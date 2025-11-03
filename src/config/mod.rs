@@ -8,6 +8,63 @@ use crate::network::transport::TransportPreference;
 
 // Note: TOML parsing is optional - can use JSON or manual config instead
 
+/// Module system configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleConfig {
+    /// Enable module system
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    
+    /// Directory containing module binaries
+    #[serde(default = "default_modules_dir")]
+    pub modules_dir: String,
+    
+    /// Directory for module data (state, configs)
+    #[serde(default = "default_modules_data_dir")]
+    pub data_dir: String,
+    
+    /// Directory for IPC sockets
+    #[serde(default = "default_modules_socket_dir")]
+    pub socket_dir: String,
+    
+    /// List of enabled modules (empty = auto-discover all)
+    #[serde(default)]
+    pub enabled_modules: Vec<String>,
+    
+    /// Module-specific configuration overrides
+    #[serde(default)]
+    pub module_configs: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_modules_dir() -> String {
+    "modules".to_string()
+}
+
+fn default_modules_data_dir() -> String {
+    "data/modules".to_string()
+}
+
+fn default_modules_socket_dir() -> String {
+    "data/modules/sockets".to_string()
+}
+
+impl Default for ModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            modules_dir: "modules".to_string(),
+            data_dir: "data/modules".to_string(),
+            socket_dir: "data/modules/sockets".to_string(),
+            enabled_modules: Vec::new(),
+            module_configs: std::collections::HashMap::new(),
+        }
+    }
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -22,6 +79,9 @@ pub struct NodeConfig {
     
     /// Protocol version
     pub protocol_version: Option<String>,
+    
+    /// Module system configuration
+    pub modules: Option<ModuleConfig>,
     
     /// Stratum V2 mining configuration
     #[cfg(feature = "stratum-v2")]
@@ -80,6 +140,7 @@ impl Default for NodeConfig {
             transport_preference: TransportPreferenceConfig::TcpOnly,
             max_peers: Some(100),
             protocol_version: Some("BitcoinV1".to_string()),
+            modules: Some(ModuleConfig::default()),
             #[cfg(feature = "stratum-v2")]
             stratum_v2: None,
         }

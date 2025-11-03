@@ -39,18 +39,37 @@ pub async fn handle_get_utxo_set(
 /// Handle GetFilteredBlock message
 ///
 /// Returns a block with spam transactions filtered out.
+/// Optionally includes BIP158 compact block filter if requested.
 /// In a full implementation, this would:
 /// 1. Load block at requested hash
 /// 2. Apply spam filter
 /// 3. Generate UTXO commitment for filtered block
-/// 4. Return filtered transactions with commitment
+/// 4. Generate BIP158 filter if requested
+/// 5. Return filtered transactions with commitment and optional filter
 pub async fn handle_get_filtered_block(
-    _message: GetFilteredBlockMessage,
-    // In real implementation: block_store, spam_filter
+    message: GetFilteredBlockMessage,
+    // In real implementation: block_store, spam_filter, filter_service
+    filter_service: Option<&crate::network::filter_service::BlockFilterService>,
 ) -> Result<FilteredBlockMessage> {
     // TODO: Integrate with actual spam filter and block store
     // For now, return placeholder
     use consensus_proof::BlockHeader;
+    
+    // Generate BIP158 filter if requested and service available
+    let bip158_filter = if message.include_bip158_filter {
+        filter_service.and_then(|fs| {
+            // In production, would get block from store and generate filter
+            // For now, return None (placeholder)
+            // fs.get_filter(&message.block_hash).map(|filter| Bip158FilterData {
+            //     filter_type: 0,
+            //     filter_data: filter.filter_data,
+            //     num_elements: filter.num_elements,
+            // })
+            None
+        })
+    } else {
+        None
+    };
     
     Ok(FilteredBlockMessage {
         header: BlockHeader {
@@ -80,6 +99,7 @@ pub async fn handle_get_filtered_block(
                 brc20: 0,
             },
         },
+        bip158_filter,
     })
 }
 

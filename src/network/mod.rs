@@ -25,11 +25,35 @@ pub mod utxo_commitments_client;
 #[cfg(feature = "stratum-v2")]
 pub mod stratum_v2;
 
+// Phase 3.3: Compact Block Relay (BIP152)
+pub mod compact_blocks;
+
+// Block Filter Service (BIP157/158)
+pub mod filter_service;
+pub mod bip157_handler;
+// Payment Protocol (BIP70) - P2P handlers
+pub mod bip70_handler;
+
+// Phase 3.4: Erlay Transaction Relay (BIP330)
+pub mod erlay;
+
+// Privacy and Performance Enhancements
+#[cfg(feature = "dandelion")]
+pub mod dandelion;  // Dandelion++ privacy-preserving transaction relay
+pub mod package_relay;  // BIP 331 Package Relay
+pub mod package_relay_handler; // BIP 331 handlers
+pub mod fibre;  // FIBRE-style Fast Relay Network
+pub mod txhash; // Non-consensus hashing helpers for relay
+
 use anyhow::Result;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{info, warn, error};
+use std::sync::{Arc, Mutex};
+use consensus_proof::{ConsensusProof, UtxoSet};
+use consensus_proof::mempool::Mempool;
+use crate::network::protocol::{ProtocolParser, ProtocolMessage};
 
 use crate::network::transport::{
     Transport, TransportListener, TransportConnection, TransportPreference, TransportAddr,
@@ -137,6 +161,14 @@ pub struct NetworkManager {
     transport_preference: TransportPreference,
     peer_tx: mpsc::UnboundedSender<NetworkMessage>,
     peer_rx: mpsc::UnboundedReceiver<NetworkMessage>,
+    /// Block filter service for BIP157/158
+    filter_service: crate::network::filter_service::BlockFilterService,
+    /// Consensus engine for mempool acceptance
+    consensus: ConsensusProof,
+    /// Shared UTXO set for mempool checks (placeholder threading)
+    utxo_set: Arc<Mutex<UtxoSet>>,
+    /// Shared mempool
+    mempool: Arc<Mutex<Mempool>>,
 }
 
 /// Network message types
@@ -157,6 +189,13 @@ pub enum NetworkMessage {
     GetFilteredBlockReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     #[cfg(feature = "stratum-v2")]
     StratumV2MessageReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    // BIP157 Block Filter messages
+    GetCfiltersReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    GetCfheadersReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    GetCfcheckptReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    // BIP331 Package Relay messages
+    PkgTxnReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    SendPkgTxnReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
 }
 
 impl NetworkManager {
@@ -174,6 +213,10 @@ impl NetworkManager {
             transport_preference: TransportPreference::TCP_ONLY,
             peer_tx,
             peer_rx,
+            filter_service: crate::network::filter_service::BlockFilterService::new(),
+            consensus: ConsensusProof::new(),
+            utxo_set: Arc::new(Mutex::new(UtxoSet::new())),
+            mempool: Arc::new(Mutex::new(Mempool::new())),
         }
     }
     
@@ -200,6 +243,10 @@ impl NetworkManager {
             transport_preference: preference,
             peer_tx,
             peer_rx,
+            filter_service: crate::network::filter_service::BlockFilterService::new(),
+            consensus: ConsensusProof::new(),
+            utxo_set: Arc::new(Mutex::new(UtxoSet::new())),
+            mempool: Arc::new(Mutex::new(Mempool::new())),
         }
     }
     
@@ -373,6 +420,32 @@ impl NetworkManager {
         Ok(())
     }
     
+    /// Try to receive a block message (non-blocking)
+    /// Returns Some(block_data) if a block was received, None otherwise
+    pub fn try_recv_block(&mut self) -> Option<Vec<u8>> {
+        use tokio::sync::mpsc::error::TryRecvError;
+        
+        // Check for BlockReceived messages without blocking
+        loop {
+            match self.peer_rx.try_recv() {
+                Ok(NetworkMessage::BlockReceived(data)) => {
+                    return Some(data);
+                }
+                Ok(_) => {
+                    // Other message types, continue checking
+                    continue;
+                }
+                Err(TryRecvError::Empty) => {
+                    return None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    warn!("Network message channel disconnected");
+                    return None;
+                }
+            }
+        }
+    }
+    
     /// Process incoming network messages
     pub async fn process_messages(&mut self) -> Result<()> {
         while let Some(message) = self.peer_rx.recv().await {
@@ -386,7 +459,7 @@ impl NetworkManager {
                 }
                 NetworkMessage::BlockReceived(data) => {
                     info!("Block received: {} bytes", data.len());
-                    // Process block with consensus layer
+                    // Block processing handled via try_recv_block() in Node::run()
                 }
                 NetworkMessage::TransactionReceived(data) => {
                     info!("Transaction received: {} bytes", data.len());
@@ -434,6 +507,56 @@ impl NetworkManager {
                     // and route message to server.handle_message()
                     // For now, just log the message
                 }
+                // BIP157 Block Filter messages
+                NetworkMessage::GetCfiltersReceived(data, peer_addr) => {
+                    info!("GetCfilters received from {}: {} bytes", peer_addr, data.len());
+                    self.handle_getcfilters_request(data, peer_addr).await?;
+                }
+                // BIP331 Package Relay
+                NetworkMessage::PkgTxnReceived(data, peer_addr) => {
+                    info!("PkgTxn received from {}: {} bytes", peer_addr, data.len());
+                    self.handle_pkgtxn_request(data, peer_addr).await?;
+                }
+                NetworkMessage::SendPkgTxnReceived(data, _peer_addr) => {
+                    info!("SendPkgTxn received: {} bytes", data.len());
+                    // Optional: We can decide whether to request package
+                }
+                NetworkMessage::GetCfheadersReceived(data, peer_addr) => {
+                    info!("GetCfheaders received from {}: {} bytes", peer_addr, data.len());
+                    self.handle_getcfheaders_request(data, peer_addr).await?;
+                }
+                NetworkMessage::GetCfcheckptReceived(data, peer_addr) => {
+                    info!("GetCfcheckpt received from {}: {} bytes", peer_addr, data.len());
+                    self.handle_getcfcheckpt_request(data, peer_addr).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Parse incoming TCP wire message and enqueue appropriate NetworkMessage
+    pub fn handle_incoming_wire_tcp(&self, peer_addr: SocketAddr, data: Vec<u8>) -> Result<()> {
+        let parsed = ProtocolParser::parse_message(&data)?;
+        match parsed {
+            // BIP331
+            ProtocolMessage::SendPkgTxn(_) => {
+                let _ = self.peer_tx.send(NetworkMessage::SendPkgTxnReceived(data, peer_addr));
+            }
+            ProtocolMessage::PkgTxn(_) => {
+                let _ = self.peer_tx.send(NetworkMessage::PkgTxnReceived(data, peer_addr));
+            }
+            // BIP157
+            ProtocolMessage::GetCfilters(_) => {
+                let _ = self.peer_tx.send(NetworkMessage::GetCfiltersReceived(data, peer_addr));
+            }
+            ProtocolMessage::GetCfheaders(_) => {
+                let _ = self.peer_tx.send(NetworkMessage::GetCfheadersReceived(data, peer_addr));
+            }
+            ProtocolMessage::GetCfcheckpt(_) => {
+                let _ = self.peer_tx.send(NetworkMessage::GetCfcheckptReceived(data, peer_addr));
+            }
+            _ => {
+                // For now, ignore other messages here
             }
         }
         Ok(())
@@ -463,6 +586,111 @@ impl NetworkManager {
         Ok(())
     }
     
+    /// Handle GetCfilters request from a peer
+    async fn handle_getcfilters_request(&self, data: Vec<u8>, peer_addr: SocketAddr) -> Result<()> {
+        use crate::network::protocol::ProtocolParser;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::bip157_handler::handle_getcfilters;
+        
+        let protocol_msg = ProtocolParser::parse_message(&data)?;
+        let request = match protocol_msg {
+            ProtocolMessage::GetCfilters(msg) => msg,
+            _ => return Err(anyhow::anyhow!("Expected GetCfilters message")),
+        };
+        
+        // Handle request and generate responses
+        let responses = handle_getcfilters(&request, &self.filter_service)?;
+        
+        // Send responses to peer
+        for response in responses {
+            let response_wire = ProtocolParser::serialize_message(&response)?;
+            self.send_to_peer(peer_addr, response_wire).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle GetCfheaders request from a peer
+    async fn handle_getcfheaders_request(&self, data: Vec<u8>, peer_addr: SocketAddr) -> Result<()> {
+        use crate::network::protocol::ProtocolParser;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::bip157_handler::handle_getcfheaders;
+        
+        let protocol_msg = ProtocolParser::parse_message(&data)?;
+        let request = match protocol_msg {
+            ProtocolMessage::GetCfheaders(msg) => msg,
+            _ => return Err(anyhow::anyhow!("Expected GetCfheaders message")),
+        };
+        
+        let response = handle_getcfheaders(&request, &self.filter_service)?;
+        let response_wire = ProtocolParser::serialize_message(&response)?;
+        self.send_to_peer(peer_addr, response_wire).await?;
+        
+        Ok(())
+    }
+    
+    /// Handle GetCfcheckpt request from a peer
+    async fn handle_getcfcheckpt_request(&self, data: Vec<u8>, peer_addr: SocketAddr) -> Result<()> {
+        use crate::network::protocol::ProtocolParser;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::bip157_handler::handle_getcfcheckpt;
+        
+        let protocol_msg = ProtocolParser::parse_message(&data)?;
+        let request = match protocol_msg {
+            ProtocolMessage::GetCfcheckpt(msg) => msg,
+            _ => return Err(anyhow::anyhow!("Expected GetCfcheckpt message")),
+        };
+        
+        let response = handle_getcfcheckpt(&request, &self.filter_service)?;
+        let response_wire = ProtocolParser::serialize_message(&response)?;
+        self.send_to_peer(peer_addr, response_wire).await?;
+        
+        Ok(())
+    }
+
+    /// Handle PkgTxn message from a peer
+    async fn handle_pkgtxn_request(&self, data: Vec<u8>, peer_addr: SocketAddr) -> Result<()> {
+        use crate::network::protocol::ProtocolParser;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::package_relay_handler::handle_pkgtxn;
+        use crate::network::package_relay::PackageRelay;
+        use consensus_proof::Transaction;
+        
+        let protocol_msg = ProtocolParser::parse_message(&data)?;
+        let request = match protocol_msg {
+            ProtocolMessage::PkgTxn(msg) => msg,
+            _ => return Err(anyhow::anyhow!("Expected PkgTxn message")),
+        };
+        
+        let mut relay = PackageRelay::new();
+        if let Some(reject) = handle_pkgtxn(&mut relay, &request)? {
+            let response_wire = ProtocolParser::serialize_message(&ProtocolMessage::PkgTxnReject(reject))?;
+            self.send_to_peer(peer_addr, response_wire).await?;
+        }
+
+        // Best-effort: attempt to submit transactions to mempool (hook for node integration)
+        // Deserialize and submit; ignore errors for now (this node may not own mempool yet)
+        let mut txs: Vec<Transaction> = Vec::with_capacity(request.transactions.len());
+        for raw in &request.transactions {
+            if let Ok(tx) = bincode::deserialize::<Transaction>(raw) {
+                txs.push(tx);
+            }
+        }
+        let _ = self.submit_transactions_to_mempool(&txs).await;
+        Ok(())
+    }
+
+    /// Submit validated transactions to the mempool (placeholder hook)
+    async fn submit_transactions_to_mempool(&self, txs: &[consensus_proof::Transaction]) -> Result<()> {
+        // Best-effort synchronous submission using shared state
+        let mut utxo_lock = self.utxo_set.lock().map_err(|_| anyhow::anyhow!("UTXO lock poisoned"))?;
+        let mempool_lock = self.mempool.lock().map_err(|_| anyhow::anyhow!("Mempool lock poisoned"))?;
+        for tx in txs {
+            let _ = self.consensus.accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0);
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "utxo-commitments")]
     /// Handle GetFilteredBlock request from a peer
     async fn handle_get_filtered_block_request(&self, data: Vec<u8>, peer_addr: SocketAddr) -> Result<()> {
@@ -477,8 +705,11 @@ impl NetworkManager {
             _ => return Err(anyhow::anyhow!("Expected GetFilteredBlock message")),
         };
         
-        // Handle the request (would integrate with spam filter and block store)
-        let response = handle_get_filtered_block(get_filtered_block_msg).await?;
+        // Handle the request with filter service (if BIP158 filter requested)
+        let response = handle_get_filtered_block(
+            get_filtered_block_msg,
+            Some(&self.filter_service),
+        ).await?;
         
         // Serialize and send response
         let response_wire = ProtocolParser::serialize_message(&ProtocolMessage::FilteredBlock(response))?;
@@ -495,6 +726,49 @@ impl NetworkManager {
     /// Get peer manager mutable reference
     pub fn peer_manager_mut(&mut self) -> &mut PeerManager {
         &mut self.peer_manager
+    }
+    
+    /// Get filter service reference
+    pub fn filter_service(&self) -> &crate::network::filter_service::BlockFilterService {
+        &self.filter_service
+    }
+    
+    /// Create version message with service flags
+    ///
+    /// Sets NODE_COMPACT_FILTERS flag if filter service is enabled
+    pub fn create_version_message(
+        &self,
+        version: i32,
+        services: u64,
+        timestamp: i64,
+        addr_recv: crate::network::protocol::NetworkAddress,
+        addr_from: crate::network::protocol::NetworkAddress,
+        nonce: u64,
+        user_agent: String,
+        start_height: i32,
+        relay: bool,
+    ) -> crate::network::protocol::VersionMessage {
+        use crate::bip157::NODE_COMPACT_FILTERS;
+        
+        // Add service flags for supported features
+        let mut services_with_filters = services;
+        services_with_filters |= NODE_COMPACT_FILTERS;
+        #[cfg(feature = "dandelion")]
+        { services_with_filters |= crate::network::protocol::NODE_DANDELION; }
+        services_with_filters |= crate::network::protocol::NODE_PACKAGE_RELAY;
+        services_with_filters |= crate::network::protocol::NODE_FIBRE;
+        
+        crate::network::protocol::VersionMessage {
+            version,
+            services: services_with_filters,
+            timestamp,
+            addr_recv,
+            addr_from,
+            nonce,
+            user_agent,
+            start_height,
+            relay,
+        }
     }
     
 }
@@ -728,6 +1002,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_incoming_wire_tcp_enqueues_pkgtxn() {
+        use crate::network::protocol::{PkgTxnMessage, ProtocolParser, ProtocolMessage};
+        let addr: std::net::SocketAddr = "127.0.0.1:8333".parse().unwrap();
+        let manager = NetworkManager::new(addr);
+
+        // Build a pkgtxn message with one trivial tx
+        let tx = consensus_proof::Transaction { version: 1, inputs: vec![], outputs: vec![], lock_time: 0 };
+        let raw = bincode::serialize(&tx).unwrap();
+        let msg = PkgTxnMessage { package_id: vec![7u8; 32], transactions: vec![raw] };
+        let wire = ProtocolParser::serialize_message(&ProtocolMessage::PkgTxn(msg)).unwrap();
+
+        // Enqueue
+        manager.handle_incoming_wire_tcp(addr, wire).unwrap();
+
+        // Drain one message from channel and assert variant
+        let mut manager = manager;
+        if let Ok(NetworkMessage::PkgTxnReceived(_, peer)) = manager.peer_rx.try_recv() {
+            assert_eq!(peer, addr);
+        } else {
+            panic!("Expected PkgTxnReceived");
+        }
+    }
+
+    #[tokio::test]
     async fn test_network_manager_peer_manager_access() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let manager = NetworkManager::new(addr);
@@ -747,6 +1045,6 @@ mod tests {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let manager = NetworkManager::new(addr);
         
-        assert_eq!(manager.transport_preference(), TransportPreference::TcpOnly);
+        assert_eq!(manager.transport_preference(), TransportPreference::TCP_ONLY);
     }
 }

@@ -1,0 +1,237 @@
+//! Module process spawning and management
+//! 
+//! Handles spawning module processes as separate executables with process isolation.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tokio::process::{Command, Child};
+use tokio::time::{Duration, timeout};
+use tracing::{debug, error, info, warn};
+
+use crate::module::traits::{ModuleError, ModuleContext};
+use crate::module::ipc::client::ModuleIpcClient;
+use crate::module::sandbox::{ProcessSandbox, SandboxConfig, FileSystemSandbox, NetworkSandbox};
+
+/// Spawn and manage module processes
+pub struct ModuleProcessSpawner {
+    /// Base directory for module binaries
+    pub modules_dir: PathBuf,
+    /// Base directory for module data
+    pub data_dir: PathBuf,
+    /// IPC socket directory
+    pub socket_dir: PathBuf,
+    /// Process sandbox for resource limits
+    process_sandbox: Option<ProcessSandbox>,
+    /// File system sandbox for access control
+    filesystem_sandbox: Option<FileSystemSandbox>,
+    /// Network sandbox for network isolation
+    network_sandbox: NetworkSandbox,
+}
+
+impl ModuleProcessSpawner {
+    /// Create a new module process spawner
+    pub fn new<P: AsRef<Path>>(modules_dir: P, data_dir: P, socket_dir: P) -> Self {
+        let data_dir_path = data_dir.as_ref().to_path_buf();
+        
+        // Initialize sandboxes
+        let sandbox_config = SandboxConfig::new(&data_dir_path);
+        let process_sandbox = Some(ProcessSandbox::new(sandbox_config));
+        let filesystem_sandbox = Some(FileSystemSandbox::new(&data_dir_path));
+        let network_sandbox = NetworkSandbox::new(); // No network access by default
+        
+        Self {
+            modules_dir: modules_dir.as_ref().to_path_buf(),
+            data_dir: data_dir_path,
+            socket_dir: socket_dir.as_ref().to_path_buf(),
+            process_sandbox,
+            filesystem_sandbox,
+            network_sandbox,
+        }
+    }
+    
+    /// Spawn a module process
+    pub async fn spawn(
+        &self,
+        module_name: &str,
+        binary_path: &Path,
+        context: ModuleContext,
+    ) -> Result<ModuleProcess, ModuleError> {
+        info!("Spawning module process: {}", module_name);
+        
+        // Verify binary exists
+        if !binary_path.exists() {
+            return Err(ModuleError::ModuleNotFound(format!(
+                "Module binary not found: {:?}",
+                binary_path
+            )));
+        }
+        
+        // Create module data directory
+        let module_data_dir = self.data_dir.join(module_name);
+        std::fs::create_dir_all(&module_data_dir)
+            .map_err(|e| ModuleError::InitializationError(format!(
+                "Failed to create module data directory: {}", e
+            )))?;
+        
+        // Validate data directory is within sandbox
+        if let Some(ref fs_sandbox) = self.filesystem_sandbox {
+            fs_sandbox.validate_path(&module_data_dir)?;
+        }
+        
+        // Create IPC socket path
+        let socket_path = self.socket_dir.join(format!("{}.sock", module_name));
+        
+        // Spawn the process
+        let mut command = Command::new(binary_path);
+        command
+            .arg("--module-id")
+            .arg(&context.module_id)
+            .arg("--socket-path")
+            .arg(&socket_path)
+            .arg("--data-dir")
+            .arg(&module_data_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("MODULE_NAME", module_name);
+        
+        // Add module config as environment variables
+        for (key, value) in &context.config {
+            command.env(format!("MODULE_CONFIG_{}", key.to_uppercase()), value);
+        }
+        
+        debug!("Spawning process: {:?} with args: {:?}", binary_path, command);
+        
+        let mut child = command.spawn()
+            .map_err(|e| ModuleError::InitializationError(format!(
+                "Failed to spawn module process: {}", e
+            )))?;
+        
+        // Apply resource limits if sandbox is configured
+        if let Some(ref sandbox) = self.process_sandbox {
+            let pid = child.id();
+            if let Err(e) = sandbox.apply_limits(pid) {
+                warn!("Failed to apply resource limits to module {}: {}", module_name, e);
+                // Continue anyway - limits will be enforced in Phase 2+
+            }
+        }
+        
+        // Wait a moment for process to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        // Wait for socket to be created (with timeout)
+        let socket_ready = timeout(Duration::from_secs(5), self.wait_for_socket(&socket_path)).await;
+        match socket_ready {
+            Ok(Ok(_)) => {
+                info!("Module {} socket ready", module_name);
+            }
+            Ok(Err(e)) => {
+                return Err(ModuleError::InitializationError(format!(
+                    "Failed to wait for module socket: {}", e
+                )));
+            }
+            Err(_) => {
+                return Err(ModuleError::Timeout);
+            }
+        }
+        
+        // Connect to the module IPC
+        let client = ModuleIpcClient::connect(&socket_path).await
+            .map_err(|e| ModuleError::IpcError(format!(
+                "Failed to connect to module IPC: {}", e
+            )))?;
+        
+        Ok(ModuleProcess {
+            module_name: module_name.to_string(),
+            process: child,
+            socket_path,
+            client: Some(client),
+        })
+    }
+    
+    /// Wait for socket file to be created
+    async fn wait_for_socket(&self, socket_path: &Path) -> Result<(), ModuleError> {
+        let mut attempts = 0;
+        let max_attempts = 50; // 5 seconds total (50 * 100ms)
+        
+        while attempts < max_attempts {
+            if socket_path.exists() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            attempts += 1;
+        }
+        
+        Err(ModuleError::InitializationError(
+            "Module socket did not appear within timeout".to_string()
+        ))
+    }
+}
+
+/// Running module process
+pub struct ModuleProcess {
+    /// Module name
+    pub module_name: String,
+    /// Child process handle
+    pub process: Child,
+    /// IPC socket path
+    pub socket_path: PathBuf,
+    /// IPC client connection (optional, may be dropped for cleanup)
+    client: Option<ModuleIpcClient>,
+}
+
+impl ModuleProcess {
+    /// Get the process ID
+    pub fn id(&self) -> Option<u32> {
+        self.process.id()
+    }
+    
+    /// Check if process is still running
+    pub fn is_running(&mut self) -> bool {
+        if let Ok(Some(_)) = self.process.try_wait() {
+            false
+        } else {
+            true
+        }
+    }
+    
+    /// Wait for process to exit
+    pub async fn wait(&mut self) -> Result<Option<std::process::ExitStatus>, ModuleError> {
+        self.process.wait().await
+            .map_err(|e| ModuleError::OperationError(format!(
+                "Failed to wait for process: {}", e
+            )))
+            .map(Some)
+    }
+    
+    /// Kill the process
+    pub async fn kill(&mut self) -> Result<(), ModuleError> {
+        debug!("Killing module process: {}", self.module_name);
+        
+        if let Err(e) = self.process.kill().await {
+            warn!("Failed to kill module process {}: {}", self.module_name, e);
+        }
+        
+        // Wait for process to exit
+        let _ = self.process.wait().await;
+        
+        // Clean up socket file
+        if self.socket_path.exists() {
+            if let Err(e) = std::fs::remove_file(&self.socket_path) {
+                warn!("Failed to remove socket file {:?}: {}", self.socket_path, e);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Get IPC client (mutable)
+    pub fn client_mut(&mut self) -> Option<&mut ModuleIpcClient> {
+        self.client.as_mut()
+    }
+    
+    /// Take IPC client (for cleanup)
+    pub fn take_client(&mut self) -> Option<ModuleIpcClient> {
+        self.client.take()
+    }
+}

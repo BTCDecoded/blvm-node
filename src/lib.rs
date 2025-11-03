@@ -19,11 +19,25 @@
 //! 2. **Protocol Abstraction**: Uses protocol-engine for variant support
 //! 3. **Pure Infrastructure**: Only adds storage, networking, RPC, orchestration
 //! 4. **Production Ready**: Full Bitcoin node functionality
+
+// Memory allocator optimization using mimalloc (faster than default allocator)
+// Note: Only in reference-node, not consensus-proof, to maintain Kani compatibility
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod storage;
 pub mod network;
 pub mod rpc;
 pub mod node;
 pub mod config;
+#[cfg(feature = "production")]
+pub mod validation;
+pub mod module;
+pub mod bip21;
+pub mod bech32m;
+pub mod bip158;
+pub mod bip157;
+pub mod bip70;
 
 // Re-export config module
 pub use config::*;

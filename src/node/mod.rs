@@ -6,6 +6,8 @@
 pub mod sync;
 pub mod mempool;
 pub mod miner;
+pub mod event_publisher;
+pub mod block_processor;
 
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -15,6 +17,12 @@ use protocol_engine::{BitcoinProtocolEngine, ProtocolVersion};
 use crate::storage::Storage;
 use crate::network::NetworkManager;
 use crate::rpc::RpcManager;
+use crate::module::ModuleManager;
+use crate::module::api::NodeApiImpl;
+use crate::node::event_publisher::EventPublisher;
+use crate::config::NodeConfig;
+use std::sync::Arc;
+use std::path::{Path, PathBuf};
 
 /// Main node orchestrator
 pub struct Node {
@@ -28,6 +36,12 @@ pub struct Node {
     mempool_manager: mempool::MempoolManager,
     #[allow(dead_code)]
     mining_coordinator: miner::MiningCoordinator,
+    /// Module manager for process-isolated modules
+    #[allow(dead_code)]
+    module_manager: Option<ModuleManager>,
+    /// Event publisher for module notifications
+    #[allow(dead_code)]
+    event_publisher: Option<EventPublisher>,
 }
 
 impl Node {
@@ -59,7 +73,43 @@ impl Node {
             sync_coordinator,
             mempool_manager,
             mining_coordinator,
+            module_manager: None,
+            event_publisher: None,
         })
+    }
+    
+    /// Enable module system from configuration
+    pub fn with_modules_from_config(mut self, config: &NodeConfig) -> anyhow::Result<Self> {
+        if let Some(module_config) = &config.modules {
+            if !module_config.enabled {
+                info!("Module system disabled in configuration");
+                return Ok(self);
+            }
+
+            let module_manager = ModuleManager::new(
+                &module_config.modules_dir,
+                &module_config.data_dir,
+                &module_config.socket_dir,
+            );
+            self.module_manager = Some(module_manager);
+            info!("Module system enabled: modules_dir={}, data_dir={}, socket_dir={}",
+                  module_config.modules_dir, module_config.data_dir, module_config.socket_dir);
+        }
+        Ok(self)
+    }
+    
+    /// Enable module system with explicit paths (for backward compatibility)
+    pub fn with_modules<P: AsRef<Path>>(
+        mut self,
+        modules_dir: P,
+        socket_dir: P,
+    ) -> anyhow::Result<Self> {
+        let data_dir = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string()));
+        let modules_data_dir = data_dir.join("modules");
+
+        let module_manager = ModuleManager::new(modules_dir.as_ref(), modules_data_dir.as_ref(), socket_dir.as_ref());
+        self.module_manager = Some(module_manager);
+        Ok(self)
     }
     
     /// Start the node
@@ -89,6 +139,36 @@ impl Node {
         info!("Mempool manager initialized");
         info!("Mining coordinator initialized");
         
+        // Start module manager if enabled
+        if let Some(ref mut module_manager) = self.module_manager {
+            // Create new Storage instance for modules (Storage doesn't implement Clone)
+            // Both instances use the same data directory, so they access the same data
+            let data_dir = std::env::var("DATA_DIR")
+                .unwrap_or_else(|_| "data".to_string());
+            let storage_arc = Arc::new(
+                Storage::new(&data_dir)
+                    .map_err(|e| anyhow::anyhow!("Failed to create storage for modules: {}", e))?
+            );
+            let node_api = Arc::new(NodeApiImpl::new(storage_arc));
+            let socket_path = std::env::var("MODULE_SOCKET_DIR")
+                .unwrap_or_else(|_| "data/modules/socket".to_string());
+            
+            module_manager.start(&socket_path, node_api).await
+                .map_err(|e| anyhow::anyhow!("Failed to start module manager: {}", e))?;
+            
+            info!("Module manager started");
+            
+            // Auto-discover and load modules
+            if let Err(e) = module_manager.auto_load_modules().await {
+                warn!("Failed to auto-load modules: {}", e);
+            }
+            
+            // Create event publisher for this node
+            let event_manager = module_manager.event_manager();
+            self.event_publisher = Some(EventPublisher::new(Arc::clone(event_manager)));
+            info!("Event publisher initialized");
+        }
+        
         Ok(())
     }
     
@@ -96,12 +176,45 @@ impl Node {
     async fn run(&mut self) -> Result<()> {
         info!("Node running - main loop started");
         
+        // Get initial state for block processing
+        let mut current_height = self.storage.chain().get_height()?.unwrap_or(0);
+        let mut utxo_set = consensus_proof::UtxoSet::new();
+        
         // Main node loop - in a real implementation this would coordinate
         // between all components and handle shutdown signals
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            // Process any received blocks (non-blocking)
+            while let Some(block_data) = self.network.try_recv_block() {
+                info!("Processing block from network");
+                match self.sync_coordinator.process_block(
+                    self.storage.blocks(),
+                    &block_data,
+                    current_height,
+                    &mut utxo_set,
+                ) {
+                    Ok(true) => {
+                        info!("Block accepted at height {}", current_height);
+                        current_height += 1;
+                    }
+                    Ok(false) => {
+                        warn!("Block rejected at height {}", current_height);
+                    }
+                    Err(e) => {
+                        warn!("Error processing block: {}", e);
+                    }
+                }
+            }
             
-            // Check node health
+            // Process other network messages (non-blocking, processes one message if available)
+            // Note: This is a simplified approach - in production, network processing
+            // would run in a separate task
+            if let Err(e) = self.network.process_messages().await {
+                warn!("Error processing network messages: {}", e);
+            }
+            
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            
+            // Check node health periodically
             self.check_health().await?;
         }
     }
@@ -137,6 +250,12 @@ impl Node {
     pub async fn stop(&mut self) -> Result<()> {
         info!("Stopping reference-node");
         
+        // Stop module manager
+        if let Some(ref mut module_manager) = self.module_manager {
+            module_manager.shutdown().await
+                .map_err(|e| anyhow::anyhow!("Failed to shutdown module manager: {}", e))?;
+        }
+        
         // Stop all components
         self.rpc.stop()?;
         
@@ -145,6 +264,26 @@ impl Node {
         
         info!("Node stopped");
         Ok(())
+    }
+    
+    /// Get module manager (mutable)
+    pub fn module_manager_mut(&mut self) -> Option<&mut ModuleManager> {
+        self.module_manager.as_mut()
+    }
+    
+    /// Get module manager (immutable)
+    pub fn module_manager(&self) -> Option<&ModuleManager> {
+        self.module_manager.as_ref()
+    }
+    
+    /// Get event publisher (immutable)
+    pub fn event_publisher(&self) -> Option<&EventPublisher> {
+        self.event_publisher.as_ref()
+    }
+    
+    /// Get event publisher (mutable)
+    pub fn event_publisher_mut(&mut self) -> Option<&mut EventPublisher> {
+        self.event_publisher.as_mut()
     }
     
     /// Get protocol engine

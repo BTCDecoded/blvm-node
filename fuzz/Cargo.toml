@@ -1,0 +1,42 @@
+[package]
+name = "reference-node-fuzz"
+version = "0.0.0"
+authors = ["BTCDecoded Team"]
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies.reference-node]
+path = ".."
+
+[dependencies]
+libfuzzer-sys = "0.4"
+consensus-proof = { path = "../../consensus-proof" }
+
+# Prevent warnings in generated code
+[profile.release]
+opt-level = 3
+
+[[bin]]
+name = "compact_block_reconstruction"
+path = "fuzz_targets/compact_block_reconstruction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_aware_negotiation"
+path = "fuzz_targets/transport_aware_negotiation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_message_parsing"
+path = "fuzz_targets/protocol_message_parsing.rs"
+test = false
+doc = false
+bench = false
+

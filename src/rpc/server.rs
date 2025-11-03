@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn, error};
 
-use super::{blockchain, network, mining};
+use super::{blockchain, network, mining, rawtx, mempool, errors};
 
 /// JSON-RPC server
 pub struct RpcServer {
@@ -71,19 +71,14 @@ impl RpcServer {
     }
     
     /// Process a JSON-RPC request
-    async fn process_request(request: &str) -> Value {
+    /// 
+    /// Public method for use by both TCP and QUIC RPC servers
+    pub async fn process_request(request: &str) -> Value {
         let request: Value = match serde_json::from_str(request) {
             Ok(req) => req,
             Err(e) => {
-                return json!({
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": -32700,
-                        "message": "Parse error",
-                        "data": e.to_string()
-                    },
-                    "id": null
-                });
+                let err = errors::RpcError::parse_error(format!("Invalid JSON: {}", e));
+                return err.to_json(None);
             }
         };
         
@@ -105,64 +100,178 @@ impl RpcServer {
                 })
             }
             Err(e) => {
-                json!({
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": -32601,
-                        "message": "Method not found",
-                        "data": e.to_string()
-                    },
-                    "id": id
-                })
+                // Convert anyhow error to RpcError if needed
+                let rpc_err = if e.to_string().contains("Unknown method") {
+                    errors::RpcError::method_not_found(method)
+                } else {
+                    errors::RpcError::internal_error(e.to_string())
+                };
+                rpc_err.to_json(id)
             }
         }
     }
     
     /// Call a specific RPC method
-    async fn call_method(method: &str, params: Value) -> Result<Value> {
+    async fn call_method(method: &str, params: Value) -> Result<Value, errors::RpcError> {
         match method {
             // Blockchain methods
             "getblockchaininfo" => {
                 let blockchain = blockchain::BlockchainRpc::new();
-                Ok(blockchain.get_blockchain_info().await?)
+                blockchain.get_blockchain_info().await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblock" => {
                 let blockchain = blockchain::BlockchainRpc::new();
                 let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
-                Ok(blockchain.get_block(hash).await?)
+                blockchain.get_block(hash).await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblockhash" => {
                 let blockchain = blockchain::BlockchainRpc::new();
                 let height = params.get(0).and_then(|p| p.as_u64()).unwrap_or(0);
-                Ok(blockchain.get_block_hash(height).await?)
+                blockchain.get_block_hash(height).await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
-            "getrawtransaction" => {
+            "getblockheader" => {
                 let blockchain = blockchain::BlockchainRpc::new();
-                let txid = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
-                Ok(blockchain.get_raw_transaction(txid).await?)
+                let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+                let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(true);
+                blockchain.get_block_header(hash, verbose).await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "getbestblockhash" => {
+                let blockchain = blockchain::BlockchainRpc::new();
+                blockchain.get_best_block_hash().await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "getblockcount" => {
+                let blockchain = blockchain::BlockchainRpc::new();
+                blockchain.get_block_count().await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "getdifficulty" => {
+                let blockchain = blockchain::BlockchainRpc::new();
+                blockchain.get_difficulty().await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "gettxoutsetinfo" => {
+                let blockchain = blockchain::BlockchainRpc::new();
+                blockchain.get_txoutset_info().await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "verifychain" => {
+                let blockchain = blockchain::BlockchainRpc::new();
+                let checklevel = params.get(0).and_then(|p| p.as_u64());
+                let numblocks = params.get(1).and_then(|p| p.as_u64());
+                blockchain.verify_chain(checklevel, numblocks).await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            
+            // Raw Transaction methods
+            "getrawtransaction" => {
+                let rawtx = rawtx::RawTxRpc::new();
+                rawtx.getrawtransaction(&params).await
+            }
+            "sendrawtransaction" => {
+                let rawtx = rawtx::RawTxRpc::new();
+                rawtx.sendrawtransaction(&params).await
+            }
+            "testmempoolaccept" => {
+                let rawtx = rawtx::RawTxRpc::new();
+                rawtx.testmempoolaccept(&params).await
+            }
+            "decoderawtransaction" => {
+                let rawtx = rawtx::RawTxRpc::new();
+                rawtx.decoderawtransaction(&params).await
+            }
+            "gettxout" => {
+                let rawtx = rawtx::RawTxRpc::new();
+                rawtx.gettxout(&params).await
+            }
+            "gettxoutproof" => {
+                let rawtx = rawtx::RawTxRpc::new();
+                rawtx.gettxoutproof(&params).await
+            }
+            "verifytxoutproof" => {
+                let rawtx = rawtx::RawTxRpc::new();
+                rawtx.verifytxoutproof(&params).await
+            }
+            
+            // Mempool methods
+            "getmempoolinfo" => {
+                let mempool = mempool::MempoolRpc::new();
+                mempool.getmempoolinfo(&params).await
+            }
+            "getrawmempool" => {
+                let mempool = mempool::MempoolRpc::new();
+                mempool.getrawmempool(&params).await
+            }
+            "savemempool" => {
+                let mempool = mempool::MempoolRpc::new();
+                mempool.savemempool(&params).await
             }
             
             // Network methods
             "getnetworkinfo" => {
                 let network = network::NetworkRpc::new();
-                Ok(network.get_network_info().await?)
+                network.get_network_info().await
             }
             "getpeerinfo" => {
                 let network = network::NetworkRpc::new();
-                Ok(network.get_peer_info().await?)
+                network.get_peer_info().await
+            }
+            "getconnectioncount" => {
+                let network = network::NetworkRpc::new();
+                network.get_connection_count(&params).await
+            }
+            "ping" => {
+                let network = network::NetworkRpc::new();
+                network.ping(&params).await
+            }
+            "addnode" => {
+                let network = network::NetworkRpc::new();
+                network.add_node(&params).await
+            }
+            "disconnectnode" => {
+                let network = network::NetworkRpc::new();
+                network.disconnect_node(&params).await
+            }
+            "getnettotals" => {
+                let network = network::NetworkRpc::new();
+                network.get_net_totals(&params).await
+            }
+            "clearbanned" => {
+                let network = network::NetworkRpc::new();
+                network.clear_banned(&params).await
+            }
+            "setban" => {
+                let network = network::NetworkRpc::new();
+                network.set_ban(&params).await
+            }
+            "listbanned" => {
+                let network = network::NetworkRpc::new();
+                network.list_banned(&params).await
             }
             
             // Mining methods
             "getmininginfo" => {
                 let mining = mining::MiningRpc::new();
-                Ok(mining.get_mining_info().await?)
+                mining.get_mining_info().await
             }
             "getblocktemplate" => {
                 let mining = mining::MiningRpc::new();
-                Ok(mining.get_block_template().await?)
+                mining.get_block_template(&params).await
+            }
+            "submitblock" => {
+                let mining = mining::MiningRpc::new();
+                mining.submit_block(&params).await
+            }
+            "estimatesmartfee" => {
+                let mining = mining::MiningRpc::new();
+                mining.estimate_smart_fee(&params).await
             }
             
-            _ => Err(anyhow::anyhow!("Unknown method: {}", method))
+            _ => Err(errors::RpcError::method_not_found(method))
         }
     }
 }

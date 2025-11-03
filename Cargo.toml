@@ -2,8 +2,8 @@
 name = "reference-node"
 version = "0.1.0"
 edition = "2021"
-authors = ["BTCDecoded Team"]
-description = "Minimal Bitcoin node implementation using protocol-engine and consensus-proof"
+authors = ["Bitcoin Commons Team"]
+description = "Bitcoin Commons BLLVM: Minimal Bitcoin node implementation using protocol-engine and consensus-proof"
 license = "MIT"
 repository = "https://github.com/BTCDecoded/reference-node"
 homepage = "https://btcdecoded.org"
@@ -34,12 +34,24 @@ futures = "=0.3.30"
 # Serialization - EXACT VERSIONS for security
 serde = { version = "=1.0.193", features = ["derive"] }
 serde_json = "=1.0.108"
+serde_bytes = "=0.11.14"  # For byte array serialization in protocol messages
 bincode = "=1.3.3"
+bytes = "=1.5.0"
+uuid = { version = "=1.6.0", features = ["v4"] }
+toml = "=0.8.2"
 
 # Cryptography - EXACT VERSIONS for security
+secp256k1 = "=0.28.2"  # For BIP70 Bitcoin signature verification
 sha2 = "=0.10.9"
 ripemd = "=0.1.3"
 hex = "=0.4.3"
+siphasher = "=0.3"
+
+# Random number generation for Dandelion++
+rand = "=0.8.5"
+
+# Address encoding (BIP173/350/351)
+bech32 = "=0.9"
 
 # Error handling - EXACT VERSIONS for security
 anyhow = "=1.0.93"
@@ -58,6 +70,12 @@ async-trait = "=0.1.75"
 # Bitflags for transport preference combinations
 bitflags = "2.4"
 
+# Memory allocator optimization (not in consensus-proof to maintain Kani compatibility)
+mimalloc = { version = "0.1", default-features = false }
+
+# Parallel processing for block validation (Phase 4.2)
+rayon = { version = "1.8", optional = true }
+
 # Iroh networking (optional feature)
 iroh-net = { version = "0.12", optional = true }
 # Quinn QUIC transport (optional feature - can be used standalone or via Iroh)
@@ -70,8 +88,47 @@ iroh = ["dep:iroh-net", "dep:quinn"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
 utxo-commitments = ["consensus-proof/utxo-commitments"]
 stratum-v2 = []
+# Production optimizations (parallel block validation, etc.)
+production = ["consensus-proof/production", "dep:rayon"]
+# Privacy relay (Dandelion++) compiled behind feature flag; default OFF
+dandelion = []
 
 [dev-dependencies]
 tempfile = "=3.8.1"
 rand = "0.8"
 cargo-tarpaulin = "0.27"
+criterion = "0.5"
+proptest = "1.4.0"
+
+# Release profile optimizations (mirrors consensus-proof)
+[profile.release]
+# Production optimizations (mirrors consensus-proof)
+opt-level = 3
+lto = "fat"  # Fat LTO for maximum optimization
+codegen-units = 1  # Single codegen unit maximizes LTO benefits
+strip = true  # Remove symbols for smaller binaries
+panic = "abort"  # Smaller binaries, no unwinding overhead
+
+[profile.release.package."*"]
+opt-level = 3
+
+# Benchmark profile
+[profile.bench]
+opt-level = 3
+debug = false
+strip = false
+lto = "thin"
+codegen-units = 16
+
+# Benchmark targets
+[[bench]]
+name = "compact_blocks"
+harness = false
+
+[[bench]]
+name = "storage_operations"
+harness = false
+
+[[bench]]
+name = "transport_comparison"
+harness = false

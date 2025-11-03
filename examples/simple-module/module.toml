@@ -1,0 +1,25 @@
+# Simple Module Manifest
+# Example module demonstrating module system capabilities
+
+name = "simple-module"
+version = "0.1.0"
+description = "A simple example module that demonstrates module system capabilities"
+author = "BTCDecoded Team"
+
+# Entry point binary name
+entry_point = "simple-module"
+
+# Capabilities this module requires
+capabilities = [
+    "blockchain_query",
+    "event_subscription",
+]
+
+# Dependencies on other modules (none for this example)
+[dependencies]
+
+# Configuration schema (optional keys the module accepts)
+[config_schema]
+poll_interval = "Polling interval in seconds (default: 5)"
+log_level = "Logging level (default: info)"
+
