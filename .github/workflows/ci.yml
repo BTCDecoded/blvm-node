@@ -12,16 +12,13 @@ env:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust: ["1.70.0", beta]
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: ${{ matrix.rust }}
+        toolchain: 1.70.0
     - name: Cache cargo registry
       uses: actions/cache@v3
       with:
@@ -40,19 +37,17 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
     - name: Run tests with coverage
-      if: matrix.rust == '1.70.0'
       run: |
         cargo install cargo-tarpaulin
         cargo tarpaulin --out Xml --output-dir coverage
     - name: Upload coverage to Codecov
-      if: matrix.rust == '1.70.0'
       uses: codecov/codecov-action@v3
       with:
         file: coverage/cobertura.xml
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -80,7 +75,7 @@ jobs:
 
   fmt:
     name: Rustfmt
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -93,7 +88,7 @@ jobs:
 
   docs:
     name: Documentation
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -122,7 +117,7 @@ jobs:
 
   security:
     name: Security Audit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -136,23 +131,13 @@ jobs:
 
   build:
     name: Build
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: macos-latest
-            target: x86_64-apple-darwin
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
         toolchain: 1.70.0
-        targets: ${{ matrix.target }}
     - name: Cache cargo registry
       uses: actions/cache@v3
       with:
@@ -169,7 +154,7 @@ jobs:
         path: target
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
     - name: Build
-      run: cargo build --release --target ${{ matrix.target }}
+      run: cargo build --release
     - name: Build tests
-      run: cargo test --no-run --release --target ${{ matrix.target }}
+      run: cargo test --no-run --release
 
