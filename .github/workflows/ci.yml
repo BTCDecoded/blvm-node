@@ -12,7 +12,7 @@ env:
 jobs:
   test:
     name: Test
-    runs-on: self-hosted,Linux,X64
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -47,7 +47,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: self-hosted,Linux,X64
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -75,7 +75,7 @@ jobs:
 
   fmt:
     name: Rustfmt
-    runs-on: self-hosted,Linux,X64
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -88,7 +88,7 @@ jobs:
 
   docs:
     name: Documentation
-    runs-on: self-hosted,Linux,X64
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -117,7 +117,7 @@ jobs:
 
   security:
     name: Security Audit
-    runs-on: self-hosted,Linux,X64
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -131,7 +131,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: self-hosted,Linux,X64
+    runs-on: [self-hosted, linux, x64]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
