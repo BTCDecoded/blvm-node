@@ -10,7 +10,7 @@ homepage = "https://btcdecoded.org"
 documentation = "https://docs.rs/reference-node"
 keywords = ["bitcoin", "node", "blockchain", "cryptocurrency", "p2p"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
-rust-version = "1.70"
+rust-version = "1.82"
 
 [package.metadata.docs.rs]
 all-features = true

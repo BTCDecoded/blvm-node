@@ -18,7 +18,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.70.0
+        toolchain: 1.82.0
     - name: Cache cargo registry
       uses: actions/cache@v3
       with:
@@ -53,7 +53,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.70.0
+        toolchain: 1.82.0
         components: clippy
     - name: Cache cargo registry
       uses: actions/cache@v3
@@ -81,7 +81,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.70.0
+        toolchain: 1.82.0
         components: rustfmt
     - name: Check formatting
       run: cargo fmt -- --check
@@ -94,7 +94,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.70.0
+        toolchain: 1.82.0
     - name: Cache cargo registry
       uses: actions/cache@v3
       with:
@@ -123,7 +123,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.70.0
+        toolchain: 1.82.0
     - name: Install cargo-audit
       run: cargo install cargo-audit
     - name: Run security audit
@@ -137,7 +137,7 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.70.0
+        toolchain: 1.82.0
     - name: Cache cargo registry
       uses: actions/cache@v3
       with:
