@@ -6,7 +6,7 @@ This crate provides a minimal, production-ready Bitcoin node implementation that
 
 ## Architecture Position
 
-This is **Tier 4** of the 5-tier BTCDecoded architecture:
+This is **Tier 4** of the 5-tier Bitcoin Commons architecture (BLLVM technology stack):
 
 ```
 1. Orange Paper (mathematical foundation)

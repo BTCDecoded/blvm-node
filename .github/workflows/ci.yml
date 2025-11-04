@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rust: [stable, beta]
+        rust: ["1.70.0", beta]
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust
@@ -40,12 +40,12 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
     - name: Run tests with coverage
-      if: matrix.rust == 'stable'
+      if: matrix.rust == '1.70.0'
       run: |
         cargo install cargo-tarpaulin
         cargo tarpaulin --out Xml --output-dir coverage
     - name: Upload coverage to Codecov
-      if: matrix.rust == 'stable'
+      if: matrix.rust == '1.70.0'
       uses: codecov/codecov-action@v3
       with:
         file: coverage/cobertura.xml
@@ -55,11 +55,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: stable
-        components: clippy
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.70.0
+          components: clippy
     - name: Cache cargo registry
       uses: actions/cache@v3
       with:
@@ -83,11 +83,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: stable
-        components: rustfmt
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.70.0
+          components: rustfmt
     - name: Check formatting
       run: cargo fmt -- --check
 
@@ -96,10 +96,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.70.0
     - name: Cache cargo registry
       uses: actions/cache@v3
       with:
@@ -125,10 +125,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.70.0
     - name: Install cargo-audit
       run: cargo install cargo-audit
     - name: Run security audit
@@ -148,10 +148,10 @@ jobs:
             target: x86_64-apple-darwin
     steps:
     - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.70.0
         targets: ${{ matrix.target }}
     - name: Cache cargo registry
       uses: actions/cache@v3
