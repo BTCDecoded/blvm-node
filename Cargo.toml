@@ -84,10 +84,10 @@ rustls = { version = "0.23", optional = true }
 [features]
 iroh = ["dep:iroh-net", "dep:quinn"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
-utxo-commitments = []
+utxo-commitments = ["protocol-engine/utxo-commitments"]
 stratum-v2 = []
 # Production optimizations (parallel block validation, etc.)
-production = ["dep:rayon"]
+production = ["protocol-engine/production", "dep:rayon"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF
 dandelion = []
 
