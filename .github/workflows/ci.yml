@@ -21,7 +21,9 @@ jobs:
         repository: BTCDecoded/protocol-engine
         path: _temp-protocol-engine
     - name: Move protocol-engine to parent directory
-      run: mv _temp-protocol-engine ../protocol-engine
+      run: |
+        if [ -d "../protocol-engine" ]; then rm -rf ../protocol-engine; fi
+        mv _temp-protocol-engine ../protocol-engine
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
@@ -63,7 +65,9 @@ jobs:
         repository: BTCDecoded/protocol-engine
         path: _temp-protocol-engine
     - name: Move protocol-engine to parent directory
-      run: mv _temp-protocol-engine ../protocol-engine
+      run: |
+        if [ -d "../protocol-engine" ]; then rm -rf ../protocol-engine; fi
+        mv _temp-protocol-engine ../protocol-engine
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
@@ -98,7 +102,9 @@ jobs:
         repository: BTCDecoded/protocol-engine
         path: _temp-protocol-engine
     - name: Move protocol-engine to parent directory
-      run: mv _temp-protocol-engine ../protocol-engine
+      run: |
+        if [ -d "../protocol-engine" ]; then rm -rf ../protocol-engine; fi
+        mv _temp-protocol-engine ../protocol-engine
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
@@ -169,6 +175,8 @@ jobs:
         persist-credentials: false
     - name: Move dependencies to parent directory
       run: |
+        if [ -d "../protocol-engine" ]; then rm -rf ../protocol-engine; fi
+        if [ -d "../consensus-proof" ]; then rm -rf ../consensus-proof; fi
         mv _temp-protocol-engine ../protocol-engine
         mv _temp-consensus-proof ../consensus-proof
     - name: Install Rust
