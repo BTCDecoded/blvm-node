@@ -40,3 +40,17 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "mining_transaction_serialization"
+path = "fuzz_targets/mining_transaction_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mining_block_template"
+path = "fuzz_targets/mining_block_template.rs"
+test = false
+doc = false
+bench = false
+
