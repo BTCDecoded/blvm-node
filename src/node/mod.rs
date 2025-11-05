@@ -32,7 +32,6 @@ pub struct Node {
     rpc: RpcManager,
     #[allow(dead_code)]
     sync_coordinator: sync::SyncCoordinator,
-    #[allow(dead_code)]
     mempool_manager: mempool::MempoolManager,
     #[allow(dead_code)]
     mining_coordinator: miner::MiningCoordinator,
@@ -59,15 +58,20 @@ impl Node {
             protocol_version.unwrap_or(ProtocolVersion::Regtest)
         )?;
         let storage = Storage::new(data_dir)?;
+        let storage_arc = Arc::new(storage);
         let network = NetworkManager::new(network_addr);
-        let rpc = RpcManager::new(rpc_addr);
+        let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
+        let rpc = RpcManager::new(rpc_addr)
+            .with_dependencies(Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc));
         let sync_coordinator = sync::SyncCoordinator::default();
-        let mempool_manager = mempool::MempoolManager::new();
+        let mempool_manager = Arc::try_unwrap(mempool_manager_arc)
+            .unwrap_or_else(|_| mempool::MempoolManager::new());
         let mining_coordinator = miner::MiningCoordinator::default();
         
         Ok(Self {
             protocol,
-            storage,
+            storage: Arc::try_unwrap(storage_arc)
+                .unwrap_or_else(|_| Storage::new(data_dir).unwrap()),
             network,
             rpc,
             sync_coordinator,

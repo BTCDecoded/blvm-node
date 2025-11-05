@@ -17,8 +17,11 @@ pub mod quinn_server;
 
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, error};
+use crate::storage::Storage;
+use crate::node::mempool::MempoolManager;
 
 /// RPC manager that coordinates all RPC operations
 /// 
@@ -29,6 +32,8 @@ pub struct RpcManager {
     blockchain_rpc: blockchain::BlockchainRpc,
     network_rpc: network::NetworkRpc,
     mining_rpc: mining::MiningRpc,
+    storage: Option<Arc<Storage>>,
+    mempool: Option<Arc<MempoolManager>>,
     shutdown_tx: Option<mpsc::UnboundedSender<()>>,
     #[cfg(feature = "quinn")]
     quinn_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
@@ -43,10 +48,25 @@ impl RpcManager {
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
             mining_rpc: mining::MiningRpc::new(),
+            storage: None,
+            mempool: None,
             shutdown_tx: None,
             #[cfg(feature = "quinn")]
             quinn_shutdown_tx: None,
         }
+    }
+    
+    /// Set storage and mempool dependencies for RPC handlers
+    pub fn with_dependencies(mut self, storage: Arc<Storage>, mempool: Arc<MempoolManager>) -> Self {
+        // Update mining RPC with dependencies
+        self.mining_rpc = mining::MiningRpc::with_dependencies(
+            Arc::clone(&storage),
+            Arc::clone(&mempool),
+        );
+        
+        self.storage = Some(storage);
+        self.mempool = Some(mempool);
+        self
     }
     
     /// Create a new RPC manager with both TCP and QUIC transports

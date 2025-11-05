@@ -96,6 +96,11 @@ impl UtxoStore {
         Ok(())
     }
     
+    /// Get all UTXOs in the set
+    pub fn get_all_utxos(&self) -> Result<UtxoSet> {
+        self.load_utxo_set()
+    }
+    
     /// Check if an output is spent
     pub fn is_spent(&self, outpoint: &OutPoint) -> Result<bool> {
         let key = self.outpoint_key(outpoint);
