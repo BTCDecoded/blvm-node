@@ -175,6 +175,7 @@ impl TransportListener for IrohListener {
                 peer_node_id,
                 peer_addr: peer_addr.clone(),
                 connected: true,
+                active_streams: std::collections::HashMap::new(),
             },
             peer_addr,
         ))
@@ -192,6 +193,8 @@ pub struct IrohConnection {
     peer_node_id: iroh_net::NodeId,
     peer_addr: TransportAddr,
     connected: bool,
+    /// Active streams per channel (for QUIC stream multiplexing)
+    active_streams: std::collections::HashMap<u32, quinn::SendStream>,
 }
 
 #[cfg(feature = "iroh")]
@@ -204,6 +207,34 @@ impl TransportConnection for IrohConnection {
 
         // Open a new QUIC stream for sending data
         let mut stream = self.conn.open_uni().await?;
+        
+        // Write length prefix (4 bytes, big-endian)
+        let len = data.len() as u32;
+        stream.write_all(&len.to_be_bytes()).await?;
+        
+        // Write data
+        stream.write_all(data).await?;
+        stream.finish()?;
+        
+        Ok(())
+    }
+    
+    /// Send data on a specific channel stream (for QUIC stream multiplexing)
+    /// 
+    /// Opens a dedicated QUIC stream for the channel, enabling parallel operations.
+    /// Streams are not reused (they're closed after sending) to avoid complexity.
+    /// For true stream reuse, would need async HashMap with proper locking.
+    pub async fn send_on_channel(&mut self, channel_id: u32, data: &[u8]) -> Result<()> {
+        if !self.connected {
+            return Err(anyhow::anyhow!("Connection closed"));
+        }
+
+        // Open a new QUIC stream for this channel (parallel, non-blocking)
+        let mut stream = self.conn.open_uni().await?;
+        
+        // Track active stream (for future reuse if needed)
+        // Note: We don't reuse streams here to keep it simple - streams are closed after send
+        // For true multiplexing with reuse, would need async-safe HashMap
         
         // Write length prefix (4 bytes, big-endian)
         let len = data.len() as u32;

@@ -47,7 +47,7 @@ pub use config::*;
 pub use protocol_engine::{
     Block, BlockHeader, Transaction, TransactionInput, TransactionOutput,
     OutPoint, UTXO, UtxoSet, ValidationResult, Hash, ByteString, Natural, Integer,
-    ConsensusError, Result, Mempool,
+    ConsensusError, Result,
 };
 
 // Re-export protocol-engine types

@@ -3,7 +3,8 @@
 //! Handles transaction mempool management, validation, and relay.
 
 use anyhow::Result;
-use protocol_engine::{Transaction, UtxoSet, Hash, OutPoint, Mempool};
+use protocol_engine::{Transaction, UtxoSet, Hash, OutPoint};
+use protocol_engine::mempool::Mempool;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 

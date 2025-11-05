@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 use tracing::{debug, warn};
 use hex;
 use crate::rpc::errors::{RpcError, RpcResult};
-use protocol_engine::{ConsensusProof, types::{BlockHeader, Transaction, UtxoSet, Natural, ByteString, Hash}};
+use protocol_engine::{ConsensusProof, BlockHeader, Transaction, UtxoSet, Natural, ByteString, Hash};
 use protocol_engine::serialization::serialize_transaction;
-use consensus_proof::mining::BlockTemplate;
+use protocol_engine::mining::BlockTemplate;
 use std::sync::Arc;
 use crate::storage::Storage;
 use crate::node::mempool::MempoolManager;
@@ -114,7 +114,7 @@ impl MiningRpc {
     /// Convert BlockTemplate to JSON-RPC format
     fn template_to_json_rpc(
         &self,
-        template: &consensus_proof::mining::BlockTemplate,
+        template: &BlockTemplate,
         prev_header: &BlockHeader,
         height: Natural,
     ) -> RpcResult<Value> {

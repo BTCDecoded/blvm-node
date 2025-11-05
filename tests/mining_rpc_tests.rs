@@ -5,10 +5,10 @@ use reference_node::storage::Storage;
 use reference_node::node::mempool::MempoolManager;
 use std::sync::Arc;
 use tempfile::TempDir;
-use protocol_engine::types::{BlockHeader, Transaction, UtxoSet, Natural, OutPoint, UTXO};
+use protocol_engine::{BlockHeader, Transaction, UtxoSet, Natural, OutPoint, UTXO};
 use protocol_engine::serialization::serialize_transaction;
-use sha2::{Digest, Sha256};
-use consensus_proof::mining::BlockTemplate;
+// Sha256 not needed directly in tests
+use protocol_engine::mining::BlockTemplate;
 mod common;
 use common::*;
 

@@ -121,14 +121,14 @@ impl StratumV2Pool {
     pub fn handle_open_channel(&mut self, endpoint: &str, msg: OpenMiningChannelMessage) -> StratumV2Result<OpenMiningChannelSuccessMessage> {
         debug!("Open Mining Channel request from {}: channel_id={}", endpoint, msg.channel_id);
         
-        // Get or create miner connection
-        let miner = self.miners.get_mut(endpoint)
-            .ok_or_else(|| StratumV2Error::MiningJob("Miner not registered".to_string()))?;
-        
-        // Calculate target from difficulty
+        // Calculate target from difficulty first (before borrowing miner)
         // Channel difficulty is typically easier than network difficulty
         // For now, use a simple conversion (full implementation would use proper difficulty calculation)
         let channel_target = self.calculate_channel_target(msg.min_difficulty)?;
+        
+        // Get or create miner connection
+        let miner = self.miners.get_mut(endpoint)
+            .ok_or_else(|| StratumV2Error::MiningJob("Miner not registered".to_string()))?;
         
         // Create channel info
         let channel_info = ChannelInfo {
@@ -181,7 +181,10 @@ impl StratumV2Pool {
     }
     
     /// Distribute new mining job to all miners
-    fn distribute_new_job(&self, job_id: u32, job_info: &JobInfo) {
+    /// 
+    /// This method creates the job messages but doesn't send them.
+    /// Actual sending is handled by the server using connections.
+    pub fn distribute_new_job(&self, job_id: u32, job_info: &JobInfo) -> Vec<(String, NewMiningJobMessage)> {
         info!("Distributing new job {} to {} miners", job_id, self.miners.len());
         
         // Extract merkle path and coinbase from template if available
@@ -191,10 +194,11 @@ impl StratumV2Pool {
             (vec![], vec![], vec![])
         };
         
+        let mut messages = Vec::new();
         for (endpoint, miner) in &self.miners {
             for (channel_id, _channel) in &miner.channels {
                 // Create NewMiningJob message
-                let _job_msg = NewMiningJobMessage {
+                let job_msg = NewMiningJobMessage {
                     channel_id: *channel_id,
                     job_id,
                     prev_hash: job_info.prev_hash,
@@ -203,10 +207,12 @@ impl StratumV2Pool {
                     merkle_path: merkle_path.clone(),
                 };
                 
-                debug!("Sending job {} to miner {} channel {}", job_id, endpoint, channel_id);
-                // In full implementation, would send via server connection
+                messages.push((endpoint.clone(), job_msg));
+                debug!("Prepared job {} for miner {} channel {}", job_id, endpoint, channel_id);
             }
         }
+        
+        messages
     }
     
     /// Handle share submission
@@ -314,12 +320,12 @@ impl StratumV2Pool {
     /// Convert Stratum V2 share to BlockHeader
     fn share_to_header(&self, share: &ShareData, job_info: &JobInfo) -> StratumV2Result<BlockHeader> {
         Ok(BlockHeader {
-            version: share.version as i32,
+            version: share.version as i64,
             prev_block_hash: job_info.prev_hash,
             merkle_root: share.merkle_root,
             timestamp: job_info.timestamp,
             bits: job_info.bits,
-            nonce: share.nonce,
+            nonce: share.nonce as u64,
         })
     }
     
