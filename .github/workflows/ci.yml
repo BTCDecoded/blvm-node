@@ -19,7 +19,9 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: BTCDecoded/protocol-engine
-        path: ../protocol-engine
+        path: _temp-protocol-engine
+    - name: Move protocol-engine to parent directory
+      run: mv _temp-protocol-engine ../protocol-engine
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
@@ -59,7 +61,9 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: BTCDecoded/protocol-engine
-        path: ../protocol-engine
+        path: _temp-protocol-engine
+    - name: Move protocol-engine to parent directory
+      run: mv _temp-protocol-engine ../protocol-engine
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
@@ -92,7 +96,9 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: BTCDecoded/protocol-engine
-        path: ../protocol-engine
+        path: _temp-protocol-engine
+    - name: Move protocol-engine to parent directory
+      run: mv _temp-protocol-engine ../protocol-engine
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
@@ -153,12 +159,18 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: BTCDecoded/protocol-engine
-        path: ../protocol-engine
+        path: _temp-protocol-engine
+        persist-credentials: false
     - name: Checkout consensus-proof dependency (for protocol-engine)
       uses: actions/checkout@v4
       with:
         repository: BTCDecoded/consensus-proof
-        path: ../consensus-proof
+        path: _temp-consensus-proof
+        persist-credentials: false
+    - name: Move dependencies to parent directory
+      run: |
+        mv _temp-protocol-engine ../protocol-engine
+        mv _temp-consensus-proof ../consensus-proof
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
