@@ -3,8 +3,8 @@
 //! Stores blocks by hash and maintains block index by height.
 
 use anyhow::Result;
-use consensus_proof::{Block, BlockHeader, Hash};
-use consensus_proof::segwit::Witness;
+use protocol_engine::{Block, BlockHeader, Hash};
+use protocol_engine::segwit::Witness;
 use sled::Db;
 
 /// Block storage manager

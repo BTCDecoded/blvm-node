@@ -8,7 +8,7 @@ use crate::network::protocol::{
     GetCfiltersMessage, CfilterMessage, GetCfheadersMessage, CfheadersMessage,
     GetCfcheckptMessage, CfcheckptMessage, ProtocolMessage, FilterHeaderData,
 };
-use consensus_proof::Hash;
+use protocol_engine::Hash;
 use anyhow::{Result, anyhow};
 
 /// Handle GetCfilters request

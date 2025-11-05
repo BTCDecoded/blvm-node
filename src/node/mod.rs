@@ -178,7 +178,7 @@ impl Node {
         
         // Get initial state for block processing
         let mut current_height = self.storage.chain().get_height()?.unwrap_or(0);
-        let mut utxo_set = consensus_proof::UtxoSet::new();
+        let mut utxo_set = protocol_engine::UtxoSet::new();
         
         // Main node loop - in a real implementation this would coordinate
         // between all components and handle shutdown signals

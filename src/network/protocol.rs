@@ -3,7 +3,7 @@
 //! Implements Bitcoin P2P protocol message serialization and deserialization.
 
 use anyhow::Result;
-use consensus_proof::{Block, Transaction, BlockHeader, Hash};
+use protocol_engine::{Block, Transaction, BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use crate::bip157::NODE_COMPACT_FILTERS;
 use crate::network::transport::TransportType;

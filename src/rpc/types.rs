@@ -3,7 +3,7 @@
 //! Common types and utilities used across RPC methods.
 
 use serde::{Deserialize, Serialize};
-// use consensus_proof::{Block, Transaction, Hash};
+// use protocol_engine::{Block, Transaction, Hash};
 
 /// RPC error response
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -3,7 +3,7 @@
 //! Implements all standard Stratum V2 message types according to the specification:
 //! https://stratumprotocol.org/
 
-use consensus_proof::types::{Block, Hash, Natural};
+use protocol_engine::types::{Block, Hash, Natural};
 use serde::{Deserialize, Serialize};
 use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
 

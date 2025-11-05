@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use serde_json::{Value, json};
-// use consensus_proof::{Block, BlockHeader, Hash};
+// use protocol_engine::{Block, BlockHeader, Hash};
 use tracing::debug;
 
 /// Blockchain RPC methods

@@ -3,7 +3,7 @@
 //! Generates, caches, and serves compact block filters for light client support.
 //! Maintains filter header chain for efficient verification.
 
-use consensus_proof::{Block, BlockHeader, Hash, Transaction};
+use protocol_engine::{Block, BlockHeader, Hash, Transaction};
 use crate::bip158::{CompactBlockFilter, build_block_filter};
 use crate::bip157;
 use std::collections::HashMap;

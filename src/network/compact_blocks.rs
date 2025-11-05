@@ -20,7 +20,7 @@
 //! - The combination provides optimal bandwidth and latency for mobile nodes and NAT-traversed connections
 
 use anyhow::Result;
-use consensus_proof::{Block, BlockHeader, Transaction, Hash};
+use protocol_engine::{Block, BlockHeader, Transaction, Hash};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use sha2::{Sha256, Digest};

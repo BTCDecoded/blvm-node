@@ -5,7 +5,7 @@
 //!
 //! Includes Dandelion++ integration for privacy-preserving transaction relay.
 
-use consensus_proof::{Hash, Block};
+use protocol_engine::{Hash, Block};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
@@ -329,7 +329,7 @@ mod tests {
         let mut relay = RelayManager::new();
         let mut fibre = FibreRelay::new();
         let block = Block {
-            header: consensus_proof::BlockHeader {
+            header: protocol_engine::BlockHeader {
                 version: 1,
                 prev_block_hash: [0u8; 32],
                 merkle_root: [0u8; 32],

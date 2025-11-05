@@ -42,11 +42,12 @@ pub mod bip70;
 // Re-export config module
 pub use config::*;
 
-// Re-export commonly used types from consensus-proof
-pub use consensus_proof::{
+// Re-export commonly used types from protocol-engine
+// This allows depending only on protocol-engine (which transitively provides consensus-proof)
+pub use protocol_engine::{
     Block, BlockHeader, Transaction, TransactionInput, TransactionOutput,
     OutPoint, UTXO, UtxoSet, ValidationResult, Hash, ByteString, Natural, Integer,
-    ConsensusError, Result,
+    ConsensusError, Result, Mempool,
 };
 
 // Re-export protocol-engine types

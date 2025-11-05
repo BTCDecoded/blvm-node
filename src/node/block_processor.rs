@@ -4,9 +4,9 @@
 //! blocks with proper witness data and median time-past.
 
 use anyhow::Result;
-use consensus_proof::{Block, BlockHeader, Hash, segwit::Witness, UtxoSet, ValidationResult};
-use consensus_proof::block::connect_block;
-use consensus_proof::serialization::deserialize_block_with_witnesses;
+use protocol_engine::{Block, BlockHeader, Hash, segwit::Witness, UtxoSet, ValidationResult};
+use protocol_engine::block::connect_block;
+use protocol_engine::serialization::deserialize_block_with_witnesses;
 use crate::storage::blockstore::BlockStore;
 
 /// Parse a block from Bitcoin wire format and extract witness data

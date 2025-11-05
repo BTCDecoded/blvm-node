@@ -12,7 +12,7 @@
 //! Note: This is a foundational implementation. Full FIBRE compatibility
 //! would require additional UDP infrastructure and FEC library integration.
 
-use consensus_proof::{Hash, Block};
+use protocol_engine::{Hash, Block};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use sha2::{Sha256, Digest};

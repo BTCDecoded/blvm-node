@@ -3,7 +3,7 @@
 //! Provides fast lookup of transactions by hash and maintains transaction metadata.
 
 use anyhow::Result;
-use consensus_proof::{Transaction, Hash};
+use protocol_engine::{Transaction, Hash};
 use sled::Db;
 use serde::{Deserialize, Serialize};
 

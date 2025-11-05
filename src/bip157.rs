@@ -5,7 +5,7 @@
 //! Defines network messages for requesting and serving compact block filters.
 //! Enables efficient transaction discovery for light clients.
 
-use consensus_proof::{BlockHeader, Hash};
+use protocol_engine::{BlockHeader, Hash};
 use crate::bip158::CompactBlockFilter;
 use sha2::{Sha256, Digest};
 

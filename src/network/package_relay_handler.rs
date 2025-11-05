@@ -10,7 +10,7 @@ use crate::network::package_relay::{
     PackageRelay, TransactionPackage, PackageId, PackageRejectReason,
 };
 use crate::network::protocol::{SendPkgTxnMessage, PkgTxnMessage, PkgTxnRejectMessage};
-use consensus_proof::Transaction;
+use protocol_engine::Transaction;
 
 /// Handle sendpkgtxn request (peer signals intent to send a package)
 pub fn handle_sendpkgtxn(_relay: &PackageRelay, msg: &SendPkgTxnMessage) -> Result<()> {
@@ -21,7 +21,7 @@ pub fn handle_sendpkgtxn(_relay: &PackageRelay, msg: &SendPkgTxnMessage) -> Resu
 
 /// Handle pkgtxn: validate package and return optional rejection
 pub fn handle_pkgtxn(relay: &mut PackageRelay, msg: &PkgTxnMessage) -> Result<Option<PkgTxnRejectMessage>> {
-    // Deserialize transactions (they are bincode-serialized consensus_proof::Transaction)
+    // Deserialize transactions (they are bincode-serialized protocol_engine::Transaction)
     let mut txs: Vec<Transaction> = Vec::with_capacity(msg.transactions.len());
     for raw in &msg.transactions {
         match bincode::deserialize::<Transaction>(raw) {
@@ -75,7 +75,7 @@ pub fn handle_pkgtxn(relay: &mut PackageRelay, msg: &PkgTxnMessage) -> Result<Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use consensus_proof::{TransactionInput, TransactionOutput, OutPoint};
+    use protocol_engine::{TransactionInput, TransactionOutput, OutPoint};
 
     fn minimal_tx() -> Transaction {
         Transaction {

@@ -17,10 +17,8 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-# Consensus layer - Local path for development
-consensus-proof = { path = "../consensus-proof" }
-
 # Protocol abstraction layer - Local path for development
+# This transitively provides consensus-proof, so we only need this one dependency
 protocol-engine = { path = "../protocol-engine" }
 
 # Storage layer - EXACT VERSIONS for security

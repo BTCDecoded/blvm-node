@@ -9,7 +9,7 @@
 //!
 //! This provides formal anonymity guarantees against transaction origin analysis.
 
-use consensus_proof::Hash;
+use protocol_engine::Hash;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use rand::{Rng, SeedableRng};

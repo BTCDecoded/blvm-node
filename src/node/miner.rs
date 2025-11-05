@@ -3,7 +3,7 @@
 //! Handles block mining, template generation, and mining coordination.
 
 use anyhow::Result;
-use consensus_proof::{Block, BlockHeader, Transaction};
+use protocol_engine::{Block, BlockHeader, Transaction};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
@@ -410,7 +410,7 @@ impl MiningCoordinator {
             version: 1,
             inputs: vec![],
             outputs: vec![
-                consensus_proof::TransactionOutput {
+                protocol_engine::TransactionOutput {
                     value: 5000000000, // 50 BTC
                     script_pubkey: vec![0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0xac],
                 }
@@ -585,7 +585,7 @@ impl MempoolProvider for MockMempoolProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use consensus_proof::{TransactionInput, TransactionOutput, OutPoint};
+    use protocol_engine::{TransactionInput, TransactionOutput, OutPoint};
 
     #[test]
     fn test_transaction_selector_creation() {

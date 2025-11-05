@@ -4,7 +4,7 @@
 //! and chain reorganization.
 
 use anyhow::Result;
-use consensus_proof::{BlockHeader, Block, UtxoSet, segwit::Witness, ValidationResult};
+use protocol_engine::{BlockHeader, Block, UtxoSet, segwit::Witness, ValidationResult};
 use std::collections::HashMap;
 use tracing::{debug, info, error};
 use crate::storage::blockstore::BlockStore;
@@ -391,7 +391,7 @@ impl MockBlockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use consensus_proof::types::BlockHeader;
+    use protocol_engine::types::BlockHeader;
     
     #[test]
     fn test_sync_coordinator_new() {

@@ -53,7 +53,7 @@ pub async fn handle_get_filtered_block(
 ) -> Result<FilteredBlockMessage> {
     // TODO: Integrate with actual spam filter and block store
     // For now, return placeholder
-    use consensus_proof::BlockHeader;
+    use protocol_engine::BlockHeader;
     
     // Generate BIP158 filter if requested and service available
     let bip158_filter = if message.include_bip158_filter {

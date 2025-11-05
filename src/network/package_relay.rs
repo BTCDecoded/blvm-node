@@ -13,7 +13,7 @@
 //! - Reduces orphan transactions in mempool
 //! - More efficient validation (package as unit)
 
-use consensus_proof::{Hash, Transaction};
+use protocol_engine::{Hash, Transaction};
 use crate::network::txhash::calculate_txid;
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};

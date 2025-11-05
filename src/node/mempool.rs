@@ -3,8 +3,7 @@
 //! Handles transaction mempool management, validation, and relay.
 
 use anyhow::Result;
-use consensus_proof::{Transaction, UtxoSet, Hash, OutPoint};
-use consensus_proof::mempool::Mempool;
+use protocol_engine::{Transaction, UtxoSet, Hash, OutPoint, Mempool};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
@@ -112,7 +111,8 @@ impl MempoolManager {
         }
         
         // Add transaction to mempool
-        let tx_hash = consensus_proof::mempool::calculate_tx_id(&tx);
+        use protocol_engine::mempool::calculate_tx_id;
+        let tx_hash = calculate_tx_id(&tx);
         self.mempool.insert(tx_hash);
         
         // Track spent outputs

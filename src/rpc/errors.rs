@@ -194,8 +194,8 @@ impl From<anyhow::Error> for RpcError {
 }
 
 /// Convert consensus error to RPC error
-impl From<consensus_proof::error::ConsensusError> for RpcError {
-    fn from(err: consensus_proof::error::ConsensusError) -> Self {
+impl From<protocol_engine::error::ConsensusError> for RpcError {
+    fn from(err: protocol_engine::error::ConsensusError) -> Self {
         RpcError::tx_rejected(format!("Consensus error: {}", err))
     }
 }

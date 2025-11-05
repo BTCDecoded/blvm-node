@@ -4,7 +4,7 @@
 //! bincode serialization of the in-memory structures. They are suitable for
 //! networking/relay purposes in this crate and do NOT replace consensus hashing.
 
-use consensus_proof::{Hash, Transaction, BlockHeader};
+use protocol_engine::{Hash, Transaction, BlockHeader};
 use sha2::{Sha256, Digest};
 
 /// Compute a best-effort txid (double-SHA256 of serialized transaction)

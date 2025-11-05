@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use std::collections::HashSet;
-use consensus_proof::Hash;
+use protocol_engine::Hash;
 
 /// Transaction set for reconciliation
 pub type TransactionSet = HashSet<Hash>;

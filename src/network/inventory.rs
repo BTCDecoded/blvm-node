@@ -3,7 +3,7 @@
 //! Handles inventory tracking, peer inventory synchronization, and data requests.
 
 use anyhow::Result;
-use consensus_proof::Hash;
+use protocol_engine::Hash;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 

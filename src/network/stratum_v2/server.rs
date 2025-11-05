@@ -9,7 +9,7 @@ use crate::network::stratum_v2::messages::*;
 use crate::network::stratum_v2::pool::StratumV2Pool;
 use crate::network::stratum_v2::protocol::{TlvDecoder, TlvEncoder};
 use crate::node::miner::MiningCoordinator;
-use consensus_proof::types::Block;
+use protocol_engine::types::Block;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;

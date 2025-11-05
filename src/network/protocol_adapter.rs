@@ -4,7 +4,7 @@
 //! transport-specific wire formats (TCP Bitcoin P2P vs Iroh message format).
 
 use anyhow::Result;
-use consensus_proof::network::NetworkMessage as ConsensusNetworkMessage;
+use protocol_engine::network::NetworkMessage as ConsensusNetworkMessage;
 use crate::network::transport::{Transport, TransportType};
 
 /// Protocol adapter for Bitcoin messages
@@ -164,7 +164,7 @@ impl ProtocolAdapter {
             NetworkAddress as ProtoNetworkAddress, PingMessage as ProtoPingMessage,
             PongMessage as ProtoPongMessage,
         };
-        use consensus_proof::network::{
+        use protocol_engine::network::{
             VersionMessage as ConsensusVersionMessage,
             NetworkAddress as ConsensusNetworkAddress,
             PingMessage as ConsensusPingMessage,
@@ -216,7 +216,7 @@ impl ProtocolAdapter {
     fn protocol_to_consensus_message(
         msg: &crate::network::protocol::ProtocolMessage,
     ) -> Result<ConsensusNetworkMessage> {
-        use consensus_proof::network::{
+        use protocol_engine::network::{
             VersionMessage as ConsensusVersionMessage,
             NetworkAddress as ConsensusNetworkAddress,
             PingMessage as ConsensusPingMessage,
@@ -270,7 +270,7 @@ impl ProtocolAdapter {
 
     /// Get command string for a message type
     fn message_to_command(msg: &ConsensusNetworkMessage) -> &'static str {
-        use consensus_proof::network::*;
+        use protocol_engine::network::*;
         
         match msg {
             ConsensusNetworkMessage::Version(_) => "version",

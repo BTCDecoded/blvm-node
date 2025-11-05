@@ -51,8 +51,8 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{info, warn, error};
 use std::sync::{Arc, Mutex};
-use consensus_proof::{ConsensusProof, UtxoSet};
-use consensus_proof::mempool::Mempool;
+use protocol_engine::{ConsensusProof, UtxoSet};
+use protocol_engine::mempool::Mempool;
 use crate::network::protocol::{ProtocolParser, ProtocolMessage};
 
 use crate::network::transport::{
@@ -654,7 +654,7 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolMessage;
         use crate::network::package_relay_handler::handle_pkgtxn;
         use crate::network::package_relay::PackageRelay;
-        use consensus_proof::Transaction;
+        use protocol_engine::Transaction;
         
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
@@ -681,7 +681,7 @@ impl NetworkManager {
     }
 
     /// Submit validated transactions to the mempool (placeholder hook)
-    async fn submit_transactions_to_mempool(&self, txs: &[consensus_proof::Transaction]) -> Result<()> {
+    async fn submit_transactions_to_mempool(&self, txs: &[protocol_engine::Transaction]) -> Result<()> {
         // Best-effort synchronous submission using shared state
         let mut utxo_lock = self.utxo_set.lock().map_err(|_| anyhow::anyhow!("UTXO lock poisoned"))?;
         let mempool_lock = self.mempool.lock().map_err(|_| anyhow::anyhow!("Mempool lock poisoned"))?;
@@ -1008,7 +1008,7 @@ mod tests {
         let manager = NetworkManager::new(addr);
 
         // Build a pkgtxn message with one trivial tx
-        let tx = consensus_proof::Transaction { version: 1, inputs: vec![], outputs: vec![], lock_time: 0 };
+        let tx = protocol_engine::Transaction { version: 1, inputs: vec![], outputs: vec![], lock_time: 0 };
         let raw = bincode::serialize(&tx).unwrap();
         let msg = PkgTxnMessage { package_id: vec![7u8; 32], transactions: vec![raw] };
         let wire = ProtocolParser::serialize_message(&ProtocolMessage::PkgTxn(msg)).unwrap();

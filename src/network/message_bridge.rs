@@ -4,7 +4,7 @@
 //! and the transport layer's message format.
 
 use anyhow::Result;
-use consensus_proof::network::{NetworkMessage as ConsensusNetworkMessage, NetworkResponse};
+use protocol_engine::network::{NetworkMessage as ConsensusNetworkMessage, NetworkResponse};
 use crate::network::transport::TransportType;
 use crate::network::protocol_adapter::ProtocolAdapter;
 use tracing::debug;
@@ -78,7 +78,7 @@ impl MessageBridge {
 
         // Process message using consensus-proof logic
         // In real implementation, this would call:
-        // consensus_proof::network::process_network_message(&consensus_msg, &mut peer_state, &chain_state)
+        // protocol_engine::network::process_network_message(&consensus_msg, &mut peer_state, &chain_state)
         // For now, return empty response
         debug!("Processed incoming consensus message: {:?}", consensus_msg);
         

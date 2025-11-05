@@ -7,7 +7,7 @@
 //! without downloading the entire block.
 
 use sha2::{Sha256, Digest};
-use consensus_proof::Transaction;
+use protocol_engine::Transaction;
 use std::collections::HashSet;
 
 /// BIP158 filter parameter: false positive rate (2^(-P))
