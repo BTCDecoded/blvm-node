@@ -10,8 +10,8 @@
 //! Consider prioritizing BIP152 (Compact Blocks) first as it has lower complexity.
 
 use anyhow::Result;
-use std::collections::HashSet;
 use protocol_engine::Hash;
+use std::collections::HashSet;
 
 /// Transaction set for reconciliation
 pub type TransactionSet = HashSet<Hash>;
@@ -37,7 +37,7 @@ pub struct ReconciliationRequest {
 }
 
 /// Sketch data for set reconciliation
-/// 
+///
 /// In full implementation, this would contain minisketch sketch bytes.
 /// For now, this is a placeholder structure.
 #[derive(Debug, Clone)]
@@ -49,15 +49,15 @@ pub struct Sketch {
 }
 
 /// Perform set reconciliation
-/// 
+///
 /// # Arguments
 /// * `local_set` - Local transaction set
 /// * `remote_set` - Remote transaction set (from sketch)
 /// * `sketch` - Reconciliation sketch
-/// 
+///
 /// # Returns
 /// Missing transactions (in local set but not in remote)
-/// 
+///
 /// NOTE: This is a placeholder. Full implementation requires minisketch.
 pub fn reconcile_sets(
     _local_set: &TransactionSet,
@@ -70,17 +70,17 @@ pub fn reconcile_sets(
 }
 
 /// Create reconciliation sketch
-/// 
+///
 /// Creates a sketch of transactions that are in local set but not in remote.
-/// 
+///
 /// # Arguments
 /// * `local_set` - Local transaction set
 /// * `remote_set` - Estimated remote transaction set
 /// * `capacity` - Sketch capacity (number of differences it can represent)
-/// 
+///
 /// # Returns
 /// Sketch for transmission to peer
-/// 
+///
 /// NOTE: This is a placeholder. Full implementation requires minisketch.
 pub fn create_sketch(
     _local_set: &TransactionSet,
@@ -95,22 +95,19 @@ pub fn create_sketch(
 }
 
 /// Decode sketch to recover missing transactions
-/// 
+///
 /// Takes a sketch from peer and decodes it to find transactions
 /// missing from local set.
-/// 
+///
 /// # Arguments
 /// * `sketch` - Sketch received from peer
 /// * `local_set` - Local transaction set
-/// 
+///
 /// # Returns
 /// Missing transactions (to request from peer)
-/// 
+///
 /// NOTE: This is a placeholder. Full implementation requires minisketch.
-pub fn decode_sketch(
-    _sketch: &Sketch,
-    _local_set: &TransactionSet,
-) -> Result<TransactionSet> {
+pub fn decode_sketch(_sketch: &Sketch, _local_set: &TransactionSet) -> Result<TransactionSet> {
     // Placeholder: would use minisketch to decode sketch
     Ok(HashSet::new())
 }
@@ -118,7 +115,7 @@ pub fn decode_sketch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_reconcile_sets_placeholder() {
         let local_set = HashSet::new();
@@ -127,18 +124,17 @@ mod tests {
             bytes: vec![],
             size: 0,
         };
-        
+
         let result = reconcile_sets(&local_set, &remote_set, &sketch);
         assert!(result.is_ok());
     }
-    
+
     #[test]
     fn test_create_sketch_placeholder() {
         let local_set = HashSet::new();
         let remote_set = HashSet::new();
-        
+
         let result = create_sketch(&local_set, &remote_set, 100);
         assert!(result.is_ok());
     }
 }
-

@@ -1,16 +1,16 @@
 //! Block and transaction relay
-//! 
+//!
 //! Handles relaying blocks and transactions to peers, managing relay policies,
 //! and preventing duplicate relay.
 //!
 //! Includes Dandelion++ integration for privacy-preserving transaction relay.
 
-use protocol_engine::{Hash, Block};
+#[cfg(feature = "dandelion")]
+use super::dandelion::DandelionRelay;
+use protocol_engine::{Block, Hash};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
-#[cfg(feature = "dandelion")]
-use super::dandelion::DandelionRelay;
 
 /// Relay manager
 pub struct RelayManager {
@@ -55,7 +55,9 @@ impl Default for RelayPolicies {
 }
 
 impl Default for RelayManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RelayManager {
@@ -66,7 +68,11 @@ impl RelayManager {
             recently_relayed_blocks: HashMap::new(),
             recently_relayed_txs: HashMap::new(),
             #[cfg(feature = "dandelion")]
-            dandelion: if policies.enable_dandelion { Some(DandelionRelay::new()) } else { None },
+            dandelion: if policies.enable_dandelion {
+                Some(DandelionRelay::new())
+            } else {
+                None
+            },
             enable_dandelion: policies.enable_dandelion,
             policies,
         }
@@ -74,82 +80,98 @@ impl RelayManager {
 
     /// Configure Dandelion stem timeout (testing/integration)
     #[cfg(feature = "dandelion")]
-    pub fn set_dandelion_stem_timeout(&mut self, timeout: std::time::Duration) { if let Some(ref mut d) = self.dandelion { d.set_stem_timeout(timeout); } }
+    pub fn set_dandelion_stem_timeout(&mut self, timeout: std::time::Duration) {
+        if let Some(ref mut d) = self.dandelion {
+            d.set_stem_timeout(timeout);
+        }
+    }
     #[cfg(not(feature = "dandelion"))]
-    pub fn set_dandelion_stem_timeout(&mut self, _timeout: std::time::Duration) { }
+    pub fn set_dandelion_stem_timeout(&mut self, _timeout: std::time::Duration) {}
 
     /// Configure Dandelion fluff probability (testing/integration)
     #[cfg(feature = "dandelion")]
-    pub fn set_dandelion_fluff_probability(&mut self, p: f64) { if let Some(ref mut d) = self.dandelion { d.set_fluff_probability(p); } }
+    pub fn set_dandelion_fluff_probability(&mut self, p: f64) {
+        if let Some(ref mut d) = self.dandelion {
+            d.set_fluff_probability(p);
+        }
+    }
     #[cfg(not(feature = "dandelion"))]
-    pub fn set_dandelion_fluff_probability(&mut self, _p: f64) { }
+    pub fn set_dandelion_fluff_probability(&mut self, _p: f64) {}
 
     /// Configure Dandelion max stem hops (testing/integration)
     #[cfg(feature = "dandelion")]
-    pub fn set_dandelion_max_stem_hops(&mut self, hops: u8) { if let Some(ref mut d) = self.dandelion { d.set_max_stem_hops(hops); } }
+    pub fn set_dandelion_max_stem_hops(&mut self, hops: u8) {
+        if let Some(ref mut d) = self.dandelion {
+            d.set_max_stem_hops(hops);
+        }
+    }
     #[cfg(not(feature = "dandelion"))]
-    pub fn set_dandelion_max_stem_hops(&mut self, _hops: u8) { }
-    
+    pub fn set_dandelion_max_stem_hops(&mut self, _hops: u8) {}
+
     /// Create a relay manager with custom policies
     pub fn with_policies(policies: RelayPolicies) -> Self {
         Self {
             recently_relayed_blocks: HashMap::new(),
             recently_relayed_txs: HashMap::new(),
             #[cfg(feature = "dandelion")]
-            dandelion: if policies.enable_dandelion { Some(DandelionRelay::new()) } else { None },
+            dandelion: if policies.enable_dandelion {
+                Some(DandelionRelay::new())
+            } else {
+                None
+            },
             enable_dandelion: policies.enable_dandelion,
             policies,
         }
     }
-    
+
     /// Check if a block should be relayed
     pub fn should_relay_block(&self, block_hash: &Hash) -> bool {
         if !self.policies.enable_block_relay {
             return false;
         }
-        
+
         if self.recently_relayed_blocks.contains_key(block_hash) {
             return false;
         }
-        
+
         true
     }
-    
+
     /// Check if a transaction should be relayed
     pub fn should_relay_transaction(&self, tx_hash: &Hash) -> bool {
         if !self.policies.enable_tx_relay {
             return false;
         }
-        
+
         if self.recently_relayed_txs.contains_key(tx_hash) {
             return false;
         }
-        
+
         true
     }
-    
+
     /// Mark a block as relayed
     pub fn mark_block_relayed(&mut self, block_hash: Hash) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         self.recently_relayed_blocks.insert(block_hash, now);
         self.cleanup_old_items();
-        
+
         debug!("Marked block {} as relayed", hex::encode(block_hash));
     }
-    
+
     /// Mark a transaction as relayed
     pub fn mark_transaction_relayed(&mut self, tx_hash: Hash) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         self.recently_relayed_txs.insert(tx_hash, now);
-        
+
         // Clean up Dandelion state if transitioning to fluff
         #[cfg(feature = "dandelion")]
         {
@@ -159,12 +181,12 @@ impl RelayManager {
                 }
             }
         }
-        
+
         self.cleanup_old_items();
-        
+
         debug!("Marked transaction {} as relayed", hex::encode(tx_hash));
     }
-    
+
     /// Relay transaction with Dandelion++ privacy (if enabled)
     /// Returns the peer ID to relay to (if stem phase) or None (if fluff phase - broadcast to all)
     #[cfg(feature = "dandelion")]
@@ -177,15 +199,18 @@ impl RelayManager {
         if !self.enable_dandelion || self.dandelion.is_none() {
             return None; // Normal relay (broadcast to all)
         }
-        
+
         let dandelion = self.dandelion.as_mut().unwrap();
-        
+
         // Check if already in stem phase
         if let Some(next_peer) = dandelion.get_stem_peer(&tx_hash) {
             // Already in stem phase, advance
             if dandelion.should_fluff(&tx_hash) {
                 dandelion.transition_to_fluff(tx_hash);
-                info!("Transaction {} transitioned to fluff phase", hex::encode(tx_hash));
+                info!(
+                    "Transaction {} transitioned to fluff phase",
+                    hex::encode(tx_hash)
+                );
                 return None; // Broadcast to all
             } else {
                 // Advance stem phase
@@ -196,10 +221,13 @@ impl RelayManager {
             if available_peers.is_empty() {
                 return None; // No peers available, skip Dandelion
             }
-            
+
             let next_peer = dandelion.start_stem_phase(tx_hash, current_peer, available_peers);
             if next_peer.is_some() {
-                info!("Transaction {} started Dandelion stem phase", hex::encode(tx_hash));
+                info!(
+                    "Transaction {} started Dandelion stem phase",
+                    hex::encode(tx_hash)
+                );
             }
             return next_peer;
         }
@@ -210,20 +238,30 @@ impl RelayManager {
         _tx_hash: Hash,
         _current_peer: String,
         _available_peers: &[String],
-    ) -> Option<String> { None }
-    
+    ) -> Option<String> {
+        None
+    }
+
     /// Initialize Dandelion stem path for a peer
     #[cfg(feature = "dandelion")]
-    pub fn initialize_dandelion_path(&mut self, peer_id: String, available_peers: &[String]) { if let Some(ref mut dandelion) = self.dandelion { dandelion.initialize_stem_path(peer_id, available_peers); } }
+    pub fn initialize_dandelion_path(&mut self, peer_id: String, available_peers: &[String]) {
+        if let Some(ref mut dandelion) = self.dandelion {
+            dandelion.initialize_stem_path(peer_id, available_peers);
+        }
+    }
     #[cfg(not(feature = "dandelion"))]
-    pub fn initialize_dandelion_path(&mut self, _peer_id: String, _available_peers: &[String]) { }
-    
+    pub fn initialize_dandelion_path(&mut self, _peer_id: String, _available_peers: &[String]) {}
+
     /// Clean up expired Dandelion paths
     #[cfg(feature = "dandelion")]
-    pub fn cleanup_dandelion(&mut self) { if let Some(ref mut dandelion) = self.dandelion { dandelion.cleanup_expired(); } }
+    pub fn cleanup_dandelion(&mut self) {
+        if let Some(ref mut dandelion) = self.dandelion {
+            dandelion.cleanup_expired();
+        }
+    }
     #[cfg(not(feature = "dandelion"))]
-    pub fn cleanup_dandelion(&mut self) { }
-    
+    pub fn cleanup_dandelion(&mut self) {}
+
     /// Get relay statistics
     pub fn get_stats(&self) -> RelayStats {
         RelayStats {
@@ -235,7 +273,11 @@ impl RelayManager {
 
     /// Try to prioritize block relay via FIBRE (if available)
     /// Returns true if FIBRE encoding path executed (send is transport-dependent)
-    pub fn prioritize_block_via_fibre(&mut self, fibre: &mut crate::network::fibre::FibreRelay, block: &Block) -> bool {
+    pub fn prioritize_block_via_fibre(
+        &mut self,
+        fibre: &mut crate::network::fibre::FibreRelay,
+        block: &Block,
+    ) -> bool {
         if !self.policies.enable_block_relay {
             return false;
         }
@@ -248,62 +290,66 @@ impl RelayManager {
             Err(_) => false,
         }
     }
-    
+
     /// Clean up old relayed items
     fn cleanup_old_items(&mut self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         // Clean up old blocks
-        let old_blocks: Vec<Hash> = self.recently_relayed_blocks
+        let old_blocks: Vec<Hash> = self
+            .recently_relayed_blocks
             .iter()
             .filter(|(_, &timestamp)| now - timestamp > self.policies.max_relay_age)
             .map(|(hash, _)| *hash)
             .collect();
-        
+
         for hash in old_blocks {
             self.recently_relayed_blocks.remove(&hash);
         }
-        
+
         // Clean up old transactions
-        let old_txs: Vec<Hash> = self.recently_relayed_txs
+        let old_txs: Vec<Hash> = self
+            .recently_relayed_txs
             .iter()
             .filter(|(_, &timestamp)| now - timestamp > self.policies.max_relay_age)
             .map(|(hash, _)| *hash)
             .collect();
-        
+
         for hash in old_txs {
             self.recently_relayed_txs.remove(&hash);
         }
-        
+
         // Limit total items
         if self.recently_relayed_blocks.len() > self.policies.max_tracked_items {
             let excess = self.recently_relayed_blocks.len() - self.policies.max_tracked_items;
-            let oldest_blocks: Vec<Hash> = self.recently_relayed_blocks
+            let oldest_blocks: Vec<Hash> = self
+                .recently_relayed_blocks
                 .iter()
                 .min_by_key(|(_, &timestamp)| timestamp)
                 .map(|(hash, _)| *hash)
                 .into_iter()
                 .take(excess)
                 .collect();
-            
+
             for hash in oldest_blocks {
                 self.recently_relayed_blocks.remove(&hash);
             }
         }
-        
+
         if self.recently_relayed_txs.len() > self.policies.max_tracked_items {
             let excess = self.recently_relayed_txs.len() - self.policies.max_tracked_items;
-            let oldest_txs: Vec<Hash> = self.recently_relayed_txs
+            let oldest_txs: Vec<Hash> = self
+                .recently_relayed_txs
                 .iter()
                 .min_by_key(|(_, &timestamp)| timestamp)
                 .map(|(hash, _)| *hash)
                 .into_iter()
                 .take(excess)
                 .collect();
-            
+
             for hash in oldest_txs {
                 self.recently_relayed_txs.remove(&hash);
             }

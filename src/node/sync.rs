@@ -1,14 +1,17 @@
 //! Block sync coordinator
-//! 
+//!
 //! Handles blockchain synchronization, header download, block validation,
 //! and chain reorganization.
 
-use anyhow::Result;
-use protocol_engine::{BlockHeader, Block, UtxoSet, segwit::Witness, ValidationResult};
-use std::collections::HashMap;
-use tracing::{debug, info, error};
+use crate::node::block_processor::{
+    parse_block_from_wire, prepare_block_validation_context, store_block_with_context,
+    validate_block_with_context,
+};
 use crate::storage::blockstore::BlockStore;
-use crate::node::block_processor::{parse_block_from_wire, store_block_with_context, prepare_block_validation_context, validate_block_with_context};
+use anyhow::Result;
+use protocol_engine::{segwit::Witness, Block, BlockHeader, UtxoSet, ValidationResult};
+use std::collections::HashMap;
+use tracing::{debug, error, info};
 
 /// Block provider for dependency injection
 pub struct BlockProvider {
@@ -45,56 +48,56 @@ impl SyncStateMachine {
             error_message: None,
         }
     }
-    
+
     /// Transition to a new state
     pub fn transition_to(&mut self, new_state: SyncState) {
         debug!("Sync state transition: {:?} -> {:?}", self.state, new_state);
         self.state = new_state;
         self.update_progress();
     }
-    
+
     /// Set error state
     pub fn set_error(&mut self, error: String) {
         self.state = SyncState::Error(error.clone());
         self.error_message = Some(error);
         self.progress = 0.0;
     }
-    
+
     /// Update best header
     pub fn update_best_header(&mut self, header: BlockHeader) {
         self.best_header = Some(header);
     }
-    
+
     /// Update chain tip
     pub fn update_chain_tip(&mut self, header: BlockHeader) {
         self.chain_tip = Some(header);
     }
-    
+
     /// Get current state
     pub fn state(&self) -> &SyncState {
         &self.state
     }
-    
+
     /// Get sync progress
     pub fn progress(&self) -> f64 {
         self.progress
     }
-    
+
     /// Check if sync is complete
     pub fn is_synced(&self) -> bool {
         matches!(self.state, SyncState::Synced)
     }
-    
+
     /// Get best header
     pub fn best_header(&self) -> Option<&BlockHeader> {
         self.best_header.as_ref()
     }
-    
+
     /// Get chain tip
     pub fn chain_tip(&self) -> Option<&BlockHeader> {
         self.chain_tip.as_ref()
     }
-    
+
     /// Update progress based on current state
     fn update_progress(&mut self) {
         self.progress = match self.state {
@@ -143,31 +146,31 @@ impl SyncCoordinator {
             block_provider: BlockProvider::new(),
         }
     }
-    
+
     /// Start sync process
     pub fn start_sync(&mut self) -> Result<()> {
         info!("Starting blockchain sync");
         self.state_machine.transition_to(SyncState::Headers);
-        
+
         // In a real implementation, we would download and validate blocks
         // For now, just transition to synced state
         self.state_machine.transition_to(SyncState::Synced);
-        
+
         Ok(())
     }
-    
+
     /// Get sync progress
     pub fn progress(&self) -> f64 {
         self.state_machine.progress()
     }
-    
+
     /// Check if sync is complete
     pub fn is_synced(&self) -> bool {
         self.state_machine.is_synced()
     }
-    
+
     /// Process an incoming block from the network
-    /// 
+    ///
     /// This function:
     /// 1. Parses the block from wire format (extracting witness data)
     /// 2. Validates the block with proper witnesses and headers
@@ -181,21 +184,18 @@ impl SyncCoordinator {
     ) -> Result<bool> {
         // Parse block from wire format (extracts witness data)
         let (block, witnesses) = parse_block_from_wire(block_data)?;
-        
+
         // Prepare validation context (get witnesses and headers)
-        let (stored_witnesses, recent_headers) = prepare_block_validation_context(
-            blockstore,
-            &block,
-            current_height,
-        )?;
-        
+        let (stored_witnesses, recent_headers) =
+            prepare_block_validation_context(blockstore, &block, current_height)?;
+
         // Use witnesses from wire format (they may not be stored yet)
         let witnesses_to_use = if !witnesses.is_empty() {
             &witnesses
         } else {
             &stored_witnesses
         };
-        
+
         // Validate block with witness data and headers
         let validation_result = validate_block_with_context(
             blockstore,
@@ -204,16 +204,11 @@ impl SyncCoordinator {
             utxo_set,
             current_height,
         )?;
-        
+
         if matches!(validation_result, ValidationResult::Valid) {
             // Store block with witnesses and update headers
-            store_block_with_context(
-                blockstore,
-                &block,
-                witnesses_to_use,
-                current_height,
-            )?;
-            
+            store_block_with_context(blockstore, &block, witnesses_to_use, current_height)?;
+
             info!("Block validated and stored at height {}", current_height);
             Ok(true)
         } else {
@@ -232,22 +227,22 @@ impl BlockProvider {
             block_count: 0,
         }
     }
-    
+
     /// Get a block by hash
     pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>> {
         Ok(self.blocks.get(hash).cloned())
     }
-    
+
     /// Get a block header by hash
     pub fn get_block_header(&self, hash: &[u8; 32]) -> Result<Option<BlockHeader>> {
         Ok(self.headers.get(hash).cloned())
     }
-    
+
     /// Get the best block header
     pub fn get_best_header(&self) -> Result<Option<BlockHeader>> {
         Ok(self.headers.values().last().cloned())
     }
-    
+
     /// Store a block
     pub fn store_block(&mut self, block: &Block) -> Result<()> {
         // Simplified hash calculation
@@ -256,7 +251,7 @@ impl BlockProvider {
         self.block_count += 1;
         Ok(())
     }
-    
+
     /// Store a block header
     pub fn store_block_header(&mut self, header: &BlockHeader) -> Result<()> {
         // Simplified hash calculation
@@ -264,12 +259,12 @@ impl BlockProvider {
         self.headers.insert(hash, header.clone());
         Ok(())
     }
-    
+
     /// Get block count
     pub fn get_block_count(&self) -> Result<u64> {
         Ok(self.block_count)
     }
-    
+
     /// Calculate block hash (simplified)
     fn calculate_block_hash(&self, block: &Block) -> [u8; 32] {
         let mut hash = [0u8; 32];
@@ -277,7 +272,7 @@ impl BlockProvider {
         hash[1] = block.transactions.len() as u8;
         hash
     }
-    
+
     /// Calculate header hash (simplified)
     fn calculate_header_hash(&self, header: &BlockHeader) -> [u8; 32] {
         let mut hash = [0u8; 32];
@@ -295,7 +290,6 @@ pub struct MockBlockProvider {
     block_count: u64,
 }
 
-
 impl MockBlockProvider {
     /// Create a new mock block provider
     pub fn new() -> Self {
@@ -306,22 +300,22 @@ impl MockBlockProvider {
             block_count: 0,
         }
     }
-    
+
     /// Get a block by hash
     pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>> {
         Ok(self.blocks.get(hash).cloned())
     }
-    
+
     /// Get a block header by hash
     pub fn get_block_header(&self, hash: &[u8; 32]) -> Result<Option<BlockHeader>> {
         Ok(self.headers.get(hash).cloned())
     }
-    
+
     /// Get the best block header
     pub fn get_best_header(&self) -> Result<Option<BlockHeader>> {
         Ok(self.best_header.clone())
     }
-    
+
     /// Store a block
     pub fn store_block(&mut self, block: &Block) -> Result<()> {
         // Simplified hash calculation
@@ -330,7 +324,7 @@ impl MockBlockProvider {
         self.block_count += 1;
         Ok(())
     }
-    
+
     /// Store a block header
     pub fn store_block_header(&mut self, header: &BlockHeader) -> Result<()> {
         // Simplified hash calculation
@@ -339,12 +333,12 @@ impl MockBlockProvider {
         self.best_header = Some(header.clone());
         Ok(())
     }
-    
+
     /// Get block count
     pub fn get_block_count(&self) -> Result<u64> {
         Ok(self.block_count)
     }
-    
+
     /// Calculate block hash (simplified)
     fn calculate_block_hash(&self, block: &Block) -> [u8; 32] {
         let mut hash = [0u8; 32];
@@ -352,7 +346,7 @@ impl MockBlockProvider {
         hash[1] = block.transactions.len() as u8;
         hash
     }
-    
+
     /// Calculate header hash (simplified)
     fn calculate_header_hash(&self, header: &BlockHeader) -> [u8; 32] {
         let mut hash = [0u8; 32];
@@ -360,14 +354,14 @@ impl MockBlockProvider {
         hash[1] = header.timestamp as u8;
         hash
     }
-    
+
     /// Add block (for testing)
     pub fn add_block(&mut self, block: Block) {
         let hash = self.calculate_block_hash(&block);
         self.blocks.insert(hash, block);
         self.block_count += 1;
     }
-    
+
     /// Add header (for testing)
     pub fn add_header(&mut self, header: BlockHeader) {
         let hash = self.calculate_header_hash(&header);
@@ -376,12 +370,12 @@ impl MockBlockProvider {
             self.best_header = Some(header);
         }
     }
-    
+
     /// Set best header (for testing)
     pub fn set_best_header(&mut self, header: BlockHeader) {
         self.best_header = Some(header);
     }
-    
+
     /// Set block count (for testing)
     pub fn set_block_count(&mut self, count: u64) {
         self.block_count = count;
@@ -392,7 +386,7 @@ impl MockBlockProvider {
 mod tests {
     use super::*;
     use protocol_engine::types::BlockHeader;
-    
+
     #[test]
     fn test_sync_coordinator_new() {
         let coordinator = SyncCoordinator::new();

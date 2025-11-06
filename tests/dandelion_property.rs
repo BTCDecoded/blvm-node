@@ -1,15 +1,28 @@
 #![cfg(feature = "dandelion")]
-use std::time::{Duration, Instant};
+use proptest::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use proptest::prelude::*;
+use std::time::{Duration, Instant};
 
-use reference_node::network::dandelion::{DandelionRelay, Clock};
+use reference_node::network::dandelion::{Clock, DandelionRelay};
 
 #[derive(Clone)]
-struct TestClock { now: Instant }
-impl TestClock { fn new(start: Instant) -> Self { Self { now: start } } fn advance(&mut self, d: Duration) { self.now += d; } }
-impl Clock for TestClock { fn now(&self) -> Instant { self.now } }
+struct TestClock {
+    now: Instant,
+}
+impl TestClock {
+    fn new(start: Instant) -> Self {
+        Self { now: start }
+    }
+    fn advance(&mut self, d: Duration) {
+        self.now += d;
+    }
+}
+impl Clock for TestClock {
+    fn now(&self) -> Instant {
+        self.now
+    }
+}
 
 proptest! {
     #[test]
@@ -61,5 +74,3 @@ proptest! {
         prop_assert!(d.should_fluff(&tx));
     }
 }
-
-

@@ -3,10 +3,10 @@
 //! Provides conversion between consensus-proof NetworkMessage types
 //! and the transport layer's message format.
 
+use crate::network::protocol_adapter::ProtocolAdapter;
+use crate::network::transport::TransportType;
 use anyhow::Result;
 use protocol_engine::network::{NetworkMessage as ConsensusNetworkMessage, NetworkResponse};
-use crate::network::transport::TransportType;
-use crate::network::protocol_adapter::ProtocolAdapter;
 use tracing::debug;
 
 /// Message bridge for connecting consensus-proof message processing
@@ -19,7 +19,10 @@ impl MessageBridge {
         msg: &ConsensusNetworkMessage,
         transport: TransportType,
     ) -> Result<Vec<u8>> {
-        debug!("Converting consensus message to transport format: {:?}", transport);
+        debug!(
+            "Converting consensus message to transport format: {:?}",
+            transport
+        );
         ProtocolAdapter::serialize_message(msg, transport)
     }
 
@@ -28,7 +31,10 @@ impl MessageBridge {
         data: &[u8],
         transport: TransportType,
     ) -> Result<ConsensusNetworkMessage> {
-        debug!("Converting transport message to consensus format: {:?}", transport);
+        debug!(
+            "Converting transport message to consensus format: {:?}",
+            transport
+        );
         ProtocolAdapter::deserialize_message(data, transport)
     }
 
@@ -81,8 +87,7 @@ impl MessageBridge {
         // protocol_engine::network::process_network_message(&consensus_msg, &mut peer_state, &chain_state)
         // For now, return empty response
         debug!("Processed incoming consensus message: {:?}", consensus_msg);
-        
+
         Ok(Vec::new()) // Simplified - would generate actual responses
     }
 }
-

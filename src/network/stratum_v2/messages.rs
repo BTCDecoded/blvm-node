@@ -3,9 +3,9 @@
 //! Implements all standard Stratum V2 message types according to the specification:
 //! https://stratumprotocol.org/
 
+use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
 use protocol_engine::types::{Block, Hash, Natural};
 use serde::{Deserialize, Serialize};
-use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
 
 /// Stratum V2 message type tags
 pub mod message_types {
@@ -13,16 +13,16 @@ pub mod message_types {
     pub const SETUP_CONNECTION: u16 = 0x0001;
     pub const SETUP_CONNECTION_SUCCESS: u16 = 0x0002;
     pub const SETUP_CONNECTION_ERROR: u16 = 0x0003;
-    
+
     // Mining channel messages
     pub const OPEN_MINING_CHANNEL: u16 = 0x0010;
     pub const OPEN_MINING_CHANNEL_SUCCESS: u16 = 0x0011;
     pub const OPEN_MINING_CHANNEL_ERROR: u16 = 0x0012;
-    
+
     // Mining job messages
     pub const NEW_MINING_JOB: u16 = 0x0020;
     pub const SET_NEW_PREV_HASH: u16 = 0x0021;
-    
+
     // Share submission messages
     pub const SUBMIT_SHARES: u16 = 0x0030;
     pub const SUBMIT_SHARES_SUCCESS: u16 = 0x0031;
@@ -173,21 +173,22 @@ pub struct SubmitSharesErrorMessage {
 pub trait StratumV2Message: Serialize + for<'de> Deserialize<'de> {
     /// Get message type tag
     fn message_type(&self) -> u16;
-    
+
     /// Serialize message to bytes (JSON format)
     fn to_bytes(&self) -> StratumV2Result<Vec<u8>> {
         let json = serde_json::to_vec(self)
             .map_err(|e| StratumV2Error::Serialization(format!("Failed to serialize: {}", e)))?;
         Ok(json)
     }
-    
+
     /// Deserialize message from bytes
     fn from_bytes(data: &[u8]) -> StratumV2Result<Self>
     where
         Self: Sized,
     {
-        let message: Self = serde_json::from_slice(data)
-            .map_err(|e| StratumV2Error::Deserialization(format!("Failed to deserialize: {}", e)))?;
+        let message: Self = serde_json::from_slice(data).map_err(|e| {
+            StratumV2Error::Deserialization(format!("Failed to deserialize: {}", e))
+        })?;
         Ok(message)
     }
 }
@@ -258,4 +259,3 @@ impl StratumV2Message for SubmitSharesErrorMessage {
         message_types::SUBMIT_SHARES_ERROR
     }
 }
-

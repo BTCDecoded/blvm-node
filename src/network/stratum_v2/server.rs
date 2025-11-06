@@ -3,21 +3,26 @@
 //! Implements the Stratum V2 mining pool server, accepting miner connections
 //! and coordinating mining operations.
 
-use crate::network::NetworkManager;
 use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
-use crate::network::stratum_v2::pool::{StratumV2Pool, JobInfo};
-use crate::network::stratum_v2::protocol::{TlvDecoder, TlvEncoder};
-use crate::network::stratum_v2::messages::{NewMiningJobMessage, SetupConnectionMessage, SetupConnectionSuccessMessage, OpenMiningChannelMessage, OpenMiningChannelSuccessMessage, SubmitSharesMessage, SubmitSharesSuccessMessage, StratumV2Message};
 use crate::network::stratum_v2::messages::message_types;
+use crate::network::stratum_v2::messages::{
+    NewMiningJobMessage, OpenMiningChannelMessage, OpenMiningChannelSuccessMessage,
+    SetupConnectionMessage, SetupConnectionSuccessMessage, StratumV2Message, SubmitSharesMessage,
+    SubmitSharesSuccessMessage,
+};
+use crate::network::stratum_v2::pool::{JobInfo, StratumV2Pool};
+use crate::network::stratum_v2::protocol::{TlvDecoder, TlvEncoder};
+use crate::network::NetworkManager;
 use crate::node::miner::MiningCoordinator;
 use protocol_engine::types::Block;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 /// Miner connection tracking
-type MinerConnection = Arc<RwLock<Option<Box<dyn crate::network::transport::TransportConnection + Send>>>>;
+type MinerConnection =
+    Arc<RwLock<Option<Box<dyn crate::network::transport::TransportConnection + Send>>>>;
 
 /// Connection pool for miner connections (0-RTT reuse)
 struct ConnectionPool {
@@ -35,7 +40,8 @@ pub struct StratumV2Server {
     listen_addr: SocketAddr,
     running: bool,
     /// Active miner connections (endpoint -> (connection, last_used))
-    miner_connections: Arc<RwLock<std::collections::HashMap<String, (MinerConnection, std::time::Instant)>>>,
+    miner_connections:
+        Arc<RwLock<std::collections::HashMap<String, (MinerConnection, std::time::Instant)>>>,
 }
 
 impl StratumV2Server {
@@ -54,43 +60,49 @@ impl StratumV2Server {
             miner_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
-    
+
     /// Start the server
     pub async fn start(&mut self) -> StratumV2Result<()> {
         if self.running {
-            return Err(StratumV2Error::Configuration("Server already running".to_string()));
+            return Err(StratumV2Error::Configuration(
+                "Server already running".to_string(),
+            ));
         }
-        
+
         info!("Starting Stratum V2 server on {}", self.listen_addr);
-        
+
         // Server would listen on configured address via NetworkManager
         // In full implementation, would:
         // 1. Register listener with NetworkManager
         // 2. Accept incoming connections
         // 3. Handle Stratum V2 protocol messages
-        
+
         self.running = true;
         info!("Stratum V2 server started");
-        
+
         Ok(())
     }
-    
+
     /// Stop the server
     pub async fn stop(&mut self) -> StratumV2Result<()> {
         if !self.running {
             return Ok(());
         }
-        
+
         info!("Stopping Stratum V2 server");
         self.running = false;
         Ok(())
     }
-    
+
     /// Handle incoming Stratum V2 message
-    pub async fn handle_message(&self, data: Vec<u8>, peer_addr: SocketAddr) -> StratumV2Result<Vec<u8>> {
+    pub async fn handle_message(
+        &self,
+        data: Vec<u8>,
+        peer_addr: SocketAddr,
+    ) -> StratumV2Result<Vec<u8>> {
         // Decode TLV message
         let (tag, payload) = TlvDecoder::decode_raw(&data)?;
-        
+
         // Deserialize message based on tag
         let response_bytes = match tag {
             message_types::SETUP_CONNECTION => {
@@ -125,20 +137,20 @@ impl StratumV2Server {
                 return Err(StratumV2Error::InvalidMessageType(tag));
             }
         };
-        
+
         Ok(response_bytes)
     }
-    
+
     /// Register a miner connection (with connection pooling)
     pub async fn register_miner_connection(&self, endpoint: String, connection: MinerConnection) {
         let mut connections = self.miner_connections.write().await;
         connections.insert(endpoint, (connection, std::time::Instant::now()));
     }
-    
+
     /// Get a miner connection from pool (0-RTT if connection is still valid)
     pub async fn get_miner_connection(&self, endpoint: &str) -> Option<MinerConnection> {
         let mut connections = self.miner_connections.write().await;
-        
+
         if let Some((conn, last_used)) = connections.get_mut(endpoint) {
             // Check if connection is still valid (not idle too long)
             let max_idle = std::time::Duration::from_secs(300); // 5 minutes
@@ -154,36 +166,49 @@ impl StratumV2Server {
                     }
                 }
             }
-            
+
             // Connection is stale or disconnected, remove it
             connections.remove(endpoint);
         }
-        
+
         None
     }
-    
+
     /// Handle Setup Connection message
-    async fn handle_setup_connection(&self, msg: SetupConnectionMessage, connection: MinerConnection) -> StratumV2Result<SetupConnectionSuccessMessage> {
+    async fn handle_setup_connection(
+        &self,
+        msg: SetupConnectionMessage,
+        connection: MinerConnection,
+    ) -> StratumV2Result<SetupConnectionSuccessMessage> {
         // Register connection
-        self.register_miner_connection(msg.endpoint.clone(), connection).await;
-        
+        self.register_miner_connection(msg.endpoint.clone(), connection)
+            .await;
+
         // Handle in pool
         let mut pool = self.pool.write().await;
         pool.handle_setup_connection(msg)
     }
-    
+
     /// Handle Open Mining Channel message
-    async fn handle_open_channel(&self, endpoint: &str, msg: OpenMiningChannelMessage) -> StratumV2Result<OpenMiningChannelSuccessMessage> {
+    async fn handle_open_channel(
+        &self,
+        endpoint: &str,
+        msg: OpenMiningChannelMessage,
+    ) -> StratumV2Result<OpenMiningChannelSuccessMessage> {
         let mut pool = self.pool.write().await;
         pool.handle_open_channel(endpoint, msg)
     }
-    
+
     /// Handle Submit Shares message
-    async fn handle_submit_shares(&self, endpoint: &str, msg: SubmitSharesMessage) -> StratumV2Result<SubmitSharesSuccessMessage> {
+    async fn handle_submit_shares(
+        &self,
+        endpoint: &str,
+        msg: SubmitSharesMessage,
+    ) -> StratumV2Result<SubmitSharesSuccessMessage> {
         let mut pool = self.pool.write().await;
         pool.handle_submit_shares(endpoint, msg)
     }
-    
+
     /// Generate and distribute new block template
     pub async fn update_template(&self) -> StratumV2Result<()> {
         // Get block template from MiningCoordinator
@@ -191,15 +216,15 @@ impl StratumV2Server {
         // TODO: In full implementation, would call coordinator.generate_block_template()
         // For now, placeholder
         debug!("Template update requested (would generate from MiningCoordinator)");
-        
+
         // Set template in pool and distribute
         // let template = coordinator.generate_block_template().await?;
         let mut pool = self.pool.write().await;
-        
+
         // For now, create placeholder template and job info
         // In full implementation, would call: pool.set_template(template);
         // set_template() internally calls distribute_new_job and creates job_info
-        
+
         // Create placeholder job info for distribution
         // In real implementation, this would come from pool.set_template()
         let job_id = 1u32; // Placeholder
@@ -212,11 +237,11 @@ impl StratumV2Server {
                 .unwrap()
                 .as_secs() as u64,
         };
-        
+
         // Get messages from pool (distribute_new_job is now public)
         let messages = pool.distribute_new_job(job_id, &job_info);
         drop(pool); // Release lock before async operations
-        
+
         // Send messages to all miners (parallel where possible via QUIC streams)
         // QUIC streams enable parallel sends even if we iterate sequentially
         for (endpoint, job_msg) in messages {
@@ -230,39 +255,50 @@ impl StratumV2Server {
                 debug!("No connection found for miner {}", endpoint);
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Send a mining job message to a miner connection
     /// Uses QUIC stream multiplexing if connection supports it
-    async fn send_job_message(&self, connection: &MinerConnection, msg: &NewMiningJobMessage) -> StratumV2Result<()> {
+    async fn send_job_message(
+        &self,
+        connection: &MinerConnection,
+        msg: &NewMiningJobMessage,
+    ) -> StratumV2Result<()> {
         use crate::network::transport::TransportConnection;
-        
+
         // Serialize message
-        let payload = msg.to_bytes()
-            .map_err(|e| StratumV2Error::Serialization(format!("Failed to serialize job message: {}", e)))?;
-        
+        let payload = msg.to_bytes().map_err(|e| {
+            StratumV2Error::Serialization(format!("Failed to serialize job message: {}", e))
+        })?;
+
         // Encode TLV
         let mut encoder = TlvEncoder::new();
-        let encoded = encoder.encode(message_types::NEW_MINING_JOB, &payload)
-            .map_err(|e| StratumV2Error::Serialization(format!("Failed to encode job message: {}", e)))?;
-        
+        let encoded = encoder
+            .encode(message_types::NEW_MINING_JOB, &payload)
+            .map_err(|e| {
+                StratumV2Error::Serialization(format!("Failed to encode job message: {}", e))
+            })?;
+
         // Send via connection with channel-specific stream if Iroh
         let mut conn = connection.write().await;
         if let Some(ref mut conn) = *conn {
             // For Iroh connections, we use send_on_channel which is handled by the trait
             // For now, use standard send - channel-specific streams are handled at the transport level
             // TODO: Add trait method for channel-specific sending if needed
-            conn.send(&encoded).await
-                .map_err(|e| StratumV2Error::Network(format!("Failed to send job message: {}", e)))?;
+            conn.send(&encoded).await.map_err(|e| {
+                StratumV2Error::Network(format!("Failed to send job message: {}", e))
+            })?;
         } else {
-            return Err(StratumV2Error::Connection(anyhow::anyhow!("Connection not available")));
+            return Err(StratumV2Error::Connection(anyhow::anyhow!(
+                "Connection not available"
+            )));
         }
-        
+
         Ok(())
     }
-    
+
     /// Get pool statistics
     pub async fn get_statistics(&self) -> PoolStatistics {
         let pool = self.pool.read().await;
@@ -271,7 +307,7 @@ impl StratumV2Server {
             // Additional statistics would be collected here
         }
     }
-    
+
     /// Check if server is running
     pub fn is_running(&self) -> bool {
         self.running
@@ -283,4 +319,3 @@ impl StratumV2Server {
 pub struct PoolStatistics {
     pub connected_miners: usize,
 }
-

@@ -102,10 +102,10 @@ impl BitcoinUri {
                 let (key, value) = if let Some(eq_pos) = param.find('=') {
                     let k = &param[..eq_pos];
                     let v = &param[eq_pos + 1..];
-                    
+
                     // URL decode value
                     let decoded_value = url_decode(v)?;
-                    
+
                     (k, decoded_value)
                 } else {
                     // Parameter without value
@@ -115,14 +115,14 @@ impl BitcoinUri {
                 match key {
                     "amount" => {
                         // Parse amount as BTC
-                        let parsed_amount: f64 = value.parse()
-                            .map_err(|_| Bip21Error::InvalidAmount)?;
-                        
+                        let parsed_amount: f64 =
+                            value.parse().map_err(|_| Bip21Error::InvalidAmount)?;
+
                         // BIP21: Amount must be positive
                         if parsed_amount <= 0.0 {
                             return Err(Bip21Error::InvalidAmount);
                         }
-                        
+
                         amount = Some(parsed_amount);
                     }
                     "label" => {
@@ -205,11 +205,12 @@ pub mod registration {
     ///
     /// Returns a `.reg` file content that can be imported to register the bitcoin: URI scheme
     pub fn generate_windows_registry_file(config: &UriSchemeRegistration) -> String {
-        let exe_path = config.executable_path
+        let exe_path = config
+            .executable_path
             .to_str()
             .unwrap_or("")
             .replace('\\', "\\\\"); // Escape backslashes for registry
-        
+
         format!(
             r#"Windows Registry Editor Version 5.00
 
@@ -228,7 +229,8 @@ pub mod registration {
 @="\"{exe_path}\" \"%1\""
 "#,
             exe_path = exe_path,
-            icon_path = config.icon_path
+            icon_path = config
+                .icon_path
                 .as_ref()
                 .and_then(|p| p.to_str())
                 .unwrap_or(&exe_path)
@@ -259,14 +261,13 @@ pub mod registration {
     ///
     /// Returns the content of a `.desktop` file that registers the bitcoin: URI scheme
     pub fn generate_linux_desktop_entry(config: &UriSchemeRegistration) -> String {
-        let exec_path = config.executable_path
-            .to_str()
-            .unwrap_or("");
-        let icon_path = config.icon_path
+        let exec_path = config.executable_path.to_str().unwrap_or("");
+        let icon_path = config
+            .icon_path
             .as_ref()
             .and_then(|p| p.to_str())
             .unwrap_or("");
-        
+
         format!(
             r#"[Desktop Entry]
 Version=1.0
@@ -279,7 +280,10 @@ MimeType=x-scheme-handler/bitcoin;
 NoDisplay=true
 "#,
             app_name = config.app_name,
-            description = config.description.as_deref().unwrap_or("Bitcoin Payment Handler"),
+            description = config
+                .description
+                .as_deref()
+                .unwrap_or("Bitcoin Payment Handler"),
             exec_path = exec_path,
             icon_path = icon_path
         )
@@ -296,7 +300,8 @@ NoDisplay=true
         <glob pattern="bitcoin:*"/>
     </mime-type>
 </mime-info>
-"#.to_string()
+"#
+        .to_string()
     }
 
     /// Write Windows registry file to disk
@@ -322,7 +327,7 @@ NoDisplay=true
         let content = generate_linux_desktop_entry(config);
         let mut file = std::fs::File::create(output_path)?;
         file.write_all(content.as_bytes())?;
-        
+
         // Make executable (desktop entries should be executable)
         #[cfg(unix)]
         {
@@ -331,7 +336,7 @@ NoDisplay=true
             perms.set_mode(0o755);
             std::fs::set_permissions(output_path, perms)?;
         }
-        
+
         Ok(())
     }
 }
@@ -339,10 +344,7 @@ NoDisplay=true
 /// Utility functions for installer integration
 impl UriSchemeRegistration {
     /// Create registration config from application info
-    pub fn new(
-        executable_path: impl Into<PathBuf>,
-        app_name: impl Into<String>,
-    ) -> Self {
+    pub fn new(executable_path: impl Into<PathBuf>, app_name: impl Into<String>) -> Self {
         Self {
             executable_path: executable_path.into(),
             app_name: app_name.into(),
@@ -368,27 +370,27 @@ impl UriSchemeRegistration {
     /// Returns a map of platform names to file contents
     pub fn generate_installer_files(&self) -> HashMap<String, String> {
         let mut files = HashMap::new();
-        
+
         files.insert(
             "windows.reg".to_string(),
             registration::generate_windows_registry_file(self),
         );
-        
+
         files.insert(
             "macos-info-plist.xml".to_string(),
             registration::generate_macos_info_plist_entry(self),
         );
-        
+
         files.insert(
             "linux.desktop".to_string(),
             registration::generate_linux_desktop_entry(self),
         );
-        
+
         files.insert(
             "linux-mime.xml".to_string(),
             registration::generate_linux_mime_type(),
         );
-        
+
         files
     }
 }
@@ -403,11 +405,11 @@ fn url_decode(encoded: &str) -> Result<String, Bip21Error> {
             // Hex encoded character
             let hex1 = chars.next().ok_or(Bip21Error::InvalidParameter)?;
             let hex2 = chars.next().ok_or(Bip21Error::InvalidParameter)?;
-            
+
             let hex_str = format!("{}{}", hex1, hex2);
-            let byte = u8::from_str_radix(&hex_str, 16)
-                .map_err(|_| Bip21Error::InvalidParameter)?;
-            
+            let byte =
+                u8::from_str_radix(&hex_str, 16).map_err(|_| Bip21Error::InvalidParameter)?;
+
             decoded.push(byte as char);
         } else if ch == '+' {
             // Plus sign is decoded as space
@@ -423,7 +425,7 @@ fn url_decode(encoded: &str) -> Result<String, Bip21Error> {
 /// URL encode a string (basic implementation)
 fn url_encode(s: &str) -> String {
     let mut encoded = String::new();
-    
+
     for ch in s.chars() {
         match ch {
             ' ' => encoded.push_str("%20"),
@@ -479,7 +481,8 @@ mod tests {
 
     #[test]
     fn test_parse_uri_with_amount() {
-        let uri = BitcoinUri::parse("bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa?amount=0.01").unwrap();
+        let uri =
+            BitcoinUri::parse("bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa?amount=0.01").unwrap();
         assert_eq!(uri.address, "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa");
         assert_eq!(uri.amount, Some(0.01));
     }
@@ -514,7 +517,7 @@ mod tests {
             message: None,
             params: HashMap::new(),
         };
-        
+
         let uri_str = uri.to_string();
         assert!(uri_str.starts_with("bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
         assert!(uri_str.contains("amount=0.01"));
@@ -532,7 +535,8 @@ mod registration_tests {
         let config = UriSchemeRegistration::new(
             PathBuf::from("C:\\Program Files\\Bitcoin Commons\\bllvm.exe"),
             "Bitcoin Commons BLLVM",
-        ).with_description("Bitcoin Node");
+        )
+        .with_description("Bitcoin Node");
 
         let reg_content = registration::generate_windows_registry_file(&config);
         assert!(reg_content.contains("bitcoin"));
@@ -555,10 +559,9 @@ mod registration_tests {
 
     #[test]
     fn test_linux_desktop_entry_generation() {
-        let config = UriSchemeRegistration::new(
-            PathBuf::from("/usr/bin/bllvm"),
-            "Bitcoin Commons BLLVM",
-        ).with_description("Bitcoin Node");
+        let config =
+            UriSchemeRegistration::new(PathBuf::from("/usr/bin/bllvm"), "Bitcoin Commons BLLVM")
+                .with_description("Bitcoin Node");
 
         let desktop_content = registration::generate_linux_desktop_entry(&config);
         assert!(desktop_content.contains("bitcoin"));
@@ -569,10 +572,8 @@ mod registration_tests {
 
     #[test]
     fn test_installer_files_generation() {
-        let config = UriSchemeRegistration::new(
-            PathBuf::from("/usr/bin/bllvm"),
-            "Bitcoin Commons BLLVM",
-        );
+        let config =
+            UriSchemeRegistration::new(PathBuf::from("/usr/bin/bllvm"), "Bitcoin Commons BLLVM");
 
         let files = config.generate_installer_files();
         assert_eq!(files.len(), 4);

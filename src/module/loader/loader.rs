@@ -1,14 +1,14 @@
 //! Module loader implementation
-//! 
+//!
 //! Handles dynamic module loading, initialization, and configuration.
 
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, info};
 
-use crate::module::traits::ModuleError;
-use crate::module::registry::discovery::DiscoveredModule;
 use crate::module::manager::ModuleManager;
+use crate::module::registry::discovery::DiscoveredModule;
+use crate::module::traits::ModuleError;
 
 /// Module loader for loading and initializing modules
 pub struct ModuleLoader;
@@ -21,17 +21,19 @@ impl ModuleLoader {
         config: HashMap<String, String>,
     ) -> Result<(), ModuleError> {
         info!("Loading module: {}", discovered.manifest.name);
-        
+
         let metadata = discovered.manifest.to_metadata();
-        
-        manager.load_module(
-            &discovered.manifest.name,
-            &discovered.binary_path,
-            metadata,
-            config,
-        ).await
+
+        manager
+            .load_module(
+                &discovered.manifest.name,
+                &discovered.binary_path,
+                metadata,
+                config,
+            )
+            .await
     }
-    
+
     /// Load all modules in dependency order
     pub async fn load_modules_in_order(
         manager: &mut ModuleManager,
@@ -41,22 +43,21 @@ impl ModuleLoader {
     ) -> Result<(), ModuleError> {
         for module_name in load_order {
             // Find the discovered module
-            let discovered = discovered_modules.iter()
+            let discovered = discovered_modules
+                .iter()
                 .find(|m| m.manifest.name == *module_name)
                 .ok_or_else(|| ModuleError::ModuleNotFound(module_name.clone()))?;
-            
+
             // Get module config (or empty default)
-            let config = module_configs.get(module_name)
-                .cloned()
-                .unwrap_or_default();
-            
+            let config = module_configs.get(module_name).cloned().unwrap_or_default();
+
             // Load the module
             Self::load_discovered_module(manager, discovered, config).await?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Load module configuration from file
     pub fn load_module_config<P: AsRef<Path>>(
         module_name: &str,
@@ -66,7 +67,7 @@ impl ModuleLoader {
             debug!("No config file for module {}, using defaults", module_name);
             return Ok(HashMap::new());
         }
-        
+
         // Try TOML first
         if let Ok(contents) = std::fs::read_to_string(&config_path) {
             if let Ok(config) = toml::from_str::<HashMap<String, toml::Value>>(&contents) {
@@ -78,12 +79,11 @@ impl ModuleLoader {
                         toml::Value::Integer(i) => i.to_string(),
                         toml::Value::Float(f) => f.to_string(),
                         toml::Value::Boolean(b) => b.to_string(),
-                        toml::Value::Array(arr) => {
-                            arr.iter()
-                                .map(|v| v.to_string())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        }
+                        toml::Value::Array(arr) => arr
+                            .iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
                         toml::Value::Table(map) => {
                             // Nested tables become dot-notation keys
                             let mut result = Vec::new();
@@ -100,32 +100,35 @@ impl ModuleLoader {
                 return Ok(string_config);
             }
         }
-        
+
         // If TOML parsing failed, try simple key=value format
-        let contents = std::fs::read_to_string(&config_path)
-            .map_err(|e| ModuleError::OperationError(format!(
-                "Failed to read config file: {}", e
-            )))?;
-        
+        let contents = std::fs::read_to_string(&config_path).map_err(|e| {
+            ModuleError::OperationError(format!("Failed to read config file: {}", e))
+        })?;
+
         let mut config = HashMap::new();
         for line in contents.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            
+
             if let Some((key, value)) = line.split_once('=') {
                 config.insert(key.trim().to_string(), value.trim().to_string());
             }
         }
-        
+
         Ok(config)
     }
-    
+
     /// Flatten TOML value to string hashmap
-    fn flatten_toml_value(prefix: String, value: &toml::Value, result: &mut HashMap<String, String>) {
+    fn flatten_toml_value(
+        prefix: String,
+        value: &toml::Value,
+        result: &mut HashMap<String, String>,
+    ) {
         use toml::Value;
-        
+
         match value {
             Value::String(s) => {
                 if !prefix.is_empty() {
@@ -142,7 +145,8 @@ impl ModuleLoader {
                 result.insert(prefix, b.to_string());
             }
             Value::Array(arr) => {
-                let values: Vec<String> = arr.iter()
+                let values: Vec<String> = arr
+                    .iter()
                     .map(|v| match v {
                         Value::String(s) => s.clone(),
                         _ => v.to_string(),

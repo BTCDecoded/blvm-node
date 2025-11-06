@@ -118,7 +118,7 @@ impl BitcoinAddress {
 
         // Convert witness program to base32 (u5)
         let program_base32 = witness_program_to_base32(&self.witness_program);
-        
+
         // Combine witness version and program as u5 values
         // Witness version needs to be converted to u5 (it's 0-16, fits in u5)
         let mut data = vec![bech32::u5::try_from_u8(self.witness_version)
@@ -142,8 +142,8 @@ impl BitcoinAddress {
     /// Decode Bech32 or Bech32m address
     pub fn decode(encoded: &str) -> Result<Self, AddressError> {
         // Try Bech32m first (Taproot), then Bech32 (SegWit)
-        let (hrp, data, variant) = bech32::decode(encoded)
-            .map_err(|_| AddressError::InvalidEncoding)?;
+        let (hrp, data, variant) =
+            bech32::decode(encoded).map_err(|_| AddressError::InvalidEncoding)?;
 
         // Determine network from HRP
         let network = match hrp.as_str() {
@@ -230,7 +230,7 @@ mod tests {
         let program = vec![0x75; 20]; // 20 bytes
         let addr = BitcoinAddress::new(Network::Mainnet, 0, program).unwrap();
         let encoded = addr.encode().unwrap();
-        
+
         assert!(encoded.starts_with("bc1"));
         assert_eq!(addr.witness_version, 0);
         assert_eq!(addr.witness_program.len(), 20);
@@ -242,7 +242,7 @@ mod tests {
         let program = vec![0x75; 32]; // 32 bytes
         let addr = BitcoinAddress::new(Network::Mainnet, 0, program).unwrap();
         let encoded = addr.encode().unwrap();
-        
+
         assert!(encoded.starts_with("bc1"));
         assert_eq!(addr.witness_version, 0);
         assert_eq!(addr.witness_program.len(), 32);
@@ -254,7 +254,7 @@ mod tests {
         let program = vec![0x75; 32]; // 32 bytes
         let addr = BitcoinAddress::new(Network::Mainnet, 1, program).unwrap();
         let encoded = addr.encode().unwrap();
-        
+
         assert!(encoded.starts_with("bc1p"));
         assert!(addr.is_taproot());
         assert_eq!(addr.witness_version, 1);
@@ -268,7 +268,7 @@ mod tests {
         let program = vec![0x75; 20];
         let addr = BitcoinAddress::new(Network::Mainnet, 0, program.clone()).unwrap();
         let encoded = addr.encode().unwrap();
-        
+
         let decoded = BitcoinAddress::decode(&encoded).unwrap();
         assert_eq!(decoded.witness_version, 0);
         assert_eq!(decoded.witness_program, program);
@@ -279,7 +279,7 @@ mod tests {
         let program = vec![0x75; 32];
         let addr = BitcoinAddress::new(Network::Mainnet, 1, program.clone()).unwrap();
         let encoded = addr.encode().unwrap();
-        
+
         let decoded = BitcoinAddress::decode(&encoded).unwrap();
         assert!(decoded.is_taproot());
         assert_eq!(decoded.witness_version, 1);
@@ -323,4 +323,3 @@ mod tests {
         assert!(p2tr.is_taproot());
     }
 }
-

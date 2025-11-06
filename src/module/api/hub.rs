@@ -1,16 +1,18 @@
 //! Module Communication Hub
-//! 
+//!
 //! Central API hub handling all module requests with routing,
 //! permissions, and auditing.
 
-use std::sync::Arc;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::module::traits::{ModuleError, NodeAPI, EventType};
-use crate::module::ipc::protocol::{ModuleMessage, RequestMessage, ResponseMessage, RequestPayload, ResponsePayload};
+use crate::module::ipc::protocol::{
+    ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
+};
 use crate::module::security::{PermissionChecker, RequestValidator};
+use crate::module::traits::{EventType, ModuleError, NodeAPI};
 
 /// API request router that routes module requests to appropriate handlers
 pub struct ModuleApiHub {
@@ -48,30 +50,41 @@ impl ModuleApiHub {
             max_audit_entries: 1000,
         }
     }
-    
+
     /// Register a module's permissions
-    pub fn register_module_permissions(&mut self, module_id: String, permissions: crate::module::security::permissions::PermissionSet) {
-        self.permission_checker.register_module_permissions(module_id, permissions);
+    pub fn register_module_permissions(
+        &mut self,
+        module_id: String,
+        permissions: crate::module::security::permissions::PermissionSet,
+    ) {
+        self.permission_checker
+            .register_module_permissions(module_id, permissions);
     }
-    
+
     /// Handle a request from a module
     pub async fn handle_request(
         &mut self,
         module_id: &str,
         request: RequestMessage,
     ) -> Result<ResponseMessage, ModuleError> {
-        debug!("API hub handling request from module {}: {:?}", module_id, request.payload);
-        
+        debug!(
+            "API hub handling request from module {}: {:?}",
+            module_id, request.payload
+        );
+
         // Validate permissions
-        self.permission_checker.check_api_call(module_id, &request.payload)?;
-        
+        self.permission_checker
+            .check_api_call(module_id, &request.payload)?;
+
         // Validate that request doesn't modify consensus
-        self.request_validator.validate_request(module_id, &request.payload)?;
-        
+        self.request_validator
+            .validate_request(module_id, &request.payload)?;
+
         // Get operation ID for resource limits and audit logging (avoid duplicate matching)
         let operation_id = Self::get_operation_id(&request.payload);
-        self.request_validator.validate_resource_limits(module_id, operation_id)?;
-        
+        self.request_validator
+            .validate_resource_limits(module_id, operation_id)?;
+
         // Route request to appropriate handler
         let response = match &request.payload {
             RequestPayload::GetBlock { hash } => {
@@ -108,17 +121,13 @@ impl ModuleApiHub {
                 ResponsePayload::SubscribeAck
             }
         };
-        
+
         // Log audit entry (use operation ID from earlier)
-        self.log_audit(
-            module_id.to_string(),
-            operation_id.to_string(),
-            true,
-        );
-        
+        self.log_audit(module_id.to_string(), operation_id.to_string(), true);
+
         Ok(ResponseMessage::success(request.correlation_id, response))
     }
-    
+
     /// Get operation identifier from request payload (for logging/rate limiting)
     #[inline]
     fn get_operation_id(payload: &RequestPayload) -> &'static str {
@@ -133,7 +142,7 @@ impl ModuleApiHub {
             RequestPayload::SubscribeEvents { .. } => "subscribe_events",
         }
     }
-    
+
     /// Log an audit entry
     fn log_audit(&mut self, module_id: String, api_call: String, success: bool) {
         // For now, keep a simple in-memory log
@@ -147,20 +156,18 @@ impl ModuleApiHub {
                 .as_secs(),
             success,
         };
-        
+
         self.audit_log.push_back(entry);
-        
+
         // Limit log size (keep last N entries)
         while self.audit_log.len() > self.max_audit_entries {
             self.audit_log.pop_front();
         }
     }
-    
+
     /// Get audit log (for debugging/monitoring)
     pub fn get_audit_log(&self, limit: usize) -> Vec<AuditEntry> {
         let start = self.audit_log.len().saturating_sub(limit);
-        self.audit_log.range(start..)
-            .cloned()
-            .collect()
+        self.audit_log.range(start..).cloned().collect()
     }
 }

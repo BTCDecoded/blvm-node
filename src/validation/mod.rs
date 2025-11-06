@@ -11,8 +11,8 @@
 //! Reference: Bitcoin Core's parallel block validation for IBD
 
 use anyhow::Result;
-use protocol_engine::{Block, BlockHeader, UtxoSet, ValidationResult};
 use protocol_engine::block::connect_block;
+use protocol_engine::{Block, BlockHeader, UtxoSet, ValidationResult};
 
 #[cfg(feature = "production")]
 use rayon::prelude::*;
@@ -36,31 +36,33 @@ pub struct ParallelBlockValidator {
 impl ParallelBlockValidator {
     /// Create a new parallel block validator
     pub fn new(max_parallel_depth: usize) -> Self {
-        Self {
-            max_parallel_depth,
-        }
+        Self { max_parallel_depth }
     }
-    
+
     /// Default validator (conservative: only validate blocks >100 deep in parallel)
     pub fn default() -> Self {
         Self::new(100)
     }
-    
+
     /// Validate a single block (sequential)
     pub fn validate_block(
         &self,
         context: &BlockValidationContext,
     ) -> Result<(ValidationResult, UtxoSet)> {
-        connect_block(&context.block, context.prev_utxo_set.clone(), context.height)
-            .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
+        connect_block(
+            &context.block,
+            context.prev_utxo_set.clone(),
+            context.height,
+        )
+        .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
     }
-    
+
     /// Validate multiple blocks in parallel (Phase 4.2)
-    /// 
+    ///
     /// Only validates blocks in parallel if:
     /// 1. They're not on the chain tip (depth > max_parallel_depth)
     /// 2. They're in independent branches (no UTXO dependencies)
-    /// 
+    ///
     /// Returns validation results in order of input blocks.
     #[cfg(feature = "production")]
     pub fn validate_blocks_parallel(
@@ -73,7 +75,7 @@ impl ParallelBlockValidator {
             // Too close to tip - validate sequentially for safety
             return self.validate_blocks_sequential(contexts);
         }
-        
+
         // Validate blocks in parallel
         // Note: Each block uses its own UTXO set, so they're independent
         let results: Vec<_> = contexts
@@ -82,12 +84,12 @@ impl ParallelBlockValidator {
                 connect_block(
                     &context.block,
                     context.prev_utxo_set.clone(),
-                    context.height
+                    context.height,
                 )
                 .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
             })
             .collect();
-        
+
         // Collect results and check for errors
         let mut validated_results = Vec::new();
         for result in results {
@@ -95,29 +97,29 @@ impl ParallelBlockValidator {
         }
         Ok(validated_results)
     }
-    
+
     /// Validate multiple blocks sequentially (default, verification-safe)
     pub fn validate_blocks_sequential(
         &self,
         contexts: &[BlockValidationContext],
     ) -> Result<Vec<(ValidationResult, UtxoSet)>> {
         let mut results = Vec::new();
-        
+
         for context in contexts {
             let result = connect_block(
                 &context.block,
                 context.prev_utxo_set.clone(),
-                context.height
+                context.height,
             )
             .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))?;
             results.push(result);
         }
-        
+
         Ok(results)
     }
-    
+
     /// Validate blocks with automatic parallel/sequential selection
-    /// 
+    ///
     /// Chooses parallel or sequential validation based on depth from tip.
     pub fn validate_blocks(
         &self,
@@ -130,7 +132,7 @@ impl ParallelBlockValidator {
                 return self.validate_blocks_parallel(contexts, depth_from_tip);
             }
         }
-        
+
         // Sequential validation (default or when too close to tip)
         self.validate_blocks_sequential(contexts)
     }
@@ -155,13 +157,13 @@ impl Default for ParallelBlockValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parallel_validator_creation() {
         let validator = ParallelBlockValidator::default();
         assert_eq!(validator.max_parallel_depth, 100);
     }
-    
+
     #[test]
     fn test_sequential_validation() {
         let validator = ParallelBlockValidator::default();
@@ -170,4 +172,3 @@ mod tests {
         assert!(results.is_ok());
     }
 }
-

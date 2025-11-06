@@ -1,8 +1,8 @@
 //! Unit tests for Stratum V2 mining and share validation
 
-use reference_node::network::stratum_v2::pool::{StratumV2Pool, JobInfo};
-use reference_node::network::stratum_v2::messages::ShareData;
 use protocol_engine::types::{Block, BlockHeader, Hash, Natural};
+use reference_node::network::stratum_v2::messages::ShareData;
+use reference_node::network::stratum_v2::pool::{JobInfo, StratumV2Pool};
 use tempfile::TempDir;
 mod common;
 use common::*;
@@ -17,7 +17,7 @@ fn test_stratum_v2_pool_new() {
 #[test]
 fn test_validate_share_no_job() {
     let pool = StratumV2Pool::new();
-    
+
     let share = ShareData {
         channel_id: 1,
         job_id: 999, // Non-existent job
@@ -25,7 +25,7 @@ fn test_validate_share_no_job() {
         version: 1,
         merkle_root: [0u8; 32],
     };
-    
+
     // Share validation should fail for non-existent job
     // Note: This tests the error path, actual implementation may vary
     assert!(true); // Placeholder - actual validation logic in pool.rs
@@ -37,13 +37,13 @@ fn test_validate_share_no_job() {
 #[test]
 fn test_set_template() {
     let mut pool = StratumV2Pool::new();
-    
+
     let block = TestBlockBuilder::new()
         .add_coinbase_transaction(p2pkh_script(random_hash20()))
         .build();
-    
+
     pool.set_template(block);
-    
+
     // Template should be set
     assert!(true); // Template is private, but we can verify no panics
 }
@@ -51,13 +51,13 @@ fn test_set_template() {
 #[test]
 fn test_job_info_storage() {
     let mut pool = StratumV2Pool::new();
-    
+
     let block = TestBlockBuilder::new()
         .add_coinbase_transaction(p2pkh_script(random_hash20()))
         .build();
-    
+
     pool.set_template(block);
-    
+
     // Job info should be stored for channels
     // This is tested indirectly through share validation
     assert!(true);
@@ -69,14 +69,14 @@ fn test_job_info_storage() {
 #[tokio::test]
 async fn test_share_validation_flow() {
     let mut pool = StratumV2Pool::new();
-    
+
     // Create a block template
     let block = TestBlockBuilder::new()
         .add_coinbase_transaction(p2pkh_script(random_hash20()))
         .build();
-    
+
     pool.set_template(block);
-    
+
     // Create a share (this would normally come from a miner)
     let share = ShareData {
         channel_id: 1,
@@ -85,9 +85,8 @@ async fn test_share_validation_flow() {
         version: 1,
         merkle_root: [0u8; 32],
     };
-    
+
     // Share validation would happen here
     // Note: Full validation requires proper channel setup and job info
     assert!(true); // Placeholder - actual validation in pool.rs
 }
-

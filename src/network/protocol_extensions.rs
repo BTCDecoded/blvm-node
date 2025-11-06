@@ -54,7 +54,7 @@ pub async fn handle_get_filtered_block(
     // TODO: Integrate with actual spam filter and block store
     // For now, return placeholder
     use protocol_engine::BlockHeader;
-    
+
     // Generate BIP158 filter if requested and service available
     let bip158_filter = if message.include_bip158_filter {
         filter_service.and_then(|fs| {
@@ -70,7 +70,7 @@ pub async fn handle_get_filtered_block(
     } else {
         None
     };
-    
+
     Ok(FilteredBlockMessage {
         header: BlockHeader {
             version: 1,
@@ -132,4 +132,3 @@ pub fn deserialize_filtered_block(data: &[u8]) -> Result<FilteredBlockMessage> {
         _ => Err(anyhow::anyhow!("Expected FilteredBlock message")),
     }
 }
-

@@ -4,8 +4,8 @@
 //! bincode serialization of the in-memory structures. They are suitable for
 //! networking/relay purposes in this crate and do NOT replace consensus hashing.
 
-use protocol_engine::{Hash, Transaction, BlockHeader};
-use sha2::{Sha256, Digest};
+use protocol_engine::{BlockHeader, Hash, Transaction};
+use sha2::{Digest, Sha256};
 
 /// Compute a best-effort txid (double-SHA256 of serialized transaction)
 pub fn calculate_txid(tx: &Transaction) -> Hash {
@@ -38,5 +38,3 @@ pub fn calculate_block_header_hash(header: &BlockHeader) -> Hash {
     out.copy_from_slice(&final_bytes);
     out
 }
-
-

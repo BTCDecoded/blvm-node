@@ -1,5 +1,5 @@
 //! RPC Error Types
-//! 
+//!
 //! Bitcoin Core-compatible JSON-RPC error codes and error handling
 
 use serde_json::{json, Value};
@@ -56,7 +56,7 @@ impl RpcErrorCode {
             RpcErrorCode::UtxoNotFound => -5,
         }
     }
-    
+
     /// Get error message
     pub fn message(&self) -> &'static str {
         match self {
@@ -94,7 +94,7 @@ impl RpcError {
             data: None,
         }
     }
-    
+
     /// Create an error with additional data
     pub fn with_data(code: RpcErrorCode, message: impl Into<String>, data: Value) -> Self {
         Self {
@@ -103,70 +103,82 @@ impl RpcError {
             data: Some(data),
         }
     }
-    
+
     /// Parse error
     pub fn parse_error(message: impl Into<String>) -> Self {
         Self::new(RpcErrorCode::ParseError, message)
     }
-    
+
     /// Invalid request
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(RpcErrorCode::InvalidRequest, message)
     }
-    
+
     /// Method not found
     pub fn method_not_found(method: &str) -> Self {
-        Self::new(RpcErrorCode::MethodNotFound, format!("Method not found: {}", method))
+        Self::new(
+            RpcErrorCode::MethodNotFound,
+            format!("Method not found: {}", method),
+        )
     }
-    
+
     /// Invalid params
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self::new(RpcErrorCode::InvalidParams, message)
     }
-    
+
     /// Internal error
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self::new(RpcErrorCode::InternalError, message)
     }
-    
+
     /// Block not found
     pub fn block_not_found(hash: &str) -> Self {
-        Self::new(RpcErrorCode::BlockNotFound, format!("Block not found: {}", hash))
+        Self::new(
+            RpcErrorCode::BlockNotFound,
+            format!("Block not found: {}", hash),
+        )
     }
-    
+
     /// Transaction not found
     pub fn tx_not_found(txid: &str) -> Self {
-        Self::new(RpcErrorCode::TxNotFound, format!("Transaction not found: {}", txid))
+        Self::new(
+            RpcErrorCode::TxNotFound,
+            format!("Transaction not found: {}", txid),
+        )
     }
-    
+
     /// UTXO not found
     pub fn utxo_not_found() -> Self {
         Self::new(RpcErrorCode::UtxoNotFound, "No such UTXO")
     }
-    
+
     /// Transaction already in mempool
     pub fn tx_already_in_mempool(txid: &str) -> Self {
-        Self::new(RpcErrorCode::TxAlreadyInMempool, format!("Transaction already in mempool: {}", txid))
+        Self::new(
+            RpcErrorCode::TxAlreadyInMempool,
+            format!("Transaction already in mempool: {}", txid),
+        )
     }
-    
+
     /// Transaction rejected
     pub fn tx_rejected(reason: impl Into<String>) -> Self {
         Self::new(RpcErrorCode::TxRejected, reason)
     }
-    
+
     /// Convert to JSON-RPC error response
     pub fn to_json(&self, id: Option<Value>) -> Value {
         let mut error = json!({
             "code": self.code.code(),
             "message": self.message,
         });
-        
+
         if let Some(data) = &self.data {
             error["data"] = data.clone();
         } else {
             error["message"] = json!(self.message.clone());
         }
-        
+
         json!({
             "jsonrpc": "2.0",
             "error": error,
@@ -203,26 +215,26 @@ impl From<protocol_engine::error::ConsensusError> for RpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_error_codes() {
         assert_eq!(RpcErrorCode::ParseError.code(), -32700);
         assert_eq!(RpcErrorCode::MethodNotFound.code(), -32601);
         assert_eq!(RpcErrorCode::BlockNotFound.code(), -5);
     }
-    
+
     #[test]
     fn test_error_creation() {
         let err = RpcError::block_not_found("abc123");
         assert_eq!(err.code.code(), -5);
         assert!(err.message.contains("abc123"));
     }
-    
+
     #[test]
     fn test_error_to_json() {
         let err = RpcError::method_not_found("test");
         let json = err.to_json(Some(json!(1)));
-        
+
         assert_eq!(json["jsonrpc"], "2.0");
         assert_eq!(json["error"]["code"], -32601);
         assert_eq!(json["id"], 1);

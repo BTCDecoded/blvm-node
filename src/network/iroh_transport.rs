@@ -6,18 +6,18 @@
 
 #[cfg(feature = "iroh")]
 use crate::network::transport::{
-    Transport, TransportConnection, TransportListener, TransportType, TransportAddr,
+    Transport, TransportAddr, TransportConnection, TransportListener, TransportType,
 };
 #[cfg(feature = "iroh")]
 use anyhow::Result;
+#[cfg(feature = "iroh")]
+use futures::StreamExt;
 #[cfg(feature = "iroh")]
 use std::net::SocketAddr;
 #[cfg(feature = "iroh")]
 use tokio::io::AsyncReadExt;
 #[cfg(feature = "iroh")]
-use tracing::{debug, error, warn, info};
-#[cfg(feature = "iroh")]
-use futures::StreamExt;
+use tracing::{debug, error, info, warn};
 
 /// Iroh transport implementation
 ///
@@ -36,26 +36,29 @@ impl IrohTransport {
     pub async fn new() -> Result<Self> {
         // Generate a new secret key for this node
         let secret_key = iroh_net::key::SecretKey::generate();
-        
+
         // Create magic endpoint - this handles QUIC connections with NAT traversal
         let endpoint = iroh_net::magic_endpoint::MagicEndpoint::builder()
             .secret_key(secret_key.clone())
             .bind(0) // Bind to any available UDP port
             .await?;
-        
-        info!("Iroh transport initialized with node ID: {}", endpoint.node_id());
-        
+
+        info!(
+            "Iroh transport initialized with node ID: {}",
+            endpoint.node_id()
+        );
+
         Ok(Self {
             endpoint,
             secret_key,
         })
     }
-    
+
     /// Get the node ID (public key) for this transport
     pub fn node_id(&self) -> iroh_net::NodeId {
         self.endpoint.node_id()
     }
-    
+
     /// Get the secret key (for persistence if needed)
     pub fn secret_key(&self) -> &iroh_net::key::SecretKey {
         &self.secret_key
@@ -77,7 +80,10 @@ impl Transport for IrohTransport {
         // The endpoint is already bound in new()
         // We use the endpoint's accept method for incoming connections
         // Note: accept() returns a future, we'll poll it in accept() method
-        let (local_addr, _) = self.endpoint.local_addr().map_err(|e| anyhow::anyhow!("Failed to get local address: {}", e))?;
+        let (local_addr, _) = self
+            .endpoint
+            .local_addr()
+            .map_err(|e| anyhow::anyhow!("Failed to get local address: {}", e))?;
         Ok(IrohListener {
             endpoint: self.endpoint.clone(),
             local_addr,
@@ -90,7 +96,10 @@ impl Transport for IrohTransport {
                 // Convert public key bytes to Iroh NodeId
                 // NodeId is 32 bytes (public key)
                 if key.len() != 32 {
-                    return Err(anyhow::anyhow!("Invalid Iroh public key length: expected 32 bytes, got {}", key.len()));
+                    return Err(anyhow::anyhow!(
+                        "Invalid Iroh public key length: expected 32 bytes, got {}",
+                        key.len()
+                    ));
                 }
                 let mut node_id_bytes = [0u8; 32];
                 node_id_bytes.copy_from_slice(&key[..32]);
@@ -107,20 +116,18 @@ impl Transport for IrohTransport {
         // Create node address with ALPN protocol identifier for Bitcoin P2P
         let node_addr = iroh_net::NodeAddr::from_parts(
             node_id,
-            None, // No DERP URL
+            None,   // No DERP URL
             vec![], // No direct addresses, use magic endpoint for connection
         );
 
         // Dial peer using magic endpoint
         // ALPN identifier for Bitcoin protocol over Iroh
         let alpn = b"bitcoin/1.0";
-        let conn = self.endpoint
-            .connect(node_addr, alpn)
-            .await?;
-        
+        let conn = self.endpoint.connect(node_addr, alpn).await?;
+
         // Store node_id separately since quinn::Connection doesn't expose it
         let peer_addr_bytes = node_id.as_bytes().to_vec();
-        
+
         Ok(IrohConnection {
             conn,
             peer_node_id: node_id,
@@ -149,10 +156,10 @@ impl TransportListener for IrohListener {
         let accept = accept_future
             .await
             .ok_or_else(|| anyhow::anyhow!("Accept stream ended"))?;
-        
+
         // Accept yields a future that becomes Connection when awaited
         let conn = accept.await?;
-        
+
         // Extract peer node_id from connection
         // Note: Iroh's Accept type doesn't directly expose peer node_id.
         // The peer's node_id is authenticated via QUIC/TLS handshake, but extraction
@@ -166,9 +173,9 @@ impl TransportListener for IrohListener {
         // For now, use placeholder that will be updated when first protocol message is received.
         let peer_node_id = self.endpoint.node_id(); // Placeholder until protocol exchange
         let peer_addr = TransportAddr::Iroh(peer_node_id.as_bytes().to_vec());
-        
+
         debug!("Iroh connection accepted - peer node_id will be extracted from protocol handshake");
-        
+
         Ok((
             IrohConnection {
                 conn,
@@ -207,20 +214,20 @@ impl TransportConnection for IrohConnection {
 
         // Open a new QUIC stream for sending data
         let mut stream = self.conn.open_uni().await?;
-        
+
         // Write length prefix (4 bytes, big-endian)
         let len = data.len() as u32;
         stream.write_all(&len.to_be_bytes()).await?;
-        
+
         // Write data
         stream.write_all(data).await?;
         stream.finish()?;
-        
+
         Ok(())
     }
-    
+
     /// Send data on a specific channel stream (for QUIC stream multiplexing)
-    /// 
+    ///
     /// Opens a dedicated QUIC stream for the channel, enabling parallel operations.
     /// Streams are not reused (they're closed after sending) to avoid complexity.
     /// For true stream reuse, would need async HashMap with proper locking.
@@ -231,19 +238,19 @@ impl TransportConnection for IrohConnection {
 
         // Open a new QUIC stream for this channel (parallel, non-blocking)
         let mut stream = self.conn.open_uni().await?;
-        
+
         // Track active stream (for future reuse if needed)
         // Note: We don't reuse streams here to keep it simple - streams are closed after send
         // For true multiplexing with reuse, would need async-safe HashMap
-        
+
         // Write length prefix (4 bytes, big-endian)
         let len = data.len() as u32;
         stream.write_all(&len.to_be_bytes()).await?;
-        
+
         // Write data
         stream.write_all(data).await?;
         stream.finish()?;
-        
+
         Ok(())
     }
 
@@ -306,4 +313,3 @@ impl IrohTransport {
         Err(anyhow::anyhow!("Iroh transport requires 'iroh' feature"))
     }
 }
-

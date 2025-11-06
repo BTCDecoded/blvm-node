@@ -12,10 +12,10 @@
 //! Note: This is a foundational implementation. Full FIBRE compatibility
 //! would require additional UDP infrastructure and FEC library integration.
 
-use protocol_engine::{Hash, Block};
+use protocol_engine::{Block, Hash};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use sha2::{Sha256, Digest};
 use tracing::{debug, info, warn};
 
 /// FIBRE relay manager
@@ -131,7 +131,7 @@ impl FibreRelay {
         let hash_bytes = hasher2.finalize();
         let mut block_hash = [0u8; 32];
         block_hash.copy_from_slice(&hash_bytes);
-        
+
         // Check cache
         if let Some(encoded) = self.encoded_blocks.get(&block_hash) {
             if encoded.encoded_at.elapsed() < self.cache_ttl {
@@ -148,12 +148,10 @@ impl FibreRelay {
         let chunks: Vec<FecChunk> = block_data
             .chunks(chunk_size)
             .enumerate()
-            .map(|(i, chunk_data)| {
-                FecChunk {
-                    index: i as u32,
-                    data: chunk_data.to_vec(),
-                    size: chunk_data.len(),
-                }
+            .map(|(i, chunk_data)| FecChunk {
+                index: i as u32,
+                data: chunk_data.to_vec(),
+                size: chunk_data.len(),
             })
             .collect();
 
@@ -169,15 +167,19 @@ impl FibreRelay {
         // Cache encoded block
         self.encoded_blocks.insert(block_hash, encoded.clone());
 
-        info!("Encoded block {} for FIBRE transmission ({} chunks)", 
-              hex::encode(block_hash), encoded.chunk_count);
+        info!(
+            "Encoded block {} for FIBRE transmission ({} chunks)",
+            hex::encode(block_hash),
+            encoded.chunk_count
+        );
 
         Ok(encoded)
     }
 
     /// Get encoded block from cache
     pub fn get_encoded_block(&self, block_hash: &Hash) -> Option<&EncodedBlock> {
-        self.encoded_blocks.get(block_hash)
+        self.encoded_blocks
+            .get(block_hash)
             .filter(|e| e.encoded_at.elapsed() < self.cache_ttl)
     }
 
@@ -201,7 +203,8 @@ impl FibreRelay {
     /// Clean up expired encoded blocks
     pub fn cleanup_expired(&mut self) {
         let now = Instant::now();
-        let expired: Vec<Hash> = self.encoded_blocks
+        let expired: Vec<Hash> = self
+            .encoded_blocks
             .iter()
             .filter(|(_, encoded)| encoded.encoded_at.elapsed() >= self.cache_ttl)
             .map(|(hash, _)| *hash)
@@ -209,7 +212,10 @@ impl FibreRelay {
 
         for hash in expired {
             self.encoded_blocks.remove(&hash);
-            debug!("Cleaned up expired FIBRE encoded block {}", hex::encode(hash));
+            debug!(
+                "Cleaned up expired FIBRE encoded block {}",
+                hex::encode(hash)
+            );
         }
     }
 
@@ -236,14 +242,13 @@ pub struct FibreStats {
 pub enum FibreError {
     #[error("Serialization error: {0}")]
     SerializationError(String),
-    
+
     #[error("FEC encoding error: {0}")]
     FecError(String),
-    
+
     #[error("UDP transmission error: {0}")]
     UdpError(String),
-    
+
     #[error("Block not found in cache")]
     BlockNotFound,
 }
-

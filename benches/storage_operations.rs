@@ -1,6 +1,6 @@
+use consensus_proof::{Block, BlockHeader, Transaction, TransactionOutput};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use reference_node::storage::Storage;
-use consensus_proof::{Block, BlockHeader, Transaction, TransactionOutput};
 use tempfile::TempDir;
 
 fn create_test_block() -> Block {
@@ -28,9 +28,9 @@ fn create_test_block() -> Block {
 fn benchmark_block_store_insert(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let storage = Storage::new(temp_dir.path()).unwrap();
-    
+
     let block = create_test_block();
-    
+
     c.bench_function("block_store_insert", |b| {
         b.iter(|| {
             black_box(storage.blocks().store_block(black_box(&block))).unwrap();
@@ -41,13 +41,13 @@ fn benchmark_block_store_insert(c: &mut Criterion) {
 fn benchmark_block_store_get(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let storage = Storage::new(temp_dir.path()).unwrap();
-    
+
     let block = create_test_block();
     let hash = storage.blocks().get_block_hash(&block);
     storage.blocks().store_block(&block).unwrap();
-    
+
     let _hash = hash; // Use hash to avoid unused variable warning
-    
+
     c.bench_function("block_store_get", |b| {
         b.iter(|| {
             black_box(storage.blocks().get_block(black_box(&hash))).unwrap();
@@ -58,13 +58,18 @@ fn benchmark_block_store_get(c: &mut Criterion) {
 fn benchmark_chainstate_update(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let storage = Storage::new(temp_dir.path()).unwrap();
-    
+
     let block = create_test_block();
     let hash = storage.blocks().get_block_hash(&block);
-    
+
     c.bench_function("chainstate_update_height", |b| {
         b.iter(|| {
-            black_box(storage.blocks().store_height(black_box(0), black_box(&hash))).unwrap();
+            black_box(
+                storage
+                    .blocks()
+                    .store_height(black_box(0), black_box(&hash)),
+            )
+            .unwrap();
         })
     });
 }
@@ -72,11 +77,11 @@ fn benchmark_chainstate_update(c: &mut Criterion) {
 fn benchmark_tx_index_insert(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let storage = Storage::new(temp_dir.path()).unwrap();
-    
+
     let block = create_test_block();
     let block_hash = storage.blocks().get_block_hash(&block);
     let tx = &block.transactions[0];
-    
+
     c.bench_function("tx_index_insert", |b| {
         b.iter(|| {
             black_box(storage.transactions().index_transaction(
@@ -84,7 +89,8 @@ fn benchmark_tx_index_insert(c: &mut Criterion) {
                 black_box(&block_hash),
                 black_box(0),
                 black_box(0),
-            )).unwrap();
+            ))
+            .unwrap();
         })
     });
 }
@@ -97,4 +103,3 @@ criterion_group!(
     benchmark_tx_index_insert
 );
 criterion_main!(benches);
-

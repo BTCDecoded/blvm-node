@@ -1,9 +1,9 @@
 //! Module process health monitoring
-//! 
+//!
 //! Monitors module processes for crashes and health issues.
 
-use tokio::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::module::process::spawner::ModuleProcess;
@@ -36,13 +36,13 @@ impl ModuleProcessMonitor {
             crash_tx,
         }
     }
-    
+
     /// Set monitoring interval
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
     }
-    
+
     /// Start monitoring a module
     pub async fn monitor_module(
         &self,
@@ -50,12 +50,12 @@ impl ModuleProcessMonitor {
         mut process: ModuleProcess,
     ) -> Result<(), ModuleError> {
         info!("Starting health monitoring for module: {}", module_name);
-        
+
         let mut ticker = tokio::time::interval(self.interval);
-        
+
         loop {
             ticker.tick().await;
-            
+
             // Check if process is still running
             if !process.is_running() {
                 // Process exited, check exit status
@@ -66,14 +66,14 @@ impl ModuleProcessMonitor {
                         } else {
                             let error_msg = format!(
                                 "Module {} exited with error: {:?}",
-                                module_name, status.code()
+                                module_name,
+                                status.code()
                             );
                             error!("{}", error_msg);
-                            
-                            let _ = self.crash_tx.send((
-                                module_name.clone(),
-                                ModuleError::ModuleCrashed(error_msg),
-                            ));
+
+                            let _ = self
+                                .crash_tx
+                                .send((module_name.clone(), ModuleError::ModuleCrashed(error_msg)));
                         }
                         return Ok(());
                     }
@@ -83,14 +83,14 @@ impl ModuleProcessMonitor {
                     }
                 }
             }
-            
+
             // TODO: Add heartbeat check via IPC
             // For now, just checking if process is alive
         }
-        
+
         Ok(())
     }
-    
+
     /// Check module health
     pub fn check_health(process: &mut ModuleProcess) -> ModuleHealth {
         if !process.is_running() {

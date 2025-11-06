@@ -2,9 +2,9 @@
 //!
 //! Handles configuration loading, validation, and transport selection.
 
+use crate::network::transport::TransportPreference;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use crate::network::transport::TransportPreference;
 
 // Note: TOML parsing is optional - can use JSON or manual config instead
 
@@ -14,26 +14,27 @@ pub struct ModuleConfig {
     /// Enable module system
     #[serde(default = "default_true")]
     pub enabled: bool,
-    
+
     /// Directory containing module binaries
     #[serde(default = "default_modules_dir")]
     pub modules_dir: String,
-    
+
     /// Directory for module data (state, configs)
     #[serde(default = "default_modules_data_dir")]
     pub data_dir: String,
-    
+
     /// Directory for IPC sockets
     #[serde(default = "default_modules_socket_dir")]
     pub socket_dir: String,
-    
+
     /// List of enabled modules (empty = auto-discover all)
     #[serde(default)]
     pub enabled_modules: Vec<String>,
-    
+
     /// Module-specific configuration overrides
     #[serde(default)]
-    pub module_configs: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    pub module_configs:
+        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
 fn default_true() -> bool {
@@ -70,19 +71,19 @@ impl Default for ModuleConfig {
 pub struct NodeConfig {
     /// Network listening address
     pub listen_addr: Option<SocketAddr>,
-    
+
     /// Transport preference
     pub transport_preference: TransportPreferenceConfig,
-    
+
     /// Maximum number of peers
     pub max_peers: Option<usize>,
-    
+
     /// Protocol version
     pub protocol_version: Option<String>,
-    
+
     /// Module system configuration
     pub modules: Option<ModuleConfig>,
-    
+
     /// Stratum V2 mining configuration
     #[cfg(feature = "stratum-v2")]
     pub stratum_v2: Option<StratumV2Config>,
@@ -154,14 +155,14 @@ impl NodeConfig {
         let config: NodeConfig = serde_json::from_str(&content)?;
         Ok(config)
     }
-    
+
     /// Save configuration to JSON file
     pub fn to_json_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
     }
-    
+
     /// Get transport preference
     pub fn get_transport_preference(&self) -> TransportPreference {
         self.transport_preference.into()
@@ -174,19 +175,19 @@ impl NodeConfig {
 pub struct StratumV2Config {
     /// Enable Stratum V2 mining
     pub enabled: bool,
-    
+
     /// Pool URL for miner mode (format: "tcp://pool.example.com:3333" or "iroh://<nodeid>")
     pub pool_url: Option<String>,
-    
+
     /// Listen address for server mode
     pub listen_addr: Option<SocketAddr>,
-    
+
     /// Transport preference for Stratum V2 connections
     pub transport_preference: TransportPreferenceConfig,
-    
+
     /// Enable merge mining
     pub merge_mining_enabled: bool,
-    
+
     /// Secondary chains for merge mining
     pub secondary_chains: Vec<String>,
 }
@@ -204,4 +205,3 @@ impl Default for StratumV2Config {
         }
     }
 }
-

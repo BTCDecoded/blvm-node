@@ -3,7 +3,7 @@
 //! Provides TCP-based transport for Bitcoin P2P protocol compatibility.
 
 use crate::network::transport::{
-    Transport, TransportConnection, TransportListener, TransportType, TransportAddr,
+    Transport, TransportAddr, TransportConnection, TransportListener, TransportType,
 };
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -53,7 +53,7 @@ impl Transport for TcpTransport {
 
         let stream = TcpStream::connect(socket_addr).await?;
         let peer_addr = stream.peer_addr()?;
-        
+
         Ok(TcpConnection {
             stream,
             peer_addr: TransportAddr::Tcp(peer_addr),
@@ -116,10 +116,10 @@ impl TransportConnection for TcpConnection {
         // Write length prefix (4 bytes, big-endian)
         let len = data.len() as u32;
         self.stream.write_u32(len).await?;
-        
+
         // Write data
         self.stream.write_all(data).await?;
-        
+
         Ok(())
     }
 
@@ -148,7 +148,7 @@ impl TransportConnection for TcpConnection {
         // Read data
         let mut buffer = vec![0u8; len];
         let bytes_read = self.stream.read_exact(&mut buffer).await?;
-        
+
         if bytes_read != len {
             return Err(anyhow::anyhow!(
                 "Incomplete read: expected {} bytes, got {}",
@@ -193,10 +193,10 @@ mod tests {
     async fn test_tcp_transport_listen() {
         let transport = TcpTransport::new();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        
+
         let listener = transport.listen(addr).await;
         assert!(listener.is_ok());
-        
+
         if let Ok(mut listener) = listener {
             let local_addr = listener.local_addr();
             assert!(local_addr.is_ok());
@@ -206,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn test_tcp_transport_connect_invalid_addr() {
         let transport = TcpTransport::new();
-        
+
         // Try to connect with non-TCP address (if Iroh feature enabled)
         #[cfg(feature = "iroh")]
         {
@@ -216,4 +216,3 @@ mod tests {
         }
     }
 }
-

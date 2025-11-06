@@ -3,11 +3,11 @@
 //! Handles incoming BIP70 messages from the P2P network.
 //! Similar to bip157_handler.rs pattern.
 
+use crate::bip70::{Bip70Error, PaymentProtocolClient, PaymentProtocolServer};
 use crate::network::protocol::{
-    GetPaymentRequestMessage, PaymentRequestMessage, PaymentMessage, PaymentACKMessage,
+    GetPaymentRequestMessage, PaymentACKMessage, PaymentMessage, PaymentRequestMessage,
     ProtocolMessage,
 };
-use crate::bip70::{PaymentProtocolServer, PaymentProtocolClient, Bip70Error};
 use anyhow::Result;
 
 /// Handle GetPaymentRequest message
@@ -19,7 +19,7 @@ pub async fn handle_get_payment_request(
 ) -> Result<PaymentRequestMessage> {
     // TODO: Look up payment request by payment_id and merchant_pubkey
     // For now, return error indicating not implemented
-    
+
     Err(anyhow::anyhow!(
         "GetPaymentRequest handler not yet implemented - requires merchant payment store"
     ))
@@ -35,16 +35,14 @@ pub async fn handle_payment(
     // TODO: Look up original PaymentRequest by payment_id
     // TODO: Validate payment against original request
     // TODO: Process payment and generate PaymentACK
-    
+
     Err(anyhow::anyhow!(
         "Payment handler not yet implemented - requires payment processing store"
     ))
 }
 
 /// Validate PaymentRequest message from P2P network
-pub fn validate_payment_request_message(
-    msg: &PaymentRequestMessage,
-) -> Result<(), Bip70Error> {
+pub fn validate_payment_request_message(msg: &PaymentRequestMessage) -> Result<(), Bip70Error> {
     PaymentProtocolClient::validate_payment_request(msg)
 }
 
@@ -55,4 +53,3 @@ pub fn validate_payment_ack_message(
 ) -> Result<(), Bip70Error> {
     PaymentProtocolClient::validate_payment_ack(ack, merchant_pubkey)
 }
-

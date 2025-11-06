@@ -1,15 +1,15 @@
 //! JSON-RPC server implementation
-//! 
+//!
 //! Handles HTTP/WebSocket connections and routes JSON-RPC requests.
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::net::SocketAddr;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, info, warn, error};
+use tokio::net::{TcpListener, TcpStream};
+use tracing::{debug, error, info, warn};
 
-use super::{blockchain, network, mining, rawtx, mempool, errors};
+use super::{blockchain, errors, mempool, mining, network, rawtx};
 
 /// JSON-RPC server
 pub struct RpcServer {
@@ -21,12 +21,12 @@ impl RpcServer {
     pub fn new(addr: SocketAddr) -> Self {
         Self { addr }
     }
-    
+
     /// Start the RPC server
     pub async fn start(&self) -> Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
         info!("RPC server listening on {}", self.addr);
-        
+
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
@@ -39,11 +39,11 @@ impl RpcServer {
             }
         }
     }
-    
+
     /// Handle a client connection
     async fn handle_connection(mut stream: TcpStream, addr: std::net::SocketAddr) {
         let mut buffer = [0u8; 4096];
-        
+
         loop {
             match stream.read(&mut buffer).await {
                 Ok(0) => {
@@ -53,10 +53,11 @@ impl RpcServer {
                 Ok(n) => {
                     let request = String::from_utf8_lossy(&buffer[..n]);
                     debug!("RPC request from {}: {}", addr, request);
-                    
+
                     let response = Self::process_request(&request).await;
-                    let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-                    
+                    let response_json =
+                        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+
                     if let Err(e) = stream.write_all(response_json.as_bytes()).await {
                         warn!("Failed to send RPC response to {}: {}", addr, e);
                         break;
@@ -69,9 +70,9 @@ impl RpcServer {
             }
         }
     }
-    
+
     /// Process a JSON-RPC request
-    /// 
+    ///
     /// Public method for use by both TCP and QUIC RPC servers
     pub async fn process_request(request: &str) -> Value {
         let request: Value = match serde_json::from_str(request) {
@@ -81,16 +82,14 @@ impl RpcServer {
                 return err.to_json(None);
             }
         };
-        
-        let method = request.get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
-        
+
+        let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
         let params = request.get("params").cloned().unwrap_or(json!([]));
         let id = request.get("id").cloned();
-        
+
         let result = Self::call_method(method, params).await;
-        
+
         match result {
             Ok(response) => {
                 json!({
@@ -110,63 +109,81 @@ impl RpcServer {
             }
         }
     }
-    
+
     /// Call a specific RPC method
     async fn call_method(method: &str, params: Value) -> Result<Value, errors::RpcError> {
         match method {
             // Blockchain methods
             "getblockchaininfo" => {
                 let blockchain = blockchain::BlockchainRpc::new();
-                blockchain.get_blockchain_info().await
+                blockchain
+                    .get_blockchain_info()
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblock" => {
                 let blockchain = blockchain::BlockchainRpc::new();
                 let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
-                blockchain.get_block(hash).await
+                blockchain
+                    .get_block(hash)
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblockhash" => {
                 let blockchain = blockchain::BlockchainRpc::new();
                 let height = params.get(0).and_then(|p| p.as_u64()).unwrap_or(0);
-                blockchain.get_block_hash(height).await
+                blockchain
+                    .get_block_hash(height)
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblockheader" => {
                 let blockchain = blockchain::BlockchainRpc::new();
                 let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
                 let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(true);
-                blockchain.get_block_header(hash, verbose).await
+                blockchain
+                    .get_block_header(hash, verbose)
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getbestblockhash" => {
                 let blockchain = blockchain::BlockchainRpc::new();
-                blockchain.get_best_block_hash().await
+                blockchain
+                    .get_best_block_hash()
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblockcount" => {
                 let blockchain = blockchain::BlockchainRpc::new();
-                blockchain.get_block_count().await
+                blockchain
+                    .get_block_count()
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getdifficulty" => {
                 let blockchain = blockchain::BlockchainRpc::new();
-                blockchain.get_difficulty().await
+                blockchain
+                    .get_difficulty()
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "gettxoutsetinfo" => {
                 let blockchain = blockchain::BlockchainRpc::new();
-                blockchain.get_txoutset_info().await
+                blockchain
+                    .get_txoutset_info()
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "verifychain" => {
                 let blockchain = blockchain::BlockchainRpc::new();
                 let checklevel = params.get(0).and_then(|p| p.as_u64());
                 let numblocks = params.get(1).and_then(|p| p.as_u64());
-                blockchain.verify_chain(checklevel, numblocks).await
+                blockchain
+                    .verify_chain(checklevel, numblocks)
+                    .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
-            
+
             // Raw Transaction methods
             "getrawtransaction" => {
                 let rawtx = rawtx::RawTxRpc::new();
@@ -196,7 +213,7 @@ impl RpcServer {
                 let rawtx = rawtx::RawTxRpc::new();
                 rawtx.verifytxoutproof(&params).await
             }
-            
+
             // Mempool methods
             "getmempoolinfo" => {
                 let mempool = mempool::MempoolRpc::new();
@@ -210,7 +227,7 @@ impl RpcServer {
                 let mempool = mempool::MempoolRpc::new();
                 mempool.savemempool(&params).await
             }
-            
+
             // Network methods
             "getnetworkinfo" => {
                 let network = network::NetworkRpc::new();
@@ -252,7 +269,7 @@ impl RpcServer {
                 let network = network::NetworkRpc::new();
                 network.list_banned(&params).await
             }
-            
+
             // Mining methods
             "getmininginfo" => {
                 let mining = mining::MiningRpc::new();
@@ -270,8 +287,8 @@ impl RpcServer {
                 let mining = mining::MiningRpc::new();
                 mining.estimate_smart_fee(&params).await
             }
-            
-            _ => Err(errors::RpcError::method_not_found(method))
+
+            _ => Err(errors::RpcError::method_not_found(method)),
         }
     }
 }
@@ -292,7 +309,7 @@ mod tests {
     async fn test_process_request_valid_json() {
         let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
         assert_eq!(response["id"], 1);
@@ -302,7 +319,7 @@ mod tests {
     async fn test_process_request_invalid_json() {
         let request = "invalid json";
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32700);
         assert_eq!(response["error"]["message"], "Parse error");
@@ -312,7 +329,7 @@ mod tests {
     async fn test_process_request_unknown_method() {
         let request = r#"{"jsonrpc":"2.0","method":"unknown_method","params":[],"id":1}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
         assert_eq!(response["error"]["message"], "Method not found");
@@ -323,7 +340,7 @@ mod tests {
     async fn test_process_request_without_id() {
         let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[]}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
         assert_eq!(response["id"], serde_json::Value::Null);
@@ -333,7 +350,7 @@ mod tests {
     async fn test_process_request_with_params() {
         let request = r#"{"jsonrpc":"2.0","method":"getblock","params":["000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"],"id":1}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
         assert_eq!(response["id"], 1);
@@ -417,7 +434,7 @@ mod tests {
     async fn test_json_rpc_2_0_compliance() {
         let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
         assert_eq!(response["id"], 1);
@@ -427,7 +444,7 @@ mod tests {
     async fn test_error_response_format() {
         let request = r#"{"jsonrpc":"2.0","method":"unknown_method","params":[],"id":1}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["error"].is_object());
         assert!(response["error"]["code"].is_number());
@@ -439,7 +456,7 @@ mod tests {
     async fn test_parse_error_response() {
         let request = "invalid json";
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32700);
         assert_eq!(response["error"]["message"], "Parse error");
@@ -450,7 +467,7 @@ mod tests {
     async fn test_method_not_found_response() {
         let request = r#"{"jsonrpc":"2.0","method":"nonexistent","params":[],"id":42}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
         assert_eq!(response["error"]["message"], "Method not found");
@@ -462,7 +479,7 @@ mod tests {
     async fn test_empty_params_handling() {
         let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","id":1}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
         assert_eq!(response["id"], 1);
@@ -472,7 +489,7 @@ mod tests {
     async fn test_missing_method_handling() {
         let request = r#"{"jsonrpc":"2.0","params":[],"id":1}"#;
         let response = RpcServer::process_request(request).await;
-        
+
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
         assert_eq!(response["error"]["message"], "Method not found");
@@ -485,14 +502,17 @@ mod tests {
         let methods = vec![
             "getblockchaininfo",
             "getblock",
-            "getblockhash", 
-            "getrawtransaction"
+            "getblockhash",
+            "getrawtransaction",
         ];
-        
+
         for method in methods {
-            let request = format!(r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#, method);
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
+                method
+            );
             let response = RpcServer::process_request(&request).await;
-            
+
             assert_eq!(response["jsonrpc"], "2.0");
             assert!(response["result"].is_object() || response["result"].is_string());
             assert_eq!(response["id"], 1);
@@ -502,15 +522,15 @@ mod tests {
     #[tokio::test]
     async fn test_network_methods_integration() {
         // Test all network methods
-        let methods = vec![
-            "getnetworkinfo",
-            "getpeerinfo"
-        ];
-        
+        let methods = vec!["getnetworkinfo", "getpeerinfo"];
+
         for method in methods {
-            let request = format!(r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#, method);
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
+                method
+            );
             let response = RpcServer::process_request(&request).await;
-            
+
             assert_eq!(response["jsonrpc"], "2.0");
             assert!(response["result"].is_object() || response["result"].is_array());
             assert_eq!(response["id"], 1);
@@ -520,15 +540,15 @@ mod tests {
     #[tokio::test]
     async fn test_mining_methods_integration() {
         // Test all mining methods
-        let methods = vec![
-            "getmininginfo",
-            "getblocktemplate"
-        ];
-        
+        let methods = vec!["getmininginfo", "getblocktemplate"];
+
         for method in methods {
-            let request = format!(r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#, method);
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
+                method
+            );
             let response = RpcServer::process_request(&request).await;
-            
+
             assert_eq!(response["jsonrpc"], "2.0");
             assert!(response["result"].is_object());
             assert_eq!(response["id"], 1);

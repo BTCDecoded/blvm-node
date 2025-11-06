@@ -1,12 +1,12 @@
 //! Bitcoin protocol message handling
-//! 
+//!
 //! Implements Bitcoin P2P protocol message serialization and deserialization.
 
-use anyhow::Result;
-use protocol_engine::{Block, Transaction, BlockHeader, Hash};
-use serde::{Deserialize, Serialize};
 use crate::bip157::NODE_COMPACT_FILTERS;
 use crate::network::transport::TransportType;
+use anyhow::Result;
+use protocol_engine::{Block, BlockHeader, Hash, Transaction};
+use serde::{Deserialize, Serialize};
 
 /// Bitcoin protocol constants
 pub const BITCOIN_MAGIC_MAINNET: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
@@ -24,18 +24,49 @@ pub const NODE_FIBRE: u64 = 1 << 26;
 
 /// Allowed Bitcoin protocol commands
 pub const ALLOWED_COMMANDS: &[&str] = &[
-    "version", "verack", "ping", "pong", "getheaders", "headers",
-    "getblocks", "block", "getdata", "inv", "tx", "notfound",
-    "getaddr", "addr", "mempool", "reject", "feefilter", "sendcmpct",
-    "cmpctblock", "getblocktxn", "blocktxn", "getblocktxn",
+    "version",
+    "verack",
+    "ping",
+    "pong",
+    "getheaders",
+    "headers",
+    "getblocks",
+    "block",
+    "getdata",
+    "inv",
+    "tx",
+    "notfound",
+    "getaddr",
+    "addr",
+    "mempool",
+    "reject",
+    "feefilter",
+    "sendcmpct",
+    "cmpctblock",
+    "getblocktxn",
+    "blocktxn",
+    "getblocktxn",
     // UTXO commitment protocol extensions
-    "getutxoset", "utxoset", "getfilteredblock", "filteredblock",
+    "getutxoset",
+    "utxoset",
+    "getfilteredblock",
+    "filteredblock",
     // Block Filtering (BIP157)
-    "getcfilters", "cfilter", "getcfheaders", "cfheaders", "getcfcheckpt", "cfcheckpt",
+    "getcfilters",
+    "cfilter",
+    "getcfheaders",
+    "cfheaders",
+    "getcfcheckpt",
+    "cfcheckpt",
     // Payment Protocol (BIP70) - P2P variant
-    "getpaymentrequest", "paymentrequest", "payment", "paymentack",
+    "getpaymentrequest",
+    "paymentrequest",
+    "payment",
+    "paymentack",
     // Package Relay (BIP 331)
-    "sendpkgtxn", "pkgtxn", "pkgtxnreject"
+    "sendpkgtxn",
+    "pkgtxn",
+    "pkgtxnreject",
 ];
 
 /// Bitcoin protocol message types
@@ -187,20 +218,19 @@ impl SendCmpctMessage {
     /// Create SendCmpct message with recommended version for transport
     pub fn for_transport(transport: TransportType, prefer_cmpct: bool) -> Self {
         use crate::network::compact_blocks::recommended_compact_block_version;
-        
+
         Self {
             version: recommended_compact_block_version(transport),
             prefer_cmpct: if prefer_cmpct { 1 } else { 0 },
         }
     }
-    
+
     /// Check if peer also supports BIP157 filters (based on version message services)
     pub fn supports_filters(&self, peer_services: u64) -> bool {
         use crate::bip157::NODE_COMPACT_FILTERS;
         (peer_services & NODE_COMPACT_FILTERS) != 0
     }
 }
-
 
 /// CompactBlock message - Compact block data
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,7 +296,7 @@ pub struct GetFilteredBlockMessage {
     /// Filter preferences (what spam types to filter)
     pub filter_preferences: FilterPreferences,
     /// Request BIP158 compact block filter in response (optional)
-    /// 
+    ///
     /// When true, the response FilteredBlockMessage will include
     /// bip158_filter field with the compact block filter.
     /// This allows clients to get both spam filtering and light client
@@ -301,7 +331,7 @@ pub struct FilteredBlockMessage {
     /// Summary of filtered spam
     pub spam_summary: SpamSummary,
     /// Optional BIP158 compact block filter (if requested and available)
-    /// 
+    ///
     /// This allows clients to get both spam-filtered transactions (UTXO commitments)
     /// and BIP158 filters (light client discovery) in a single response.
     /// When present, clients can use the filter for efficient transaction matching
@@ -521,44 +551,46 @@ impl ProtocolParser {
         if data.len() < 24 {
             return Err(anyhow::anyhow!("Message too short"));
         }
-        
+
         if data.len() > MAX_PROTOCOL_MESSAGE_LENGTH {
             return Err(anyhow::anyhow!("Message too large"));
         }
-        
+
         // Parse message header
         let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if magic != 0xd9b4bef9 {
             return Err(anyhow::anyhow!("Invalid magic number"));
         }
-        
-        let command = String::from_utf8_lossy(&data[4..12]).trim_end_matches('\0').to_string();
-        
+
+        let command = String::from_utf8_lossy(&data[4..12])
+            .trim_end_matches('\0')
+            .to_string();
+
         // Validate command string
         if !ALLOWED_COMMANDS.contains(&command.as_str()) {
             return Err(anyhow::anyhow!("Unknown command: {}", command));
         }
-        
+
         let payload_length = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
         let checksum = &data[20..24];
-        
+
         // Validate payload length
         if payload_length as usize > MAX_PROTOCOL_MESSAGE_LENGTH - 24 {
             return Err(anyhow::anyhow!("Payload too large"));
         }
-        
+
         if data.len() < 24 + payload_length as usize {
             return Err(anyhow::anyhow!("Incomplete message"));
         }
-        
+
         let payload = &data[24..24 + payload_length as usize];
-        
+
         // Verify checksum using Bitcoin double SHA256
         let calculated_checksum = Self::calculate_checksum(payload);
         if calculated_checksum != checksum {
             return Err(anyhow::anyhow!("Invalid checksum"));
         }
-        
+
         // Parse payload based on command
         match command.as_str() {
             "version" => Ok(ProtocolMessage::Version(bincode::deserialize(payload)?)),
@@ -580,28 +612,42 @@ impl ProtocolParser {
             // UTXO commitment protocol extensions
             "getutxoset" => Ok(ProtocolMessage::GetUTXOSet(bincode::deserialize(payload)?)),
             "utxoset" => Ok(ProtocolMessage::UTXOSet(bincode::deserialize(payload)?)),
-            "getfilteredblock" => Ok(ProtocolMessage::GetFilteredBlock(bincode::deserialize(payload)?)),
-            "filteredblock" => Ok(ProtocolMessage::FilteredBlock(bincode::deserialize(payload)?)),
+            "getfilteredblock" => Ok(ProtocolMessage::GetFilteredBlock(bincode::deserialize(
+                payload,
+            )?)),
+            "filteredblock" => Ok(ProtocolMessage::FilteredBlock(bincode::deserialize(
+                payload,
+            )?)),
             // Block Filtering (BIP157)
             "getcfilters" => Ok(ProtocolMessage::GetCfilters(bincode::deserialize(payload)?)),
             "cfilter" => Ok(ProtocolMessage::Cfilter(bincode::deserialize(payload)?)),
-            "getcfheaders" => Ok(ProtocolMessage::GetCfheaders(bincode::deserialize(payload)?)),
+            "getcfheaders" => Ok(ProtocolMessage::GetCfheaders(bincode::deserialize(
+                payload,
+            )?)),
             "cfheaders" => Ok(ProtocolMessage::Cfheaders(bincode::deserialize(payload)?)),
-            "getcfcheckpt" => Ok(ProtocolMessage::GetCfcheckpt(bincode::deserialize(payload)?)),
+            "getcfcheckpt" => Ok(ProtocolMessage::GetCfcheckpt(bincode::deserialize(
+                payload,
+            )?)),
             "cfcheckpt" => Ok(ProtocolMessage::Cfcheckpt(bincode::deserialize(payload)?)),
             // Payment Protocol (BIP70) - P2P variant
-            "getpaymentrequest" => Ok(ProtocolMessage::GetPaymentRequest(bincode::deserialize(payload)?)),
-            "paymentrequest" => Ok(ProtocolMessage::PaymentRequest(bincode::deserialize(payload)?)),
+            "getpaymentrequest" => Ok(ProtocolMessage::GetPaymentRequest(bincode::deserialize(
+                payload,
+            )?)),
+            "paymentrequest" => Ok(ProtocolMessage::PaymentRequest(bincode::deserialize(
+                payload,
+            )?)),
             "payment" => Ok(ProtocolMessage::Payment(bincode::deserialize(payload)?)),
             "paymentack" => Ok(ProtocolMessage::PaymentACK(bincode::deserialize(payload)?)),
             // Package Relay (BIP 331)
             "sendpkgtxn" => Ok(ProtocolMessage::SendPkgTxn(bincode::deserialize(payload)?)),
             "pkgtxn" => Ok(ProtocolMessage::PkgTxn(bincode::deserialize(payload)?)),
-            "pkgtxnreject" => Ok(ProtocolMessage::PkgTxnReject(bincode::deserialize(payload)?)),
+            "pkgtxnreject" => Ok(ProtocolMessage::PkgTxnReject(bincode::deserialize(
+                payload,
+            )?)),
             _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
         }
     }
-    
+
     /// Serialize a protocol message to bytes
     pub fn serialize_message(message: &ProtocolMessage) -> Result<Vec<u8>> {
         let (command, payload) = match message {
@@ -624,7 +670,9 @@ impl ProtocolParser {
             // UTXO commitment protocol extensions
             ProtocolMessage::GetUTXOSet(msg) => ("getutxoset", bincode::serialize(msg)?),
             ProtocolMessage::UTXOSet(msg) => ("utxoset", bincode::serialize(msg)?),
-            ProtocolMessage::GetFilteredBlock(msg) => ("getfilteredblock", bincode::serialize(msg)?),
+            ProtocolMessage::GetFilteredBlock(msg) => {
+                ("getfilteredblock", bincode::serialize(msg)?)
+            }
             ProtocolMessage::FilteredBlock(msg) => ("filteredblock", bincode::serialize(msg)?),
             // Block Filtering (BIP157)
             ProtocolMessage::GetCfilters(msg) => ("getcfilters", bincode::serialize(msg)?),
@@ -634,7 +682,9 @@ impl ProtocolParser {
             ProtocolMessage::GetCfcheckpt(msg) => ("getcfcheckpt", bincode::serialize(msg)?),
             ProtocolMessage::Cfcheckpt(msg) => ("cfcheckpt", bincode::serialize(msg)?),
             // Payment Protocol (BIP70) - P2P variant
-            ProtocolMessage::GetPaymentRequest(msg) => ("getpaymentrequest", bincode::serialize(msg)?),
+            ProtocolMessage::GetPaymentRequest(msg) => {
+                ("getpaymentrequest", bincode::serialize(msg)?)
+            }
             ProtocolMessage::PaymentRequest(msg) => ("paymentrequest", bincode::serialize(msg)?),
             ProtocolMessage::Payment(msg) => ("payment", bincode::serialize(msg)?),
             ProtocolMessage::PaymentACK(msg) => ("paymentack", bincode::serialize(msg)?),
@@ -643,37 +693,37 @@ impl ProtocolParser {
             ProtocolMessage::PkgTxn(msg) => ("pkgtxn", bincode::serialize(msg)?),
             ProtocolMessage::PkgTxnReject(msg) => ("pkgtxnreject", bincode::serialize(msg)?),
         };
-        
+
         let mut message = Vec::new();
-        
+
         // Magic number
         message.extend_from_slice(&0xd9b4bef9u32.to_le_bytes());
-        
+
         // Command (12 bytes, null-padded)
         let mut command_bytes = [0u8; 12];
         command_bytes[..command.len()].copy_from_slice(command.as_bytes());
         message.extend_from_slice(&command_bytes);
-        
+
         // Payload length
         message.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        
+
         // Checksum
         let checksum = Self::calculate_checksum(&payload);
         message.extend_from_slice(&checksum);
-        
+
         // Payload
         message.extend_from_slice(&payload);
-        
+
         Ok(message)
     }
-    
+
     /// Calculate message checksum
     fn calculate_checksum(payload: &[u8]) -> [u8; 4] {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         let hash1 = Sha256::digest(payload);
         let hash2 = Sha256::digest(hash1);
-        
+
         let mut checksum = [0u8; 4];
         checksum.copy_from_slice(&hash2[..4]);
         checksum

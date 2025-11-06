@@ -1,12 +1,12 @@
 //! Permission model for module API access
-//! 
+//!
 //! Implements whitelist-only access control for module API calls.
 
 use std::collections::HashSet;
 use tracing::{debug, warn};
 
-use crate::module::traits::ModuleError;
 use crate::module::ipc::protocol::RequestPayload;
+use crate::module::traits::ModuleError;
 
 /// Helper function to convert permission string to Permission enum
 pub fn parse_permission_string(perm_str: &str) -> Option<Permission> {
@@ -48,29 +48,29 @@ impl PermissionSet {
             permissions: HashSet::new(),
         }
     }
-    
+
     /// Create a permission set from a vector
     pub fn from_vec(permissions: Vec<Permission>) -> Self {
         Self {
             permissions: permissions.into_iter().collect(),
         }
     }
-    
+
     /// Add a permission
     pub fn add(&mut self, permission: Permission) {
         self.permissions.insert(permission);
     }
-    
+
     /// Check if a permission is granted
     pub fn has(&self, permission: &Permission) -> bool {
         self.permissions.contains(permission)
     }
-    
+
     /// Check if all required permissions are granted
     pub fn has_all(&self, required: &[Permission]) -> bool {
         required.iter().all(|p| self.permissions.contains(p))
     }
-    
+
     /// Get all permissions as a vector
     pub fn to_vec(&self) -> Vec<Permission> {
         self.permissions.iter().cloned().collect()
@@ -97,20 +97,24 @@ impl PermissionChecker {
         default.add(Permission::ReadUTXO);
         default.add(Permission::ReadChainState);
         default.add(Permission::SubscribeEvents);
-        
+
         Self {
             default_permissions: default,
             module_permissions: std::collections::HashMap::new(),
             payload_to_permission_cache: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Register module-specific permissions
     pub fn register_module_permissions(&mut self, module_id: String, permissions: PermissionSet) {
-        debug!("Registering permissions for module {}: {:?}", module_id, permissions.to_vec());
+        debug!(
+            "Registering permissions for module {}: {:?}",
+            module_id,
+            permissions.to_vec()
+        );
         self.module_permissions.insert(module_id, permissions);
     }
-    
+
     /// Check if a module has a specific permission
     #[inline]
     pub fn check_permission(&self, module_id: &str, permission: &Permission) -> bool {
@@ -122,11 +126,11 @@ impl PermissionChecker {
             // If module has custom permissions, only those apply (no defaults)
             return false;
         }
-        
+
         // Fall back to default permissions
         self.default_permissions.has(permission)
     }
-    
+
     /// Get effective permissions for a module
     pub fn get_permissions(&self, module_id: &str) -> PermissionSet {
         if let Some(module_perms) = self.module_permissions.get(module_id) {
@@ -135,9 +139,13 @@ impl PermissionChecker {
             self.default_permissions.clone()
         }
     }
-    
+
     /// Check if a module can perform a specific API operation
-    pub fn check_api_call(&self, module_id: &str, payload: &RequestPayload) -> Result<(), ModuleError> {
+    pub fn check_api_call(
+        &self,
+        module_id: &str,
+        payload: &RequestPayload,
+    ) -> Result<(), ModuleError> {
         let required_permission = match payload {
             RequestPayload::GetBlock { .. } => Permission::ReadBlockchain,
             RequestPayload::GetBlockHeader { .. } => Permission::ReadBlockchain,
@@ -148,16 +156,18 @@ impl PermissionChecker {
             RequestPayload::GetUtxo { .. } => Permission::ReadUTXO,
             RequestPayload::SubscribeEvents { .. } => Permission::SubscribeEvents,
         };
-        
+
         if !self.check_permission(module_id, &required_permission) {
-            warn!("Module {} denied access to {:?} (missing permission: {:?})", 
-                  module_id, payload, required_permission);
+            warn!(
+                "Module {} denied access to {:?} (missing permission: {:?})",
+                module_id, payload, required_permission
+            );
             return Err(ModuleError::OperationError(format!(
                 "Permission denied: module {} does not have permission {:?}",
                 module_id, required_permission
             )));
         }
-        
+
         debug!("Module {} granted access to {:?}", module_id, payload);
         Ok(())
     }

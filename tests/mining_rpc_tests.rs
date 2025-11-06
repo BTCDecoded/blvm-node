@@ -1,12 +1,12 @@
 //! Unit tests for Mining RPC methods
 
+use protocol_engine::serialization::serialize_transaction;
+use protocol_engine::{BlockHeader, Natural, OutPoint, Transaction, UtxoSet, UTXO};
+use reference_node::node::mempool::MempoolManager;
 use reference_node::rpc::mining::MiningRpc;
 use reference_node::storage::Storage;
-use reference_node::node::mempool::MempoolManager;
 use std::sync::Arc;
 use tempfile::TempDir;
-use protocol_engine::{BlockHeader, Transaction, UtxoSet, Natural, OutPoint, UTXO};
-use protocol_engine::serialization::serialize_transaction;
 // Sha256 not needed directly in tests
 use protocol_engine::mining::BlockTemplate;
 mod common;
@@ -24,7 +24,7 @@ async fn test_mining_rpc_with_dependencies() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
-    
+
     let mining = MiningRpc::with_dependencies(storage, mempool);
     // Should create with dependencies
     assert!(true);
@@ -45,7 +45,7 @@ async fn test_get_current_height_initialized() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -56,7 +56,7 @@ async fn test_get_current_height_initialized() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     // Test through get_block_template
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
@@ -71,7 +71,7 @@ async fn test_get_tip_header_initialized() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -82,7 +82,7 @@ async fn test_get_tip_header_initialized() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     // Test through get_block_template
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
@@ -98,7 +98,7 @@ async fn test_get_utxo_set_empty() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -109,7 +109,7 @@ async fn test_get_utxo_set_empty() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     // Test through get_block_template - should work with empty UTXO set
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
@@ -122,7 +122,7 @@ async fn test_get_utxo_set_populated() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -133,7 +133,7 @@ async fn test_get_utxo_set_populated() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     // Add a UTXO
     let outpoint = OutPoint {
         hash: [1u8; 32],
@@ -145,7 +145,7 @@ async fn test_get_utxo_set_populated() {
         height: 0,
     };
     storage.utxos().add_utxo(&outpoint, &utxo).unwrap();
-    
+
     // Test through get_block_template - should work with populated UTXO set
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
@@ -158,7 +158,7 @@ async fn test_transaction_serialization_in_template() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -169,13 +169,13 @@ async fn test_transaction_serialization_in_template() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     // Test transaction serialization through template
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
     assert!(result.is_ok());
     let template = result.unwrap();
-    
+
     // Verify transactions array exists
     let transactions = template.get("transactions").unwrap().as_array().unwrap();
     // Transactions should be serialized properly
@@ -191,7 +191,7 @@ async fn test_calculate_tx_hash_format() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -202,16 +202,16 @@ async fn test_calculate_tx_hash_format() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     let tx = valid_transaction();
     let tx_bytes = serialize_transaction(&tx);
-    
+
     // Test hash calculation through template
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
     assert!(result.is_ok());
     let template = result.unwrap();
-    
+
     // Verify transaction hashes are 64 hex characters (32 bytes)
     let transactions = template.get("transactions").unwrap().as_array().unwrap();
     for tx_json in transactions {
@@ -236,16 +236,22 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
         }],
         outputs: vec![protocol_engine::types::TransactionOutput {
             value: 5000000000,
-            script_pubkey: vec![0x41, 0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6, 0x71, 0x30, 0xb7, 0x10, 0x5c, 0xd6, 0xa8, 0x28, 0xe0, 0x39, 0x09, 0xa6, 0x79, 0x62, 0xe0, 0xea, 0x1f, 0x61, 0xde, 0xb6, 0x49, 0xf6, 0xbc, 0x3f, 0x4c, 0xef, 0x38, 0xc4, 0xf3, 0x55, 0x04, 0xe5, 0x1e, 0xc1, 0x12, 0xde, 0x5c, 0x38, 0x4d, 0xf7, 0xba, 0x0b, 0x8d, 0x57, 0x8a, 0x4c, 0x70, 0x2b, 0x6b, 0xf1, 0x1d, 0x5f, 0xac],
+            script_pubkey: vec![
+                0x41, 0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6,
+                0x71, 0x30, 0xb7, 0x10, 0x5c, 0xd6, 0xa8, 0x28, 0xe0, 0x39, 0x09, 0xa6, 0x79, 0x62,
+                0xe0, 0xea, 0x1f, 0x61, 0xde, 0xb6, 0x49, 0xf6, 0xbc, 0x3f, 0x4c, 0xef, 0x38, 0xc4,
+                0xf3, 0x55, 0x04, 0xe5, 0x1e, 0xc1, 0x12, 0xde, 0x5c, 0x38, 0x4d, 0xf7, 0xba, 0x0b,
+                0x8d, 0x57, 0x8a, 0x4c, 0x70, 0x2b, 0x6b, 0xf1, 0x1d, 0x5f, 0xac,
+            ],
         }],
         lock_time: 0,
     };
-    
+
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -256,20 +262,23 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     // Test hash calculation through template
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
     assert!(result.is_ok());
     let template = result.unwrap();
-    
+
     // Verify transactions have valid hashes
     let transactions = template.get("transactions").unwrap().as_array().unwrap();
     for tx_json in transactions {
         let txid = tx_json.get("txid").unwrap().as_str().unwrap();
         assert_eq!(txid.len(), 64); // 32 bytes = 64 hex chars
-        // Verify it's not all zeros
-        assert_ne!(txid, "0000000000000000000000000000000000000000000000000000000000000000");
+                                    // Verify it's not all zeros
+        assert_ne!(
+            txid,
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
     }
 }
 
@@ -279,7 +288,7 @@ async fn test_calculate_weight() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -290,16 +299,16 @@ async fn test_calculate_weight() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     let tx = valid_transaction();
     let base_size = serialize_transaction(&tx).len() as u64;
-    
+
     // Test weight calculation through template
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
     assert!(result.is_ok());
     let template = result.unwrap();
-    
+
     let transactions = template.get("transactions").unwrap().as_array().unwrap();
     for tx_json in transactions {
         if let Some(weight) = tx_json.get("weight").and_then(|w| w.as_u64()) {
@@ -315,7 +324,7 @@ async fn test_calculate_coinbase_value() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state
     let genesis_header = BlockHeader {
         version: 1,
@@ -326,13 +335,13 @@ async fn test_calculate_coinbase_value() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     // Test coinbase value through template
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await;
     assert!(result.is_ok());
     let template = result.unwrap();
-    
+
     // Genesis block subsidy should be 50 BTC = 5000000000 satoshis
     let coinbase_value = template.get("coinbasevalue").unwrap().as_u64().unwrap();
     assert_eq!(coinbase_value, 5000000000);
@@ -344,7 +353,7 @@ async fn test_get_active_rules() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Initialize chain state at height 0
     let genesis_header = BlockHeader {
         version: 1,
@@ -355,14 +364,16 @@ async fn test_get_active_rules() {
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header).unwrap();
-    
+
     // Test at genesis (height 0)
     let params = serde_json::json!([]);
     let result = mining.get_block_template(&params).await.unwrap();
     let rules = result.get("rules").unwrap().as_array().unwrap();
-    let rule_strings: Vec<String> = rules.iter().map(|r| r.as_str().unwrap().to_string()).collect();
+    let rule_strings: Vec<String> = rules
+        .iter()
+        .map(|r| r.as_str().unwrap().to_string())
+        .collect();
     assert!(rule_strings.contains(&"csv".to_string()));
     assert!(!rule_strings.contains(&"segwit".to_string()));
     assert!(!rule_strings.contains(&"taproot".to_string()));
 }
-

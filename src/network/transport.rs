@@ -26,30 +26,30 @@ impl TransportAddr {
     pub fn tcp(addr: SocketAddr) -> Self {
         Self::Tcp(addr)
     }
-    
+
     #[cfg(feature = "quinn")]
     /// Create Quinn transport address
     pub fn quinn(addr: SocketAddr) -> Self {
         Self::Quinn(addr)
     }
-    
+
     #[cfg(feature = "iroh")]
     /// Create Iroh transport address from public key
     pub fn iroh(pubkey: Vec<u8>) -> Self {
         Self::Iroh(pubkey)
     }
-    
+
     /// Check if this is a TCP address
     pub fn is_tcp(&self) -> bool {
         matches!(self, Self::Tcp(_))
     }
-    
+
     #[cfg(feature = "quinn")]
     /// Check if this is a Quinn address
     pub fn is_quinn(&self) -> bool {
         matches!(self, Self::Quinn(_))
     }
-    
+
     #[cfg(feature = "iroh")]
     /// Check if this is an Iroh address
     pub fn is_iroh(&self) -> bool {
@@ -86,13 +86,13 @@ pub trait Transport: Send + Sync {
     type Connection: TransportConnection + Send;
     /// Listener type for accepting incoming connections
     type Listener: TransportListener + Send;
-    
+
     /// Get the transport type
     fn transport_type(&self) -> TransportType;
-    
+
     /// Listen for incoming connections on the given address
     async fn listen(&self, addr: SocketAddr) -> Result<Self::Listener>;
-    
+
     /// Connect to a peer at the given address
     async fn connect(&self, addr: TransportAddr) -> Result<Self::Connection>;
 }
@@ -104,19 +104,19 @@ pub trait Transport: Send + Sync {
 pub trait TransportConnection: Send + Sync {
     /// Send data to the peer
     async fn send(&mut self, data: &[u8]) -> Result<()>;
-    
+
     /// Receive data from the peer
     ///
     /// Returns Ok(Vec<u8>) with received data, or error on failure
     /// May return Ok(vec![]) if connection closed gracefully
     async fn recv(&mut self) -> Result<Vec<u8>>;
-    
+
     /// Get the peer's transport address
     fn peer_addr(&self) -> TransportAddr;
-    
+
     /// Check if connection is still active
     fn is_connected(&self) -> bool;
-    
+
     /// Close the connection
     async fn close(&mut self) -> Result<()>;
 }
@@ -128,12 +128,12 @@ pub trait TransportConnection: Send + Sync {
 pub trait TransportListener: Send + Sync {
     /// Connection type that this listener produces
     type Connection: TransportConnection + Send;
-    
+
     /// Accept a new incoming connection
     ///
     /// Returns the connection and the peer's address
     async fn accept(&mut self) -> Result<(Self::Connection, TransportAddr)>;
-    
+
     /// Get the local address this listener is bound to
     fn local_addr(&self) -> Result<SocketAddr>;
 }
@@ -167,58 +167,57 @@ impl TransportPreference {
     pub fn allows_tcp(&self) -> bool {
         self.contains(Self::TCP)
     }
-    
+
     /// Check if Iroh is allowed
     #[cfg(feature = "iroh")]
     pub fn allows_iroh(&self) -> bool {
         self.contains(Self::IROH)
     }
-    
+
     /// Check if Quinn is allowed
     #[cfg(feature = "quinn")]
     pub fn allows_quinn(&self) -> bool {
         self.contains(Self::QUINN)
     }
-    
+
     /// Get list of enabled transport types
     pub fn enabled_transports(&self) -> Vec<TransportType> {
         let mut transports = Vec::new();
-        
+
         if self.allows_tcp() {
             transports.push(TransportType::Tcp);
         }
-        
+
         #[cfg(feature = "quinn")]
         if self.allows_quinn() {
             transports.push(TransportType::Quinn);
         }
-        
+
         #[cfg(feature = "iroh")]
         if self.allows_iroh() {
             transports.push(TransportType::Iroh);
         }
-        
+
         transports
     }
-    
+
     // Backward compatibility constants
     /// TCP-only mode (Bitcoin P2P compatible, default)
     pub const TCP_ONLY: Self = Self::TCP;
-    
+
     #[cfg(feature = "iroh")]
     /// Iroh-only mode
     pub const IROH_ONLY: Self = Self::IROH;
-    
+
     #[cfg(feature = "quinn")]
     /// Quinn-only mode
     pub const QUINN_ONLY: Self = Self::QUINN;
-    
+
     #[cfg(feature = "iroh")]
     /// Hybrid mode (TCP + Iroh) - backward compatibility
     pub const HYBRID: Self = Self::TCP | Self::IROH;
-    
+
     #[cfg(all(feature = "iroh", feature = "quinn"))]
     /// All transports enabled (TCP + Iroh + Quinn)
     pub const ALL: Self = Self::TCP | Self::IROH | Self::QUINN;
 }
-

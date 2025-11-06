@@ -1,16 +1,31 @@
 #![cfg(feature = "dandelion")]
-use std::time::{Duration, Instant};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use std::time::{Duration, Instant};
 
-use reference_node::network::dandelion::{DandelionRelay, Clock, DandelionPhase};
+use reference_node::network::dandelion::{Clock, DandelionPhase, DandelionRelay};
 
 #[derive(Clone)]
-struct TestClock { now: Instant }
-impl TestClock { fn new(start: Instant) -> Self { Self { now: start } } fn advance(&mut self, d: Duration) { self.now += d; } }
-impl Clock for TestClock { fn now(&self) -> Instant { self.now } }
+struct TestClock {
+    now: Instant,
+}
+impl TestClock {
+    fn new(start: Instant) -> Self {
+        Self { now: start }
+    }
+    fn advance(&mut self, d: Duration) {
+        self.now += d;
+    }
+}
+impl Clock for TestClock {
+    fn now(&self) -> Instant {
+        self.now
+    }
+}
 
-fn peers() -> Vec<String> { vec!["p1".into(), "p2".into(), "p3".into(), "p4".into()] }
+fn peers() -> Vec<String> {
+    vec!["p1".into(), "p2".into(), "p3".into(), "p4".into()]
+}
 
 #[test]
 fn no_premature_broadcast_probability_zero() {
@@ -73,7 +88,9 @@ fn probabilistic_fluff_rate_is_reasonable() {
     for i in 0..trials {
         let tx = [i as u8; 32];
         let _ = d.start_stem_phase(tx, "p1".into(), &peers());
-        if d.should_fluff(&tx) { fluffed += 1; }
+        if d.should_fluff(&tx) {
+            fluffed += 1;
+        }
         // Reset state to avoid timeout-based effects
         let _ = d.transition_to_fluff(tx);
     }
@@ -128,40 +145,40 @@ fn bounded_state_after_cleanup() {
     clock.advance(Duration::from_millis(20));
     d.set_clock(clock.clone());
 
-#[test]
-fn eclipse_subset_eventual_fluff() {
-    let rng = StdRng::seed_from_u64(1337);
-    let mut clock = TestClock::new(Instant::now());
-    let mut d: DandelionRelay<TestClock> = DandelionRelay::with_rng_and_clock(rng, clock.clone());
-    d.set_stem_timeout(Duration::from_millis(50));
-    d.set_fluff_probability(0.0);
-    d.set_max_stem_hops(2);
-    let tx = [11u8; 32];
-    let subset = vec!["p1".into(), "p2".into()];
-    let _ = d.start_stem_phase(tx, "p1".into(), &subset);
-    // Advance hops without alternative path
-    let _ = d.advance_stem(tx, &subset);
-    // Timeout guarantees fluff eventually
-    clock.advance(Duration::from_millis(60));
-    d.set_clock(clock.clone());
-    assert!(d.should_fluff(&tx));
-}
+    #[test]
+    fn eclipse_subset_eventual_fluff() {
+        let rng = StdRng::seed_from_u64(1337);
+        let mut clock = TestClock::new(Instant::now());
+        let mut d: DandelionRelay<TestClock> =
+            DandelionRelay::with_rng_and_clock(rng, clock.clone());
+        d.set_stem_timeout(Duration::from_millis(50));
+        d.set_fluff_probability(0.0);
+        d.set_max_stem_hops(2);
+        let tx = [11u8; 32];
+        let subset = vec!["p1".into(), "p2".into()];
+        let _ = d.start_stem_phase(tx, "p1".into(), &subset);
+        // Advance hops without alternative path
+        let _ = d.advance_stem(tx, &subset);
+        // Timeout guarantees fluff eventually
+        clock.advance(Duration::from_millis(60));
+        d.set_clock(clock.clone());
+        assert!(d.should_fluff(&tx));
+    }
 
-#[test]
-fn rng_extremes_bounds() {
-    let rng = StdRng::seed_from_u64(4242);
-    let clock = TestClock::new(Instant::now());
-    let mut d: DandelionRelay<TestClock> = DandelionRelay::with_rng_and_clock(rng, clock.clone());
-    d.set_stem_timeout(Duration::from_secs(60));
-    // p = 1.0 always fluff immediately
-    d.set_fluff_probability(1.0);
-    let tx = [13u8; 32];
-    let _ = d.start_stem_phase(tx, "p3".into(), &peers());
-    assert!(d.should_fluff(&tx));
-}
+    #[test]
+    fn rng_extremes_bounds() {
+        let rng = StdRng::seed_from_u64(4242);
+        let clock = TestClock::new(Instant::now());
+        let mut d: DandelionRelay<TestClock> =
+            DandelionRelay::with_rng_and_clock(rng, clock.clone());
+        d.set_stem_timeout(Duration::from_secs(60));
+        // p = 1.0 always fluff immediately
+        d.set_fluff_probability(1.0);
+        let tx = [13u8; 32];
+        let _ = d.start_stem_phase(tx, "p3".into(), &peers());
+        assert!(d.should_fluff(&tx));
+    }
     d.cleanup_expired();
     // Expect near-zero stem txs after cleanup
     assert!(d.get_stats().stem_transactions < 10);
 }
-
-

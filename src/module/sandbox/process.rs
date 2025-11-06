@@ -1,5 +1,5 @@
 //! Process-level sandboxing and resource limits
-//! 
+//!
 //! Implements CPU, memory, and file descriptor limits for module processes.
 
 use std::path::Path;
@@ -23,10 +23,10 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_cpu_percent: Some(50), // Default: 50% CPU
+            max_cpu_percent: Some(50),                 // Default: 50% CPU
             max_memory_bytes: Some(512 * 1024 * 1024), // Default: 512 MB
-            max_file_descriptors: Some(256), // Default: 256 FDs
-            max_child_processes: Some(10), // Default: 10 child processes
+            max_file_descriptors: Some(256),           // Default: 256 FDs
+            max_child_processes: Some(10),             // Default: 10 child processes
         }
     }
 }
@@ -51,7 +51,7 @@ impl SandboxConfig {
             strict_mode: false, // Phase 1: disabled, Phase 2+: enabled
         }
     }
-    
+
     /// Create strict sandbox config (for Phase 2+)
     pub fn strict<P: AsRef<Path>>(data_dir: P) -> Self {
         Self {
@@ -72,9 +72,9 @@ impl ProcessSandbox {
     pub fn new(config: SandboxConfig) -> Self {
         Self { config }
     }
-    
+
     /// Apply resource limits to a process
-    /// 
+    ///
     /// On Unix systems, uses `setrlimit` and process groups.
     /// On Windows, uses job objects (Phase 2+).
     pub fn apply_limits(&self, _pid: Option<u32>) -> Result<(), ModuleError> {
@@ -82,23 +82,23 @@ impl ProcessSandbox {
         // Phase 2+: Implement OS-specific resource limiting
         // - Unix: Use `setrlimit` via `libc` or `nix` crate
         // - Windows: Use job objects via Windows API
-        
+
         if self.config.strict_mode {
             warn!("Strict sandboxing requested but not yet implemented (Phase 2+)");
             // TODO: Implement OS-specific sandboxing
         }
-        
+
         debug!("Resource limits configured (enforcement pending Phase 2+)");
         Ok(())
     }
-    
+
     /// Monitor process resource usage
     pub async fn monitor_resources(&self, _pid: Option<u32>) -> Result<ResourceUsage, ModuleError> {
         // Phase 1: Resource monitoring placeholder
         // Phase 2+: Implement actual resource monitoring
         // - Read from /proc/<pid>/stat (Linux)
         // - Use process APIs (Windows)
-        
+
         Ok(ResourceUsage {
             cpu_percent: 0.0,
             memory_bytes: 0,
@@ -106,7 +106,7 @@ impl ProcessSandbox {
             child_processes: 0,
         })
     }
-    
+
     /// Get sandbox configuration
     pub fn config(&self) -> &SandboxConfig {
         &self.config
@@ -152,4 +152,3 @@ impl ResourceUsage {
         false
     }
 }
-

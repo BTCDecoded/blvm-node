@@ -3,12 +3,12 @@
 //! Generates, caches, and serves compact block filters for light client support.
 //! Maintains filter header chain for efficient verification.
 
-use protocol_engine::{Block, BlockHeader, Hash, Transaction};
-use crate::bip158::{CompactBlockFilter, build_block_filter};
 use crate::bip157;
+use crate::bip158::{build_block_filter, CompactBlockFilter};
+use anyhow::{anyhow, Result};
+use protocol_engine::{Block, BlockHeader, Hash, Transaction};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use anyhow::{Result, anyhow};
 
 /// Block filter service for generating and serving BIP158 filters
 #[derive(Debug, Clone)]
@@ -59,18 +59,28 @@ impl BlockFilterService {
         let block_hash = self.calculate_block_hash(&block.header);
 
         // Cache filter
-        self.filters.write().unwrap().insert(block_hash, filter.clone());
-        self.block_hash_to_height.write().unwrap().insert(block_hash, height);
+        self.filters
+            .write()
+            .unwrap()
+            .insert(block_hash, filter.clone());
+        self.block_hash_to_height
+            .write()
+            .unwrap()
+            .insert(block_hash, height);
 
         // Update filter header chain
         let prev_header = if height > 0 {
-            self.filter_headers.read().unwrap().get((height - 1) as usize).cloned()
+            self.filter_headers
+                .read()
+                .unwrap()
+                .get((height - 1) as usize)
+                .cloned()
         } else {
             None
         };
 
         let filter_header = bip157::FilterHeader::new(&filter, prev_header.as_ref());
-        
+
         // Extend filter header chain if needed
         let mut headers = self.filter_headers.write().unwrap();
         let current_len = headers.len() as u32;
@@ -88,7 +98,11 @@ impl BlockFilterService {
 
     /// Get filter header at a specific height
     pub fn get_filter_header(&self, height: u32) -> Option<bip157::FilterHeader> {
-        self.filter_headers.read().unwrap().get(height as usize).cloned()
+        self.filter_headers
+            .read()
+            .unwrap()
+            .get(height as usize)
+            .cloned()
     }
 
     /// Get filter headers in a range
@@ -106,9 +120,10 @@ impl BlockFilterService {
     ) -> Result<Vec<Hash>> {
         let headers = self.filter_headers.read().unwrap();
         let height_to_hash = self.block_hash_to_height.read().unwrap();
-        
+
         // Find stop height
-        let stop_height = height_to_hash.get(&stop_hash)
+        let stop_height = height_to_hash
+            .get(&stop_hash)
             .copied()
             .ok_or_else(|| anyhow!("Stop hash not found"))?;
 
@@ -135,7 +150,8 @@ impl BlockFilterService {
     /// Vector of filter header hashes at checkpoint intervals
     pub fn get_filter_checkpoints(&self, stop_hash: Hash) -> Result<Vec<Hash>> {
         let height_to_hash = self.block_hash_to_height.read().unwrap();
-        let stop_height = height_to_hash.get(&stop_hash)
+        let stop_height = height_to_hash
+            .get(&stop_hash)
             .copied()
             .ok_or_else(|| anyhow!("Stop hash not found"))?;
 
@@ -144,7 +160,7 @@ impl BlockFilterService {
 
         // Checkpoints every 1000 blocks (per BIP157)
         let checkpoint_interval = 1000;
-        
+
         for height in (0..=stop_height).step_by(checkpoint_interval as usize) {
             if let Some(header) = headers.get(height as usize) {
                 checkpoints.push(header.header_hash());
@@ -159,14 +175,18 @@ impl BlockFilterService {
         if start_height == 0 {
             return None;
         }
-        self.filter_headers.read().unwrap().get((start_height - 1) as usize).cloned()
+        self.filter_headers
+            .read()
+            .unwrap()
+            .get((start_height - 1) as usize)
+            .cloned()
     }
 
     /// Calculate block hash from header (simplified)
     /// In production, this should use proper Bitcoin block hash calculation
     fn calculate_block_hash(&self, header: &BlockHeader) -> Hash {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         // Serialize header (simplified)
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&header.version.to_le_bytes());
@@ -175,11 +195,11 @@ impl BlockFilterService {
         bytes.extend_from_slice(&header.timestamp.to_le_bytes());
         bytes.extend_from_slice(&header.bits.to_le_bytes());
         bytes.extend_from_slice(&header.nonce.to_le_bytes());
-        
+
         // Double SHA256
         let first = Sha256::digest(&bytes);
         let second = Sha256::digest(&first);
-        
+
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&second);
         hash
@@ -214,4 +234,3 @@ mod tests {
         assert!(service.get_filter(&hash).is_none());
     }
 }
-

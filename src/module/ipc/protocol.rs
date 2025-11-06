@@ -1,13 +1,13 @@
 //! IPC message protocol
-//! 
+//!
 //! Defines the message types and serialization for IPC communication
 //! between modules and the base node.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::{Block, BlockHeader, Transaction, Hash, OutPoint, UTXO};
 use crate::module::traits::EventType;
+use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 
 /// Correlation ID for matching requests with responses
 pub type CorrelationId = u64;
@@ -32,7 +32,7 @@ impl ModuleMessage {
             ModuleMessage::Event(_) => None,
         }
     }
-    
+
     /// Get message type
     pub fn message_type(&self) -> MessageType {
         match self {
@@ -131,7 +131,7 @@ impl RequestMessage {
             payload: RequestPayload::GetBlock { hash },
         }
     }
-    
+
     pub fn get_block_header(correlation_id: CorrelationId, hash: Hash) -> Self {
         Self {
             correlation_id,
@@ -139,7 +139,7 @@ impl RequestMessage {
             payload: RequestPayload::GetBlockHeader { hash },
         }
     }
-    
+
     pub fn get_transaction(correlation_id: CorrelationId, hash: Hash) -> Self {
         Self {
             correlation_id,
@@ -147,7 +147,7 @@ impl RequestMessage {
             payload: RequestPayload::GetTransaction { hash },
         }
     }
-    
+
     pub fn has_transaction(correlation_id: CorrelationId, hash: Hash) -> Self {
         Self {
             correlation_id,
@@ -155,7 +155,7 @@ impl RequestMessage {
             payload: RequestPayload::HasTransaction { hash },
         }
     }
-    
+
     pub fn get_chain_tip(correlation_id: CorrelationId) -> Self {
         Self {
             correlation_id,
@@ -163,7 +163,7 @@ impl RequestMessage {
             payload: RequestPayload::GetChainTip,
         }
     }
-    
+
     pub fn get_block_height(correlation_id: CorrelationId) -> Self {
         Self {
             correlation_id,
@@ -171,7 +171,7 @@ impl RequestMessage {
             payload: RequestPayload::GetBlockHeight,
         }
     }
-    
+
     pub fn get_utxo(correlation_id: CorrelationId, outpoint: OutPoint) -> Self {
         Self {
             correlation_id,
@@ -179,7 +179,7 @@ impl RequestMessage {
             payload: RequestPayload::GetUtxo { outpoint },
         }
     }
-    
+
     pub fn subscribe_events(correlation_id: CorrelationId, event_types: Vec<EventType>) -> Self {
         Self {
             correlation_id,
@@ -199,7 +199,7 @@ impl ResponseMessage {
             error: None,
         }
     }
-    
+
     pub fn error(correlation_id: CorrelationId, error: String) -> Self {
         Self {
             correlation_id,
@@ -209,4 +209,3 @@ impl ResponseMessage {
         }
     }
 }
-

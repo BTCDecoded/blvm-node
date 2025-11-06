@@ -1,10 +1,9 @@
 //! Process management for modules
-//! 
+//!
 //! Handles spawning, monitoring, and lifecycle management of module processes.
 
-pub mod spawner;
 pub mod monitor;
+pub mod spawner;
 
-pub use spawner::{ModuleProcessSpawner, ModuleProcess};
-pub use monitor::{ModuleProcessMonitor, ModuleHealth};
-
+pub use monitor::{ModuleHealth, ModuleProcessMonitor};
+pub use spawner::{ModuleProcess, ModuleProcessSpawner};

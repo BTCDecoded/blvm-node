@@ -3,9 +3,9 @@
 //! Handles conversion between consensus-proof NetworkMessage types and
 //! transport-specific wire formats (TCP Bitcoin P2P vs Iroh message format).
 
+use crate::network::transport::{Transport, TransportType};
 use anyhow::Result;
 use protocol_engine::network::NetworkMessage as ConsensusNetworkMessage;
-use crate::network::transport::{Transport, TransportType};
 
 /// Protocol adapter for Bitcoin messages
 ///
@@ -22,18 +22,14 @@ impl ProtocolAdapter {
         transport: TransportType,
     ) -> Result<Vec<u8>> {
         match transport {
-            TransportType::Tcp => {
-                Self::serialize_bitcoin_wire_format(msg)
-            }
+            TransportType::Tcp => Self::serialize_bitcoin_wire_format(msg),
             #[cfg(feature = "quinn")]
             TransportType::Quinn => {
                 // Quinn uses same format as Iroh (JSON-based) for simplicity
                 Self::serialize_iroh_format(msg)
             }
             #[cfg(feature = "iroh")]
-            TransportType::Iroh => {
-                Self::serialize_iroh_format(msg)
-            }
+            TransportType::Iroh => Self::serialize_iroh_format(msg),
         }
     }
 
@@ -43,18 +39,14 @@ impl ProtocolAdapter {
         transport: TransportType,
     ) -> Result<ConsensusNetworkMessage> {
         match transport {
-            TransportType::Tcp => {
-                Self::deserialize_bitcoin_wire_format(data)
-            }
+            TransportType::Tcp => Self::deserialize_bitcoin_wire_format(data),
             #[cfg(feature = "quinn")]
             TransportType::Quinn => {
                 // Quinn uses same format as Iroh (JSON-based) for simplicity
                 Self::deserialize_iroh_format(data)
             }
             #[cfg(feature = "iroh")]
-            TransportType::Iroh => {
-                Self::deserialize_iroh_format(data)
-            }
+            TransportType::Iroh => Self::deserialize_iroh_format(data),
         }
     }
 
@@ -63,28 +55,24 @@ impl ProtocolAdapter {
     /// Format: [magic:4][command:12][length:4][checksum:4][payload:var]
     fn serialize_bitcoin_wire_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
         use crate::network::protocol::ProtocolParser;
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         // Convert consensus-proof message to protocol message
         let protocol_msg = Self::consensus_to_protocol_message(msg)?;
-        
+
         // Serialize payload
         let payload = match &protocol_msg {
-            crate::network::protocol::ProtocolMessage::Version(v) => {
-                bincode::serialize(v)?
-            }
+            crate::network::protocol::ProtocolMessage::Version(v) => bincode::serialize(v)?,
             crate::network::protocol::ProtocolMessage::Verack => {
                 vec![]
             }
-            crate::network::protocol::ProtocolMessage::Ping(p) => {
-                bincode::serialize(p)?
-            }
-            crate::network::protocol::ProtocolMessage::Pong(p) => {
-                bincode::serialize(p)?
-            }
+            crate::network::protocol::ProtocolMessage::Ping(p) => bincode::serialize(p)?,
+            crate::network::protocol::ProtocolMessage::Pong(p) => bincode::serialize(p)?,
             // Add other message types as needed
             _ => {
-                return Err(anyhow::anyhow!("Unsupported message type for serialization"));
+                return Err(anyhow::anyhow!(
+                    "Unsupported message type for serialization"
+                ));
             }
         };
 
@@ -100,19 +88,19 @@ impl ProtocolAdapter {
 
         // Build message
         let mut message = Vec::new();
-        
+
         // Magic bytes (mainnet)
         message.extend_from_slice(&0xf9beb4d9u32.to_le_bytes());
-        
+
         // Command
         message.extend_from_slice(&command_bytes);
-        
+
         // Payload length
         message.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        
+
         // Checksum
         message.extend_from_slice(checksum);
-        
+
         // Payload
         message.extend_from_slice(&payload);
 
@@ -122,10 +110,10 @@ impl ProtocolAdapter {
     /// Deserialize from Bitcoin P2P wire protocol format
     fn deserialize_bitcoin_wire_format(data: &[u8]) -> Result<ConsensusNetworkMessage> {
         use crate::network::protocol::ProtocolParser;
-        
+
         // Parse using existing protocol parser
         let protocol_msg = ProtocolParser::parse_message(data)?;
-        
+
         // Convert to consensus-proof message
         Self::protocol_to_consensus_message(&protocol_msg)
     }
@@ -160,17 +148,15 @@ impl ProtocolAdapter {
         msg: &ConsensusNetworkMessage,
     ) -> Result<crate::network::protocol::ProtocolMessage> {
         use crate::network::protocol::{
-            ProtocolMessage, VersionMessage as ProtoVersionMessage,
             NetworkAddress as ProtoNetworkAddress, PingMessage as ProtoPingMessage,
-            PongMessage as ProtoPongMessage,
+            PongMessage as ProtoPongMessage, ProtocolMessage,
+            VersionMessage as ProtoVersionMessage,
         };
         use protocol_engine::network::{
-            VersionMessage as ConsensusVersionMessage,
-            NetworkAddress as ConsensusNetworkAddress,
-            PingMessage as ConsensusPingMessage,
-            PongMessage as ConsensusPongMessage,
+            NetworkAddress as ConsensusNetworkAddress, PingMessage as ConsensusPingMessage,
+            PongMessage as ConsensusPongMessage, VersionMessage as ConsensusVersionMessage,
         };
-        
+
         match msg {
             ConsensusNetworkMessage::Version(v) => {
                 Ok(ProtocolMessage::Version(ProtoVersionMessage {
@@ -193,22 +179,16 @@ impl ProtocolAdapter {
                     relay: v.relay,
                 }))
             }
-            ConsensusNetworkMessage::VerAck => {
-                Ok(ProtocolMessage::Verack)
-            }
+            ConsensusNetworkMessage::VerAck => Ok(ProtocolMessage::Verack),
             ConsensusNetworkMessage::Ping(p) => {
-                Ok(ProtocolMessage::Ping(ProtoPingMessage {
-                    nonce: p.nonce,
-                }))
+                Ok(ProtocolMessage::Ping(ProtoPingMessage { nonce: p.nonce }))
             }
             ConsensusNetworkMessage::Pong(p) => {
-                Ok(ProtocolMessage::Pong(ProtoPongMessage {
-                    nonce: p.nonce,
-                }))
+                Ok(ProtocolMessage::Pong(ProtoPongMessage { nonce: p.nonce }))
             }
-            _ => {
-                Err(anyhow::anyhow!("Unsupported message type for protocol conversion"))
-            }
+            _ => Err(anyhow::anyhow!(
+                "Unsupported message type for protocol conversion"
+            )),
         }
     }
 
@@ -216,17 +196,15 @@ impl ProtocolAdapter {
     fn protocol_to_consensus_message(
         msg: &crate::network::protocol::ProtocolMessage,
     ) -> Result<ConsensusNetworkMessage> {
-        use protocol_engine::network::{
-            VersionMessage as ConsensusVersionMessage,
-            NetworkAddress as ConsensusNetworkAddress,
-            PingMessage as ConsensusPingMessage,
-            PongMessage as ConsensusPongMessage,
-        };
         use crate::network::protocol::{
-            ProtocolMessage, VersionMessage as ProtoVersionMessage,
-            PingMessage as ProtoPingMessage, PongMessage as ProtoPongMessage,
+            PingMessage as ProtoPingMessage, PongMessage as ProtoPongMessage, ProtocolMessage,
+            VersionMessage as ProtoVersionMessage,
         };
-        
+        use protocol_engine::network::{
+            NetworkAddress as ConsensusNetworkAddress, PingMessage as ConsensusPingMessage,
+            PongMessage as ConsensusPongMessage, VersionMessage as ConsensusVersionMessage,
+        };
+
         match msg {
             ProtocolMessage::Version(v) => {
                 Ok(ConsensusNetworkMessage::Version(ConsensusVersionMessage {
@@ -249,29 +227,23 @@ impl ProtocolAdapter {
                     relay: v.relay,
                 }))
             }
-            ProtocolMessage::Verack => {
-                Ok(ConsensusNetworkMessage::VerAck)
-            }
-            ProtocolMessage::Ping(p) => {
-                Ok(ConsensusNetworkMessage::Ping(ConsensusPingMessage {
-                    nonce: p.nonce,
-                }))
-            }
-            ProtocolMessage::Pong(p) => {
-                Ok(ConsensusNetworkMessage::Pong(ConsensusPongMessage {
-                    nonce: p.nonce,
-                }))
-            }
-            _ => {
-                Err(anyhow::anyhow!("Unsupported message type for consensus conversion"))
-            }
+            ProtocolMessage::Verack => Ok(ConsensusNetworkMessage::VerAck),
+            ProtocolMessage::Ping(p) => Ok(ConsensusNetworkMessage::Ping(ConsensusPingMessage {
+                nonce: p.nonce,
+            })),
+            ProtocolMessage::Pong(p) => Ok(ConsensusNetworkMessage::Pong(ConsensusPongMessage {
+                nonce: p.nonce,
+            })),
+            _ => Err(anyhow::anyhow!(
+                "Unsupported message type for consensus conversion"
+            )),
         }
     }
 
     /// Get command string for a message type
     fn message_to_command(msg: &ConsensusNetworkMessage) -> &'static str {
         use protocol_engine::network::*;
-        
+
         match msg {
             ConsensusNetworkMessage::Version(_) => "version",
             ConsensusNetworkMessage::VerAck => "verack",
@@ -289,4 +261,3 @@ impl ProtocolAdapter {
         }
     }
 }
-

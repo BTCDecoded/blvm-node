@@ -1,8 +1,10 @@
 #![cfg(feature = "dandelion")]
-use reference_node::network::relay::RelayManager;
 use consensus_proof::Hash;
+use reference_node::network::relay::RelayManager;
 
-fn hash_from_u8(v: u8) -> Hash { [v; 32] }
+fn hash_from_u8(v: u8) -> Hash {
+    [v; 32]
+}
 
 #[test]
 fn stem_then_fluff_via_hop_limit() {
@@ -26,5 +28,3 @@ fn stem_then_fluff_via_hop_limit() {
     let next2 = relay.relay_transaction_dandelion(tx, "p1".into(), &peers);
     assert!(next2.is_none());
 }
-
-

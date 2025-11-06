@@ -6,7 +6,7 @@
 
 #[cfg(feature = "quinn")]
 use crate::network::transport::{
-    Transport, TransportConnection, TransportListener, TransportType, TransportAddr,
+    Transport, TransportAddr, TransportConnection, TransportListener, TransportType,
 };
 #[cfg(feature = "quinn")]
 use anyhow::Result;
@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 #[cfg(feature = "quinn")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "quinn")]
-use tracing::{debug, error, warn, info};
+use tracing::{debug, error, info, warn};
 
 /// Quinn transport implementation
 ///
@@ -37,14 +37,12 @@ impl QuinnTransport {
         // Create client endpoint
         // For now, use default client config (will need proper cert verification later)
         let endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
-        
+
         info!("Quinn transport initialized (client mode)");
-        
-        Ok(Self {
-            endpoint,
-        })
+
+        Ok(Self { endpoint })
     }
-    
+
     // Note: Server certificates are handled in listen() method
     // This transport uses self-signed certs for development
 }
@@ -66,13 +64,13 @@ impl Transport for QuinnTransport {
         // Convert to DER formats expected by quinn
         let cert_der = rustls::pki_types::CertificateDer::from(cert.serialize_der()?);
         let key_der = rustls::pki_types::PrivateKeyDer::from(
-            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.serialize_private_key_der())
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()),
         );
-        
+
         let server_config = quinn::ServerConfig::with_single_cert(vec![cert_der], key_der)?;
-        
+
         let endpoint = quinn::Endpoint::server(server_config, addr)?;
-        
+
         Ok(QuinnListener {
             endpoint,
             local_addr: addr,
@@ -92,13 +90,11 @@ impl Transport for QuinnTransport {
         // Create a new endpoint for this connection
         // For now, use default client endpoint (will need proper cert verification later)
         let endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
-        
+
         // Connect to server (use SNI or IP)
         let server_name = socket_addr.ip().to_string();
-        let conn = endpoint
-            .connect(socket_addr, &server_name)?
-            .await?;
-        
+        let conn = endpoint.connect(socket_addr, &server_name)?.await?;
+
         Ok(QuinnConnection {
             conn,
             peer_addr: TransportAddr::Quinn(socket_addr),
@@ -121,18 +117,21 @@ impl TransportListener for QuinnListener {
 
     async fn accept(&mut self) -> Result<(Self::Connection, TransportAddr)> {
         // Accept incoming QUIC connection
-        let conn = self.endpoint.accept().await
+        let conn = self
+            .endpoint
+            .accept()
+            .await
             .ok_or_else(|| anyhow::anyhow!("Endpoint closed"))?;
-        
+
         // Wait for connection handshake
         let conn = conn.await?;
-        
+
         // Extract peer address from connection
         let peer_addr = conn.remote_address();
         let transport_addr = TransportAddr::Quinn(peer_addr);
-        
+
         debug!("Accepted Quinn connection from {}", peer_addr);
-        
+
         Ok((
             QuinnConnection {
                 conn,
@@ -166,15 +165,15 @@ impl TransportConnection for QuinnConnection {
 
         // Open a new QUIC unidirectional stream for sending data
         let mut stream = self.conn.open_uni().await?;
-        
+
         // Write length prefix (4 bytes, big-endian)
         let len = data.len() as u32;
         stream.write_all(&len.to_be_bytes()).await?;
-        
+
         // Write data
         stream.write_all(data).await?;
         stream.finish()?;
-        
+
         Ok(())
     }
 
@@ -236,4 +235,3 @@ impl QuinnTransport {
         Err(anyhow::anyhow!("Quinn transport requires 'quinn' feature"))
     }
 }
-

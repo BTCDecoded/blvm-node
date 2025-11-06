@@ -7,20 +7,27 @@ use anyhow::Result;
 use tracing::{debug, warn};
 
 use crate::network::package_relay::{
-    PackageRelay, TransactionPackage, PackageId, PackageRejectReason,
+    PackageId, PackageRejectReason, PackageRelay, TransactionPackage,
 };
-use crate::network::protocol::{SendPkgTxnMessage, PkgTxnMessage, PkgTxnRejectMessage};
+use crate::network::protocol::{PkgTxnMessage, PkgTxnRejectMessage, SendPkgTxnMessage};
 use protocol_engine::Transaction;
 
 /// Handle sendpkgtxn request (peer signals intent to send a package)
 pub fn handle_sendpkgtxn(_relay: &PackageRelay, msg: &SendPkgTxnMessage) -> Result<()> {
-    debug!("Received sendpkgtxn for package {} ({} tx hashes)", hex::encode(&msg.package_id), msg.tx_hashes.len());
+    debug!(
+        "Received sendpkgtxn for package {} ({} tx hashes)",
+        hex::encode(&msg.package_id),
+        msg.tx_hashes.len()
+    );
     // In a full implementation, we could decide to request the package or ignore it based on policy
     Ok(())
 }
 
 /// Handle pkgtxn: validate package and return optional rejection
-pub fn handle_pkgtxn(relay: &mut PackageRelay, msg: &PkgTxnMessage) -> Result<Option<PkgTxnRejectMessage>> {
+pub fn handle_pkgtxn(
+    relay: &mut PackageRelay,
+    msg: &PkgTxnMessage,
+) -> Result<Option<PkgTxnRejectMessage>> {
     // Deserialize transactions (they are bincode-serialized protocol_engine::Transaction)
     let mut txs: Vec<Transaction> = Vec::with_capacity(msg.transactions.len());
     for raw in &msg.transactions {
@@ -71,17 +78,19 @@ pub fn handle_pkgtxn(relay: &mut PackageRelay, msg: &PkgTxnMessage) -> Result<Op
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol_engine::{TransactionInput, TransactionOutput, OutPoint};
+    use protocol_engine::{OutPoint, TransactionInput, TransactionOutput};
 
     fn minimal_tx() -> Transaction {
         Transaction {
             version: 1,
             inputs: vec![],
-            outputs: vec![TransactionOutput { value: 0, script_pubkey: vec![] }],
+            outputs: vec![TransactionOutput {
+                value: 0,
+                script_pubkey: vec![],
+            }],
             lock_time: 0,
         }
     }
@@ -115,4 +124,3 @@ mod tests {
         assert!(result.is_none());
     }
 }
-

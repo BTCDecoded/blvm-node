@@ -1,13 +1,13 @@
 //! Mempool RPC Methods
-//! 
+//!
 //! Implements mempool-related JSON-RPC methods:
 //! - getmempoolinfo
 //! - getrawmempool
 //! - savemempool
 
-use serde_json::{Value, json};
-use tracing::debug;
 use crate::rpc::errors::RpcResult;
+use serde_json::{json, Value};
+use tracing::debug;
 
 /// Mempool RPC methods
 pub struct MempoolRpc;
@@ -17,15 +17,15 @@ impl MempoolRpc {
     pub fn new() -> Self {
         Self
     }
-    
+
     /// Get mempool information
-    /// 
+    ///
     /// Params: []
     pub async fn getmempoolinfo(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmempoolinfo");
-        
+
         // TODO: Query actual mempool state from node::mempool
-        
+
         // Placeholder response matching Bitcoin Core format
         Ok(json!({
             "loaded": true,
@@ -37,19 +37,17 @@ impl MempoolRpc {
             "minrelaytxfee": 0.00001000
         }))
     }
-    
+
     /// Get all transaction IDs in mempool
-    /// 
+    ///
     /// Params: [verbose (optional, default: false)]
     pub async fn getrawmempool(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getrawmempool");
-        
-        let verbose = params.get(0)
-            .and_then(|p| p.as_bool())
-            .unwrap_or(false);
-        
+
+        let verbose = params.get(0).and_then(|p| p.as_bool()).unwrap_or(false);
+
         // TODO: Query actual mempool from node::mempool
-        
+
         if verbose {
             // Return object with transaction details
             Ok(json!({
@@ -82,15 +80,15 @@ impl MempoolRpc {
             Ok(json!([]))
         }
     }
-    
+
     /// Save mempool to disk (for node restart persistence)
-    /// 
+    ///
     /// Params: []
     pub async fn savemempool(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: savemempool");
-        
+
         // TODO: Persist mempool to disk using node::mempool
-        
+
         // Placeholder response
         Ok(json!(null))
     }

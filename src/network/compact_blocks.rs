@@ -19,15 +19,15 @@
 //! - Iroh can be used with or without compact blocks
 //! - The combination provides optimal bandwidth and latency for mobile nodes and NAT-traversed connections
 
+use crate::network::transport::TransportType;
 use anyhow::Result;
-use protocol_engine::{Block, BlockHeader, Transaction, Hash};
+use protocol_engine::{Block, BlockHeader, Hash, Transaction};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
-use sha2::{Sha256, Digest};
-use crate::network::transport::TransportType;
 
 /// Short transaction ID (6 bytes / 48 bits)
-/// 
+///
 /// Computed using SipHash-2-4 of the transaction hash with keys derived
 /// from the block header nonce.
 pub type ShortTxId = [u8; 6];
@@ -46,24 +46,24 @@ pub struct CompactBlock {
 }
 
 /// Calculate Bitcoin transaction hash (double SHA256 of serialized transaction)
-/// 
+///
 /// Properly serializes a transaction according to Bitcoin protocol and computes
 /// the transaction ID (txid) using double SHA256.
-/// 
+///
 /// # Arguments
 /// * `tx` - Transaction to hash
-/// 
+///
 /// # Returns
 /// Transaction hash (32 bytes)
 pub fn calculate_tx_hash(tx: &Transaction) -> Hash {
     let mut data = Vec::new();
-    
+
     // Version (4 bytes, little-endian)
     data.extend_from_slice(&(tx.version as u32).to_le_bytes());
-    
+
     // Input count (varint)
     data.extend_from_slice(&encode_varint(tx.inputs.len() as u64));
-    
+
     // Inputs
     for input in &tx.inputs {
         // Previous output hash (32 bytes)
@@ -77,10 +77,10 @@ pub fn calculate_tx_hash(tx: &Transaction) -> Hash {
         // Sequence (4 bytes, little-endian)
         data.extend_from_slice(&(input.sequence as u32).to_le_bytes());
     }
-    
+
     // Output count (varint)
     data.extend_from_slice(&encode_varint(tx.outputs.len() as u64));
-    
+
     // Outputs
     for output in &tx.outputs {
         // Value (8 bytes, little-endian)
@@ -90,14 +90,14 @@ pub fn calculate_tx_hash(tx: &Transaction) -> Hash {
         // Script
         data.extend_from_slice(&output.script_pubkey);
     }
-    
+
     // Lock time (4 bytes, little-endian)
     data.extend_from_slice(&(tx.lock_time as u32).to_le_bytes());
-    
+
     // Double SHA256
     let hash1 = Sha256::digest(&data);
     let hash2 = Sha256::digest(&hash1);
-    
+
     let mut result = [0u8; 32];
     result.copy_from_slice(&hash2);
     result
@@ -123,27 +123,27 @@ fn encode_varint(value: u64) -> Vec<u8> {
 }
 
 /// Calculate short transaction ID
-/// 
+///
 /// Uses SipHash-2-4 with keys derived from block header nonce.
-/// 
+///
 /// # Arguments
 /// * `tx_hash` - Full transaction hash (32 bytes)
 /// * `nonce` - Block nonce (used to derive SipHash keys)
-/// 
+///
 /// # Returns
 /// Short transaction ID (6 bytes)
 pub fn calculate_short_tx_id(tx_hash: &Hash, nonce: u64) -> ShortTxId {
     // Derive SipHash keys from nonce
     let k0 = nonce;
     let k1 = nonce.wrapping_add(1);
-    
+
     // Use SipHash-2-4 to hash the transaction hash
     // siphasher 0.3 uses the Hasher trait from std::hash
     use siphasher::sip::SipHasher24;
     let mut hasher = SipHasher24::new_with_keys(k0, k1);
     hasher.write(tx_hash);
     let hash_result = hasher.finish();
-    
+
     // Take first 6 bytes (48 bits) as short ID
     let mut short_id = [0u8; 6];
     short_id.copy_from_slice(&hash_result.to_le_bytes()[..6]);
@@ -151,18 +151,18 @@ pub fn calculate_short_tx_id(tx_hash: &Hash, nonce: u64) -> ShortTxId {
 }
 
 /// Reconstruct full block from compact block
-/// 
+///
 /// Attempts to match short IDs with transactions from mempool,
 /// then requests missing transactions from peer.
-/// 
+///
 /// **BIP125 + BIP152 Integration**: When matching transactions from mempool,
 /// this function uses RBF conflict detection to ensure that matched transactions
 /// don't conflict with each other or with already-matched transactions.
-/// 
+///
 /// # Arguments
 /// * `compact_block` - The compact block to reconstruct
 /// * `mempool_txs` - Map of transaction hash to transaction from mempool
-/// 
+///
 /// # Returns
 /// Vector of indices for missing transactions (to request via getblocktxn)
 pub fn reconstruct_block(
@@ -171,11 +171,11 @@ pub fn reconstruct_block(
 ) -> Result<Vec<usize>> {
     let mut missing_indices = Vec::new();
     let mut reconstructed_txs = Vec::new();
-    
+
     // Match short IDs with mempool transactions
     for (index, &short_id) in compact_block.short_ids.iter().enumerate() {
         let mut matched = false;
-        
+
         // Search mempool for transaction matching this short ID
         for (tx_hash, tx) in mempool_txs {
             let calculated_short_id = calculate_short_tx_id(tx_hash, compact_block.nonce);
@@ -183,10 +183,10 @@ pub fn reconstruct_block(
                 // BIP125 + BIP152 Integration: Check for RBF conflicts
                 // If this transaction conflicts with already-matched transactions,
                 // don't use it (the block version is authoritative)
-                let has_conflict = reconstructed_txs.iter().any(|(_, existing_tx)| {
-                    has_conflict_with_tx(tx, existing_tx)
-                });
-                
+                let has_conflict = reconstructed_txs
+                    .iter()
+                    .any(|(_, existing_tx)| has_conflict_with_tx(tx, existing_tx));
+
                 if !has_conflict {
                     reconstructed_txs.push((index, tx.clone()));
                     matched = true;
@@ -200,17 +200,17 @@ pub fn reconstruct_block(
                 }
             }
         }
-        
+
         if !matched {
             missing_indices.push(index);
         }
     }
-    
+
     Ok(missing_indices)
 }
 
 /// Check if two transactions conflict (BIP125 requirement #4)
-/// 
+///
 /// A conflict exists if tx1 and tx2 spend at least one common input.
 /// Used during compact block reconstruction to detect RBF conflicts.
 fn has_conflict_with_tx(tx1: &Transaction, tx2: &Transaction) -> bool {
@@ -225,12 +225,12 @@ fn has_conflict_with_tx(tx1: &Transaction, tx2: &Transaction) -> bool {
 }
 
 /// Create compact block from full block
-/// 
+///
 /// # Arguments
 /// * `block` - Full block to convert
 /// * `nonce` - Nonce for short ID calculation (typically from block header)
 /// * `prefilled_indices` - Indices of transactions to include in full (not as short IDs)
-/// 
+///
 /// # Returns
 /// Compact block representation
 pub fn create_compact_block(
@@ -240,7 +240,7 @@ pub fn create_compact_block(
 ) -> CompactBlock {
     let mut short_ids = Vec::new();
     let mut prefilled_txs = Vec::new();
-    
+
     // Calculate short IDs for all transactions
     for (index, tx) in block.transactions.iter().enumerate() {
         if prefilled_indices.contains(&index) {
@@ -253,7 +253,7 @@ pub fn create_compact_block(
             short_ids.push(short_id);
         }
     }
-    
+
     CompactBlock {
         header: block.header.clone(),
         nonce,
@@ -263,13 +263,13 @@ pub fn create_compact_block(
 }
 
 /// Determine if compact blocks should be preferred for a given transport type
-/// 
+///
 /// Compact blocks are especially beneficial for QUIC transports (Iroh/Quinn)
 /// due to QUIC's lower latency and better handling of multiple streams.
-/// 
+///
 /// # Arguments
 /// * `transport_type` - The transport type being used
-/// 
+///
 /// # Returns
 /// `true` if compact blocks should be preferred for this transport
 pub fn should_prefer_compact_blocks(transport_type: TransportType) -> bool {
@@ -300,11 +300,11 @@ pub fn negotiate_optimizations(
     peer_services: u64,
 ) -> (u64, bool, bool) {
     use crate::bip157::NODE_COMPACT_FILTERS;
-    
+
     let compact_version = recommended_compact_block_version(transport_type);
     let prefer_compact = should_prefer_compact_blocks(transport_type);
     let supports_filters = (peer_services & NODE_COMPACT_FILTERS) != 0;
-    
+
     (compact_version, prefer_compact, supports_filters)
 }
 
@@ -320,9 +320,10 @@ pub fn create_optimized_sendcmpct(
     peer_services: u64,
 ) -> crate::network::protocol::SendCmpctMessage {
     use crate::network::protocol::SendCmpctMessage;
-    
-    let (version, prefer_cmpct, _supports_filters) = negotiate_optimizations(transport_type, peer_services);
-    
+
+    let (version, prefer_cmpct, _supports_filters) =
+        negotiate_optimizations(transport_type, peer_services);
+
     // When both compact blocks and filters are available, prefer compact blocks
     // This reduces bandwidth for both features working together
     SendCmpctMessage {
@@ -332,13 +333,13 @@ pub fn create_optimized_sendcmpct(
 }
 
 /// Get recommended compact block version based on transport
-/// 
+///
 /// Returns the compact block version to negotiate based on transport capabilities.
 /// Version 2 adds prefilled transaction index optimization which works well with QUIC.
-/// 
+///
 /// # Arguments
 /// * `transport_type` - The transport type being used
-/// 
+///
 /// # Returns
 /// Recommended compact block version (1 or 2)
 pub fn recommended_compact_block_version(transport_type: TransportType) -> u64 {
@@ -354,15 +355,15 @@ pub fn recommended_compact_block_version(transport_type: TransportType) -> u64 {
 }
 
 /// Check if transport supports QUIC (Iroh or Quinn)
-/// 
+///
 /// QUIC transports benefit more from compact blocks due to:
 /// - Lower latency on connection establishment
 /// - Better multiplexing for multiple block requests
 /// - Stream prioritization for compact block data
-/// 
+///
 /// # Arguments
 /// * `transport_type` - The transport type to check
-/// 
+///
 /// # Returns
 /// `true` if transport is QUIC-based
 pub fn is_quic_transport(transport_type: TransportType) -> bool {
@@ -381,17 +382,17 @@ pub fn is_quic_transport(transport_type: TransportType) -> bool {
 mod tests {
     use super::*;
     use crate::network::transport::TransportType;
-    
+
     #[test]
     fn test_calculate_short_tx_id() {
         let tx_hash = [0u8; 32];
         let nonce = 12345u64;
         let short_id = calculate_short_tx_id(&tx_hash, nonce);
-        
+
         // Short ID should be 6 bytes
         assert_eq!(short_id.len(), 6);
     }
-    
+
     #[test]
     fn test_reconstruct_block_empty_mempool() {
         let compact_block = CompactBlock {
@@ -407,10 +408,10 @@ mod tests {
             short_ids: vec![[0u8; 6]],
             prefilled_txs: vec![],
         };
-        
+
         let mempool_txs = HashMap::new();
         let missing = reconstruct_block(&compact_block, &mempool_txs).unwrap();
-        
+
         // All transactions should be missing
         assert_eq!(missing.len(), 1);
     }
@@ -475,4 +476,3 @@ mod tests {
         assert_eq!(is_quic_transport(TransportType::Iroh), true);
     }
 }
-

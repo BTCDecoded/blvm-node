@@ -10,7 +10,7 @@ use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
 use crate::network::stratum_v2::messages::*;
 use protocol_engine::types::{Block, Hash};
 use std::collections::HashMap;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 /// Secondary chain configuration for merge mining
 #[derive(Debug, Clone)]
@@ -73,25 +73,36 @@ impl MergeMiningCoordinator {
             chain_revenue: HashMap::new(),
         }
     }
-    
+
     /// Enable merge mining for a chain
     pub fn enable_chain(&mut self, chain_id: &str) -> StratumV2Result<()> {
-        if let Some(chain) = self.secondary_chains.iter_mut().find(|c| c.chain_id == chain_id) {
+        if let Some(chain) = self
+            .secondary_chains
+            .iter_mut()
+            .find(|c| c.chain_id == chain_id)
+        {
             chain.enabled = true;
             info!("Enabled merge mining for chain: {}", chain_id);
             Ok(())
         } else {
-            Err(StratumV2Error::Configuration(format!("Chain not found: {}", chain_id)))
+            Err(StratumV2Error::Configuration(format!(
+                "Chain not found: {}",
+                chain_id
+            )))
         }
     }
-    
+
     /// Create merge mining channel for a chain
     pub fn create_channel(&mut self, chain_id: &str, channel_id: u32) -> StratumV2Result<()> {
         // Verify chain is enabled
-        let chain = self.secondary_chains.iter()
+        let chain = self
+            .secondary_chains
+            .iter()
             .find(|c| c.chain_id == chain_id && c.enabled)
-            .ok_or_else(|| StratumV2Error::Configuration(format!("Chain not enabled: {}", chain_id)))?;
-        
+            .ok_or_else(|| {
+                StratumV2Error::Configuration(format!("Chain not enabled: {}", chain_id))
+            })?;
+
         let merge_channel = MergeMiningChannel {
             chain_id: chain_id.to_string(),
             channel_id,
@@ -99,13 +110,16 @@ impl MergeMiningCoordinator {
             total_rewards: 0,
             shares_submitted: 0,
         };
-        
+
         self.channels.insert(chain_id.to_string(), merge_channel);
-        info!("Created merge mining channel {} for chain {}", channel_id, chain_id);
-        
+        info!(
+            "Created merge mining channel {} for chain {}",
+            channel_id, chain_id
+        );
+
         Ok(())
     }
-    
+
     /// Update job for a merge mining channel
     pub fn update_job(&mut self, chain_id: &str, job_id: u32) -> StratumV2Result<()> {
         if let Some(channel) = self.channels.get_mut(chain_id) {
@@ -113,10 +127,13 @@ impl MergeMiningCoordinator {
             debug!("Updated job {} for chain {}", job_id, chain_id);
             Ok(())
         } else {
-            Err(StratumV2Error::MiningJob(format!("Channel not found for chain: {}", chain_id)))
+            Err(StratumV2Error::MiningJob(format!(
+                "Channel not found for chain: {}",
+                chain_id
+            )))
         }
     }
-    
+
     /// Record share submission for a chain
     pub fn record_share(&mut self, chain_id: &str, share_count: u64) -> StratumV2Result<()> {
         if let Some(channel) = self.channels.get_mut(chain_id) {
@@ -124,23 +141,32 @@ impl MergeMiningCoordinator {
             debug!("Recorded {} shares for chain {}", share_count, chain_id);
             Ok(())
         } else {
-            Err(StratumV2Error::MiningJob(format!("Channel not found for chain: {}", chain_id)))
+            Err(StratumV2Error::MiningJob(format!(
+                "Channel not found for chain: {}",
+                chain_id
+            )))
         }
     }
-    
+
     /// Record reward for a chain
     pub fn record_reward(&mut self, chain_id: &str, reward: u64) -> StratumV2Result<()> {
         if let Some(channel) = self.channels.get_mut(chain_id) {
             channel.total_rewards += reward;
             *self.chain_revenue.entry(chain_id.to_string()).or_insert(0) += reward;
             self.total_revenue += reward;
-            info!("Recorded reward {} for chain {} (total: {})", reward, chain_id, channel.total_rewards);
+            info!(
+                "Recorded reward {} for chain {} (total: {})",
+                reward, chain_id, channel.total_rewards
+            );
             Ok(())
         } else {
-            Err(StratumV2Error::MiningJob(format!("Channel not found for chain: {}", chain_id)))
+            Err(StratumV2Error::MiningJob(format!(
+                "Channel not found for chain: {}",
+                chain_id
+            )))
         }
     }
-    
+
     /// Calculate revenue distribution (per whitepaper: 60% core, 25% grants, 10% audits, 5% ops)
     pub fn calculate_revenue_distribution(&self, total_revenue: u64) -> RevenueDistribution {
         RevenueDistribution {
@@ -150,46 +176,42 @@ impl MergeMiningCoordinator {
             operations: (total_revenue * 5) / 100,
         }
     }
-    
+
     /// Get revenue distribution for total tracked revenue
     pub fn get_total_revenue_distribution(&self) -> RevenueDistribution {
         self.calculate_revenue_distribution(self.total_revenue)
     }
-    
+
     /// Get revenue distribution per chain
     pub fn get_chain_revenue_distribution(&self, chain_id: &str) -> Option<RevenueDistribution> {
-        self.chain_revenue.get(chain_id).map(|&revenue| {
-            self.calculate_revenue_distribution(revenue)
-        })
+        self.chain_revenue
+            .get(chain_id)
+            .map(|&revenue| self.calculate_revenue_distribution(revenue))
     }
-    
+
     /// Get enabled chains
     pub fn get_enabled_chains(&self) -> Vec<&SecondaryChain> {
-        self.secondary_chains.iter()
-            .filter(|c| c.enabled)
-            .collect()
+        self.secondary_chains.iter().filter(|c| c.enabled).collect()
     }
-    
+
     /// Get merge mining channel for a chain
     pub fn get_channel(&self, chain_id: &str) -> Option<&MergeMiningChannel> {
         self.channels.get(chain_id)
     }
-    
+
     /// Get all active channels
     pub fn get_all_channels(&self) -> Vec<&MergeMiningChannel> {
         self.channels.values().collect()
     }
-    
+
     /// Get chain statistics
     pub fn get_chain_stats(&self, chain_id: &str) -> Option<ChainStatistics> {
-        self.channels.get(chain_id).map(|channel| {
-            ChainStatistics {
-                chain_id: chain_id.to_string(),
-                channel_id: channel.channel_id,
-                total_rewards: channel.total_rewards,
-                shares_submitted: channel.shares_submitted,
-                current_job_id: channel.current_job_id,
-            }
+        self.channels.get(chain_id).map(|channel| ChainStatistics {
+            chain_id: chain_id.to_string(),
+            channel_id: channel.channel_id,
+            total_rewards: channel.total_rewards,
+            shares_submitted: channel.shares_submitted,
+            current_job_id: channel.current_job_id,
         })
     }
 }
@@ -209,4 +231,3 @@ impl Default for MergeMiningCoordinator {
         Self::new(Vec::new())
     }
 }
-

@@ -1,5 +1,5 @@
 //! RPC types and utilities
-//! 
+//!
 //! Common types and utilities used across RPC methods.
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ impl<T> RpcResponse<T> {
             id,
         }
     }
-    
+
     /// Create an error response
     pub fn error(error: RpcError, id: Option<serde_json::Value>) -> Self {
         Self {
@@ -167,7 +167,7 @@ mod tests {
         let result = "test_result";
         let id = serde_json::Value::Number(serde_json::Number::from(1));
         let response = RpcResponse::success(result, Some(id.clone()));
-        
+
         assert_eq!(response.jsonrpc, "2.0");
         assert_eq!(response.result, Some("test_result"));
         assert!(response.error.is_none());
@@ -183,7 +183,7 @@ mod tests {
         };
         let id = serde_json::Value::Number(serde_json::Number::from(1));
         let response: RpcResponse<String> = RpcResponse::error(error.clone(), Some(id.clone()));
-        
+
         assert_eq!(response.jsonrpc, "2.0");
         assert!(response.result.is_none());
         assert_eq!(response.error, Some(error));
@@ -194,7 +194,7 @@ mod tests {
     fn test_rpc_response_success_without_id() {
         let result = "test_result";
         let response = RpcResponse::success(result, None);
-        
+
         assert_eq!(response.jsonrpc, "2.0");
         assert_eq!(response.result, Some("test_result"));
         assert!(response.error.is_none());
@@ -209,7 +209,7 @@ mod tests {
             data: Some(serde_json::Value::String("test_data".to_string())),
         };
         let response: RpcResponse<String> = RpcResponse::error(error.clone(), None);
-        
+
         assert_eq!(response.jsonrpc, "2.0");
         assert!(response.result.is_none());
         assert_eq!(response.error, Some(error));
@@ -223,10 +223,10 @@ mod tests {
             message: "Method not found".to_string(),
             data: Some(serde_json::Value::String("test_data".to_string())),
         };
-        
+
         let json = serde_json::to_string(&error).unwrap();
         let deserialized: RpcError = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.code, error.code);
         assert_eq!(deserialized.message, error.message);
         assert_eq!(deserialized.data, error.data);
@@ -238,21 +238,23 @@ mod tests {
             chain: "main".to_string(),
             blocks: 100,
             headers: 100,
-            bestblockhash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            bestblockhash: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             difficulty: 1.0,
             mediantime: 1234567890,
             verificationprogress: 1.0,
             initialblockdownload: false,
-            chainwork: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            chainwork: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             size_on_disk: 1000000,
             pruned: false,
             softforks: vec![],
             warnings: "".to_string(),
         };
-        
+
         let json = serde_json::to_string(&info).unwrap();
         let deserialized: BlockchainInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.chain, info.chain);
         assert_eq!(deserialized.blocks, info.blocks);
         assert_eq!(deserialized.difficulty, info.difficulty);
@@ -269,22 +271,28 @@ mod tests {
             height: 1,
             version: 1,
             version_hex: "00000001".to_string(),
-            merkleroot: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            merkleroot: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             tx: vec!["tx1".to_string(), "tx2".to_string()],
             time: 1234567890,
             mediantime: 1234567890,
             nonce: 12345,
             bits: "1d00ffff".to_string(),
             difficulty: 1.0,
-            chainwork: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            chainwork: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             n_tx: 2,
-            previousblockhash: Some("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
-            nextblockhash: Some("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+            previousblockhash: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
+            nextblockhash: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ),
         };
-        
+
         let json = serde_json::to_string(&block_info).unwrap();
         let deserialized: BlockInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.hash, block_info.hash);
         assert_eq!(deserialized.height, block_info.height);
         assert_eq!(deserialized.n_tx, block_info.n_tx);
@@ -302,12 +310,13 @@ mod tests {
             locktime: 0,
             vin: vec![serde_json::Value::Object(serde_json::Map::new())],
             vout: vec![serde_json::Value::Object(serde_json::Map::new())],
-            hex: "01000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            hex: "01000000000000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
         };
-        
+
         let json = serde_json::to_string(&tx_info).unwrap();
         let deserialized: TransactionInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.txid, tx_info.txid);
         assert_eq!(deserialized.version, tx_info.version);
         assert_eq!(deserialized.size, tx_info.size);
@@ -330,10 +339,10 @@ mod tests {
             localaddresses: vec![],
             warnings: "".to_string(),
         };
-        
+
         let json = serde_json::to_string(&network_info).unwrap();
         let deserialized: NetworkInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.version, network_info.version);
         assert_eq!(deserialized.connections, network_info.connections);
         assert_eq!(deserialized.relayfee, network_info.relayfee);
@@ -351,10 +360,10 @@ mod tests {
             chain: "main".to_string(),
             warnings: "".to_string(),
         };
-        
+
         let json = serde_json::to_string(&mining_info).unwrap();
         let deserialized: MiningInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.blocks, mining_info.blocks);
         assert_eq!(deserialized.difficulty, mining_info.difficulty);
         assert_eq!(deserialized.chain, mining_info.chain);
@@ -368,11 +377,13 @@ mod tests {
             rules: vec!["csv".to_string(), "segwit".to_string()],
             vbavailable: serde_json::Value::Object(serde_json::Map::new()),
             vbrequired: 0,
-            previousblockhash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            previousblockhash: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             transactions: vec![],
             coinbaseaux: serde_json::Value::Object(serde_json::Map::new()),
             coinbasevalue: 5000000000,
-            longpollid: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            longpollid: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             target: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             mintime: 1234567890,
             mutable: vec!["time".to_string(), "transactions".to_string()],
@@ -384,10 +395,10 @@ mod tests {
             bits: "1d00ffff".to_string(),
             height: 100,
         };
-        
+
         let json = serde_json::to_string(&template).unwrap();
         let deserialized: BlockTemplate = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.version, template.version);
         assert_eq!(deserialized.height, template.height);
         assert_eq!(deserialized.capabilities, template.capabilities);
@@ -400,7 +411,7 @@ mod tests {
             message: "Invalid params".to_string(),
             data: Some(serde_json::Value::String("param_name".to_string())),
         };
-        
+
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "Invalid params");
         assert!(error.data.is_some());
@@ -413,7 +424,7 @@ mod tests {
             message: "Method not found".to_string(),
             data: None,
         };
-        
+
         assert_eq!(error.code, -32601);
         assert_eq!(error.message, "Method not found");
         assert!(error.data.is_none());

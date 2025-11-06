@@ -18,11 +18,11 @@
 //! - Signed refund addresses prevent refund attacks
 //! - P2P routing preserves customer privacy (no direct merchant connection)
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use secp256k1::{Secp256k1, Message};
 use secp256k1::ecdsa::Signature;
-use sha2::{Sha256, Digest};
+use secp256k1::{Message, Secp256k1};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 /// BIP70 Payment Protocol version
 pub const PAYMENT_PROTOCOL_VERSION: u32 = 1;
@@ -103,11 +103,7 @@ pub struct PaymentACK {
 
 impl PaymentRequest {
     /// Create a new payment request
-    pub fn new(
-        network: String,
-        outputs: Vec<PaymentOutput>,
-        time: u64,
-    ) -> Self {
+    pub fn new(network: String, outputs: Vec<PaymentOutput>, time: u64) -> Self {
         Self {
             payment_details: PaymentDetails {
                 network,
@@ -123,19 +119,22 @@ impl PaymentRequest {
             authorized_refund_addresses: None,
         }
     }
-    
+
     /// Set merchant public key
     pub fn with_merchant_key(mut self, pubkey: [u8; 33]) -> Self {
         self.merchant_pubkey = Some(pubkey.to_vec());
         self
     }
-    
+
     /// Add authorized refund address (signed by merchant)
     pub fn with_authorized_refund(mut self, signed_refund: SignedRefundAddress) -> Self {
         if self.authorized_refund_addresses.is_none() {
             self.authorized_refund_addresses = Some(Vec::new());
         }
-        self.authorized_refund_addresses.as_mut().unwrap().push(signed_refund);
+        self.authorized_refund_addresses
+            .as_mut()
+            .unwrap()
+            .push(signed_refund);
         self
     }
 
@@ -166,73 +165,75 @@ impl PaymentRequest {
     /// Sign payment request with merchant's private key
     pub fn sign(&mut self, private_key: &secp256k1::SecretKey) -> Result<(), Bip70Error> {
         use secp256k1::Message as SecpMessage;
-        
+
         // Serialize payment_details for signing
         let serialized = bincode::serialize(&self.payment_details)
             .map_err(|e| Bip70Error::SerializationError(e.to_string()))?;
-        
+
         // Hash payment_details
         let mut hasher = Sha256::new();
         hasher.update(&serialized);
         let hash = hasher.finalize();
-        
+
         // Create message for signing
         let message = SecpMessage::from_digest_slice(&hash)
-            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {}", e)))?;
-        
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {e}")))?;
+
         // Sign with secp256k1
         let secp = Secp256k1::new();
         let signature = secp.sign_ecdsa(&message, private_key);
-        
+
         // Get public key
         let pubkey = secp256k1::PublicKey::from_secret_key(&secp, private_key);
         let pubkey_serialized = pubkey.serialize();
-        
+
         // Store signature and public key
         self.signature = Some(signature.serialize_compact().to_vec());
         self.merchant_pubkey = Some(pubkey_serialized.to_vec());
-        
+
         Ok(())
     }
-    
+
     /// Verify payment request signature
     pub fn verify_signature(&self) -> Result<(), Bip70Error> {
-        let pubkey = self.merchant_pubkey
+        let pubkey = self
+            .merchant_pubkey
             .as_ref()
             .ok_or_else(|| Bip70Error::SignatureError("No merchant public key".to_string()))?;
-        let signature_bytes = self.signature
+        let signature_bytes = self
+            .signature
             .as_ref()
             .ok_or_else(|| Bip70Error::SignatureError("No signature".to_string()))?;
-        
+
         // Parse public key
         let pubkey = secp256k1::PublicKey::from_slice(&pubkey)
             .map_err(|e| Bip70Error::SignatureError(format!("Invalid public key: {}", e)))?;
-        
+
         // Parse signature
         let signature = Signature::from_compact(signature_bytes)
-            .map_err(|e| Bip70Error::SignatureError(format!("Invalid signature: {}", e)))?;
-        
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid signature: {e}")))?;
+
         // Serialize payment_details for verification
         let serialized = bincode::serialize(&self.payment_details)
             .map_err(|e| Bip70Error::SerializationError(e.to_string()))?;
-        
+
         // Hash payment_details
         let mut hasher = Sha256::new();
         hasher.update(&serialized);
         let hash = hasher.finalize();
-        
+
         // Create message for verification
         let message = Message::from_digest_slice(&hash)
-            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {}", e)))?;
-        
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {e}")))?;
+
         // Verify signature
         let secp = Secp256k1::new();
         secp.verify_ecdsa(&message, &signature, &pubkey)
             .map_err(|_| Bip70Error::SignatureError("Signature verification failed".to_string()))?;
-        
+
         Ok(())
     }
-    
+
     /// Validate payment request
     pub fn validate(&self) -> Result<(), Bip70Error> {
         // Check expiration
@@ -254,9 +255,10 @@ impl PaymentRequest {
         // Validate network
         let valid_networks = ["main", "test", "regtest"];
         if !valid_networks.contains(&self.payment_details.network.as_str()) {
-            return Err(Bip70Error::InvalidRequest(
-                format!("Invalid network: {}", self.payment_details.network)
-            ));
+            return Err(Bip70Error::InvalidRequest(format!(
+                "Invalid network: {}",
+                self.payment_details.network
+            )));
         }
 
         Ok(())
@@ -279,7 +281,7 @@ impl Payment {
         self.refund_to = Some(outputs);
         self
     }
-    
+
     /// Validate refund addresses against PaymentRequest authorized list
     pub fn validate_refund_addresses(
         &self,
@@ -289,14 +291,15 @@ impl Payment {
             for refund_addr in refund_to {
                 // Check if refund address is in authorized list
                 let is_authorized = authorized_refunds.iter().any(|auth| {
-                    auth.address.script == refund_addr.script &&
-                    auth.address.amount == refund_addr.amount
+                    auth.address.script == refund_addr.script
+                        && auth.address.amount == refund_addr.amount
                 });
-                
+
                 if !is_authorized {
-                    return Err(Bip70Error::InvalidPayment(
-                        format!("Refund address not authorized: {:?}", refund_addr.script)
-                    ));
+                    return Err(Bip70Error::InvalidPayment(format!(
+                        "Refund address not authorized: {:?}",
+                        refund_addr.script
+                    )));
                 }
             }
         }
@@ -330,22 +333,22 @@ impl Payment {
 pub enum Bip70Error {
     #[error("Payment request expired")]
     Expired,
-    
+
     #[error("Invalid payment request: {0}")]
     InvalidRequest(String),
-    
+
     #[error("Invalid payment: {0}")]
     InvalidPayment(String),
-    
+
     #[error("Certificate validation failed: {0}")]
     CertificateError(String),
-    
+
     #[error("Signature verification failed: {0}")]
     SignatureError(String),
-    
+
     #[error("HTTP error: {0}")]
     HttpError(String),
-    
+
     #[error("Serialization error: {0}")]
     SerializationError(String),
 }
@@ -366,7 +369,7 @@ impl PaymentProtocolClient {
             network,
         }
     }
-    
+
     /// Create Payment message for P2P network
     pub fn create_payment_message(
         payment: Payment,
@@ -378,29 +381,29 @@ impl PaymentProtocolClient {
             customer_signature: None,
         }
     }
-    
+
     /// Validate received PaymentRequest from P2P network
     pub fn validate_payment_request(
         msg: &crate::network::protocol::PaymentRequestMessage,
     ) -> Result<(), Bip70Error> {
         // Verify signature
         msg.payment_request.verify_signature()?;
-        
+
         // Validate payment request
         msg.payment_request.validate()?;
-        
+
         // Verify merchant pubkey matches
         if let Some(ref req_pubkey) = msg.payment_request.merchant_pubkey {
             if req_pubkey.as_slice() != msg.merchant_pubkey.as_slice() {
                 return Err(Bip70Error::SignatureError(
-                    "PaymentRequest pubkey mismatch".to_string()
+                    "PaymentRequest pubkey mismatch".to_string(),
                 ));
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Validate PaymentACK from merchant
     pub fn validate_payment_ack(
         ack: &crate::network::protocol::PaymentACKMessage,
@@ -409,25 +412,27 @@ impl PaymentProtocolClient {
         // Verify merchant signature
         let pubkey = secp256k1::PublicKey::from_slice(merchant_pubkey)
             .map_err(|e| Bip70Error::SignatureError(format!("Invalid pubkey: {}", e)))?;
-        
+
         // Serialize payment_ack for verification
         let serialized = bincode::serialize(&ack.payment_ack)
             .map_err(|e| Bip70Error::SerializationError(e.to_string()))?;
-        
+
         let mut hasher = Sha256::new();
         hasher.update(&serialized);
         let hash = hasher.finalize();
-        
+
         let message = Message::from_digest_slice(&hash)
-            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {}", e)))?;
-        
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {e}")))?;
+
         let signature = Signature::from_compact(&ack.merchant_signature)
-            .map_err(|e| Bip70Error::SignatureError(format!("Invalid signature: {}", e)))?;
-        
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid signature: {e}")))?;
+
         let secp = Secp256k1::new();
         secp.verify_ecdsa(&message, &signature, &pubkey)
-            .map_err(|_| Bip70Error::SignatureError("PaymentACK signature verification failed".to_string()))?;
-        
+            .map_err(|_| {
+                Bip70Error::SignatureError("PaymentACK signature verification failed".to_string())
+            })?;
+
         Ok(())
     }
 }
@@ -441,39 +446,50 @@ impl PaymentProtocolServer {
         details: PaymentDetails,
         merchant_private_key: &secp256k1::SecretKey,
         authorized_refunds: Option<Vec<SignedRefundAddress>>,
-    ) -> Result<(PaymentRequest, crate::network::protocol::PaymentRequestMessage), Bip70Error> {
+    ) -> Result<
+        (
+            PaymentRequest,
+            crate::network::protocol::PaymentRequestMessage,
+        ),
+        Bip70Error,
+    > {
         let mut payment_request = PaymentRequest {
             payment_details: details,
             merchant_pubkey: None,
             signature: None,
             authorized_refund_addresses: authorized_refunds,
         };
-        
+
         // Sign payment request
         payment_request.sign(merchant_private_key)?;
-        
+
         // Get merchant public key
-        let merchant_pubkey = payment_request.merchant_pubkey
+        let merchant_pubkey = payment_request
+            .merchant_pubkey
             .as_ref()
             .cloned()
-            .ok_or_else(|| Bip70Error::SignatureError("Failed to get merchant pubkey".to_string()))?;
-        
+            .ok_or_else(|| {
+                Bip70Error::SignatureError("Failed to get merchant pubkey".to_string())
+            })?;
+
         // Create payment ID from payment details hash
         let serialized = bincode::serialize(&payment_request.payment_details)
             .map_err(|e| Bip70Error::SerializationError(e.to_string()))?;
         let mut hasher = Sha256::new();
         hasher.update(&serialized);
         let payment_id: [u8; 32] = hasher.finalize().into();
-        
+
         // Create P2P message
         let p2p_message = crate::network::protocol::PaymentRequestMessage {
             payment_request: payment_request.clone(),
-            merchant_signature: payment_request.signature.clone()
+            merchant_signature: payment_request
+                .signature
+                .clone()
                 .ok_or_else(|| Bip70Error::SignatureError("No signature".to_string()))?,
             merchant_pubkey: merchant_pubkey,
             payment_id: payment_id.to_vec(),
         };
-        
+
         Ok((payment_request, p2p_message))
     }
 
@@ -487,22 +503,24 @@ impl PaymentProtocolServer {
 
         // Validate refund addresses if provided
         if let Some(ref authorized_refunds) = original_request.authorized_refund_addresses {
-            payment_msg.payment.validate_refund_addresses(authorized_refunds)?;
+            payment_msg
+                .payment
+                .validate_refund_addresses(authorized_refunds)?;
         }
 
         // TODO: Verify transactions match PaymentRequest outputs
         // TODO: Validate merchant_data matches original request
-        
+
         let payment_ack = PaymentACK {
             payment: payment_msg.payment.clone(),
             memo: Some("Payment received".to_string()),
         };
-        
+
         // Sign payment ACK
-        let _merchant_pubkey = original_request.merchant_pubkey
-            .as_ref()
-            .ok_or_else(|| Bip70Error::SignatureError("No merchant pubkey in request".to_string()))?;
-        
+        let _merchant_pubkey = original_request.merchant_pubkey.as_ref().ok_or_else(|| {
+            Bip70Error::SignatureError("No merchant pubkey in request".to_string())
+        })?;
+
         // For signing, we'd need the merchant's private key - this should be passed in
         // For now, return unsigned ACK (real implementation would sign it)
         Ok(crate::network::protocol::PaymentACKMessage {
@@ -511,7 +529,7 @@ impl PaymentProtocolServer {
             merchant_signature: Vec::new(), // TODO: Sign with merchant key
         })
     }
-    
+
     /// Sign a refund address for inclusion in PaymentRequest
     pub fn sign_refund_address(
         address: PaymentOutput,
@@ -520,25 +538,25 @@ impl PaymentProtocolServer {
         // Serialize address for signing
         let serialized = bincode::serialize(&address)
             .map_err(|e| Bip70Error::SerializationError(e.to_string()))?;
-        
+
         // Hash address
         let mut hasher = Sha256::new();
         hasher.update(&serialized);
         let hash = hasher.finalize();
-        
+
         // Sign
         let message = Message::from_digest_slice(&hash)
-            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {}", e)))?;
-        
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {e}")))?;
+
         let secp = Secp256k1::new();
         let signature = secp.sign_ecdsa(&message, merchant_private_key);
-        
+
         Ok(SignedRefundAddress {
             address,
             signature: signature.serialize_compact().to_vec(),
         })
     }
-    
+
     /// Verify signed refund address
     pub fn verify_refund_address(
         signed_refund: &SignedRefundAddress,
@@ -546,24 +564,28 @@ impl PaymentProtocolServer {
     ) -> Result<(), Bip70Error> {
         let pubkey = secp256k1::PublicKey::from_slice(merchant_pubkey)
             .map_err(|e| Bip70Error::SignatureError(format!("Invalid pubkey: {}", e)))?;
-        
+
         let serialized = bincode::serialize(&signed_refund.address)
             .map_err(|e| Bip70Error::SerializationError(e.to_string()))?;
-        
+
         let mut hasher = Sha256::new();
         hasher.update(&serialized);
         let hash = hasher.finalize();
-        
+
         let message = Message::from_digest_slice(&hash)
-            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {}", e)))?;
-        
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {e}")))?;
+
         let signature = Signature::from_compact(&signed_refund.signature)
-            .map_err(|e| Bip70Error::SignatureError(format!("Invalid signature: {}", e)))?;
-        
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid signature: {e}")))?;
+
         let secp = Secp256k1::new();
         secp.verify_ecdsa(&message, &signature, &pubkey)
-            .map_err(|_| Bip70Error::SignatureError("Refund address signature verification failed".to_string()))?;
-        
+            .map_err(|_| {
+                Bip70Error::SignatureError(
+                    "Refund address signature verification failed".to_string(),
+                )
+            })?;
+
         Ok(())
     }
 }
@@ -575,15 +597,11 @@ mod tests {
     #[test]
     fn test_payment_request_creation() {
         let output = PaymentOutput {
-            script: vec![0x51], // OP_1 (placeholder)
+            script: vec![0x51],   // OP_1 (placeholder)
             amount: Some(100000), // 0.001 BTC
         };
 
-        let request = PaymentRequest::new(
-            "main".to_string(),
-            vec![output],
-            1234567890,
-        );
+        let request = PaymentRequest::new("main".to_string(), vec![output], 1234567890);
 
         assert_eq!(request.payment_details.network, "main");
         assert_eq!(request.payment_details.outputs.len(), 1);
@@ -614,7 +632,8 @@ mod tests {
                 amount: Some(100000),
             }],
             expired_time,
-        ).with_expires(1001);
+        )
+        .with_expires(1001);
 
         // Should fail validation (expired)
         let result = request.validate();
@@ -639,4 +658,3 @@ mod tests {
         assert!(empty_payment.validate().is_err());
     }
 }
-

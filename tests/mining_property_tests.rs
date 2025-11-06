@@ -1,17 +1,19 @@
 //! Property-based tests for mining functionality
-//! 
+//!
 //! Uses proptest to verify invariants and properties that should hold for all inputs.
 
+use hex;
 use proptest::prelude::*;
+use protocol_engine::serialization::serialize_transaction;
+use protocol_engine::types::{
+    BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput,
+};
+use reference_node::node::mempool::MempoolManager;
 use reference_node::rpc::mining::MiningRpc;
 use reference_node::storage::Storage;
-use reference_node::node::mempool::MempoolManager;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempfile::TempDir;
-use protocol_engine::types::{Transaction, BlockHeader, OutPoint, TransactionInput, TransactionOutput};
-use protocol_engine::serialization::serialize_transaction;
-use sha2::{Digest, Sha256};
-use hex;
 mod common;
 use common::*;
 
@@ -38,7 +40,7 @@ proptest! {
             result.copy_from_slice(&hash2);
             hex::encode(result)
         };
-        
+
         // Verify hash is 64 hex characters (32 bytes)
         prop_assert_eq!(expected_hash.len(), 64);
     }
@@ -64,7 +66,7 @@ proptest! {
                 sequence: 0xffffffff,
             })
             .collect();
-        
+
         // Generate transaction outputs
         let outputs: Vec<TransactionOutput> = (0..outputs_count)
             .map(|i| TransactionOutput {
@@ -72,18 +74,18 @@ proptest! {
                 script_pubkey: vec![0x76, 0xa9, 0x14; i % 50], // Variable length scripts
             })
             .collect();
-        
+
         let tx = Transaction {
             version: version as u64,
             inputs,
             outputs,
             lock_time: lock_time as u64,
         };
-        
+
         // Serialize and verify it's not empty
         let serialized = serialize_transaction(&tx);
         prop_assert!(!serialized.is_empty());
-        
+
         // Verify serialized length is reasonable (at least header + varints)
         prop_assert!(serialized.len() >= 10);
     }
@@ -94,7 +96,7 @@ proptest! {
     #[test]
     fn prop_transaction_serialization_valid(tx in any::<Transaction>()) {
         let serialized = serialize_transaction(&tx);
-        
+
         // Serialized transaction should have at least version (4 bytes) + varints
         if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
             prop_assert!(serialized.len() >= 4);
@@ -109,12 +111,12 @@ proptest! {
         height in 0u64..=100u64, // Reduced range for faster tests
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        
+
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-        
+
         // Initialize chain state
         let genesis_header = BlockHeader {
             version: 1,
@@ -125,7 +127,7 @@ proptest! {
             nonce: 2083236893,
         };
         storage.chain().initialize(&genesis_header).unwrap();
-        
+
         // Set height
         let tip_hash = random_hash();
         let tip_header = BlockHeader {
@@ -137,11 +139,11 @@ proptest! {
             nonce: 0,
         };
         storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
-        
+
         // Get template
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
-        
+
         if result.is_ok() {
             let template = result.unwrap();
             let template_height = template.get("height").unwrap().as_u64().unwrap();
@@ -157,12 +159,12 @@ proptest! {
         height in 0u64..=100u64, // Reduced range for faster tests
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        
+
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-        
+
         // Initialize chain state
         let genesis_header = BlockHeader {
             version: 1,
@@ -173,7 +175,7 @@ proptest! {
             nonce: 2083236893,
         };
         storage.chain().initialize(&genesis_header).unwrap();
-        
+
         // Set height
         let tip_hash = random_hash();
         let tip_header = BlockHeader {
@@ -185,11 +187,11 @@ proptest! {
             nonce: 0,
         };
         storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
-        
+
         // Get template
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
-        
+
         if result.is_ok() {
             let template = result.unwrap();
             let coinbase_value = template.get("coinbasevalue").unwrap().as_u64().unwrap();
@@ -203,12 +205,12 @@ proptest! {
     #[test]
     fn prop_template_target_format(height in 0u64..=50u64) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        
+
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-        
+
         // Initialize chain state
         let genesis_header = BlockHeader {
             version: 1,
@@ -219,7 +221,7 @@ proptest! {
             nonce: 2083236893,
         };
         storage.chain().initialize(&genesis_header).unwrap();
-        
+
         let tip_hash = random_hash();
         let tip_header = BlockHeader {
             version: 1,
@@ -230,15 +232,15 @@ proptest! {
             nonce: 0,
         };
         storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
-        
+
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
-        
+
         if result.is_ok() {
             let template = result.unwrap();
             let target = template.get("target").unwrap().as_str().unwrap();
             prop_assert_eq!(target.len(), 64);
-            
+
             // Verify it's hex
             prop_assert!(target.chars().all(|c| c.is_ascii_hexdigit()));
         }
@@ -250,12 +252,12 @@ proptest! {
     #[test]
     fn prop_template_bits_format(height in 0u64..=50u64) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        
+
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-        
+
         // Initialize chain state
         let genesis_header = BlockHeader {
             version: 1,
@@ -266,7 +268,7 @@ proptest! {
             nonce: 2083236893,
         };
         storage.chain().initialize(&genesis_header).unwrap();
-        
+
         let tip_hash = random_hash();
         let tip_header = BlockHeader {
             version: 1,
@@ -277,15 +279,15 @@ proptest! {
             nonce: 0,
         };
         storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
-        
+
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
-        
+
         if result.is_ok() {
             let template = result.unwrap();
             let bits = template.get("bits").unwrap().as_str().unwrap();
             prop_assert_eq!(bits.len(), 8);
-            
+
             // Verify it's hex
             prop_assert!(bits.chars().all(|c| c.is_ascii_hexdigit()));
         }
@@ -297,12 +299,12 @@ proptest! {
     #[test]
     fn prop_rules_always_contains_csv(height in 0u64..=100u64) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        
+
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
-        
+
         // Initialize chain state
         let genesis_header = BlockHeader {
             version: 1,
@@ -313,7 +315,7 @@ proptest! {
             nonce: 2083236893,
         };
         storage.chain().initialize(&genesis_header).unwrap();
-        
+
         let tip_hash = random_hash();
         let tip_header = BlockHeader {
             version: 1,
@@ -324,10 +326,10 @@ proptest! {
             nonce: 0,
         };
         storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
-        
+
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
-        
+
         if result.is_ok() {
             let template = result.unwrap();
             let rules = template.get("rules").unwrap().as_array().unwrap();
@@ -345,10 +347,10 @@ proptest! {
     fn prop_transaction_hash_deterministic(tx in any::<Transaction>()) {
         let tx_bytes1 = serialize_transaction(&tx);
         let tx_bytes2 = serialize_transaction(&tx);
-        
+
         // Same transaction should serialize to same bytes
         prop_assert_eq!(tx_bytes1, tx_bytes2);
-        
+
         // Same bytes should produce same hash
         let hash1 = {
             let h1 = Sha256::digest(&tx_bytes1);
@@ -360,7 +362,7 @@ proptest! {
             let h2 = Sha256::digest(h1);
             hex::encode(h2)
         };
-        
+
         prop_assert_eq!(hash1, hash2);
     }
 }
@@ -379,10 +381,10 @@ proptest! {
            tx1.lock_time == tx2.lock_time {
             return Ok(());
         }
-        
+
         let tx1_bytes = serialize_transaction(&tx1);
         let tx2_bytes = serialize_transaction(&tx2);
-        
+
         let hash1 = {
             let h1 = Sha256::digest(&tx1_bytes);
             let h2 = Sha256::digest(h1);
@@ -393,9 +395,8 @@ proptest! {
             let h2 = Sha256::digest(h1);
             hex::encode(h2)
         };
-        
+
         // With high probability, different transactions have different hashes
         prop_assert_ne!(hash1, hash2);
     }
 }
-

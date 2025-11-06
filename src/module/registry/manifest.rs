@@ -1,11 +1,11 @@
 //! Module manifest parsing and validation
-//! 
+//!
 //! Handles parsing module.toml manifests and validating module metadata.
 
+use crate::module::traits::{ModuleError, ModuleMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use crate::module::traits::{ModuleMetadata, ModuleError};
 
 /// Module manifest (module.toml structure)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,27 +34,29 @@ pub struct ModuleManifest {
 impl ModuleManifest {
     /// Load manifest from file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ModuleError> {
-        let contents = std::fs::read_to_string(path.as_ref())
-            .map_err(|e| ModuleError::InvalidManifest(format!(
-                "Failed to read manifest file: {}", e
-            )))?;
-        
-        let manifest: ModuleManifest = toml::from_str(&contents)
-            .map_err(|e| ModuleError::InvalidManifest(format!(
-                "Failed to parse manifest TOML: {}", e
-            )))?;
-        
+        let contents = std::fs::read_to_string(path.as_ref()).map_err(|e| {
+            ModuleError::InvalidManifest(format!("Failed to read manifest file: {}", e))
+        })?;
+
+        let manifest: ModuleManifest = toml::from_str(&contents).map_err(|e| {
+            ModuleError::InvalidManifest(format!("Failed to parse manifest TOML: {}", e))
+        })?;
+
         // Validate required fields
         if manifest.name.is_empty() {
-            return Err(ModuleError::InvalidManifest("Module name cannot be empty".to_string()));
+            return Err(ModuleError::InvalidManifest(
+                "Module name cannot be empty".to_string(),
+            ));
         }
         if manifest.entry_point.is_empty() {
-            return Err(ModuleError::InvalidManifest("Entry point cannot be empty".to_string()));
+            return Err(ModuleError::InvalidManifest(
+                "Entry point cannot be empty".to_string(),
+            ));
         }
-        
+
         Ok(manifest)
     }
-    
+
     /// Convert to ModuleMetadata
     pub fn to_metadata(&self) -> ModuleMetadata {
         ModuleMetadata {
@@ -71,7 +73,7 @@ impl ModuleManifest {
 
 impl TryFrom<ModuleManifest> for ModuleMetadata {
     type Error = ModuleError;
-    
+
     fn try_from(manifest: ModuleManifest) -> Result<Self, Self::Error> {
         Ok(manifest.to_metadata())
     }

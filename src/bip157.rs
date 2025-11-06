@@ -5,9 +5,9 @@
 //! Defines network messages for requesting and serving compact block filters.
 //! Enables efficient transaction discovery for light clients.
 
-use protocol_engine::{BlockHeader, Hash};
 use crate::bip158::CompactBlockFilter;
-use sha2::{Sha256, Digest};
+use protocol_engine::{BlockHeader, Hash};
+use sha2::{Digest, Sha256};
 
 /// Filter header - commits to previous filter header and current filter
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,29 +25,29 @@ impl FilterHeader {
         let mut hasher = Sha256::new();
         hasher.update(&filter.filter_data);
         let first_hash = hasher.finalize();
-        
+
         let mut hasher2 = Sha256::new();
         hasher2.update(&first_hash);
         let filter_hash_bytes = hasher2.finalize();
-        
+
         let mut filter_hash = [0u8; 32];
         filter_hash.copy_from_slice(&filter_hash_bytes);
-        
+
         // Previous header hash
         let prev_header_hash = if let Some(prev) = prev_header {
             // Header hash = SHA256(SHA256(filter_hash || prev_header_hash))
             let mut combined = Vec::new();
             combined.extend_from_slice(&prev.filter_hash);
             combined.extend_from_slice(&prev.prev_header_hash);
-            
+
             let mut hasher = Sha256::new();
             hasher.update(&combined);
             let first_hash = hasher.finalize();
-            
+
             let mut hasher2 = Sha256::new();
             hasher2.update(&first_hash);
             let header_hash_bytes = hasher2.finalize();
-            
+
             let mut header_hash = [0u8; 32];
             header_hash.copy_from_slice(&header_hash_bytes);
             header_hash
@@ -55,27 +55,27 @@ impl FilterHeader {
             // Genesis filter header (all zeros or block hash)
             [0u8; 32]
         };
-        
+
         FilterHeader {
             filter_hash,
             prev_header_hash,
         }
     }
-    
+
     /// Calculate header hash (double SHA256 of filter_hash || prev_header_hash)
     pub fn header_hash(&self) -> Hash {
         let mut combined = Vec::new();
         combined.extend_from_slice(&self.filter_hash);
         combined.extend_from_slice(&self.prev_header_hash);
-        
+
         let mut hasher = Sha256::new();
         hasher.update(&combined);
         let first_hash = hasher.finalize();
-        
+
         let mut hasher2 = Sha256::new();
         hasher2.update(&first_hash);
         let hash_bytes = hasher2.finalize();
-        
+
         let mut header_hash = [0u8; 32];
         header_hash.copy_from_slice(&hash_bytes);
         header_hash
@@ -96,7 +96,7 @@ impl FilterType {
             _ => None,
         }
     }
-    
+
     pub fn to_u8(self) -> u8 {
         self as u8
     }
@@ -181,13 +181,12 @@ mod tests {
             filter_data: vec![1, 2, 3],
             num_elements: 0,
         };
-        
+
         let header1 = FilterHeader::new(&empty_filter, None);
         let header2 = FilterHeader::new(&empty_filter, Some(&header1));
-        
+
         // Headers should be different when chained
         assert_ne!(header1.filter_hash, header2.filter_hash);
         assert_eq!(header2.prev_header_hash, header1.header_hash());
     }
 }
-

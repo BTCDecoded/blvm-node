@@ -1,11 +1,11 @@
 //! Transaction index implementation
-//! 
+//!
 //! Provides fast lookup of transactions by hash and maintains transaction metadata.
 
 use anyhow::Result;
-use protocol_engine::{Transaction, Hash};
-use sled::Db;
+use protocol_engine::{Hash, Transaction};
 use serde::{Deserialize, Serialize};
+use sled::Db;
 
 /// Transaction metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +33,7 @@ impl TxIndex {
         let tx_by_hash = db.open_tree("tx_by_hash")?;
         let tx_by_block = db.open_tree("tx_by_block")?;
         let tx_metadata = db.open_tree("tx_metadata")?;
-        
+
         Ok(Self {
             db,
             tx_by_hash,
@@ -41,7 +41,7 @@ impl TxIndex {
             tx_metadata,
         })
     }
-    
+
     /// Index a transaction
     pub fn index_transaction(
         &self,
@@ -52,10 +52,10 @@ impl TxIndex {
     ) -> Result<()> {
         let tx_hash = self.calculate_tx_hash(tx);
         let tx_data = bincode::serialize(tx)?;
-        
+
         // Store transaction by hash
         self.tx_by_hash.insert(tx_hash.as_slice(), tx_data)?;
-        
+
         // Store transaction metadata
         let metadata = TxMetadata {
             tx_hash,
@@ -65,17 +65,17 @@ impl TxIndex {
             size: self.calculate_tx_size(tx),
             weight: self.calculate_tx_weight(tx),
         };
-        
+
         let metadata_data = bincode::serialize(&metadata)?;
         self.tx_metadata.insert(tx_hash.as_slice(), metadata_data)?;
-        
+
         // Index by block
         let block_key = self.block_tx_key(block_hash, tx_index);
         self.tx_by_block.insert(block_key, tx_hash.as_slice())?;
-        
+
         Ok(())
     }
-    
+
     /// Get transaction by hash
     pub fn get_transaction(&self, tx_hash: &Hash) -> Result<Option<Transaction>> {
         if let Some(data) = self.tx_by_hash.get(tx_hash.as_slice())? {
@@ -85,7 +85,7 @@ impl TxIndex {
             Ok(None)
         }
     }
-    
+
     /// Get transaction metadata
     pub fn get_metadata(&self, tx_hash: &Hash) -> Result<Option<TxMetadata>> {
         if let Some(data) = self.tx_metadata.get(tx_hash.as_slice())? {
@@ -95,12 +95,12 @@ impl TxIndex {
             Ok(None)
         }
     }
-    
+
     /// Get all transactions in a block
     pub fn get_block_transactions(&self, block_hash: &Hash) -> Result<Vec<Transaction>> {
         let mut transactions = Vec::new();
         let mut tx_index = 0u32;
-        
+
         loop {
             let block_key = self.block_tx_key(block_hash, tx_index);
             if let Some(tx_hash_data) = self.tx_by_block.get(block_key)? {
@@ -116,44 +116,48 @@ impl TxIndex {
                 break;
             }
         }
-        
+
         Ok(transactions)
     }
-    
+
     /// Check if transaction exists
     pub fn has_transaction(&self, tx_hash: &Hash) -> Result<bool> {
         Ok(self.tx_by_hash.contains_key(tx_hash.as_slice())?)
     }
-    
+
     /// Get transaction count
     pub fn transaction_count(&self) -> Result<usize> {
         Ok(self.tx_by_hash.len())
     }
-    
+
     /// Get transactions by block height range
-    pub fn get_transactions_by_height_range(&self, _start_height: u64, _end_height: u64) -> Result<Vec<Transaction>> {
+    pub fn get_transactions_by_height_range(
+        &self,
+        _start_height: u64,
+        _end_height: u64,
+    ) -> Result<Vec<Transaction>> {
         let transactions = Vec::new();
-        
+
         // This is a simplified implementation
         // In a real implementation, we'd need to track block hashes by height
         // For now, we'll just return empty results
-        
+
         Ok(transactions)
     }
-    
+
     /// Remove transaction from index
     pub fn remove_transaction(&self, tx_hash: &Hash) -> Result<()> {
         if let Some(metadata) = self.get_metadata(tx_hash)? {
             let block_key = self.block_tx_key(&metadata.block_hash, metadata.tx_index);
             self.tx_by_block.remove(block_key)?;
         }
-        
+
         self.tx_by_hash.remove(tx_hash.as_slice())?;
         self.tx_metadata.remove(tx_hash.as_slice())?;
-        
+
         Ok(())
     }
-    
+
     /// Clear all transactions
     pub fn clear(&self) -> Result<()> {
         self.tx_by_hash.clear()?;
@@ -161,15 +165,15 @@ impl TxIndex {
         self.tx_metadata.clear()?;
         Ok(())
     }
-    
+
     /// Calculate transaction hash using proper Bitcoin double SHA256
     fn calculate_tx_hash(&self, tx: &Transaction) -> Hash {
         use crate::storage::hashing::double_sha256;
-        
+
         // Serialize transaction for hashing
         let mut tx_data = Vec::new();
         tx_data.extend_from_slice(&tx.version.to_le_bytes());
-        
+
         // Input count (varint)
         tx_data.extend_from_slice(&Self::encode_varint(tx.inputs.len() as u64));
         for input in &tx.inputs {
@@ -179,7 +183,7 @@ impl TxIndex {
             tx_data.extend_from_slice(&input.script_sig);
             tx_data.extend_from_slice(&input.sequence.to_le_bytes());
         }
-        
+
         // Output count (varint)
         tx_data.extend_from_slice(&Self::encode_varint(tx.outputs.len() as u64));
         for output in &tx.outputs {
@@ -187,13 +191,13 @@ impl TxIndex {
             tx_data.extend_from_slice(&Self::encode_varint(output.script_pubkey.len() as u64));
             tx_data.extend_from_slice(&output.script_pubkey);
         }
-        
+
         tx_data.extend_from_slice(&tx.lock_time.to_le_bytes());
-        
+
         // Calculate Bitcoin double SHA256 hash
         double_sha256(&tx_data)
     }
-    
+
     /// Encode integer as Bitcoin varint
     fn encode_varint(value: u64) -> Vec<u8> {
         if value < 0xfd {
@@ -212,7 +216,7 @@ impl TxIndex {
             result
         }
     }
-    
+
     /// Calculate transaction size
     fn calculate_tx_size(&self, tx: &Transaction) -> u32 {
         // Simplified size calculation
@@ -233,13 +237,13 @@ impl TxIndex {
         size += 4; // lock time
         size
     }
-    
+
     /// Calculate transaction weight
     fn calculate_tx_weight(&self, tx: &Transaction) -> u32 {
         // Simplified weight calculation (4x for witness data)
         self.calculate_tx_size(tx) * 4
     }
-    
+
     /// Create block transaction key
     fn block_tx_key(&self, block_hash: &Hash, tx_index: u32) -> Vec<u8> {
         let mut key = Vec::new();

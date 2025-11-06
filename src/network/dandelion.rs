@@ -10,10 +10,10 @@
 //! This provides formal anonymity guarantees against transaction origin analysis.
 
 use protocol_engine::Hash;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
-use rand::{Rng, SeedableRng};
-use rand::rngs::StdRng;
 use tracing::{debug, info};
 
 /// Dandelion relay state
@@ -75,11 +75,17 @@ impl Default for DandelionRelay<SystemClock> {
     }
 }
 
-pub trait Clock: Clone + Send + Sync + 'static { fn now(&self) -> Instant; }
+pub trait Clock: Clone + Send + Sync + 'static {
+    fn now(&self) -> Instant;
+}
 
 #[derive(Clone)]
 pub struct SystemClock;
-impl Clock for SystemClock { fn now(&self) -> Instant { Instant::now() } }
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
 
 impl DandelionRelay<SystemClock> {
     /// Create a new Dandelion++ relay
@@ -88,7 +94,7 @@ impl DandelionRelay<SystemClock> {
             stem_paths: HashMap::new(),
             stem_txs: HashMap::new(),
             stem_timeout: Duration::from_secs(10),
-            fluff_probability: 0.1,  // 10% chance to fluff at each hop
+            fluff_probability: 0.1, // 10% chance to fluff at each hop
             max_stem_hops: 2,
             rng: StdRng::from_entropy(),
             clock: SystemClock,
@@ -96,11 +102,7 @@ impl DandelionRelay<SystemClock> {
     }
 
     /// Create with custom parameters
-    pub fn with_params(
-        stem_timeout: Duration,
-        fluff_probability: f64,
-        max_stem_hops: u8,
-    ) -> Self {
+    pub fn with_params(stem_timeout: Duration, fluff_probability: f64, max_stem_hops: u8) -> Self {
         Self {
             stem_paths: HashMap::new(),
             stem_txs: HashMap::new(),
@@ -128,41 +130,53 @@ impl<C: Clock> DandelionRelay<C> {
     }
 
     /// Test helper: set stem timeout
-    pub fn set_stem_timeout(&mut self, timeout: Duration) { self.stem_timeout = timeout; }
+    pub fn set_stem_timeout(&mut self, timeout: Duration) {
+        self.stem_timeout = timeout;
+    }
 
     /// Test helper: set fluff probability
-    pub fn set_fluff_probability(&mut self, p: f64) { self.fluff_probability = p; }
+    pub fn set_fluff_probability(&mut self, p: f64) {
+        self.fluff_probability = p;
+    }
 
     /// Test helper: set max stem hops
-    pub fn set_max_stem_hops(&mut self, hops: u8) { self.max_stem_hops = hops; }
+    pub fn set_max_stem_hops(&mut self, hops: u8) {
+        self.max_stem_hops = hops;
+    }
 
     /// Test helper: update clock
-    pub fn set_clock(&mut self, clock: C) { self.clock = clock; }
+    pub fn set_clock(&mut self, clock: C) {
+        self.clock = clock;
+    }
 
     /// Initialize stem path for a peer (called during peer handshake)
-    pub fn initialize_stem_path(&mut self, peer_id: String, available_peers: &[String]) -> Option<String> {
+    pub fn initialize_stem_path(
+        &mut self,
+        peer_id: String,
+        available_peers: &[String],
+    ) -> Option<String> {
         // Select a random peer (not self) for stem path
         let rng = &mut self.rng;
-        let candidates: Vec<_> = available_peers
-            .iter()
-            .filter(|p| *p != &peer_id)
-            .collect();
-        
+        let candidates: Vec<_> = available_peers.iter().filter(|p| *p != &peer_id).collect();
+
         if candidates.is_empty() {
             return None;
         }
 
         let next_peer = candidates[rng.gen_range(0..candidates.len())].clone();
-        
+
         let path = StemPath {
             next_peer: next_peer.clone(),
             expiry: self.clock.now() + Duration::from_secs(600), // 10 minute path expiry
             hop_count: 0,
         };
-        
+
         self.stem_paths.insert(peer_id.clone(), path);
-        debug!("Initialized Dandelion stem path: {} -> {}", peer_id, next_peer);
-        
+        debug!(
+            "Initialized Dandelion stem path: {} -> {}",
+            peer_id, next_peer
+        );
+
         Some(next_peer)
     }
 
@@ -175,18 +189,25 @@ impl<C: Clock> DandelionRelay<C> {
                 .iter()
                 .filter(|p| *p != peer_id && *p != &path.next_peer)
                 .collect();
-            
+
             if !candidates.is_empty() {
                 path.next_peer = candidates[rng.gen_range(0..candidates.len())].clone();
                 path.hop_count += 1;
-                debug!("Updated Dandelion stem path: {} -> {} (hop {})", 
-                       peer_id, path.next_peer, path.hop_count);
+                debug!(
+                    "Updated Dandelion stem path: {} -> {} (hop {})",
+                    peer_id, path.next_peer, path.hop_count
+                );
             }
         }
     }
 
     /// Start stem phase for a transaction
-    pub fn start_stem_phase(&mut self, tx_hash: Hash, current_peer: String, available_peers: &[String]) -> Option<String> {
+    pub fn start_stem_phase(
+        &mut self,
+        tx_hash: Hash,
+        current_peer: String,
+        available_peers: &[String],
+    ) -> Option<String> {
         // Get or create stem path for current peer
         let next_peer = if let Some(path) = self.stem_paths.get(&current_peer) {
             if path.expiry > Instant::now() {
@@ -209,8 +230,12 @@ impl<C: Clock> DandelionRelay<C> {
             };
 
             self.stem_txs.insert(tx_hash, stem_state);
-            debug!("Started Dandelion stem phase for tx {}: {} -> {}", 
-                   hex::encode(tx_hash), current_peer, next);
+            debug!(
+                "Started Dandelion stem phase for tx {}: {} -> {}",
+                hex::encode(tx_hash),
+                current_peer,
+                next
+            );
         }
 
         next_peer
@@ -255,8 +280,12 @@ impl<C: Clock> DandelionRelay<C> {
                     let next = path.next_peer.clone();
                     state2.current_peer = next.clone();
                     state2.next_peer = Some(next.clone());
-                    debug!("Advanced Dandelion stem for tx {}: hop {} -> {}", 
-                           hex::encode(tx_hash), state2.hops, next);
+                    debug!(
+                        "Advanced Dandelion stem for tx {}: hop {} -> {}",
+                        hex::encode(tx_hash),
+                        state2.hops,
+                        next
+                    );
                     return Some(next);
                 }
             }
@@ -268,7 +297,10 @@ impl<C: Clock> DandelionRelay<C> {
     /// Transition transaction to fluff phase
     pub fn transition_to_fluff(&mut self, tx_hash: Hash) -> DandelionPhase {
         self.stem_txs.remove(&tx_hash);
-        debug!("Transitioned tx {} to Dandelion fluff phase", hex::encode(tx_hash));
+        debug!(
+            "Transitioned tx {} to Dandelion fluff phase",
+            hex::encode(tx_hash)
+        );
         DandelionPhase::Fluff
     }
 
@@ -283,9 +315,7 @@ impl<C: Clock> DandelionRelay<C> {
 
     /// Get next stem peer for a transaction (if in stem phase)
     pub fn get_stem_peer(&self, tx_hash: &Hash) -> Option<String> {
-        self.stem_txs
-            .get(tx_hash)
-            .and_then(|s| s.next_peer.clone())
+        self.stem_txs.get(tx_hash).and_then(|s| s.next_peer.clone())
     }
 
     /// Clean up expired stem paths and transactions
@@ -296,7 +326,9 @@ impl<C: Clock> DandelionRelay<C> {
         self.stem_paths.retain(|_, path| path.expiry > now);
 
         // Clean expired stem transactions (should have fluffed)
-        self.stem_txs.retain(|_, state| self.clock.now().duration_since(state.stem_start) < self.stem_timeout * 2);
+        self.stem_txs.retain(|_, state| {
+            self.clock.now().duration_since(state.stem_start) < self.stem_timeout * 2
+        });
     }
 
     /// Get statistics
@@ -326,17 +358,33 @@ mod tests {
     use super::*;
 
     #[derive(Clone)]
-    struct TestClock { now: Instant }
-    impl TestClock { fn new(start: Instant) -> Self { Self { now: start } } fn advance(&mut self, d: Duration) { self.now += d; } }
-    impl Clock for TestClock { fn now(&self) -> Instant { self.now } }
+    struct TestClock {
+        now: Instant,
+    }
+    impl TestClock {
+        fn new(start: Instant) -> Self {
+            Self { now: start }
+        }
+        fn advance(&mut self, d: Duration) {
+            self.now += d;
+        }
+    }
+    impl Clock for TestClock {
+        fn now(&self) -> Instant {
+            self.now
+        }
+    }
 
-    fn peers() -> Vec<String> { vec!["p1".into(), "p2".into(), "p3".into(), "p4".into()] }
+    fn peers() -> Vec<String> {
+        vec!["p1".into(), "p2".into(), "p3".into(), "p4".into()]
+    }
 
     #[test]
     fn stem_initialization_and_advance() {
         let rng = StdRng::seed_from_u64(42);
         let clock = TestClock::new(Instant::now());
-        let mut d: DandelionRelay<TestClock> = DandelionRelay::with_rng_and_clock(rng, clock.clone());
+        let mut d: DandelionRelay<TestClock> =
+            DandelionRelay::with_rng_and_clock(rng, clock.clone());
         let next = d.initialize_stem_path("p1".into(), &peers());
         assert!(next.is_some());
 
@@ -355,7 +403,8 @@ mod tests {
         let rng = StdRng::seed_from_u64(7);
         let start = Instant::now();
         let mut clock = TestClock::new(start);
-        let mut d: DandelionRelay<TestClock> = DandelionRelay::with_rng_and_clock(rng, clock.clone());
+        let mut d: DandelionRelay<TestClock> =
+            DandelionRelay::with_rng_and_clock(rng, clock.clone());
 
         // Make timeout very short
         d.stem_timeout = Duration::from_millis(50);
@@ -382,19 +431,22 @@ mod kani_proofs {
     fn kani_no_premature_broadcast_single_state() {
         let mut relay = DandelionRelay::new();
         let tx: Hash = kani::any();
-        
+
         // Start stem phase
         let peers = vec!["p1".into(), "p2".into()];
         let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-        
+
         // Verify: exactly one stem state exists
         let state_count = relay.stem_txs.get(&tx).is_some() as usize;
         assert!(state_count <= 1, "At most one stem state per transaction");
-        
+
         // Start again should overwrite (not duplicate)
         let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
         let state_count_after = relay.stem_txs.get(&tx).is_some() as usize;
-        assert!(state_count_after <= 1, "Still at most one stem state after restart");
+        assert!(
+            state_count_after <= 1,
+            "Still at most one stem state after restart"
+        );
     }
 
     /// Proof 2: Bounded Stem Length - hops never exceed max_stem_hops
@@ -405,13 +457,13 @@ mod kani_proofs {
         let max_hops: u8 = kani::any();
         kani::assume(max_hops <= 255);
         relay.max_stem_hops = max_hops;
-        
+
         let tx: Hash = kani::any();
         let peers = vec!["p1".into(), "p2".into(), "p3".into()];
-        
+
         // Start stem phase
         let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-        
+
         // Advance up to max_hops + 1 times
         for _ in 0..=max_hops {
             if let Some(state) = relay.stem_txs.get(&tx) {
@@ -426,7 +478,7 @@ mod kani_proofs {
                 break; // Already fluffed
             }
         }
-        
+
         // Final check
         if let Some(state) = relay.stem_txs.get(&tx) {
             assert!(state.hops <= max_hops, "Final hop count respects bound");
@@ -440,12 +492,12 @@ mod kani_proofs {
         let mut relay = DandelionRelay::new();
         let tx: Hash = kani::any();
         let peers = vec!["p1".into(), "p2".into()];
-        
+
         // Insert once
         let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
         let count1 = relay.stem_txs.iter().filter(|(h, _)| **h == tx).count();
         assert!(count1 <= 1, "At most one state entry per transaction");
-        
+
         // Insert again (should overwrite)
         let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
         let count2 = relay.stem_txs.iter().filter(|(h, _)| **h == tx).count();
@@ -461,19 +513,22 @@ mod kani_proofs {
         let timeout_secs: u64 = kani::any();
         kani::assume(timeout_secs > 0 && timeout_secs < 3600); // Reasonable bounds
         relay.stem_timeout = Duration::from_secs(timeout_secs);
-        
+
         let tx: Hash = kani::any();
         let peers = vec!["p1".into()];
-        
+
         // Start stem phase with deterministic clock would be needed
         // For now, verify the structure: if state exists and elapsed >= timeout, should_fluff
         // This proves the logic path, not the time-dependent behavior
         let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-        
+
         if let Some(state) = relay.stem_txs.get(&tx) {
             // Verify that should_fluff checks timeout correctly
             // The actual time check requires runtime, but we verify the structure
-            assert!(state.hops <= relay.max_stem_hops, "Structure: hops bound respected");
+            assert!(
+                state.hops <= relay.max_stem_hops,
+                "Structure: hops bound respected"
+            );
         }
     }
 
@@ -485,19 +540,27 @@ mod kani_proofs {
         let tx1: Hash = kani::any();
         let tx2: Hash = kani::any();
         let peers = vec!["p1".into()];
-        
+
         // Insert two different transactions
         let _ = relay.start_stem_phase(tx1, "p0".into(), &peers);
         let _ = relay.start_stem_phase(tx2, "p0".into(), &peers);
-        
+
         // Verify both exist and are distinct
         assert!(relay.stem_txs.contains_key(&tx1), "tx1 exists");
         assert!(relay.stem_txs.contains_key(&tx2), "tx2 exists");
-        assert_eq!(relay.stem_txs.len(), 2, "Exactly two entries for two distinct transactions");
-        
+        assert_eq!(
+            relay.stem_txs.len(),
+            2,
+            "Exactly two entries for two distinct transactions"
+        );
+
         // Reinsert same transaction should not increase count
         let _ = relay.start_stem_phase(tx1, "p0".into(), &peers);
-        assert_eq!(relay.stem_txs.len(), 2, "Reinsertion does not increase count");
+        assert_eq!(
+            relay.stem_txs.len(),
+            2,
+            "Reinsertion does not increase count"
+        );
     }
 
     /// Proof 6: Max hops check in should_fluff structure
@@ -508,17 +571,17 @@ mod kani_proofs {
         kani::assume(max_hops <= 255);
         relay.max_stem_hops = max_hops;
         relay.fluff_probability = 0.0; // Disable random fluff for deterministic proof
-        
+
         let tx: Hash = kani::any();
         let peers = vec!["p1".into(), "p2".into()];
-        
+
         let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-        
+
         // Manually set hops to max_hops
         if let Some(state) = relay.stem_txs.get_mut(&tx) {
             state.hops = max_hops;
         }
-        
+
         // Verify should_fluff detects max hops
         // Note: This requires &mut self, so we test the invariant structure
         // Actual fluff decision requires the full should_fluff call
@@ -527,4 +590,3 @@ mod kani_proofs {
         }
     }
 }
-

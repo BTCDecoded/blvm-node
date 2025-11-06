@@ -5,11 +5,11 @@
 
 use crate::network::filter_service::BlockFilterService;
 use crate::network::protocol::{
-    GetCfiltersMessage, CfilterMessage, GetCfheadersMessage, CfheadersMessage,
-    GetCfcheckptMessage, CfcheckptMessage, ProtocolMessage, FilterHeaderData,
+    CfcheckptMessage, CfheadersMessage, CfilterMessage, FilterHeaderData, GetCfcheckptMessage,
+    GetCfheadersMessage, GetCfiltersMessage, ProtocolMessage,
 };
+use anyhow::{anyhow, Result};
 use protocol_engine::Hash;
-use anyhow::{Result, anyhow};
 
 /// Handle GetCfilters request
 pub fn handle_getcfilters(
@@ -56,13 +56,12 @@ pub fn handle_getcfheaders(
     }
 
     // Get filter headers in range
-    let filter_headers = filter_service.get_filter_headers_range(
-        request.start_height,
-        request.stop_hash,
-    )?;
+    let filter_headers =
+        filter_service.get_filter_headers_range(request.start_height, request.stop_hash)?;
 
     // Get previous filter header
-    let prev_header = filter_service.get_prev_filter_header(request.start_height)
+    let prev_header = filter_service
+        .get_prev_filter_header(request.start_height)
         .unwrap_or_else(|| {
             // Genesis filter header (all zeros)
             crate::bip157::FilterHeader {
@@ -114,7 +113,8 @@ pub fn generate_cfilter_response(
         return Err(anyhow!("Unsupported filter type: {}", filter_type));
     }
 
-    let filter = filter_service.get_filter(&block_hash)
+    let filter = filter_service
+        .get_filter(&block_hash)
         .ok_or_else(|| anyhow!("Filter not found for block hash"))?;
 
     Ok(ProtocolMessage::Cfilter(CfilterMessage {
@@ -124,4 +124,3 @@ pub fn generate_cfilter_response(
         num_elements: filter.num_elements,
     }))
 }
-
