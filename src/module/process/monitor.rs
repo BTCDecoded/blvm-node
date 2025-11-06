@@ -86,9 +86,8 @@ impl ModuleProcessMonitor {
 
             // TODO: Add heartbeat check via IPC
             // For now, just checking if process is alive
+            Ok(())
         }
-
-        Ok(())
     }
 
     /// Check module health

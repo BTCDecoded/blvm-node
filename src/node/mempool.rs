@@ -112,7 +112,7 @@ impl MempoolManager {
         }
 
         // Add transaction to mempool
-        use protocol_engine::mempool::calculate_tx_id;
+        use protocol_engine::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
         self.mempool.insert(tx_hash);
 

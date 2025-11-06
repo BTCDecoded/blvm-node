@@ -486,7 +486,7 @@ impl PaymentProtocolServer {
                 .signature
                 .clone()
                 .ok_or_else(|| Bip70Error::SignatureError("No signature".to_string()))?,
-            merchant_pubkey: merchant_pubkey,
+            merchant_pubkey,
             payment_id: payment_id.to_vec(),
         };
 
