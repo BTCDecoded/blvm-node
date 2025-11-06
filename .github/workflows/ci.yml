@@ -197,14 +197,14 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ../consensus-proof/target
-        key: consensus-proof-${{ runner.os }}-target-${{ hashFiles('../consensus-proof/Cargo.lock') }}
+        key: consensus-proof-${{ runner.os }}-target
         restore-keys: |
           consensus-proof-${{ runner.os }}-target-
     - name: Restore protocol-engine build artifacts
       uses: actions/cache@v3
       with:
         path: ../protocol-engine/target
-        key: protocol-engine-${{ runner.os }}-target-${{ hashFiles('../protocol-engine/Cargo.lock') }}
+        key: protocol-engine-${{ runner.os }}-target
         restore-keys: |
           protocol-engine-${{ runner.os }}-target-
     - name: Cache reference-node build
