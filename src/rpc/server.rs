@@ -13,6 +13,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
@@ -23,14 +24,26 @@ use super::{blockchain, errors, mempool, mining, network, rawtx};
 const MAX_REQUEST_SIZE: usize = 1_048_576;
 
 /// JSON-RPC server
+#[derive(Clone)]
 pub struct RpcServer {
     addr: SocketAddr,
+    // Cached RPC handlers to avoid recreating on every request
+    blockchain: Arc<blockchain::BlockchainRpc>,
+    network: Arc<network::NetworkRpc>,
+    mempool: Arc<mempool::MempoolRpc>,
+    mining: Arc<mining::MiningRpc>,
 }
 
 impl RpcServer {
     /// Create a new RPC server
     pub fn new(addr: SocketAddr) -> Self {
-        Self { addr }
+        Self {
+            addr,
+            blockchain: Arc::new(blockchain::BlockchainRpc::new()),
+            network: Arc::new(network::NetworkRpc::new()),
+            mempool: Arc::new(mempool::MempoolRpc::new()),
+            mining: Arc::new(mining::MiningRpc::new()),
+        }
     }
 
     /// Start the RPC server
@@ -40,20 +53,29 @@ impl RpcServer {
         let listener = TcpListener::bind(self.addr).await?;
         info!("RPC server listening on {}", self.addr);
 
+        // Wrap server in Arc to share across connections
+        // Create a new server instance with cloned Arc handlers
+        let server = Arc::new(RpcServer {
+            addr: self.addr,
+            blockchain: Arc::clone(&self.blockchain),
+            network: Arc::clone(&self.network),
+            mempool: Arc::clone(&self.mempool),
+            mining: Arc::clone(&self.mining),
+        });
+        
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     debug!("New RPC connection from {}", addr);
                     let peer_addr = addr;
+                    let server = Arc::clone(&server);
                     
                     // Spawn task to handle connection
                     tokio::spawn(async move {
                         // Use hyper for HTTP - it will handle protocol detection and parsing
-                        // For backward compatibility with raw TCP, we detect by trying to read first bytes
-                        // and checking if they look like HTTP
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
-                            Self::handle_http_request(req, peer_addr)
+                            Self::handle_http_request_with_server(Arc::clone(&server), req, peer_addr)
                         });
                         
                         // Try to serve as HTTP
@@ -75,8 +97,9 @@ impl RpcServer {
         }
     }
 
-    /// Handle HTTP request using hyper
-    async fn handle_http_request(
+    /// Handle HTTP request using hyper (with server instance for cached handlers)
+    async fn handle_http_request_with_server(
+        server: Arc<Self>,
         req: Request<Incoming>,
         addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>, hyper::Error> {
@@ -120,8 +143,8 @@ impl RpcServer {
 
         debug!("HTTP RPC request from {}: {} bytes", addr, json_body.len());
 
-        // Process JSON-RPC request
-        let response = Self::process_request(&json_body).await;
+        // Process JSON-RPC request (reuse server instance with cached handlers)
+        let response = Self::process_request_with_server(server, &json_body).await;
         let response_json =
             serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
 
@@ -156,7 +179,16 @@ impl RpcServer {
     /// Process a JSON-RPC request
     ///
     /// Public method for use by both HTTP and raw TCP RPC servers
+    /// Note: This creates temporary RPC handlers. For better performance,
+    /// use process_request_with_server() with a server instance.
     pub async fn process_request(request: &str) -> Value {
+        // Create temporary server instance for backward compatibility
+        let server = Arc::new(Self::new("127.0.0.1:0".parse().unwrap()));
+        Self::process_request_with_server(server, request).await
+    }
+
+    /// Process a JSON-RPC request with a server instance (reuses cached handlers)
+    async fn process_request_with_server(server: Arc<Self>, request: &str) -> Value {
         let request: Value = match serde_json::from_str(request) {
             Ok(req) => req,
             Err(e) => {
@@ -170,7 +202,7 @@ impl RpcServer {
         let params = request.get("params").cloned().unwrap_or(json!([]));
         let id = request.get("id").cloned();
 
-        let result = Self::call_method(method, params).await;
+        let result = server.call_method(method, params).await;
 
         match result {
             Ok(response) => {
@@ -188,74 +220,65 @@ impl RpcServer {
     }
 
     /// Call a specific RPC method
-    async fn call_method(method: &str, params: Value) -> Result<Value, errors::RpcError> {
+    async fn call_method(&self, method: &str, params: Value) -> Result<Value, errors::RpcError> {
         match method {
             // Blockchain methods
             "getblockchaininfo" => {
-                let blockchain = blockchain::BlockchainRpc::new();
-                blockchain
+                self.blockchain
                     .get_blockchain_info()
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblock" => {
-                let blockchain = blockchain::BlockchainRpc::new();
                 let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
-                blockchain
+                self.blockchain
                     .get_block(hash)
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblockhash" => {
-                let blockchain = blockchain::BlockchainRpc::new();
                 let height = params.get(0).and_then(|p| p.as_u64()).unwrap_or(0);
-                blockchain
+                self.blockchain
                     .get_block_hash(height)
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblockheader" => {
-                let blockchain = blockchain::BlockchainRpc::new();
                 let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
                 let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(true);
-                blockchain
+                self.blockchain
                     .get_block_header(hash, verbose)
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getbestblockhash" => {
-                let blockchain = blockchain::BlockchainRpc::new();
-                blockchain
+                self.blockchain
                     .get_best_block_hash()
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getblockcount" => {
-                let blockchain = blockchain::BlockchainRpc::new();
-                blockchain
+                self.blockchain
                     .get_block_count()
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "getdifficulty" => {
-                let blockchain = blockchain::BlockchainRpc::new();
-                blockchain
+                self.blockchain
                     .get_difficulty()
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "gettxoutsetinfo" => {
-                let blockchain = blockchain::BlockchainRpc::new();
-                blockchain
+                self.blockchain
                     .get_txoutset_info()
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
             "verifychain" => {
-                let blockchain = blockchain::BlockchainRpc::new();
                 let checklevel = params.get(0).and_then(|p| p.as_u64());
                 let numblocks = params.get(1).and_then(|p| p.as_u64());
-                blockchain
+                self.blockchain
                     .verify_chain(checklevel, numblocks)
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
@@ -293,76 +316,59 @@ impl RpcServer {
 
             // Mempool methods
             "getmempoolinfo" => {
-                let mempool = mempool::MempoolRpc::new();
-                mempool.getmempoolinfo(&params).await
+                self.mempool.getmempoolinfo(&params).await
             }
             "getrawmempool" => {
-                let mempool = mempool::MempoolRpc::new();
-                mempool.getrawmempool(&params).await
+                self.mempool.getrawmempool(&params).await
             }
             "savemempool" => {
-                let mempool = mempool::MempoolRpc::new();
-                mempool.savemempool(&params).await
+                self.mempool.savemempool(&params).await
             }
 
             // Network methods
             "getnetworkinfo" => {
-                let network = network::NetworkRpc::new();
-                network.get_network_info().await
+                self.network.get_network_info().await
             }
             "getpeerinfo" => {
-                let network = network::NetworkRpc::new();
-                network.get_peer_info().await
+                self.network.get_peer_info().await
             }
             "getconnectioncount" => {
-                let network = network::NetworkRpc::new();
-                network.get_connection_count(&params).await
+                self.network.get_connection_count(&params).await
             }
             "ping" => {
-                let network = network::NetworkRpc::new();
-                network.ping(&params).await
+                self.network.ping(&params).await
             }
             "addnode" => {
-                let network = network::NetworkRpc::new();
-                network.add_node(&params).await
+                self.network.add_node(&params).await
             }
             "disconnectnode" => {
-                let network = network::NetworkRpc::new();
-                network.disconnect_node(&params).await
+                self.network.disconnect_node(&params).await
             }
             "getnettotals" => {
-                let network = network::NetworkRpc::new();
-                network.get_net_totals(&params).await
+                self.network.get_net_totals(&params).await
             }
             "clearbanned" => {
-                let network = network::NetworkRpc::new();
-                network.clear_banned(&params).await
+                self.network.clear_banned(&params).await
             }
             "setban" => {
-                let network = network::NetworkRpc::new();
-                network.set_ban(&params).await
+                self.network.set_ban(&params).await
             }
             "listbanned" => {
-                let network = network::NetworkRpc::new();
-                network.list_banned(&params).await
+                self.network.list_banned(&params).await
             }
 
             // Mining methods
             "getmininginfo" => {
-                let mining = mining::MiningRpc::new();
-                mining.get_mining_info().await
+                self.mining.get_mining_info().await
             }
             "getblocktemplate" => {
-                let mining = mining::MiningRpc::new();
-                mining.get_block_template(&params).await
+                self.mining.get_block_template(&params).await
             }
             "submitblock" => {
-                let mining = mining::MiningRpc::new();
-                mining.submit_block(&params).await
+                self.mining.submit_block(&params).await
             }
             "estimatesmartfee" => {
-                let mining = mining::MiningRpc::new();
-                mining.estimate_smart_fee(&params).await
+                self.mining.estimate_smart_fee(&params).await
             }
 
             _ => Err(errors::RpcError::method_not_found(method)),

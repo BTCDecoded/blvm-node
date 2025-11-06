@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use tracing::debug;
 
 /// Network RPC methods
+#[derive(Clone)]
 pub struct NetworkRpc;
 
 impl NetworkRpc {

@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use tracing::debug;
 
 /// Mempool RPC methods
+#[derive(Clone)]
 pub struct MempoolRpc;
 
 impl MempoolRpc {

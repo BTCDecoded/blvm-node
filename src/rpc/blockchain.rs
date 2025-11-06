@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use tracing::debug;
 
 /// Blockchain RPC methods
+#[derive(Clone)]
 pub struct BlockchainRpc;
 
 impl Default for BlockchainRpc {
