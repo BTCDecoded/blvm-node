@@ -2,6 +2,8 @@
 
 **Minimal Bitcoin implementation using bllvm-protocol for protocol abstraction and bllvm-consensus for consensus decisions.**
 
+> **For verified system status**: See [SYSTEM_STATUS.md](https://github.com/BTCDecoded/.github/blob/main/SYSTEM_STATUS.md) in the BTCDecoded organization repository.
+
 This crate provides a minimal, production-ready Bitcoin node implementation that uses the bllvm-protocol crate for protocol abstraction and bllvm-consensus for all consensus decisions. It adds only the non-consensus infrastructure: storage, networking, RPC, and orchestration.
 
 ## Architecture Position
