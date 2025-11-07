@@ -3,7 +3,7 @@
 //! Stores and manages the UTXO set for efficient transaction validation.
 
 use anyhow::Result;
-use protocol_engine::{OutPoint, UtxoSet, UTXO};
+use bllvm_protocol::{OutPoint, UtxoSet, UTXO};
 use sled::Db;
 use std::collections::HashMap;
 

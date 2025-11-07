@@ -3,8 +3,8 @@
 //! Stores blocks by hash and maintains block index by height.
 
 use anyhow::Result;
-use protocol_engine::segwit::Witness;
-use protocol_engine::{Block, BlockHeader, Hash};
+use bllvm_protocol::segwit::Witness;
+use bllvm_protocol::{Block, BlockHeader, Hash};
 use sled::Db;
 
 /// Block storage manager

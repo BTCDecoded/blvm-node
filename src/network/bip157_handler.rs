@@ -9,7 +9,7 @@ use crate::network::protocol::{
     GetCfheadersMessage, GetCfiltersMessage, ProtocolMessage,
 };
 use anyhow::{anyhow, Result};
-use protocol_engine::Hash;
+use bllvm_protocol::Hash;
 
 /// Handle GetCfilters request
 pub fn handle_getcfilters(

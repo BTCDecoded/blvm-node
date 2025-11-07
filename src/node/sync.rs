@@ -9,7 +9,7 @@ use crate::node::block_processor::{
 };
 use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
-use protocol_engine::{segwit::Witness, Block, BlockHeader, UtxoSet, ValidationResult};
+use bllvm_protocol::{segwit::Witness, Block, BlockHeader, UtxoSet, ValidationResult};
 use std::collections::HashMap;
 use tracing::{debug, error, info};
 
@@ -385,7 +385,7 @@ impl MockBlockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol_engine::types::BlockHeader;
+    use bllvm_protocol::types::BlockHeader;
 
     #[test]
     fn test_sync_coordinator_new() {

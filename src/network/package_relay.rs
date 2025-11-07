@@ -14,7 +14,7 @@
 //! - More efficient validation (package as unit)
 
 use crate::network::txhash::calculate_txid;
-use protocol_engine::{Hash, Transaction};
+use bllvm_protocol::{Hash, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};

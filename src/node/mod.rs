@@ -20,7 +20,7 @@ use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::rpc::RpcManager;
 use crate::storage::Storage;
-use protocol_engine::{BitcoinProtocolEngine, ProtocolVersion};
+use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -189,7 +189,7 @@ impl Node {
 
         // Get initial state for block processing
         let mut current_height = self.storage.chain().get_height()?.unwrap_or(0);
-        let mut utxo_set = protocol_engine::UtxoSet::new();
+        let mut utxo_set = bllvm_protocol::UtxoSet::new();
 
         // Main node loop - in a real implementation this would coordinate
         // between all components and handle shutdown signals

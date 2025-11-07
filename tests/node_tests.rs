@@ -1,12 +1,12 @@
 //! Node orchestration tests
 
-use reference_node::node::*;
-use reference_node::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+use bllvm_node::node::*;
+use bllvm_node::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 use std::net::SocketAddr;
 use tempfile::TempDir;
 mod common;
 use common::*;
-use protocol_engine::ProtocolVersion;
+use bllvm_protocol::ProtocolVersion;
 
 #[tokio::test]
 async fn test_node_creation() {
@@ -51,7 +51,7 @@ async fn test_mempool_manager() {
     assert!(mempool.transaction_hashes().is_empty());
 
     // Test adding transaction (simplified)
-    use consensus_proof::Transaction;
+    use bllvm_consensus::Transaction;
     let tx = Transaction {
         version: 1,
         inputs: vec![],
@@ -130,13 +130,13 @@ async fn test_node_creation_with_different_protocols() {
         mainnet_temp_dir.path().to_str().unwrap(),
         network_addr,
         rpc_addr,
-        Some(protocol_engine::ProtocolVersion::BitcoinV1),
+        Some(bllvm_protocol::ProtocolVersion::BitcoinV1),
     )
     .unwrap();
 
     assert_eq!(
         mainnet_node.protocol().get_protocol_version(),
-        protocol_engine::ProtocolVersion::BitcoinV1
+        bllvm_protocol::ProtocolVersion::BitcoinV1
     );
 
     // Test testnet node
@@ -145,13 +145,13 @@ async fn test_node_creation_with_different_protocols() {
         testnet_temp_dir.path().to_str().unwrap(),
         network_addr,
         rpc_addr,
-        Some(protocol_engine::ProtocolVersion::Testnet3),
+        Some(bllvm_protocol::ProtocolVersion::Testnet3),
     )
     .unwrap();
 
     assert_eq!(
         testnet_node.protocol().get_protocol_version(),
-        protocol_engine::ProtocolVersion::Testnet3
+        bllvm_protocol::ProtocolVersion::Testnet3
     );
 
     // Test regtest node (default)
@@ -166,7 +166,7 @@ async fn test_node_creation_with_different_protocols() {
 
     assert_eq!(
         regtest_node.protocol().get_protocol_version(),
-        protocol_engine::ProtocolVersion::Regtest
+        bllvm_protocol::ProtocolVersion::Regtest
     );
 }
 

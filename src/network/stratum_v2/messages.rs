@@ -4,7 +4,7 @@
 //! https://stratumprotocol.org/
 
 use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
-use protocol_engine::types::{Block, Hash, Natural};
+use bllvm_protocol::types::{Block, Hash, Natural};
 use serde::{Deserialize, Serialize};
 
 /// Stratum V2 message type tags

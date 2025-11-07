@@ -14,7 +14,7 @@ use crate::network::stratum_v2::pool::{JobInfo, StratumV2Pool};
 use crate::network::stratum_v2::protocol::{TlvDecoder, TlvEncoder};
 use crate::network::NetworkManager;
 use crate::node::miner::MiningCoordinator;
-use protocol_engine::types::Block;
+use bllvm_protocol::types::Block;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;

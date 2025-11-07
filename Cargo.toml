@@ -1,13 +1,13 @@
 [package]
-name = "reference-node"
+name = "bllvm-node"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bitcoin Commons Team"]
-description = "Bitcoin Commons BLLVM: Minimal Bitcoin node implementation using protocol-engine and consensus-proof"
+description = "Bitcoin Commons BLLVM: Minimal Bitcoin node implementation using bllvm-protocol and bllvm-consensus"
 license = "MIT"
-repository = "https://github.com/BTCDecoded/reference-node"
+repository = "https://github.com/BTCDecoded/bllvm-node"
 homepage = "https://btcdecoded.org"
-documentation = "https://docs.rs/reference-node"
+documentation = "https://docs.rs/bllvm-node"
 keywords = ["bitcoin", "node", "blockchain", "cryptocurrency", "p2p"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
 rust-version = "1.82"
@@ -18,8 +18,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # Protocol abstraction layer - Local path for development
-# This transitively provides consensus-proof, so we only need this one dependency
-protocol-engine = { path = "../protocol-engine" }
+# This transitively provides bllvm-consensus, so we only need this one dependency
+bllvm-protocol = { path = "../bllvm-protocol", package = "bllvm-protocol" }
 
 # Storage layer - EXACT VERSIONS for security
 sled = "=0.34.7"
@@ -73,7 +73,7 @@ async-trait = "=0.1.75"
 # Bitflags for transport preference combinations
 bitflags = "2.4"
 
-# Memory allocator optimization (not in consensus-proof to maintain Kani compatibility)
+# Memory allocator optimization (not in bllvm-consensus to maintain Kani compatibility)
 mimalloc = { version = "0.1", default-features = false }
 
 # Parallel processing for block validation (Phase 4.2)
@@ -89,10 +89,10 @@ rustls = { version = "0.23", optional = true }
 [features]
 iroh = ["dep:iroh-net", "dep:quinn"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
-utxo-commitments = ["protocol-engine/utxo-commitments"]
+utxo-commitments = ["bllvm-protocol/utxo-commitments"]
 stratum-v2 = []
 # Production optimizations (parallel block validation, etc.)
-production = ["protocol-engine/production", "dep:rayon"]
+production = ["bllvm-protocol/production", "dep:rayon"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF
 dandelion = []
 
@@ -103,9 +103,9 @@ cargo-tarpaulin = "0.27"
 criterion = "0.5"
 proptest = "1.4.0"
 
-# Release profile optimizations (mirrors consensus-proof)
+# Release profile optimizations (mirrors bllvm-consensus)
 [profile.release]
-# Production optimizations (mirrors consensus-proof)
+# Production optimizations (mirrors bllvm-consensus)
 opt-level = 3
 lto = "fat"  # Fat LTO for maximum optimization
 codegen-units = 1  # Single codegen unit maximizes LTO benefits

@@ -1,6 +1,6 @@
 #![cfg(feature = "dandelion")]
-use consensus_proof::Hash;
-use reference_node::network::relay::RelayManager;
+use bllvm_consensus::Hash;
+use bllvm_node::network::relay::RelayManager;
 
 fn hash_from_u8(v: u8) -> Hash {
     [v; 32]

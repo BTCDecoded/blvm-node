@@ -11,9 +11,9 @@
 //! Reference: Bitcoin Core's parallel block validation for IBD
 
 use anyhow::Result;
-use protocol_engine::block::connect_block;
-use protocol_engine::segwit::Witness;
-use protocol_engine::{Block, BlockHeader, UtxoSet, ValidationResult};
+use bllvm_protocol::block::connect_block;
+use bllvm_protocol::segwit::Witness;
+use bllvm_protocol::{Block, BlockHeader, UtxoSet, ValidationResult};
 
 #[cfg(feature = "production")]
 use rayon::prelude::*;

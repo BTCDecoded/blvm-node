@@ -4,7 +4,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::time::{Duration, Instant};
 
-use reference_node::network::dandelion::{Clock, DandelionRelay};
+use bllvm_node::network::dandelion::{Clock, DandelionRelay};
 
 #[derive(Clone)]
 struct TestClock {

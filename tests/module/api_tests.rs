@@ -2,15 +2,15 @@
 //!
 //! Tests for module API access, permissions, and request validation.
 
-use reference_node::tests::module::test_utils::*;
-use reference_node::module::security::permissions::{Permission, PermissionSet};
-use reference_node::module::api::hub::ModuleApiHub;
-use reference_node::module::ipc::protocol::{RequestMessage, RequestPayload};
-use reference_node::Hash;
+use bllvm_node::tests::module::test_utils::*;
+use bllvm_node::module::security::permissions::{Permission, PermissionSet};
+use bllvm_node::module::api::hub::ModuleApiHub;
+use bllvm_node::module::ipc::protocol::{RequestMessage, RequestPayload};
+use bllvm_node::Hash;
 
 #[tokio::test]
 async fn test_permission_checker() {
-    use reference_node::module::security::permissions::PermissionChecker;
+    use bllvm_node::module::security::permissions::PermissionChecker;
     
     let mut checker = PermissionChecker::new();
     
@@ -29,8 +29,8 @@ async fn test_permission_checker() {
 
 #[tokio::test]
 async fn test_request_validator() {
-    use reference_node::module::security::validator::RequestValidator;
-    use reference_node::module::ipc::protocol::RequestPayload;
+    use bllvm_node::module::security::validator::RequestValidator;
+    use bllvm_node::module::ipc::protocol::RequestPayload;
     
     let validator = RequestValidator::new();
     
@@ -39,7 +39,7 @@ async fn test_request_validator() {
         hash: Hash::default(),
     };
     
-    use reference_node::module::security::validator::ValidationResult;
+    use bllvm_node::module::security::validator::ValidationResult;
     let result = validator.validate_request("test-module", &payload).unwrap();
     assert!(matches!(result, ValidationResult::Allowed));
 }

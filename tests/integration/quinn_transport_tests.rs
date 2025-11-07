@@ -3,7 +3,7 @@
 #[cfg(feature = "quinn")]
 use anyhow::Result;
 #[cfg(feature = "quinn")]
-use reference_node::network::{
+use bllvm_node::network::{
     transport::{Transport, TransportAddr},
     quinn_transport::QuinnTransport,
 };
@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 #[tokio::test]
 async fn test_quinn_transport_type() -> Result<()> {
     let transport = QuinnTransport::new()?;
-    assert_eq!(transport.transport_type(), reference_node::network::transport::TransportType::Quinn);
+    assert_eq!(transport.transport_type(), bllvm_node::network::transport::TransportType::Quinn);
     Ok(())
 }
 

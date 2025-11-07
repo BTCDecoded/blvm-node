@@ -1,14 +1,14 @@
 //! Storage layer tests
 
-use consensus_proof::*;
-use reference_node::storage::*;
+use bllvm_consensus::*;
+use bllvm_node::storage::*;
 use tempfile::TempDir;
 mod common;
 use common::*;
-use reference_node::storage::blockstore::BlockStore;
-use reference_node::storage::chainstate::ChainState;
-use reference_node::storage::txindex::TxIndex;
-use reference_node::storage::utxostore::UtxoStore;
+use bllvm_node::storage::blockstore::BlockStore;
+use bllvm_node::storage::chainstate::ChainState;
+use bllvm_node::storage::txindex::TxIndex;
+use bllvm_node::storage::utxostore::UtxoStore;
 
 #[test]
 fn test_storage_creation() {
@@ -722,7 +722,7 @@ async fn test_txindex_lookup_paths() {
         .with_lock_time(0)
         .build();
 
-    let tx_hash = consensus_proof::mempool::calculate_tx_id(&tx);
+    let tx_hash = bllvm_consensus::mempool::calculate_tx_id(&tx);
     let block_hash = random_hash();
     let block_height = 100;
 
@@ -795,7 +795,7 @@ async fn test_storage_integration_workflow() {
 
     // Index transaction
     let tx = valid_transaction();
-    let tx_hash = consensus_proof::mempool::calculate_tx_id(&tx);
+    let tx_hash = bllvm_consensus::mempool::calculate_tx_id(&tx);
     txindex
         .index_transaction(&tx, &block_hash, block_height, 0)
         .unwrap();

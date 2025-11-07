@@ -1,6 +1,6 @@
 #![cfg(feature = "quinn")]
 
-use reference_node::rpc::quinn_server::QuinnRpcServer;
+use bllvm_node::rpc::quinn_server::QuinnRpcServer;
 use std::net::SocketAddr;
 
 #[tokio::test]

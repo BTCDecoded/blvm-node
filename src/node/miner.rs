@@ -3,7 +3,7 @@
 //! Handles block mining, template generation, and mining coordination.
 
 use anyhow::Result;
-use protocol_engine::{Block, BlockHeader, Transaction};
+use bllvm_protocol::{Block, BlockHeader, Transaction};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
@@ -423,7 +423,7 @@ impl MiningCoordinator {
         Ok(Transaction {
             version: 1,
             inputs: vec![],
-            outputs: vec![protocol_engine::TransactionOutput {
+            outputs: vec![bllvm_protocol::TransactionOutput {
                 value: 5000000000, // 50 BTC
                 script_pubkey: vec![
                     0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -603,7 +603,7 @@ impl MempoolProvider for MockMempoolProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol_engine::{OutPoint, TransactionInput, TransactionOutput};
+    use bllvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
 
     #[test]
     fn test_transaction_selector_creation() {

@@ -1,6 +1,6 @@
 //! RPC layer tests
 
-use reference_node::rpc::*;
+use bllvm_node::rpc::*;
 use std::net::SocketAddr;
 use tokio::time::{timeout, Duration};
 mod common;

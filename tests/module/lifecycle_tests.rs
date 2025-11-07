@@ -2,7 +2,7 @@
 //!
 //! Tests for module loading, unloading, reloading, and crash recovery.
 
-use reference_node::tests::module::test_utils::*;
+use bllvm_node::tests::module::test_utils::*;
 
 #[tokio::test]
 async fn test_module_manager_creation() {
@@ -23,7 +23,7 @@ async fn test_module_discovery() {
     fixture.create_test_manifest(&module_dir, "test-module", "0.1.0").unwrap();
     
     // Test module discovery  
-    use reference_node::module::registry::discovery::ModuleDiscovery;
+    use bllvm_node::module::registry::discovery::ModuleDiscovery;
     let discovery = ModuleDiscovery::new(&fixture.modules_dir);
     let modules = discovery.discover_modules().unwrap();
     
@@ -55,7 +55,7 @@ async fn test_module_manifest_validation() {
     assert_eq!(manifest.version, "1.0.0");
     
     // Validate manifest
-    use reference_node::module::validation::{ManifestValidator, ValidationResult};
+    use bllvm_node::module::validation::{ManifestValidator, ValidationResult};
     let validator = ManifestValidator::new();
     let result = validator.validate(&manifest);
     

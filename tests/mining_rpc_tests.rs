@@ -1,14 +1,14 @@
 //! Unit tests for Mining RPC methods
 
-use protocol_engine::serialization::serialize_transaction;
-use protocol_engine::{BlockHeader, Natural, OutPoint, Transaction, UtxoSet, UTXO};
-use reference_node::node::mempool::MempoolManager;
-use reference_node::rpc::mining::MiningRpc;
-use reference_node::storage::Storage;
+use bllvm_protocol::serialization::serialize_transaction;
+use bllvm_protocol::{BlockHeader, Natural, OutPoint, Transaction, UtxoSet, UTXO};
+use bllvm_node::node::mempool::MempoolManager;
+use bllvm_node::rpc::mining::MiningRpc;
+use bllvm_node::storage::Storage;
 use std::sync::Arc;
 use tempfile::TempDir;
 // Sha256 not needed directly in tests
-use protocol_engine::mining::BlockTemplate;
+use bllvm_protocol::mining::BlockTemplate;
 mod common;
 use common::*;
 
@@ -226,15 +226,15 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
     // Using a simple coinbase transaction structure
     let tx = Transaction {
         version: 1,
-        inputs: vec![protocol_engine::types::TransactionInput {
-            prevout: protocol_engine::types::OutPoint {
+        inputs: vec![bllvm_protocol::types::TransactionInput {
+            prevout: bllvm_protocol::types::OutPoint {
                 hash: [0u8; 32],
                 index: 0xffffffff,
             },
             script_sig: vec![0x03, 0x00, 0x00, 0x00], // Minimal coinbase script
             sequence: 0xffffffff,
         }],
-        outputs: vec![protocol_engine::types::TransactionOutput {
+        outputs: vec![bllvm_protocol::types::TransactionOutput {
             value: 5000000000,
             script_pubkey: vec![
                 0x41, 0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6,

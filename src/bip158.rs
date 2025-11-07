@@ -6,7 +6,7 @@
 //! Allows light clients to determine if a block contains relevant transactions
 //! without downloading the entire block.
 
-use protocol_engine::Transaction;
+use bllvm_protocol::Transaction;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 

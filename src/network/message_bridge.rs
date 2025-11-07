@@ -6,7 +6,7 @@
 use crate::network::protocol_adapter::ProtocolAdapter;
 use crate::network::transport::TransportType;
 use anyhow::Result;
-use protocol_engine::network::{NetworkMessage as ConsensusNetworkMessage, NetworkResponse};
+use bllvm_protocol::network::{NetworkMessage as ConsensusNetworkMessage, NetworkResponse};
 use tracing::debug;
 
 /// Message bridge for connecting consensus-proof message processing
@@ -84,7 +84,7 @@ impl MessageBridge {
 
         // Process message using consensus-proof logic
         // In real implementation, this would call:
-        // protocol_engine::network::process_network_message(&consensus_msg, &mut peer_state, &chain_state)
+        // bllvm_protocol::network::process_network_message(&consensus_msg, &mut peer_state, &chain_state)
         // For now, return empty response
         debug!("Processed incoming consensus message: {:?}", consensus_msg);
 

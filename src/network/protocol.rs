@@ -5,7 +5,7 @@
 use crate::bip157::NODE_COMPACT_FILTERS;
 use crate::network::transport::TransportType;
 use anyhow::Result;
-use protocol_engine::{Block, BlockHeader, Hash, Transaction};
+use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
 
 /// Bitcoin protocol constants

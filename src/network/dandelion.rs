@@ -9,7 +9,7 @@
 //!
 //! This provides formal anonymity guarantees against transaction origin analysis.
 
-use protocol_engine::Hash;
+use bllvm_protocol::Hash;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, HashSet};

@@ -44,15 +44,15 @@ pub use config::*;
 
 // Re-export commonly used types from protocol-engine
 // This allows depending only on protocol-engine (which transitively provides consensus-proof)
-pub use protocol_engine::{
+pub use bllvm_protocol::{
     Block, BlockHeader, Transaction, TransactionInput, TransactionOutput,
     OutPoint, UTXO, UtxoSet, ValidationResult, Hash, ByteString, Natural, Integer,
     ConsensusError, Result,
 };
-pub use protocol_engine::mempool::Mempool;
+pub use bllvm_protocol::mempool::Mempool;
 
 // Re-export protocol-engine types
-pub use protocol_engine::{BitcoinProtocolEngine, ProtocolVersion};
+pub use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 
 /// Main reference node implementation
 pub struct ReferenceNode {

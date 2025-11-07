@@ -51,7 +51,7 @@ QUIC RPC requires the `quinn` feature flag:
 
 ```toml
 [dependencies]
-reference-node = { path = "../reference-node", features = ["quinn"] }
+bllvm-node = { path = "../bllvm-node", features = ["quinn"] }
 ```
 
 Or when building:

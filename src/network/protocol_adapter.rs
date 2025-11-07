@@ -5,7 +5,7 @@
 
 use crate::network::transport::{Transport, TransportType};
 use anyhow::Result;
-use protocol_engine::network::NetworkMessage as ConsensusNetworkMessage;
+use bllvm_protocol::network::NetworkMessage as ConsensusNetworkMessage;
 
 /// Protocol adapter for Bitcoin messages
 ///
@@ -152,7 +152,7 @@ impl ProtocolAdapter {
             PongMessage as ProtoPongMessage, ProtocolMessage,
             VersionMessage as ProtoVersionMessage,
         };
-        use protocol_engine::network::{
+        use bllvm_protocol::network::{
             NetworkAddress as ConsensusNetworkAddress, PingMessage as ConsensusPingMessage,
             PongMessage as ConsensusPongMessage, VersionMessage as ConsensusVersionMessage,
         };
@@ -200,7 +200,7 @@ impl ProtocolAdapter {
             PingMessage as ProtoPingMessage, PongMessage as ProtoPongMessage, ProtocolMessage,
             VersionMessage as ProtoVersionMessage,
         };
-        use protocol_engine::network::{
+        use bllvm_protocol::network::{
             NetworkAddress as ConsensusNetworkAddress, PingMessage as ConsensusPingMessage,
             PongMessage as ConsensusPongMessage, VersionMessage as ConsensusVersionMessage,
         };
@@ -242,7 +242,7 @@ impl ProtocolAdapter {
 
     /// Get command string for a message type
     fn message_to_command(msg: &ConsensusNetworkMessage) -> &'static str {
-        use protocol_engine::network::*;
+        use bllvm_protocol::network::*;
 
         match msg {
             ConsensusNetworkMessage::Version(_) => "version",

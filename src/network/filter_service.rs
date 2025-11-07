@@ -6,7 +6,7 @@
 use crate::bip157;
 use crate::bip158::{build_block_filter, CompactBlockFilter};
 use anyhow::{anyhow, Result};
-use protocol_engine::{Block, BlockHeader, Hash, Transaction};
+use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 

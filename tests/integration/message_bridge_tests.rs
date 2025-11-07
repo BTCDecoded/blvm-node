@@ -1,11 +1,11 @@
 //! Integration tests for message bridge
 
 use anyhow::Result;
-use reference_node::network::{
+use bllvm_node::network::{
     message_bridge::MessageBridge,
     transport::TransportType,
 };
-use consensus_proof::network::{
+use bllvm_consensus::network::{
     NetworkMessage, NetworkResponse, VersionMessage, NetworkAddress, PingMessage,
 };
 

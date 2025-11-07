@@ -155,7 +155,7 @@ impl StratumV2Client {
         // Perform Setup Connection handshake
         let setup_msg = SetupConnectionMessage {
             protocol_version: 2, // Stratum V2
-            endpoint: "reference-node/0.1.0".to_string(),
+            endpoint: "bllvm-node/0.1.0".to_string(),
             capabilities: vec!["mining".to_string(), "merge-mining".to_string()],
         };
 

@@ -1,25 +1,25 @@
 # Reference Node
 
-**Minimal Bitcoin implementation using protocol-engine for protocol abstraction and consensus-proof for consensus decisions.**
+**Minimal Bitcoin implementation using bllvm-protocol for protocol abstraction and bllvm-consensus for consensus decisions.**
 
-This crate provides a minimal, production-ready Bitcoin node implementation that uses the protocol-engine crate for protocol abstraction and consensus-proof for all consensus decisions. It adds only the non-consensus infrastructure: storage, networking, RPC, and orchestration.
+This crate provides a minimal, production-ready Bitcoin node implementation that uses the bllvm-protocol crate for protocol abstraction and bllvm-consensus for all consensus decisions. It adds only the non-consensus infrastructure: storage, networking, RPC, and orchestration.
 
 ## Architecture Position
 
 This is **Tier 4** of the 5-tier Bitcoin Commons architecture (BLLVM technology stack):
 
 ```
-1. Orange Paper (mathematical foundation)
-2. consensus-proof (pure math implementation)
-3. protocol-engine (Bitcoin abstraction)
-4. reference-node (full node implementation) ← THIS CRATE
-5. developer-sdk (governance infrastructure)
+1. bllvm-spec (Orange Paper - mathematical foundation)
+2. bllvm-consensus (pure math implementation)
+3. bllvm-protocol (Bitcoin abstraction)
+4. bllvm-node (full node implementation) ← THIS CRATE
+5. bllvm-sdk (governance infrastructure)
 ```
 
 ## Design Principles
 
-1. **Zero Consensus Re-implementation**: All consensus logic from consensus-proof
-2. **Protocol Abstraction**: Uses protocol-engine for variant support
+1. **Zero Consensus Re-implementation**: All consensus logic from bllvm-consensus
+2. **Protocol Abstraction**: Uses bllvm-protocol for variant support
 3. **Pure Infrastructure**: Only adds storage, networking, RPC, orchestration
 4. **Production Ready**: Full Bitcoin node functionality
 
@@ -52,29 +52,29 @@ let mainnet_node = ReferenceNode::new(Some(ProtocolVersion::BitcoinV1))?;
 ### Quick Start
 
 ```bash
-git clone https://github.com/BTCDecoded/reference-node
-cd reference-node
+git clone https://github.com/BTCDecoded/bllvm-node
+cd bllvm-node
 cargo build --release
 ```
 
-The build automatically fetches consensus-proof from GitHub.
+The build automatically fetches bllvm-consensus from GitHub.
 
 ### Local Development
 
-If you're developing both reference-node and consensus-proof:
+If you're developing both bllvm-node and bllvm-consensus:
 
 1. Clone both repos:
    ```bash
-   git clone https://github.com/BTCDecoded/consensus-proof
-   git clone https://github.com/BTCDecoded/reference-node
+   git clone https://github.com/BTCDecoded/bllvm-consensus
+   git clone https://github.com/BTCDecoded/bllvm-node
    ```
 
 2. Set up local override:
    ```bash
-   cd reference-node
+   cd bllvm-node
    mkdir -p .cargo
-   echo '[patch."https://github.com/BTCDecoded/consensus-proof"]' > .cargo/config.toml
-   echo 'consensus-proof = { path = "../consensus-proof" }' >> .cargo/config.toml
+   echo '[patch."https://github.com/BTCDecoded/bllvm-consensus"]' > .cargo/config.toml
+   echo 'bllvm-consensus = { path = "../bllvm-consensus" }' >> .cargo/config.toml
    ```
 
 3. Build:
@@ -82,7 +82,7 @@ If you're developing both reference-node and consensus-proof:
    cargo build
    ```
 
-Changes to consensus-proof are now immediately reflected without git push.
+Changes to bllvm-consensus are now immediately reflected without git push.
 
 ## Testing
 
@@ -132,7 +132,7 @@ See [SECURITY.md](SECURITY.md) for security policies and [BTCDecoded Security Po
 
 ## Dependencies
 
-- **consensus-proof**: All consensus logic (git dependency)
+- **bllvm-consensus**: All consensus logic (git dependency)
 - **tokio**: Async runtime for networking
 - **serde**: Serialization
 - **anyhow/thiserror**: Error handling

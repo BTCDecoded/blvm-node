@@ -2,12 +2,12 @@
 //! 
 //! Tests real-world mining scenarios and end-to-end workflows.
 
-use reference_node::rpc::mining::MiningRpc;
-use reference_node::storage::Storage;
-use reference_node::node::mempool::MempoolManager;
+use bllvm_node::rpc::mining::MiningRpc;
+use bllvm_node::storage::Storage;
+use bllvm_node::node::mempool::MempoolManager;
 use std::sync::Arc;
 use tempfile::TempDir;
-use protocol_engine::types::{BlockHeader, OutPoint, UTXO, Transaction, TransactionInput, TransactionOutput};
+use bllvm_protocol::types::{BlockHeader, OutPoint, UTXO, Transaction, TransactionInput, TransactionOutput};
 use serde_json::json;
 mod common;
 use common::*;

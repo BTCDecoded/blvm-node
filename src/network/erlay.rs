@@ -10,7 +10,7 @@
 //! Consider prioritizing BIP152 (Compact Blocks) first as it has lower complexity.
 
 use anyhow::Result;
-use protocol_engine::Hash;
+use bllvm_protocol::Hash;
 use std::collections::HashSet;
 
 /// Transaction set for reconciliation

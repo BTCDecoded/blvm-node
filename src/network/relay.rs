@@ -7,7 +7,7 @@
 
 #[cfg(feature = "dandelion")]
 use super::dandelion::DandelionRelay;
-use protocol_engine::{Block, Hash};
+use bllvm_protocol::{Block, Hash};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
@@ -375,7 +375,7 @@ mod tests {
         let mut relay = RelayManager::new();
         let mut fibre = FibreRelay::new();
         let block = Block {
-            header: protocol_engine::BlockHeader {
+            header: bllvm_protocol::BlockHeader {
                 version: 1,
                 prev_block_hash: [0u8; 32],
                 merkle_root: [0u8; 32],

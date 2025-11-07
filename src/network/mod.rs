@@ -47,8 +47,8 @@ pub mod txhash; // Non-consensus hashing helpers for relay
 
 use crate::network::protocol::{ProtocolMessage, ProtocolParser};
 use anyhow::Result;
-use protocol_engine::mempool::Mempool;
-use protocol_engine::{ConsensusProof, UtxoSet};
+use bllvm_protocol::mempool::Mempool;
+use bllvm_protocol::{ConsensusProof, UtxoSet};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -713,7 +713,7 @@ impl NetworkManager {
         use crate::network::package_relay_handler::handle_pkgtxn;
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
-        use protocol_engine::Transaction;
+        use bllvm_protocol::Transaction;
 
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
@@ -743,7 +743,7 @@ impl NetworkManager {
     /// Submit validated transactions to the mempool (placeholder hook)
     async fn submit_transactions_to_mempool(
         &self,
-        txs: &[protocol_engine::Transaction],
+        txs: &[bllvm_protocol::Transaction],
     ) -> Result<()> {
         // Best-effort synchronous submission using shared state
         let mut utxo_lock = self
@@ -1083,7 +1083,7 @@ mod tests {
         let manager = NetworkManager::new(addr);
 
         // Build a pkgtxn message with one trivial tx
-        let tx = protocol_engine::Transaction {
+        let tx = bllvm_protocol::Transaction {
             version: 1,
             inputs: vec![],
             outputs: vec![],

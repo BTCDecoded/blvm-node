@@ -4,13 +4,13 @@
 
 use hex;
 use proptest::prelude::*;
-use protocol_engine::serialization::serialize_transaction;
-use protocol_engine::types::{
+use bllvm_protocol::serialization::serialize_transaction;
+use bllvm_protocol::types::{
     BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput,
 };
-use reference_node::node::mempool::MempoolManager;
-use reference_node::rpc::mining::MiningRpc;
-use reference_node::storage::Storage;
+use bllvm_node::node::mempool::MempoolManager;
+use bllvm_node::rpc::mining::MiningRpc;
+use bllvm_node::storage::Storage;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempfile::TempDir;

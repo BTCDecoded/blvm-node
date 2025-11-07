@@ -1,4 +1,4 @@
-//! Integration tests for reference-node
+//! Integration tests for bllvm-node
 
 pub mod basic;
 pub mod mining_integration_tests;

@@ -1,8 +1,8 @@
 //! Unit tests for Stratum V2 mining and share validation
 
-use protocol_engine::types::{Block, BlockHeader, Hash, Natural};
-use reference_node::network::stratum_v2::messages::ShareData;
-use reference_node::network::stratum_v2::pool::{JobInfo, StratumV2Pool};
+use bllvm_protocol::types::{Block, BlockHeader, Hash, Natural};
+use bllvm_node::network::stratum_v2::messages::ShareData;
+use bllvm_node::network::stratum_v2::pool::{JobInfo, StratumV2Pool};
 use tempfile::TempDir;
 mod common;
 use common::*;

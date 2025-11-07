@@ -5,8 +5,8 @@
 
 use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
 use crate::network::stratum_v2::messages::*;
-use protocol_engine::types::{Block, BlockHeader, Hash, Natural};
-use protocol_engine::ConsensusProof;
+use bllvm_protocol::types::{Block, BlockHeader, Hash, Natural};
+use bllvm_protocol::ConsensusProof;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -334,7 +334,7 @@ impl StratumV2Pool {
         };
 
         // 3. Verify proof of work using formally verified consensus-proof function
-        // This function has Kani proofs in consensus-proof/src/pow.rs
+        // This function has Kani proofs in bllvm-consensus/src/pow.rs
         let pow_valid = match self.consensus.check_proof_of_work(&header) {
             Ok(valid) => valid,
             Err(e) => {
@@ -467,7 +467,7 @@ impl StratumV2Pool {
     }
 
     /// Serialize transaction for template extraction
-    fn serialize_transaction(&self, _tx: &protocol_engine::types::Transaction) -> Vec<u8> {
+    fn serialize_transaction(&self, _tx: &bllvm_protocol::types::Transaction) -> Vec<u8> {
         // TODO: Implement proper transaction serialization
         // For now, return empty
         vec![]

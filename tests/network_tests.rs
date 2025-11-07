@@ -1,16 +1,16 @@
 //! Network layer tests
 
-use reference_node::network::inventory::InventoryManager;
-use reference_node::network::peer::Peer;
-use reference_node::network::protocol::*;
-use reference_node::network::relay::RelayManager;
-use reference_node::network::*;
+use bllvm_node::network::inventory::InventoryManager;
+use bllvm_node::network::peer::Peer;
+use bllvm_node::network::protocol::*;
+use bllvm_node::network::relay::RelayManager;
+use bllvm_node::network::*;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 mod common;
 use common::*;
-use reference_node::network::inventory::{InventoryRequest, MSG_BLOCK, MSG_TX};
-use reference_node::network::protocol::InventoryItem as NetworkInventoryItem;
+use bllvm_node::network::inventory::{InventoryRequest, MSG_BLOCK, MSG_TX};
+use bllvm_node::network::protocol::InventoryItem as NetworkInventoryItem;
 
 #[tokio::test]
 async fn test_network_manager_creation() {
@@ -48,7 +48,7 @@ async fn test_inventory_manager() {
 
     // Test adding inventory
     let hash = [1u8; 32];
-    let items = vec![reference_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = vec![bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
 
     inventory.add_inventory("peer1", &items[..]).unwrap();
     assert_eq!(inventory.inventory_count(), 1);
@@ -84,7 +84,7 @@ async fn test_relay_manager() {
 
 #[tokio::test]
 async fn test_protocol_parser() {
-    use reference_node::network::protocol::*;
+    use bllvm_node::network::protocol::*;
 
     // Test version message
     let version_msg = VersionMessage {
@@ -102,7 +102,7 @@ async fn test_protocol_parser() {
             port: 8333,
         },
         nonce: 12345,
-        user_agent: "reference-node/0.1.0".to_string(),
+        user_agent: "bllvm-node/0.1.0".to_string(),
         start_height: 0,
         relay: true,
     };
@@ -200,7 +200,7 @@ async fn test_message_serialization() {
             port: 8333,
         },
         nonce: 12345,
-        user_agent: "reference-node/0.1.0".to_string(),
+        user_agent: "bllvm-node/0.1.0".to_string(),
         start_height: 0,
         relay: true,
     };
@@ -234,7 +234,7 @@ async fn test_message_deserialization() {
             port: 8333,
         },
         nonce: 12345,
-        user_agent: "reference-node/0.1.0".to_string(),
+        user_agent: "bllvm-node/0.1.0".to_string(),
         start_height: 0,
         relay: true,
     };
@@ -274,7 +274,7 @@ async fn test_checksum_validation() {
             port: 8333,
         },
         nonce: 12345,
-        user_agent: "reference-node/0.1.0".to_string(),
+        user_agent: "bllvm-node/0.1.0".to_string(),
         start_height: 0,
         relay: true,
     };
@@ -320,12 +320,12 @@ async fn test_inventory_manager_operations() {
     let hash1 = random_hash();
     let hash2 = random_hash();
 
-    let items1 = vec![reference_node::network::protocol::InventoryItem {
+    let items1 = vec![bllvm_node::network::protocol::InventoryItem {
         inv_type: 1, // MSG_TX
         hash: hash1,
     }];
 
-    let items2 = vec![reference_node::network::protocol::InventoryItem {
+    let items2 = vec![bllvm_node::network::protocol::InventoryItem {
         inv_type: 2, // MSG_BLOCK
         hash: hash2,
     }];
@@ -343,7 +343,7 @@ async fn test_inventory_peer_tracking() {
     let mut inventory = InventoryManager::new();
 
     let hash = random_hash();
-    let items = vec![reference_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = vec![bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
 
     // Add inventory from multiple peers
     inventory.add_inventory("peer1", &items[..]).unwrap();
@@ -362,7 +362,7 @@ async fn test_inventory_request_handling() {
     let mut inventory = InventoryManager::new();
 
     let hash = random_hash();
-    let items = vec![reference_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = vec![bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
 
     inventory.add_inventory("peer1", &items[..]).unwrap();
 
@@ -637,7 +637,7 @@ async fn test_inventory_integration_workflow() {
 
 #[tokio::test]
 async fn test_protocol_message_parsing() {
-    use reference_node::network::protocol::*;
+    use bllvm_node::network::protocol::*;
 
     // Test version message parsing
     let version_msg = VersionMessage {
@@ -678,7 +678,7 @@ async fn test_protocol_message_parsing() {
 
 #[tokio::test]
 async fn test_ping_pong_messages() {
-    use reference_node::network::protocol::*;
+    use bllvm_node::network::protocol::*;
 
     let ping_msg = PingMessage { nonce: 12345 };
     let pong_msg = PongMessage { nonce: 12345 };
@@ -706,7 +706,7 @@ async fn test_ping_pong_messages() {
 
 #[tokio::test]
 async fn test_getheaders_message() {
-    use reference_node::network::protocol::*;
+    use bllvm_node::network::protocol::*;
 
     let hash1 = random_hash();
     let hash2 = random_hash();
@@ -737,8 +737,8 @@ async fn test_getheaders_message() {
 
 #[tokio::test]
 async fn test_headers_message() {
-    use consensus_proof::BlockHeader;
-    use reference_node::network::protocol::*;
+    use bllvm_consensus::BlockHeader;
+    use bllvm_node::network::protocol::*;
 
     let header1 = BlockHeader {
         version: 1,
@@ -780,7 +780,7 @@ async fn test_headers_message() {
 
 #[tokio::test]
 async fn test_inv_message() {
-    use reference_node::network::protocol::*;
+    use bllvm_node::network::protocol::*;
 
     let hash1 = random_hash();
     let hash2 = random_hash();
@@ -819,7 +819,7 @@ async fn test_inv_message() {
 
 #[tokio::test]
 async fn test_getdata_message() {
-    use reference_node::network::protocol::*;
+    use bllvm_node::network::protocol::*;
 
     let hash1 = random_hash();
     let hash2 = random_hash();
@@ -857,7 +857,7 @@ async fn test_getdata_message() {
 
 #[tokio::test]
 async fn test_protocol_constants() {
-    use reference_node::network::protocol::*;
+    use bllvm_node::network::protocol::*;
 
     // Test magic bytes
     assert_eq!(BITCOIN_MAGIC_MAINNET, [0xf9, 0xbe, 0xb4, 0xd9]);

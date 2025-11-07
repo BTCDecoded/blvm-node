@@ -12,7 +12,7 @@
 //! Note: This is a foundational implementation. Full FIBRE compatibility
 //! would require additional UDP infrastructure and FEC library integration.
 
-use protocol_engine::{Block, Hash};
+use bllvm_protocol::{Block, Hash};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

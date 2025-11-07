@@ -3,7 +3,7 @@
 //! Stores chain metadata including tip, height, and chain parameters.
 
 use anyhow::Result;
-use protocol_engine::{BlockHeader, Hash};
+use bllvm_protocol::{BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use sled::Db;
 

@@ -3,7 +3,7 @@
 #[cfg(all(feature = "stratum-v2", feature = "quinn"))]
 use anyhow::Result;
 #[cfg(all(feature = "stratum-v2", feature = "quinn"))]
-use reference_node::network::stratum_v2::client::StratumV2Client;
+use bllvm_node::network::stratum_v2::client::StratumV2Client;
 
 #[cfg(all(feature = "stratum-v2", feature = "quinn"))]
 #[tokio::test]

@@ -1,7 +1,7 @@
 //! Integration tests for hybrid transport mode
 
 use anyhow::Result;
-use reference_node::network::{
+use bllvm_node::network::{
     transport::TransportPreference,
     NetworkManager,
 };
@@ -24,7 +24,7 @@ async fn test_network_manager_tcp_only_mode() {
 #[cfg(feature = "iroh")]
 #[tokio::test]
 async fn test_network_manager_iroh_only_mode() {
-    use reference_node::network::transport::TransportPreference;
+    use bllvm_node::network::transport::TransportPreference;
     
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::with_transport_preference(
@@ -41,7 +41,7 @@ async fn test_network_manager_iroh_only_mode() {
 #[cfg(feature = "iroh")]
 #[tokio::test]
 async fn test_network_manager_hybrid_mode() {
-    use reference_node::network::transport::TransportPreference;
+    use bllvm_node::network::transport::TransportPreference;
     
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::with_transport_preference(

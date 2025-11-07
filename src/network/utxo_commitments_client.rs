@@ -19,13 +19,13 @@ use crate::network::{
 #[cfg(feature = "utxo-commitments")]
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
-use protocol_engine::types::{Hash, Natural};
+use bllvm_protocol::types::{Hash, Natural};
 #[cfg(feature = "utxo-commitments")]
-use protocol_engine::utxo_commitments::data_structures::UtxoCommitment;
+use bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
 #[cfg(feature = "utxo-commitments")]
-use protocol_engine::utxo_commitments::data_structures::UtxoCommitmentResult;
+use bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentResult;
 #[cfg(feature = "utxo-commitments")]
-use protocol_engine::utxo_commitments::network_integration::{
+use bllvm_protocol::utxo_commitments::network_integration::{
     FilteredBlock, UtxoCommitmentsNetworkClient,
 };
 #[cfg(feature = "utxo-commitments")]
@@ -103,7 +103,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             let peer_addr = match peer_addr {
                 Some(addr) => addr,
                 None => {
-                    return Err(protocol_engine::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Invalid peer_id format: {}", peer_id)
                     ));
                 }
@@ -114,14 +114,14 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
 
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
             let wire_format = serialize_get_utxo_set(&get_utxo_set_msg)
-                .map_err(|e| protocol_engine::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to serialize GetUTXOSet: {}", e)
                 ))?;
 
             // Send message to peer via NetworkManager
             let network = network_manager.read().await;
             network.send_to_peer(peer_addr, wire_format).await
-                .map_err(|e| protocol_engine::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
                 ))?;
 
@@ -132,7 +132,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // 4. Extract and return UtxoCommitment
 
             // For now, return placeholder (request sent, but response handling needs async message routing)
-            Err(protocol_engine::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+            Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                 "Request sent - response handling needs async message routing system".to_string()
             ))
         })
@@ -166,7 +166,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             let peer_addr = match peer_addr {
                 Some(addr) => addr,
                 None => {
-                    return Err(protocol_engine::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Invalid peer_id format: {}", peer_id)
                     ));
                 }
@@ -186,14 +186,14 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
 
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
             let wire_format = serialize_get_filtered_block(&get_filtered_block_msg)
-                .map_err(|e| protocol_engine::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to serialize GetFilteredBlock: {}", e)
                 ))?;
 
             // Send message to peer via NetworkManager
             let network = network_manager.read().await;
             network.send_to_peer(peer_addr, wire_format).await
-                .map_err(|e| protocol_engine::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
                 ))?;
 
@@ -204,7 +204,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // 4. Extract and return FilteredBlock
 
             // For now, return placeholder (request sent, but response handling needs async message routing)
-            Err(protocol_engine::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+            Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                 "Request sent - response handling needs async message routing system".to_string()
             ))
         })

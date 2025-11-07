@@ -10,7 +10,7 @@ use crate::network::package_relay::{
     PackageId, PackageRejectReason, PackageRelay, TransactionPackage,
 };
 use crate::network::protocol::{PkgTxnMessage, PkgTxnRejectMessage, SendPkgTxnMessage};
-use protocol_engine::Transaction;
+use bllvm_protocol::Transaction;
 
 /// Handle sendpkgtxn request (peer signals intent to send a package)
 pub fn handle_sendpkgtxn(_relay: &PackageRelay, msg: &SendPkgTxnMessage) -> Result<()> {
@@ -28,7 +28,7 @@ pub fn handle_pkgtxn(
     relay: &mut PackageRelay,
     msg: &PkgTxnMessage,
 ) -> Result<Option<PkgTxnRejectMessage>> {
-    // Deserialize transactions (they are bincode-serialized protocol_engine::Transaction)
+    // Deserialize transactions (they are bincode-serialized bllvm_protocol::Transaction)
     let mut txs: Vec<Transaction> = Vec::with_capacity(msg.transactions.len());
     for raw in &msg.transactions {
         match bincode::deserialize::<Transaction>(raw) {
@@ -81,7 +81,7 @@ pub fn handle_pkgtxn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol_engine::{OutPoint, TransactionInput, TransactionOutput};
+    use bllvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
 
     fn minimal_tx() -> Transaction {
         Transaction {

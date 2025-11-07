@@ -5,7 +5,7 @@
 
 use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
 use crate::network::stratum_v2::messages::*;
-use protocol_engine::types::{Block, Hash};
+use bllvm_protocol::types::{Block, Hash};
 use std::collections::HashMap;
 use tracing::{debug, info};
 

@@ -6,7 +6,7 @@
 //! Enables efficient transaction discovery for light clients.
 
 use crate::bip158::CompactBlockFilter;
-use protocol_engine::{BlockHeader, Hash};
+use bllvm_protocol::{BlockHeader, Hash};
 use sha2::{Digest, Sha256};
 
 /// Filter header - commits to previous filter header and current filter

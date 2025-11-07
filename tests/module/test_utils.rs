@@ -8,11 +8,11 @@ use tempfile::TempDir;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info};
 
-use reference_node::module::traits::ModuleContext;
-use reference_node::module::manager::ModuleManager;
-use reference_node::module::api::NodeApiImpl;
-use reference_node::module::registry::manifest::ModuleManifest;
-use reference_node::storage::Storage;
+use bllvm_node::module::traits::ModuleContext;
+use bllvm_node::module::manager::ModuleManager;
+use bllvm_node::module::api::NodeApiImpl;
+use bllvm_node::module::registry::manifest::ModuleManifest;
+use bllvm_node::storage::Storage;
 use std::sync::Arc;
 
 /// Test fixture for module system tests
