@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
-use super::{blockchain, errors, mempool, mining, network, rawtx};
+use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};
 
 /// Maximum request body size (1MB)
 const MAX_REQUEST_SIZE: usize = 1_048_576;
@@ -32,6 +32,10 @@ pub struct RpcServer {
     network: Arc<network::NetworkRpc>,
     mempool: Arc<mempool::MempoolRpc>,
     mining: Arc<mining::MiningRpc>,
+    rawtx: Arc<rawtx::RawTxRpc>,
+    control: Arc<control::ControlRpc>,
+    // Authentication manager (optional)
+    auth_manager: Option<Arc<auth::RpcAuthManager>>,
 }
 
 impl RpcServer {
@@ -43,6 +47,71 @@ impl RpcServer {
             network: Arc::new(network::NetworkRpc::new()),
             mempool: Arc::new(mempool::MempoolRpc::new()),
             mining: Arc::new(mining::MiningRpc::new()),
+            rawtx: Arc::new(rawtx::RawTxRpc::new()),
+            control: Arc::new(control::ControlRpc::new()),
+            auth_manager: None,
+        }
+    }
+
+    /// Create a new RPC server with authentication
+    pub fn with_auth(
+        addr: SocketAddr,
+        auth_manager: Arc<auth::RpcAuthManager>,
+    ) -> Self {
+        Self {
+            addr,
+            blockchain: Arc::new(blockchain::BlockchainRpc::new()),
+            network: Arc::new(network::NetworkRpc::new()),
+            mempool: Arc::new(mempool::MempoolRpc::new()),
+            mining: Arc::new(mining::MiningRpc::new()),
+            rawtx: Arc::new(rawtx::RawTxRpc::new()),
+            control: Arc::new(control::ControlRpc::new()),
+            auth_manager: Some(auth_manager),
+        }
+    }
+
+    /// Create with dependencies
+    pub fn with_dependencies(
+        addr: SocketAddr,
+        blockchain: Arc<blockchain::BlockchainRpc>,
+        network: Arc<network::NetworkRpc>,
+        mempool: Arc<mempool::MempoolRpc>,
+        mining: Arc<mining::MiningRpc>,
+        rawtx: Arc<rawtx::RawTxRpc>,
+        control: Arc<control::ControlRpc>,
+    ) -> Self {
+        Self {
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control,
+            auth_manager: None,
+        }
+    }
+
+    /// Create with dependencies and authentication
+    pub fn with_dependencies_and_auth(
+        addr: SocketAddr,
+        blockchain: Arc<blockchain::BlockchainRpc>,
+        network: Arc<network::NetworkRpc>,
+        mempool: Arc<mempool::MempoolRpc>,
+        mining: Arc<mining::MiningRpc>,
+        rawtx: Arc<rawtx::RawTxRpc>,
+        control: Arc<control::ControlRpc>,
+        auth_manager: Arc<auth::RpcAuthManager>,
+    ) -> Self {
+        Self {
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control,
+            auth_manager: Some(auth_manager),
         }
     }
 
@@ -61,6 +130,8 @@ impl RpcServer {
             network: Arc::clone(&self.network),
             mempool: Arc::clone(&self.mempool),
             mining: Arc::clone(&self.mining),
+            rawtx: Arc::clone(&self.rawtx),
+            auth_manager: self.auth_manager.clone(),
         });
         
         loop {
@@ -142,6 +213,29 @@ impl RpcServer {
         };
 
         debug!("HTTP RPC request from {}: {} bytes", addr, json_body.len());
+
+        // Authenticate request if authentication is enabled
+        if let Some(ref auth_manager) = server.auth_manager {
+            let auth_result = auth_manager.authenticate_request(req.headers(), addr).await;
+            
+            // Check if authentication failed
+            if let Some(error) = auth_result.error {
+                return Ok(Self::http_error_response(
+                    StatusCode::UNAUTHORIZED,
+                    &error,
+                ));
+            }
+
+            // Check rate limiting
+            if let Some(ref user_id) = auth_result.user_id {
+                if !auth_manager.check_rate_limit(user_id).await {
+                    return Ok(Self::http_error_response(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "Rate limit exceeded",
+                    ));
+                }
+            }
+        }
 
         // Process JSON-RPC request (reuse server instance with cached handlers)
         let response = Self::process_request_with_server(server, &json_body).await;
@@ -283,35 +377,88 @@ impl RpcServer {
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
+            "getchaintips" => {
+                self.blockchain
+                    .get_chain_tips()
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "getchaintxstats" => {
+                self.blockchain
+                    .get_chain_tx_stats(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "getblockstats" => {
+                self.blockchain
+                    .get_block_stats(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "pruneblockchain" => {
+                self.blockchain
+                    .prune_blockchain(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "getpruneinfo" => {
+                self.blockchain
+                    .get_prune_info(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "invalidateblock" => {
+                self.blockchain
+                    .invalidate_block(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "reconsiderblock" => {
+                self.blockchain
+                    .reconsider_block(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "waitfornewblock" => {
+                self.blockchain
+                    .wait_for_new_block(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "waitforblock" => {
+                self.blockchain
+                    .wait_for_block(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "waitforblockheight" => {
+                self.blockchain
+                    .wait_for_block_height(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
 
             // Raw Transaction methods
             "getrawtransaction" => {
-                let rawtx = rawtx::RawTxRpc::new();
-                rawtx.getrawtransaction(&params).await
+                self.rawtx.getrawtransaction(&params).await
             }
             "sendrawtransaction" => {
-                let rawtx = rawtx::RawTxRpc::new();
-                rawtx.sendrawtransaction(&params).await
+                self.rawtx.sendrawtransaction(&params).await
             }
             "testmempoolaccept" => {
-                let rawtx = rawtx::RawTxRpc::new();
-                rawtx.testmempoolaccept(&params).await
+                self.rawtx.testmempoolaccept(&params).await
             }
             "decoderawtransaction" => {
-                let rawtx = rawtx::RawTxRpc::new();
-                rawtx.decoderawtransaction(&params).await
+                self.rawtx.decoderawtransaction(&params).await
             }
             "gettxout" => {
-                let rawtx = rawtx::RawTxRpc::new();
-                rawtx.gettxout(&params).await
+                self.rawtx.gettxout(&params).await
             }
             "gettxoutproof" => {
-                let rawtx = rawtx::RawTxRpc::new();
-                rawtx.gettxoutproof(&params).await
+                self.rawtx.gettxoutproof(&params).await
             }
             "verifytxoutproof" => {
-                let rawtx = rawtx::RawTxRpc::new();
-                rawtx.verifytxoutproof(&params).await
+                self.rawtx.verifytxoutproof(&params).await
             }
 
             // Mempool methods
@@ -323,6 +470,15 @@ impl RpcServer {
             }
             "savemempool" => {
                 self.mempool.savemempool(&params).await
+            }
+            "getmempoolancestors" => {
+                self.mempool.getmempoolancestors(&params).await
+            }
+            "getmempooldescendants" => {
+                self.mempool.getmempooldescendants(&params).await
+            }
+            "getmempoolentry" => {
+                self.mempool.getmempoolentry(&params).await
             }
 
             // Network methods
@@ -356,6 +512,15 @@ impl RpcServer {
             "listbanned" => {
                 self.network.list_banned(&params).await
             }
+            "getaddednodeinfo" => {
+                self.network.getaddednodeinfo(&params).await
+            }
+            "getnodeaddresses" => {
+                self.network.getnodeaddresses(&params).await
+            }
+            "setnetworkactive" => {
+                self.network.setnetworkactive(&params).await
+            }
 
             // Mining methods
             "getmininginfo" => {
@@ -369,6 +534,41 @@ impl RpcServer {
             }
             "estimatesmartfee" => {
                 self.mining.estimate_smart_fee(&params).await
+            }
+            "prioritisetransaction" => {
+                self.mining.prioritise_transaction(&params).await
+            }
+            "getblockfilter" => {
+                self.blockchain
+                    .get_block_filter(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            "getindexinfo" => {
+                self.blockchain
+                    .get_index_info(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+
+            // Control methods
+            "stop" => {
+                self.control.stop(&params).await
+            }
+            "uptime" => {
+                self.control.uptime(&params).await
+            }
+            "getmemoryinfo" => {
+                self.control.getmemoryinfo(&params).await
+            }
+            "getrpcinfo" => {
+                self.control.getrpcinfo(&params).await
+            }
+            "help" => {
+                self.control.help(&params).await
+            }
+            "logging" => {
+                self.control.logging(&params).await
             }
 
             _ => Err(errors::RpcError::method_not_found(method)),

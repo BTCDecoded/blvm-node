@@ -19,7 +19,8 @@ pub trait MempoolProvider: Send + Sync {
     fn get_mempool_size(&self) -> usize;
 
     /// Get prioritized transactions (by fee rate)
-    fn get_prioritized_transactions(&self, limit: usize) -> Vec<Transaction>;
+    /// Requires UTXO set for accurate fee calculation
+    fn get_prioritized_transactions(&self, limit: usize, utxo_set: &bllvm_protocol::UtxoSet) -> Vec<Transaction>;
 
     /// Remove transaction from mempool
     fn remove_transaction(&mut self, hash: &[u8; 32]) -> bool;
@@ -55,13 +56,14 @@ impl TransactionSelector {
     }
 
     /// Select transactions for block
-    pub fn select_transactions(&self, mempool: &dyn MempoolProvider) -> Vec<Transaction> {
+    /// Note: Requires UTXO set for fee calculation - caller must provide it
+    pub fn select_transactions(&self, mempool: &dyn MempoolProvider, utxo_set: &bllvm_protocol::UtxoSet) -> Vec<Transaction> {
         let mut selected = Vec::new();
         let mut current_size = 0;
         let mut current_weight = 0;
 
-        // Get prioritized transactions
-        let transactions = mempool.get_prioritized_transactions(1000);
+        // Get prioritized transactions (with UTXO set for fee calculation)
+        let transactions = mempool.get_prioritized_transactions(1000, utxo_set);
 
         for tx in transactions {
             let tx_size = self.calculate_transaction_size(&tx);
@@ -268,26 +270,26 @@ pub struct MiningCoordinator {
     mining_engine: MiningEngine,
     /// Transaction selector
     transaction_selector: TransactionSelector,
-    /// Mempool provider
-    mempool_provider: MockMempoolProvider,
+    /// Mempool manager (real implementation)
+    mempool: std::sync::Arc<crate::node::mempool::MempoolManager>,
+    /// Storage for UTXO set access
+    storage: Option<std::sync::Arc<crate::storage::Storage>>,
     /// Stratum V2 client (optional)
     #[cfg(feature = "stratum-v2")]
     stratum_v2_client: Option<crate::network::stratum_v2::client::StratumV2Client>,
 }
 
-impl Default for MiningCoordinator {
-    fn default() -> Self {
-        Self::new(MockMempoolProvider::new())
-    }
-}
-
 impl MiningCoordinator {
-    /// Create a new mining coordinator with a mempool provider
-    pub fn new(mempool_provider: MockMempoolProvider) -> Self {
+    /// Create a new mining coordinator with real mempool and storage
+    pub fn new(
+        mempool: std::sync::Arc<crate::node::mempool::MempoolManager>,
+        storage: Option<std::sync::Arc<crate::storage::Storage>>,
+    ) -> Self {
         Self {
             mining_engine: MiningEngine::new(),
             transaction_selector: TransactionSelector::new(),
-            mempool_provider,
+            mempool,
+            storage,
             #[cfg(feature = "stratum-v2")]
             stratum_v2_client: None,
         }
@@ -295,7 +297,8 @@ impl MiningCoordinator {
 
     /// Create with custom parameters
     pub fn with_params(
-        mempool_provider: MockMempoolProvider,
+        mempool: std::sync::Arc<crate::node::mempool::MempoolManager>,
+        storage: Option<std::sync::Arc<crate::storage::Storage>>,
         threads: u32,
         max_block_size: usize,
         max_block_weight: u64,
@@ -308,7 +311,8 @@ impl MiningCoordinator {
                 max_block_weight,
                 min_fee_rate,
             ),
-            mempool_provider,
+            mempool,
+            storage,
             #[cfg(feature = "stratum-v2")]
             stratum_v2_client: None,
         }
@@ -386,33 +390,73 @@ impl MiningCoordinator {
     async fn generate_block_template(&mut self) -> Result<Block> {
         debug!("Generating block template");
 
-        // Select transactions from mempool
+        // Get chain tip from storage for prev_block_hash and difficulty
+        let (prev_block_hash, bits, height) = if let Some(ref storage) = self.storage {
+            if let Some(tip_header) = storage.chain().get_tip_header()
+                .map_err(|e| anyhow::anyhow!("Failed to get tip header: {}", e))? {
+                let tip_hash = storage.chain().get_tip_hash()
+                    .map_err(|e| anyhow::anyhow!("Failed to get tip hash: {}", e))?
+                    .unwrap_or([0u8; 32]);
+                let chain_height = storage.chain().get_height()
+                    .map_err(|e| anyhow::anyhow!("Failed to get chain height: {}", e))?
+                    .unwrap_or(0);
+                (tip_hash, tip_header.bits, chain_height)
+            } else {
+                // No chain tip - use genesis defaults
+                ([0u8; 32], 0x1d00ffff, 0)
+            }
+        } else {
+            // No storage - use defaults
+            ([0u8; 32], 0x1d00ffff, 0)
+        };
+
+        // Get UTXO set from storage for fee calculation
+        let utxo_set = if let Some(ref storage) = self.storage {
+            storage.utxos().get_all_utxos()
+                .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?
+        } else {
+            // No storage - use empty UTXO set (will result in 0 fees)
+            bllvm_protocol::UtxoSet::new()
+        };
+
+        // Select transactions from mempool (with UTXO set for accurate fee calculation)
         let transactions = self
             .transaction_selector
-            .select_transactions(&self.mempool_provider);
+            .select_transactions(&*self.mempool as &dyn MempoolProvider, &utxo_set);
 
         // Create coinbase transaction (simplified)
         let coinbase_tx = self.create_coinbase_transaction().await?;
 
-        // Build block
+        // Build transaction list (coinbase first)
+        let mut all_transactions = vec![coinbase_tx];
+        all_transactions.extend(transactions);
+
+        // Calculate merkle root from transactions
+        use bllvm_consensus::mining::calculate_merkle_root;
+        let merkle_root = calculate_merkle_root(&all_transactions)
+            .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {}", e))?;
+
+        // Get current timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Build block template
         let template = Block {
             header: BlockHeader {
                 version: 1,
-                prev_block_hash: [0u8; 32],
-                merkle_root: [0u8; 32],
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                bits: 0x1d00ffff,
+                prev_block_hash,
+                merkle_root,
+                timestamp,
+                bits,
                 nonce: 0,
             },
-            transactions: {
-                let mut txs = vec![coinbase_tx];
-                txs.extend(transactions);
-                txs
-            },
+            transactions: all_transactions,
         };
+
+        debug!("Generated block template: height={}, prev_hash={:?}, {} transactions, merkle_root={:?}",
+               height + 1, prev_block_hash, template.transactions.len(), merkle_root);
 
         Ok(template)
     }
@@ -497,17 +541,7 @@ impl MiningCoordinator {
 
     /// Get mempool size
     pub fn get_mempool_size(&self) -> usize {
-        self.mempool_provider.get_mempool_size()
-    }
-
-    /// Get prioritized transactions
-    pub fn get_prioritized_transactions(&self, limit: usize) -> Vec<Transaction> {
-        self.mempool_provider.get_prioritized_transactions(limit)
-    }
-
-    /// Get mutable access to mempool provider
-    pub fn mempool_provider_mut(&mut self) -> &mut MockMempoolProvider {
-        &mut self.mempool_provider
+        self.mempool.size()
     }
 }
 
@@ -582,7 +616,8 @@ impl MempoolProvider for MockMempoolProvider {
         self.transactions.len()
     }
 
-    fn get_prioritized_transactions(&self, limit: usize) -> Vec<Transaction> {
+    fn get_prioritized_transactions(&self, limit: usize, _utxo_set: &bllvm_protocol::UtxoSet) -> Vec<Transaction> {
+        // Mock implementation ignores UTXO set and uses pre-calculated priorities
         self.prioritized_transactions
             .iter()
             .take(limit)
@@ -635,7 +670,8 @@ mod tests {
         mempool.add_transaction(tx2);
         mempool.add_transaction(tx3);
 
-        let selected = selector.select_transactions(&mempool);
+        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let selected = selector.select_transactions(&mempool, &empty_utxo_set);
         assert!(!selected.is_empty());
         assert!(selected.len() <= 3);
     }
@@ -749,7 +785,8 @@ mod tests {
         let mempool = MockMempoolProvider::new();
         assert_eq!(mempool.get_mempool_size(), 0);
         assert!(mempool.get_transactions().is_empty());
-        assert!(mempool.get_prioritized_transactions(10).is_empty());
+        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        assert!(mempool.get_prioritized_transactions(10, &empty_utxo_set).is_empty());
     }
 
     #[test]
@@ -765,7 +802,8 @@ mod tests {
         assert_eq!(mempool.get_mempool_size(), 2);
         assert_eq!(mempool.get_transactions().len(), 2);
 
-        let prioritized = mempool.get_prioritized_transactions(10);
+        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let prioritized = mempool.get_prioritized_transactions(10, &empty_utxo_set);
         assert_eq!(prioritized.len(), 2);
 
         // Test transaction removal
@@ -791,7 +829,8 @@ mod tests {
         mempool.add_transaction(tx_high_fee);
         mempool.add_transaction(tx_medium_fee);
 
-        let prioritized = mempool.get_prioritized_transactions(10);
+        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let prioritized = mempool.get_prioritized_transactions(10, &empty_utxo_set);
         assert_eq!(prioritized.len(), 3);
 
         // Transactions should be sorted by fee rate (descending)
@@ -817,8 +856,9 @@ mod tests {
 
     #[test]
     fn test_mining_coordinator_creation() {
-        let mempool = MockMempoolProvider::new();
-        let coordinator = MiningCoordinator::new(mempool);
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let coordinator = MiningCoordinator::new(mempool, None);
 
         assert!(!coordinator.is_mining_enabled());
         assert_eq!(coordinator.get_mempool_size(), 0);
@@ -831,8 +871,9 @@ mod tests {
 
     #[test]
     fn test_mining_coordinator_with_params() {
-        let mempool = MockMempoolProvider::new();
-        let coordinator = MiningCoordinator::with_params(mempool, 4, 2_000_000, 8_000_000, 5);
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let coordinator = MiningCoordinator::with_params(mempool, None, 4, 2_000_000, 8_000_000, 5);
 
         assert_eq!(coordinator.mining_engine().get_threads(), 4);
         assert_eq!(
@@ -848,8 +889,9 @@ mod tests {
 
     #[test]
     fn test_mining_coordinator_enable_disable() {
-        let mempool = MockMempoolProvider::new();
-        let mut coordinator = MiningCoordinator::new(mempool);
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let mut coordinator = MiningCoordinator::new(mempool, None);
 
         assert!(!coordinator.is_mining_enabled());
         coordinator.enable_mining();
@@ -861,8 +903,9 @@ mod tests {
 
     #[test]
     fn test_mining_coordinator_info() {
-        let mempool = MockMempoolProvider::new();
-        let coordinator = MiningCoordinator::new(mempool);
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let coordinator = MiningCoordinator::new(mempool, None);
 
         let info = coordinator.get_mining_info();
         assert!(!info.enabled);
@@ -872,8 +915,9 @@ mod tests {
 
     #[test]
     fn test_mining_coordinator_statistics() {
-        let mempool = MockMempoolProvider::new();
-        let coordinator = MiningCoordinator::new(mempool);
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let coordinator = MiningCoordinator::new(mempool, None);
 
         let stats = coordinator.get_mining_stats();
         assert_eq!(stats.blocks_mined, 0);
@@ -884,8 +928,9 @@ mod tests {
 
     #[test]
     fn test_mining_coordinator_accessors() {
-        let mempool = MockMempoolProvider::new();
-        let coordinator = MiningCoordinator::new(mempool);
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let coordinator = MiningCoordinator::new(mempool, None);
 
         // Test immutable access
         let engine = coordinator.mining_engine();
@@ -905,28 +950,25 @@ mod tests {
         assert_eq!(selector_mut.max_block_size(), 1_000_000);
     }
 
-    #[test]
-    fn test_mining_coordinator_mempool_operations() {
-        let mut mempool = MockMempoolProvider::new();
+    #[tokio::test]
+    async fn test_mining_coordinator_mempool_operations() {
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
         let tx = create_test_transaction(1, 1000);
-        mempool.add_transaction(tx);
-
-        let coordinator = MiningCoordinator::new(mempool);
+        let _ = mempool.add_transaction(tx).await;
+        let coordinator = MiningCoordinator::new(mempool, None);
 
         assert_eq!(coordinator.get_mempool_size(), 1);
-
-        let prioritized = coordinator.get_prioritized_transactions(10);
-        assert_eq!(prioritized.len(), 1);
-        assert_eq!(prioritized[0].version, 1);
     }
 
     #[tokio::test]
     async fn test_mining_coordinator_block_template_generation() {
-        let mut mempool = MockMempoolProvider::new();
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
         let tx = create_test_transaction(1, 1000);
-        mempool.add_transaction(tx);
+        let _ = mempool.add_transaction(tx).await;
 
-        let mut coordinator = MiningCoordinator::new(mempool);
+        let mut coordinator = MiningCoordinator::new(mempool, None);
 
         let template = coordinator.generate_block_template().await;
         assert!(template.is_ok());
@@ -938,8 +980,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mining_coordinator_coinbase_creation() {
-        let mempool = MockMempoolProvider::new();
-        let coordinator = MiningCoordinator::new(mempool);
+        use std::sync::Arc;
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let coordinator = MiningCoordinator::new(mempool, None);
 
         let coinbase = coordinator.create_coinbase_transaction().await;
         assert!(coinbase.is_ok());

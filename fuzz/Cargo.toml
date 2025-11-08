@@ -13,7 +13,7 @@ path = ".."
 
 [dependencies]
 libfuzzer-sys = "0.4"
-consensus-proof = { path = "../../consensus-proof" }
+bllvm-consensus = { path = "../../bllvm-consensus" }
 
 # Prevent warnings in generated code
 [profile.release]

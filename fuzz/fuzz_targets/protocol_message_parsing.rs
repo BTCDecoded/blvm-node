@@ -72,5 +72,41 @@ fuzz_target!(|data: &[u8]| {
         }
         let _corrupted = ProtocolParser::parse_message(&corrupted);
     }
+    
+    // 6. Test UTXO commitment message parsing (if feature enabled)
+    #[cfg(feature = "utxo-commitments")]
+    {
+        use reference_node::network::protocol_extensions::deserialize_utxo_set;
+        use reference_node::network::protocol_extensions::deserialize_filtered_block;
+        let _utxo_result = deserialize_utxo_set(data);
+        let _filtered_result = deserialize_filtered_block(data);
+    }
+    
+    // 7. Test RPC message parsing (if applicable)
+    // RPC uses JSON-RPC 2.0, different from P2P protocol
+    // But we can test for malformed JSON that might reach network layer
+    
+    // 8. Test with various message sizes
+    // Small messages (edge cases)
+    if data.len() > 0 && data.len() < 24 {
+        let _small = ProtocolParser::parse_message(data);
+    }
+    
+    // Very large messages (should be rejected)
+    if data.len() > 32 * 1024 * 1024 {
+        let _large = ProtocolParser::parse_message(&data[..32 * 1024 * 1024]);
+    }
+    
+    // 9. Test with zero bytes
+    if data.len() > 0 {
+        let zeros = vec![0u8; data.len().min(1000)];
+        let _zeros = ProtocolParser::parse_message(&zeros);
+    }
+    
+    // 10. Test with all 0xFF bytes
+    if data.len() > 0 {
+        let all_ff = vec![0xFFu8; data.len().min(1000)];
+        let _all_ff = ProtocolParser::parse_message(&all_ff);
+    }
 });
 

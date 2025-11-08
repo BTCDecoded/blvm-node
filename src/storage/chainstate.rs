@@ -5,7 +5,8 @@
 use anyhow::Result;
 use bllvm_protocol::{BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
-use sled::Db;
+use crate::storage::database::{Database, Tree};
+use std::sync::Arc;
 
 /// Chain state information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,21 +41,27 @@ impl Default for ChainParams {
 /// Chain state storage manager
 pub struct ChainState {
     #[allow(dead_code)]
-    db: Db,
-    chain_info: sled::Tree,
-    work_cache: sled::Tree,
+    db: Arc<dyn Database>,
+    chain_info: Arc<dyn Tree>,
+    work_cache: Arc<dyn Tree>,
+    invalid_blocks: Arc<dyn Tree>,
+    chain_tips: Arc<dyn Tree>,
 }
 
 impl ChainState {
     /// Create a new chain state store
-    pub fn new(db: Db) -> Result<Self> {
-        let chain_info = db.open_tree("chain_info")?;
-        let work_cache = db.open_tree("work_cache")?;
+    pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        let chain_info = Arc::from(db.open_tree("chain_info")?);
+        let work_cache = Arc::from(db.open_tree("work_cache")?);
+        let invalid_blocks = Arc::from(db.open_tree("invalid_blocks")?);
+        let chain_tips = Arc::from(db.open_tree("chain_tips")?);
 
         Ok(Self {
             db,
             chain_info,
             work_cache,
+            invalid_blocks,
+            chain_tips,
         })
     }
 
@@ -172,7 +179,95 @@ impl ChainState {
     pub fn reset(&self) -> Result<()> {
         self.chain_info.clear()?;
         self.work_cache.clear()?;
+        self.invalid_blocks.clear()?;
+        self.chain_tips.clear()?;
         Ok(())
+    }
+
+    /// Mark a block as invalid
+    pub fn mark_invalid(&self, hash: &Hash) -> Result<()> {
+        // Store invalid block with timestamp
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let value = timestamp.to_be_bytes();
+        self.invalid_blocks.insert(hash.as_slice(), &value)?;
+        Ok(())
+    }
+
+    /// Remove a block from invalid blocks (reconsider)
+    pub fn unmark_invalid(&self, hash: &Hash) -> Result<()> {
+        self.invalid_blocks.remove(hash.as_slice())?;
+        Ok(())
+    }
+
+    /// Check if a block is marked as invalid
+    pub fn is_invalid(&self, hash: &Hash) -> Result<bool> {
+        Ok(self.invalid_blocks.contains_key(hash.as_slice())?)
+    }
+
+    /// Get all invalid block hashes
+    pub fn get_invalid_blocks(&self) -> Result<Vec<Hash>> {
+        let mut invalid = Vec::new();
+        for result in self.invalid_blocks.iter() {
+            let (key, _) = result?;
+            if key.len() == 32 {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&key);
+                invalid.push(hash);
+            }
+        }
+        Ok(invalid)
+    }
+
+    /// Add a chain tip (for fork tracking)
+    pub fn add_chain_tip(&self, hash: &Hash, height: u64, branchlen: u64, status: &str) -> Result<()> {
+        #[derive(Serialize, Deserialize)]
+        struct TipInfo {
+            height: u64,
+            branchlen: u64,
+            status: String,
+        }
+        
+        let tip_info = TipInfo {
+            height,
+            branchlen,
+            status: status.to_string(),
+        };
+        let data = bincode::serialize(&tip_info)?;
+        self.chain_tips.insert(hash.as_slice(), &data)?;
+        Ok(())
+    }
+
+    /// Remove a chain tip
+    pub fn remove_chain_tip(&self, hash: &Hash) -> Result<()> {
+        self.chain_tips.remove(hash.as_slice())?;
+        Ok(())
+    }
+
+    /// Get all chain tips
+    pub fn get_chain_tips(&self) -> Result<Vec<(Hash, u64, u64, String)>> {
+        #[derive(Deserialize)]
+        struct TipInfo {
+            height: u64,
+            branchlen: u64,
+            status: String,
+        }
+        
+        let mut tips = Vec::new();
+        for result in self.chain_tips.iter() {
+            let (key, data) = result?;
+            if key.len() == 32 {
+                if let Ok(tip_info) = bincode::deserialize::<TipInfo>(&data) {
+                    let mut hash = [0u8; 32];
+                    hash.copy_from_slice(&key);
+                    tips.push((hash, tip_info.height, tip_info.branchlen, tip_info.status));
+                }
+            }
+        }
+        Ok(tips)
     }
 
     /// Calculate block hash using proper Bitcoin double SHA256

@@ -193,7 +193,7 @@ impl ProtocolAdapter {
     }
 
     /// Convert protocol message to consensus-proof message
-    fn protocol_to_consensus_message(
+    pub fn protocol_to_consensus_message(
         msg: &crate::network::protocol::ProtocolMessage,
     ) -> Result<ConsensusNetworkMessage> {
         use crate::network::protocol::{

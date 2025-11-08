@@ -1,4 +1,4 @@
-use consensus_proof::{Block, BlockHeader, Transaction, TransactionOutput};
+use bllvm_consensus::{Block, BlockHeader, Transaction, TransactionOutput};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use reference_node::network::compact_blocks::create_compact_block;
 use std::collections::HashSet;

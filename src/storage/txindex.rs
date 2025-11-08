@@ -5,7 +5,8 @@
 use anyhow::Result;
 use bllvm_protocol::{Hash, Transaction};
 use serde::{Deserialize, Serialize};
-use sled::Db;
+use crate::storage::database::{Database, Tree};
+use std::sync::Arc;
 
 /// Transaction metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,18 +22,18 @@ pub struct TxMetadata {
 /// Transaction index storage manager
 pub struct TxIndex {
     #[allow(dead_code)]
-    db: Db,
-    tx_by_hash: sled::Tree,
-    tx_by_block: sled::Tree,
-    tx_metadata: sled::Tree,
+    db: Arc<dyn Database>,
+    tx_by_hash: Arc<dyn Tree>,
+    tx_by_block: Arc<dyn Tree>,
+    tx_metadata: Arc<dyn Tree>,
 }
 
 impl TxIndex {
     /// Create a new transaction index
-    pub fn new(db: Db) -> Result<Self> {
-        let tx_by_hash = db.open_tree("tx_by_hash")?;
-        let tx_by_block = db.open_tree("tx_by_block")?;
-        let tx_metadata = db.open_tree("tx_metadata")?;
+    pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        let tx_by_hash = Arc::from(db.open_tree("tx_by_hash")?);
+        let tx_by_block = Arc::from(db.open_tree("tx_by_block")?);
+        let tx_metadata = Arc::from(db.open_tree("tx_metadata")?);
 
         Ok(Self {
             db,

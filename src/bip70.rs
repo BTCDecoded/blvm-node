@@ -494,9 +494,12 @@ impl PaymentProtocolServer {
     }
 
     /// Process incoming payment from P2P network
+    /// 
+    /// NOTE: For full signing support, merchant_private_key parameter should be added
     pub fn process_payment(
         payment_msg: &crate::network::protocol::PaymentMessage,
         original_request: &PaymentRequest,
+        _merchant_private_key: Option<&secp256k1::SecretKey>, // For future signing support
     ) -> Result<crate::network::protocol::PaymentACKMessage, Bip70Error> {
         // Validate payment
         payment_msg.payment.validate()?;
@@ -508,8 +511,65 @@ impl PaymentProtocolServer {
                 .validate_refund_addresses(authorized_refunds)?;
         }
 
-        // TODO: Verify transactions match PaymentRequest outputs
-        // TODO: Validate merchant_data matches original request
+        // Verify transactions match PaymentRequest outputs
+        use bllvm_consensus::serialization::transaction::deserialize_transaction;
+        
+        let mut total_paid: u64 = 0;
+        let mut payment_outputs = Vec::new();
+        
+        // Deserialize and verify each transaction
+        for tx_bytes in &payment_msg.payment.transactions {
+            let tx = deserialize_transaction(tx_bytes)
+                .map_err(|e| Bip70Error::ValidationError(format!("Invalid transaction: {}", e)))?;
+            
+            // Collect outputs from this transaction
+            for output in &tx.outputs {
+                total_paid += output.value;
+                payment_outputs.push(PaymentOutput {
+                    script: output.script_pubkey.clone(),
+                    amount: Some(output.value),
+                });
+            }
+        }
+        
+        // Verify outputs match PaymentRequest outputs (amount and script)
+        // Note: In production, would need to handle partial payments and change outputs
+        let request_outputs = &original_request.payment_details.outputs;
+        if payment_outputs.len() < request_outputs.len() {
+            return Err(Bip70Error::ValidationError(
+                "Payment has fewer outputs than requested".to_string()
+            ));
+        }
+        
+        // Check that all requested outputs are present
+        for request_output in request_outputs {
+            let found = payment_outputs.iter().any(|payment_output| {
+                payment_output.script == request_output.script &&
+                payment_output.amount.unwrap_or(0) >= request_output.amount.unwrap_or(0)
+            });
+            
+            if !found {
+                return Err(Bip70Error::ValidationError(format!(
+                    "Payment missing required output: script={:?}, amount={:?}",
+                    request_output.script, request_output.amount
+                )));
+            }
+        }
+        
+        // Validate merchant_data matches original request
+        if let Some(ref payment_merchant_data) = payment_msg.payment.merchant_data {
+            if let Some(ref request_merchant_data) = original_request.payment_details.merchant_data {
+                if payment_merchant_data != request_merchant_data {
+                    return Err(Bip70Error::ValidationError(
+                        "Merchant data mismatch".to_string()
+                    ));
+                }
+            }
+        } else if original_request.payment_details.merchant_data.is_some() {
+            return Err(Bip70Error::ValidationError(
+                "Payment missing merchant data".to_string()
+            ));
+        }
 
         let payment_ack = PaymentACK {
             payment: payment_msg.payment.clone(),
@@ -517,16 +577,39 @@ impl PaymentProtocolServer {
         };
 
         // Sign payment ACK
-        let _merchant_pubkey = original_request.merchant_pubkey.as_ref().ok_or_else(|| {
+        // NOTE: This function doesn't receive merchant private key
+        // In production, merchant key should be passed as parameter or retrieved from key store
+        let merchant_pubkey = original_request.merchant_pubkey.as_ref().ok_or_else(|| {
             Bip70Error::SignatureError("No merchant pubkey in request".to_string())
         })?;
 
-        // For signing, we'd need the merchant's private key - this should be passed in
-        // For now, return unsigned ACK (real implementation would sign it)
+        // Serialize payment ACK for signing
+        let ack_bytes = bincode::serialize(&payment_ack)
+            .map_err(|e| Bip70Error::SerializationError(e.to_string()))?;
+        
+        // Hash for signing
+        let mut hasher = Sha256::new();
+        hasher.update(&ack_bytes);
+        let hash = hasher.finalize();
+        
+        let message = Message::from_digest_slice(&hash)
+            .map_err(|e| Bip70Error::SignatureError(format!("Invalid message: {e}")))?;
+        
+        // Sign with merchant private key if provided
+        let merchant_signature = if let Some(merchant_private_key) = _merchant_private_key {
+            let secp = Secp256k1::new();
+            let signature = secp.sign_ecdsa(&message, merchant_private_key);
+            signature.serialize_compact().to_vec()
+        } else {
+            // No private key provided - return unsigned ACK
+            // In production, merchant key should be retrieved from key store
+            Vec::new()
+        };
+        
         Ok(crate::network::protocol::PaymentACKMessage {
             payment_ack,
             payment_id: payment_msg.payment_id.clone(),
-            merchant_signature: Vec::new(), // TODO: Sign with merchant key
+            merchant_signature,
         })
     }
 

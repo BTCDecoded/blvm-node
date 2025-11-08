@@ -88,53 +88,148 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         let peer_id = peer_id.to_string(); // Clone string for move
 
         Box::pin(async move {
-            // Parse peer_id to get SocketAddr
+            // Parse peer_id to get SocketAddr or TransportAddr
             // Format: "tcp:127.0.0.1:8333" or "iroh:<pubkey_hex>"
-            let peer_addr = if peer_id.starts_with("tcp:") {
+            let (peer_addr, transport_addr_opt) = if peer_id.starts_with("tcp:") {
                 peer_id
                     .strip_prefix("tcp:")
                     .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+                    .map(|addr| (addr, None))
+            } else if peer_id.starts_with("iroh:") {
+                // Parse Iroh node ID from hex
+                #[cfg(feature = "iroh")]
+                {
+                    use crate::network::transport::TransportAddr;
+                    use hex;
+                    
+                    let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
+                        bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            format!("Invalid Iroh peer_id format: {}", peer_id)
+                        )
+                    })?;
+                    
+                    let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
+                        bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            format!("Invalid Iroh node ID hex: {}", e)
+                        )
+                    })?;
+                    
+                    // Validate node ID length (Iroh uses 32-byte public keys)
+                    if node_id_bytes.len() != 32 {
+                        return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            format!("Invalid Iroh node ID length: expected 32 bytes, got {}", node_id_bytes.len())
+                        ));
+                    }
+                    
+                    // Create placeholder SocketAddr for Iroh (same approach as mod.rs)
+                    // Use first 4 bytes of key for IP, last 2 bytes for port
+                    let ip_bytes = [node_id_bytes[0], node_id_bytes[1], node_id_bytes[2], node_id_bytes[3]];
+                    let port = u16::from_be_bytes([node_id_bytes[30], node_id_bytes[31]]);
+                    let placeholder_addr = std::net::SocketAddr::from((ip_bytes, port));
+                    
+                    let transport_addr = TransportAddr::Iroh(node_id_bytes);
+                    Some((placeholder_addr, Some(transport_addr)))
+                }
+                #[cfg(not(feature = "iroh"))]
+                {
+                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        "Iroh feature not enabled".to_string()
+                    ));
+                }
             } else {
-                // For Iroh peers, would need to map NodeId to address
-                // For now, try to parse as SocketAddr
-                peer_id.strip_prefix("iroh:").and_then(|_| None) // Placeholder
+                None
             };
 
-            let peer_addr = match peer_addr {
-                Some(addr) => addr,
+            let (peer_addr, transport_addr_opt) = match peer_addr {
+                Some((addr, transport)) => (addr, transport),
                 None => {
                     return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Invalid peer_id format: {}", peer_id)
                     ));
                 }
             };
+            
+            // Store TransportAddr mapping if Iroh
+            if let Some(transport_addr) = transport_addr_opt {
+                let network = network_manager.read().await;
+                // Store mapping from placeholder SocketAddr to TransportAddr
+                network.socket_to_transport.lock().unwrap().insert(peer_addr, transport_addr);
+                drop(network);
+            }
 
-            // Create GetUTXOSet message
-            let get_utxo_set_msg = GetUTXOSetMessage { height, block_hash };
+            // Register pending request before sending
+            let network = network_manager.read().await;
+            let (request_id, response_rx) = network.register_request(peer_addr);
+            drop(network); // Release read lock before async wait
+            
+            // Create GetUTXOSet message with request_id
+            let get_utxo_set_msg = GetUTXOSetMessage { 
+                request_id,
+                height, 
+                block_hash 
+            };
 
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
             let wire_format = serialize_get_utxo_set(&get_utxo_set_msg)
                 .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to serialize GetUTXOSet: {}", e)
                 ))?;
-
+            
             // Send message to peer via NetworkManager
-            let network = network_manager.read().await;
-            network.send_to_peer(peer_addr, wire_format).await
-                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                    format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
-                ))?;
-
-            // TODO: In full implementation, would:
-            // 1. Register a response callback/future for this request
-            // 2. Await the UTXOSet response message
-            // 3. Deserialize UTXOSet message
-            // 4. Extract and return UtxoCommitment
-
-            // For now, return placeholder (request sent, but response handling needs async message routing)
-            Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                "Request sent - response handling needs async message routing system".to_string()
-            ))
+            {
+                let network = network_manager.read().await;
+                network.send_to_peer(peer_addr, wire_format).await
+                    .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
+                    ))?;
+            }
+            
+            // Await response with timeout (30 seconds)
+            tokio::select! {
+                result = response_rx => {
+                    match result {
+                        Ok(response_data) => {
+                            // Deserialize UTXOSet response
+                            use crate::network::protocol::{ProtocolMessage, ProtocolParser};
+                            let parsed = ProtocolParser::parse_message(&response_data)
+                                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                                    format!("Failed to parse UTXOSet response: {}", e)
+                                ))?;
+                            
+                            match parsed {
+                                ProtocolMessage::UTXOSet(utxo_set_msg) => {
+                                    // Convert to UtxoCommitment
+                                    let commitment = bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment {
+                                        merkle_root: utxo_set_msg.commitment.merkle_root,
+                                        total_supply: utxo_set_msg.commitment.total_supply,
+                                        utxo_count: utxo_set_msg.commitment.utxo_count,
+                                        block_height: utxo_set_msg.commitment.block_height,
+                                        block_hash: utxo_set_msg.commitment.block_hash,
+                                    };
+                                    Ok(commitment)
+                                }
+                                _ => Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                                    format!("Unexpected response type: expected UTXOSet")
+                                ))
+                            }
+                        }
+                        Err(_) => Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            "Response channel closed".to_string()
+                        ))
+                    }
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                    // Timeout - cleanup request
+                    {
+                        let network = network_manager.read().await;
+                        let mut pending = network.pending_requests.lock().unwrap();
+                        pending.remove(&request_id);
+                    }
+                    Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        "Request timeout: no response received within 30 seconds".to_string()
+                    ))
+                }
+            }
         })
     }
 
@@ -154,27 +249,84 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         let peer_id = peer_id.to_string(); // Clone string for move
 
         Box::pin(async move {
-            // Parse peer_id to get SocketAddr
-            let peer_addr = if peer_id.starts_with("tcp:") {
+            // Parse peer_id to get SocketAddr or TransportAddr
+            // Format: "tcp:127.0.0.1:8333" or "iroh:<pubkey_hex>"
+            let (peer_addr, transport_addr_opt) = if peer_id.starts_with("tcp:") {
                 peer_id
                     .strip_prefix("tcp:")
                     .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+                    .map(|addr| (addr, None))
+            } else if peer_id.starts_with("iroh:") {
+                // Parse Iroh node ID from hex
+                #[cfg(feature = "iroh")]
+                {
+                    use crate::network::transport::TransportAddr;
+                    use hex;
+                    
+                    let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
+                        bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            format!("Invalid Iroh peer_id format: {}", peer_id)
+                        )
+                    })?;
+                    
+                    let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
+                        bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            format!("Invalid Iroh node ID hex: {}", e)
+                        )
+                    })?;
+                    
+                    // Validate node ID length (Iroh uses 32-byte public keys)
+                    if node_id_bytes.len() != 32 {
+                        return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            format!("Invalid Iroh node ID length: expected 32 bytes, got {}", node_id_bytes.len())
+                        ));
+                    }
+                    
+                    // Create placeholder SocketAddr for Iroh (same approach as mod.rs)
+                    // Use first 4 bytes of key for IP, last 2 bytes for port
+                    let ip_bytes = [node_id_bytes[0], node_id_bytes[1], node_id_bytes[2], node_id_bytes[3]];
+                    let port = u16::from_be_bytes([node_id_bytes[30], node_id_bytes[31]]);
+                    let placeholder_addr = std::net::SocketAddr::from((ip_bytes, port));
+                    
+                    let transport_addr = TransportAddr::Iroh(node_id_bytes);
+                    Some((placeholder_addr, Some(transport_addr)))
+                }
+                #[cfg(not(feature = "iroh"))]
+                {
+                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        "Iroh feature not enabled".to_string()
+                    ));
+                }
             } else {
-                peer_id.strip_prefix("iroh:").and_then(|_| None) // Placeholder for Iroh
+                None
             };
 
-            let peer_addr = match peer_addr {
-                Some(addr) => addr,
+            let (peer_addr, transport_addr_opt) = match peer_addr {
+                Some((addr, transport)) => (addr, transport),
                 None => {
                     return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Invalid peer_id format: {}", peer_id)
                     ));
                 }
             };
+            
+            // Store TransportAddr mapping if Iroh
+            if let Some(transport_addr) = transport_addr_opt {
+                let network = network_manager.read().await;
+                // Store mapping from placeholder SocketAddr to TransportAddr
+                network.socket_to_transport.lock().unwrap().insert(peer_addr, transport_addr);
+                drop(network);
+            }
 
-            // Create GetFilteredBlock message (with default filter preferences)
+            // Register pending request before sending
+            let network = network_manager.read().await;
+            let (request_id, response_rx) = network.register_request(peer_addr);
+            drop(network); // Release read lock before async wait
+            
+            // Create GetFilteredBlock message with request_id
             use crate::network::protocol::FilterPreferences;
             let get_filtered_block_msg = GetFilteredBlockMessage {
+                request_id,
                 block_hash,
                 filter_preferences: FilterPreferences {
                     filter_ordinals: true,
@@ -182,6 +334,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     filter_brc20: true,
                     min_output_value: 546, // Default dust threshold
                 },
+                include_bip158_filter: true,
             };
 
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
@@ -189,24 +342,72 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to serialize GetFilteredBlock: {}", e)
                 ))?;
-
+            
             // Send message to peer via NetworkManager
-            let network = network_manager.read().await;
-            network.send_to_peer(peer_addr, wire_format).await
-                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                    format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
-                ))?;
-
-            // TODO: In full implementation, would:
-            // 1. Register a response callback/future for this request
-            // 2. Await the FilteredBlock response message
-            // 3. Deserialize FilteredBlock message
-            // 4. Extract and return FilteredBlock
-
-            // For now, return placeholder (request sent, but response handling needs async message routing)
-            Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                "Request sent - response handling needs async message routing system".to_string()
-            ))
+            {
+                let network = network_manager.read().await;
+                network.send_to_peer(peer_addr, wire_format).await
+                    .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
+                    ))?;
+            }
+            
+            // Await response with timeout (30 seconds)
+            tokio::select! {
+                result = response_rx => {
+                    match result {
+                        Ok(response_data) => {
+                            // Deserialize FilteredBlock response
+                            use crate::network::protocol::{ProtocolMessage, ProtocolParser};
+                            let parsed = ProtocolParser::parse_message(&response_data)
+                                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                                    format!("Failed to parse FilteredBlock response: {}", e)
+                                ))?;
+                            
+                            match parsed {
+                                ProtocolMessage::FilteredBlock(filtered_block_msg) => {
+                                    // Convert to FilteredBlock
+                                    let filtered_block = FilteredBlock {
+                                        block_hash: filtered_block_msg.block_hash,
+                                        filtered_transactions: filtered_block_msg.filtered_transactions.clone(),
+                                        utxo_commitment: bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment {
+                                            merkle_root: filtered_block_msg.utxo_commitment.merkle_root,
+                                            total_supply: filtered_block_msg.utxo_commitment.total_supply,
+                                            utxo_count: filtered_block_msg.utxo_commitment.utxo_count,
+                                            block_height: filtered_block_msg.utxo_commitment.block_height,
+                                            block_hash: filtered_block_msg.utxo_commitment.block_hash,
+                                        },
+                                        bip158_filter: filtered_block_msg.bip158_filter.map(|f| {
+                                            bllvm_protocol::utxo_commitments::network_integration::Bip158FilterData {
+                                                filter_type: f.filter_type,
+                                                filter_data: f.filter_data,
+                                            }
+                                        }),
+                                    };
+                                    Ok(filtered_block)
+                                }
+                                _ => Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                                    format!("Unexpected response type: expected FilteredBlock")
+                                ))
+                            }
+                        }
+                        Err(_) => Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            "Response channel closed".to_string()
+                        ))
+                    }
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                    // Timeout - cleanup request
+                    {
+                        let network = network_manager.read().await;
+                        let mut pending = network.pending_requests.lock().unwrap();
+                        pending.remove(&request_id);
+                    }
+                    Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        "Request timeout: no response received within 30 seconds".to_string()
+                    ))
+                }
+            }
         })
     }
 

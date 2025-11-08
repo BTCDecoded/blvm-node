@@ -5,27 +5,28 @@
 use anyhow::Result;
 use bllvm_protocol::segwit::Witness;
 use bllvm_protocol::{Block, BlockHeader, Hash};
-use sled::Db;
+use crate::storage::database::{Database, Tree};
+use std::sync::Arc;
 
 /// Block storage manager
 pub struct BlockStore {
     #[allow(dead_code)]
-    db: Db,
-    blocks: sled::Tree,
-    headers: sled::Tree,
-    height_index: sled::Tree,
-    witnesses: sled::Tree,
-    recent_headers: sled::Tree, // For median time-past: stores last 11+ headers by height
+    db: Arc<dyn Database>,
+    blocks: Arc<dyn Tree>,
+    headers: Arc<dyn Tree>,
+    height_index: Arc<dyn Tree>,
+    witnesses: Arc<dyn Tree>,
+    recent_headers: Arc<dyn Tree>, // For median time-past: stores last 11+ headers by height
 }
 
 impl BlockStore {
     /// Create a new block store
-    pub fn new(db: Db) -> Result<Self> {
-        let blocks = db.open_tree("blocks")?;
-        let headers = db.open_tree("headers")?;
-        let height_index = db.open_tree("height_index")?;
-        let witnesses = db.open_tree("witnesses")?;
-        let recent_headers = db.open_tree("recent_headers")?;
+    pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        let blocks = Arc::from(db.open_tree("blocks")?);
+        let headers = Arc::from(db.open_tree("headers")?);
+        let height_index = Arc::from(db.open_tree("height_index")?);
+        let witnesses = Arc::from(db.open_tree("witnesses")?);
+        let recent_headers = Arc::from(db.open_tree("recent_headers")?);
 
         Ok(Self {
             db,
@@ -118,7 +119,9 @@ impl BlockStore {
 
         // Get current height (from height_index)
         let mut current_height: Option<u64> = None;
-        for item in self.height_index.iter().rev() {
+        let mut items: Vec<_> = self.height_index.iter().collect();
+        items.reverse();
+        for item in items {
             if let Ok((height_bytes, _hash)) = item {
                 let mut height_bytes_array = [0u8; 8];
                 height_bytes_array.copy_from_slice(&height_bytes);
@@ -187,6 +190,21 @@ impl BlockStore {
         }
     }
 
+    /// Get block height by hash (reverse lookup)
+    pub fn get_height_by_hash(&self, hash: &Hash) -> Result<Option<u64>> {
+        // Search through height_index to find matching hash
+        for item in self.height_index.iter() {
+            if let Ok((height_bytes, stored_hash)) = item {
+                if stored_hash.as_ref() == hash.as_slice() {
+                    let mut height_bytes_array = [0u8; 8];
+                    height_bytes_array.copy_from_slice(&height_bytes);
+                    return Ok(Some(u64::from_be_bytes(height_bytes_array)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Get all blocks in a height range
     pub fn get_blocks_by_height_range(&self, start: u64, end: u64) -> Result<Vec<Block>> {
         let mut blocks = Vec::new();
@@ -232,5 +250,41 @@ impl BlockStore {
 
         // Calculate Bitcoin double SHA256 hash
         double_sha256(&header_data)
+    }
+
+    /// Remove block body (keep header for PoW verification)
+    pub fn remove_block_body(&self, hash: &Hash) -> Result<()> {
+        self.blocks.remove(hash.as_slice())?;
+        Ok(())
+    }
+
+    /// Remove witness data for a block
+    pub fn remove_witness(&self, hash: &Hash) -> Result<()> {
+        self.witnesses.remove(hash.as_slice())?;
+        Ok(())
+    }
+
+    /// Remove block by height (removes body, keeps header)
+    pub fn remove_block_by_height(&self, height: u64) -> Result<()> {
+        if let Some(hash) = self.get_hash_by_height(height)? {
+            self.remove_block_body(&hash)?;
+        }
+        Ok(())
+    }
+
+    /// Remove blocks in a height range (removes bodies, keeps headers)
+    pub fn remove_blocks_by_height_range(&self, start: u64, end: u64) -> Result<u64> {
+        let mut removed = 0;
+        for height in start..=end {
+            if self.remove_block_by_height(height).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Check if a block body exists (not just header)
+    pub fn has_block_body(&self, hash: &Hash) -> Result<bool> {
+        Ok(self.blocks.contains_key(hash.as_slice())?)
     }
 }

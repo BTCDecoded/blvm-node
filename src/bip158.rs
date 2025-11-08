@@ -42,62 +42,144 @@ fn hash_to_range(script: &[u8], n: u64, m: u64) -> u64 {
     (hash_value % (n * m))
 }
 
+/// Bit writer for Golomb-Rice encoding
+struct BitWriter {
+    data: Vec<u8>,
+    current_byte: u8,
+    bit_count: u8,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            current_byte: 0,
+            bit_count: 0,
+        }
+    }
+
+    /// Write a single bit
+    fn write_bit(&mut self, bit: bool) {
+        if bit {
+            self.current_byte |= 1u8 << (7 - self.bit_count);
+        }
+        self.bit_count += 1;
+        
+        if self.bit_count == 8 {
+            self.data.push(self.current_byte);
+            self.current_byte = 0;
+            self.bit_count = 0;
+        }
+    }
+
+    /// Write multiple bits (up to 64)
+    fn write_bits(&mut self, value: u64, num_bits: u8) {
+        for i in 0..num_bits {
+            let bit = ((value >> (num_bits - 1 - i)) & 1) != 0;
+            self.write_bit(bit);
+        }
+    }
+
+    /// Finish writing (flush remaining bits)
+    fn finish(mut self) -> Vec<u8> {
+        if self.bit_count > 0 {
+            self.data.push(self.current_byte);
+        }
+        self.data
+    }
+}
+
 /// Golomb-Rice encode a value
 ///
 /// BIP158: Encode value x as:
 /// - Write (x / 2^P) in unary (that many 1s, then a 0)
 /// - Write (x mod 2^P) in binary (P bits)
 fn golomb_rice_encode(value: u64, p: u8) -> Vec<u8> {
-    let mut result = Vec::new();
+    let mut writer = BitWriter::new();
 
     // Calculate quotient and remainder
     let quotient = value >> p; // value / 2^P
     let remainder = value & ((1u64 << p) - 1); // value mod 2^P
 
-    // Encode quotient in unary (quotient number of 1s, then 0)
-    // We'll encode this as bits in bytes
-    let quotient_bytes = (quotient / 8) as usize;
-    let quotient_remainder = (quotient % 8) as u8;
+    // Encode quotient in unary (quotient number of 1s, then a 0)
+    for _ in 0..quotient {
+        writer.write_bit(true);
+    }
+    writer.write_bit(false); // Terminate unary with 0
 
-    // Add quotient bytes (all 1s)
-    result.resize(quotient_bytes, 0xFF);
+    // Encode remainder in binary (P bits)
+    writer.write_bits(remainder, p);
 
-    // Add remainder bits of quotient
-    if quotient_remainder > 0 {
-        let byte = 0xFF << (8 - quotient_remainder);
-        result.push(byte);
-    } else {
-        // Need to add a 0 byte to terminate unary encoding
-        if quotient > 0 {
-            result.push(0xFF);
+    writer.finish()
+}
+
+/// Bit reader for Golomb-Rice decoding
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit_offset: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            bit_offset: 0,
         }
     }
 
-    // Terminate unary with a 0 bit (clear last bit)
-    if let Some(last) = result.last_mut() {
-        *last &= !(1u8 << (7 - quotient_remainder));
-    } else {
-        result.push(0);
+    /// Read a single bit
+    fn read_bit(&mut self) -> Option<bool> {
+        if self.bit_offset >= self.data.len() * 8 {
+            return None;
+        }
+        let byte_idx = self.bit_offset / 8;
+        let bit_idx = self.bit_offset % 8;
+        let bit = (self.data[byte_idx] >> (7 - bit_idx)) & 1;
+        self.bit_offset += 1;
+        Some(bit == 1)
     }
 
-    // Encode remainder in binary (P bits)
-    // BIP158 uses P=19, so 19 bits = 2.375 bytes, round to 3 bytes
-    let remainder_bytes = ((p + 7) / 8) as usize;
-    for i in 0..remainder_bytes {
-        let shift = i * 8;
-        let byte = ((remainder >> shift) & 0xFF) as u8;
-        result.push(byte);
+    /// Read P bits as a u64
+    fn read_bits(&mut self, p: u8) -> Option<u64> {
+        let mut value = 0u64;
+        for _ in 0..p {
+            if let Some(bit) = self.read_bit() {
+                value = (value << 1) | (if bit { 1 } else { 0 });
+            } else {
+                return None;
+            }
+        }
+        Some(value)
     }
 
-    result
+    /// Get current bit offset
+    fn bit_offset(&self) -> usize {
+        self.bit_offset
+    }
 }
 
 /// Golomb-Rice decode a value from stream
-/// This is a simplified decoder - full implementation needs bit-level reading
-fn golomb_rice_decode(_data: &[u8], _p: u8, _offset: &mut usize) -> Option<u64> {
-    // Full implementation requires bit-level decoding
-    // For now, return None to indicate not fully implemented
-    None
+///
+/// BIP158: Decode value x by:
+/// - Read unary-encoded quotient (count 1s until 0)
+/// - Read P bits as remainder
+/// - Value = quotient * 2^P + remainder
+fn golomb_rice_decode(reader: &mut BitReader, p: u8) -> Option<u64> {
+    // Read quotient in unary (count 1s until we hit a 0)
+    let mut quotient = 0u64;
+    loop {
+        match reader.read_bit() {
+            Some(true) => quotient += 1,
+            Some(false) => break,
+            None => return None,
+        }
+    }
+
+    // Read remainder in binary (P bits)
+    let remainder = reader.read_bits(p)?;
+
+    // Reconstruct value: quotient * 2^P + remainder
+    Some((quotient << p) | remainder)
 }
 
 /// Build a compact block filter from transaction data
@@ -177,12 +259,39 @@ pub fn build_block_filter(
 /// Match a script against a compact block filter
 ///
 /// Returns true if the script (or its hash) is likely in the filter
-/// Note: This is a simplified check - full implementation needs GCS decoding
-pub fn match_filter(_filter: &CompactBlockFilter, _script: &[u8]) -> bool {
-    // Full implementation requires decoding the Golomb-Rice encoded filter
-    // and checking if the hashed script value is present in the set
-    // For now, return false (requires bit-level GCS decoding)
-    false
+///
+/// Algorithm:
+/// 1. Hash the script to get a value in range [0, N*M)
+/// 2. Decode the filter to reconstruct the sorted set of hashed values
+/// 3. Check if the script's hash value is in the set
+pub fn match_filter(filter: &CompactBlockFilter, script: &[u8]) -> bool {
+    if filter.num_elements == 0 {
+        return false;
+    }
+
+    let n = filter.num_elements as u64;
+    
+    // Hash script to range [0, N*M)
+    let script_hash = hash_to_range(script, n, BIP158_M);
+    
+    // Decode filter to reconstruct sorted set
+    let mut reader = BitReader::new(&filter.filter_data);
+    let mut decoded_values = Vec::new();
+    let mut current_value = 0u64;
+    
+    // Decode all differences and reconstruct values
+    for _ in 0..filter.num_elements {
+        if let Some(diff) = golomb_rice_decode(&mut reader, BIP158_P) {
+            current_value += diff;
+            decoded_values.push(current_value);
+        } else {
+            // Decoding failed - filter may be corrupted
+            return false;
+        }
+    }
+    
+    // Check if script_hash is in the decoded set
+    decoded_values.binary_search(&script_hash).is_ok()
 }
 
 #[cfg(test)]
@@ -213,5 +322,56 @@ mod tests {
         let filter = build_block_filter(&[], &[]).unwrap();
         assert_eq!(filter.num_elements, 0);
         assert!(filter.filter_data.is_empty());
+    }
+
+    #[test]
+    fn test_golomb_rice_encode_decode_roundtrip() {
+        let test_values = vec![0, 1, 2, 10, 100, 1000, 10000];
+        
+        for value in test_values {
+            let encoded = golomb_rice_encode(value, BIP158_P);
+            let mut reader = BitReader::new(&encoded);
+            let decoded = golomb_rice_decode(&mut reader, BIP158_P);
+            
+            assert_eq!(decoded, Some(value), "Roundtrip failed for value {}", value);
+        }
+    }
+
+    #[test]
+    fn test_build_and_match_filter() {
+        use bllvm_protocol::{Transaction, TransactionInput, TransactionOutput, OutPoint};
+        
+        // Create a test transaction
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [0u8; 32],
+                    index: 0,
+                },
+                script_sig: vec![],
+                sequence: 0xffffffff,
+            }],
+            outputs: vec![TransactionOutput {
+                value: 1000,
+                script_pubkey: vec![0x51, 0x52], // OP_1 OP_2
+            }],
+            lock_time: 0,
+        };
+        
+        // Build filter
+        let filter = build_block_filter(&[tx.clone()], &[]).unwrap();
+        assert!(filter.num_elements > 0);
+        
+        // Match the script that's in the filter
+        let script_in_filter = &tx.outputs[0].script_pubkey;
+        assert!(match_filter(&filter, script_in_filter));
+        
+        // Match a script that's not in the filter
+        let script_not_in_filter = vec![0x53, 0x54]; // OP_3 OP_4
+        // Note: May have false positives due to GCS nature, but should generally work
+        let matched = match_filter(&filter, &script_not_in_filter);
+        // False positives are possible, so we can't assert false
+        // But we can verify the filter works for scripts that are definitely in it
     }
 }

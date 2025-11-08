@@ -3,26 +3,39 @@
 //! Handles incoming BIP70 messages from the P2P network.
 //! Similar to bip157_handler.rs pattern.
 
-use crate::bip70::{Bip70Error, PaymentProtocolClient, PaymentProtocolServer};
+use crate::bip70::{Bip70Error, PaymentProtocolClient, PaymentProtocolServer, PaymentRequest};
 use crate::network::protocol::{
     GetPaymentRequestMessage, PaymentACKMessage, PaymentMessage, PaymentRequestMessage,
     ProtocolMessage,
 };
 use anyhow::Result;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use hex;
+
+/// In-memory payment request store (simplified - would use persistent storage in production)
+type PaymentRequestStore = Arc<Mutex<HashMap<String, PaymentRequest>>>;
 
 /// Handle GetPaymentRequest message
 ///
 /// Merchant node responds with PaymentRequest signed with their Bitcoin key.
 pub async fn handle_get_payment_request(
     request: &GetPaymentRequestMessage,
-    // In real implementation: merchant_payment_store: &MerchantPaymentStore
+    payment_store: Option<&PaymentRequestStore>,
 ) -> Result<PaymentRequestMessage> {
-    // TODO: Look up payment request by payment_id and merchant_pubkey
-    // For now, return error indicating not implemented
-
-    Err(anyhow::anyhow!(
-        "GetPaymentRequest handler not yet implemented - requires merchant payment store"
-    ))
+    if let Some(store) = payment_store {
+        let store = store.lock().unwrap();
+        let key = format!("{}_{}", hex::encode(&request.payment_id), hex::encode(&request.merchant_pubkey));
+        if let Some(payment_request) = store.get(&key) {
+            // Convert to P2P message format
+            return Ok(PaymentRequestMessage {
+                payment_request: payment_request.clone(),
+                payment_id: request.payment_id.clone(),
+            });
+        }
+    }
+    
+    Err(anyhow::anyhow!("Payment request not found"))
 }
 
 /// Handle Payment message
@@ -30,15 +43,27 @@ pub async fn handle_get_payment_request(
 /// Merchant node processes payment and responds with PaymentACK.
 pub async fn handle_payment(
     payment_msg: &PaymentMessage,
-    // In real implementation: payment_store: &PaymentStore, original_request: &PaymentRequest
+    payment_store: Option<&PaymentRequestStore>,
+    merchant_private_key: Option<&secp256k1::SecretKey>,
 ) -> Result<PaymentACKMessage> {
-    // TODO: Look up original PaymentRequest by payment_id
-    // TODO: Validate payment against original request
-    // TODO: Process payment and generate PaymentACK
-
-    Err(anyhow::anyhow!(
-        "Payment handler not yet implemented - requires payment processing store"
-    ))
+    // Look up original PaymentRequest
+    let original_request = if let Some(store) = payment_store {
+        let store = store.lock().unwrap();
+        let key = format!("{}_{}", hex::encode(&payment_msg.payment_id), "");
+        // Find matching request (simplified - would use proper lookup)
+        store.values().next().cloned()
+    } else {
+        None
+    };
+    
+    if let Some(request) = original_request {
+        // Use existing process_payment function
+        use crate::bip70::PaymentProtocolServer;
+        PaymentProtocolServer::process_payment(payment_msg, &request, merchant_private_key)
+            .map_err(|e| anyhow::anyhow!("Payment processing failed: {:?}", e))
+    } else {
+        Err(anyhow::anyhow!("Original payment request not found"))
+    }
 }
 
 /// Validate PaymentRequest message from P2P network

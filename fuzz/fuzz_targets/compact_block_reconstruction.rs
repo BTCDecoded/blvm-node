@@ -6,7 +6,7 @@ use reference_node::network::compact_blocks::{
     is_quic_transport,
 };
 use reference_node::network::transport::TransportType;
-use consensus_proof::{Block, BlockHeader, Transaction, TransactionOutput, Hash};
+use bllvm_consensus::{Block, BlockHeader, Transaction, TransactionOutput, Hash};
 use std::collections::HashSet;
 
 fuzz_target!(|data: &[u8]| {

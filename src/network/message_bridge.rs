@@ -71,23 +71,33 @@ impl MessageBridge {
 
     /// Process incoming transport message and generate response
     ///
-    /// Takes transport bytes, converts to consensus message, processes it,
+    /// Takes transport bytes, converts to protocol message, processes it,
     /// and returns wire format messages to send back (if any).
+    ///
+    /// NOTE: This is a future integration point. To fully implement, this would:
+    /// 1. Take `&BitcoinProtocolEngine`, `&mut PeerState`, and `Option<&dyn ChainStateAccess>`
+    /// 2. Call `bllvm_protocol::network::process_network_message()` with these parameters
+    /// 3. Convert the `NetworkResponse` to wire format messages using `extract_send_messages()`
+    ///
+    /// For now, this method only handles message conversion, not processing.
     pub fn process_incoming_message(
         data: &[u8],
         transport: TransportType,
-        // Note: In real implementation, this would take peer_state and chain_state
-        // For now, this is a simplified interface
     ) -> Result<Vec<Vec<u8>>> {
-        // Convert to consensus message
-        let consensus_msg = Self::from_transport_message(data, transport)?;
+        // Convert to protocol message
+        let protocol_msg = Self::from_transport_message(data, transport)?;
 
-        // Process message using consensus-proof logic
-        // In real implementation, this would call:
-        // bllvm_protocol::network::process_network_message(&consensus_msg, &mut peer_state, &chain_state)
-        // For now, return empty response
-        debug!("Processed incoming consensus message: {:?}", consensus_msg);
+        // Note: Protocol layer processing is handled in NetworkManager::handle_incoming_wire_tcp
+        // This function provides message extraction for transport layer
+        // This requires:
+        // - BitcoinProtocolEngine instance
+        // - PeerState management
+        // - ChainStateAccess implementation
+        // - UTXO set and height for block/tx validation
+        debug!("Converted incoming protocol message: {:?}", protocol_msg);
 
-        Ok(Vec::new()) // Simplified - would generate actual responses
+        // Return empty for now - actual processing would be done by network handlers
+        // that have access to protocol engine and chain state
+        Ok(Vec::new())
     }
 }

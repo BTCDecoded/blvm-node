@@ -4,22 +4,23 @@
 
 use anyhow::Result;
 use bllvm_protocol::{OutPoint, UtxoSet, UTXO};
-use sled::Db;
+use crate::storage::database::{Database, Tree};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// UTXO set storage manager
 pub struct UtxoStore {
     #[allow(dead_code)]
-    db: Db,
-    utxos: sled::Tree,
-    spent_outputs: sled::Tree,
+    db: Arc<dyn Database>,
+    utxos: Arc<dyn Tree>,
+    spent_outputs: Arc<dyn Tree>,
 }
 
 impl UtxoStore {
     /// Create a new UTXO store
-    pub fn new(db: Db) -> Result<Self> {
-        let utxos = db.open_tree("utxos")?;
-        let spent_outputs = db.open_tree("spent_outputs")?;
+    pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        let utxos = Arc::from(db.open_tree("utxos")?);
+        let spent_outputs = Arc::from(db.open_tree("spent_outputs")?);
 
         Ok(Self {
             db,

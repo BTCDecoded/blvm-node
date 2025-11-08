@@ -3,7 +3,9 @@
 //! This module provides JSON-RPC server, blockchain query methods,
 //! network info methods, transaction submission, and mining methods.
 
+pub mod auth;
 pub mod blockchain;
+pub mod control;
 pub mod errors;
 pub mod mempool;
 pub mod mining;
@@ -32,11 +34,17 @@ pub struct RpcManager {
     blockchain_rpc: blockchain::BlockchainRpc,
     network_rpc: network::NetworkRpc,
     mining_rpc: mining::MiningRpc,
+    control_rpc: control::ControlRpc,
     storage: Option<Arc<Storage>>,
     mempool: Option<Arc<MempoolManager>>,
+    network_manager: Option<Arc<crate::network::NetworkManager>>,
     shutdown_tx: Option<mpsc::UnboundedSender<()>>,
     #[cfg(feature = "quinn")]
     quinn_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
+    /// RPC authentication manager (optional)
+    auth_manager: Option<Arc<auth::RpcAuthManager>>,
+    /// Node shutdown callback (optional)
+    node_shutdown: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
 }
 
 impl RpcManager {
@@ -48,12 +56,49 @@ impl RpcManager {
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
             mining_rpc: mining::MiningRpc::new(),
+            control_rpc: control::ControlRpc::new(),
             storage: None,
             mempool: None,
+            network_manager: None,
             shutdown_tx: None,
             #[cfg(feature = "quinn")]
             quinn_shutdown_tx: None,
+            auth_manager: None,
+            node_shutdown: None,
         }
+    }
+
+    /// Set node shutdown callback
+    pub fn with_node_shutdown(
+        mut self,
+        shutdown_fn: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Self {
+        self.node_shutdown = Some(shutdown_fn);
+        self
+    }
+
+    /// Set RPC authentication configuration
+    pub async fn with_auth_config(mut self, auth_config: RpcAuthConfig) -> Self {
+        let auth_manager = Arc::new(auth::RpcAuthManager::with_rate_limits(
+            auth_config.required,
+            auth_config.rate_limit_burst,
+            auth_config.rate_limit_rate,
+        ));
+
+        // Add tokens and certificates to auth manager (synchronously)
+        for token in auth_config.tokens {
+            if let Err(e) = auth_manager.add_token(token).await {
+                error!("Failed to add RPC auth token: {}", e);
+            }
+        }
+        for cert in auth_config.certificates {
+            if let Err(e) = auth_manager.add_certificate(cert).await {
+                error!("Failed to add RPC auth certificate: {}", e);
+            }
+        }
+
+        self.auth_manager = Some(auth_manager);
+        self
     }
 
     /// Set storage and mempool dependencies for RPC handlers
@@ -62,12 +107,24 @@ impl RpcManager {
         storage: Arc<Storage>,
         mempool: Arc<MempoolManager>,
     ) -> Self {
-        // Update mining RPC with dependencies
+        // Update all RPC handlers with dependencies
         self.mining_rpc =
             mining::MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
+        self.blockchain_rpc = blockchain::BlockchainRpc::with_dependencies(Arc::clone(&storage));
+        let mempool_rpc = mempool::MempoolRpc::with_dependencies(Arc::clone(&mempool), Arc::clone(&storage));
+        let rawtx_rpc = rawtx::RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
+
+        self.mempool = Some(Arc::clone(&mempool));
 
         self.storage = Some(storage);
         self.mempool = Some(mempool);
+        self
+    }
+
+    /// Set network manager dependency
+    pub fn with_network_manager(mut self, network_manager: Arc<crate::network::NetworkManager>) -> Self {
+        self.network_rpc = network::NetworkRpc::with_dependencies(Arc::clone(&network_manager));
+        self.network_manager = Some(network_manager);
         self
     }
 
@@ -80,8 +137,14 @@ impl RpcManager {
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
             mining_rpc: mining::MiningRpc::new(),
+            control_rpc: control::ControlRpc::new(),
+            storage: None,
+            mempool: None,
+            network_manager: None,
             shutdown_tx: None,
             quinn_shutdown_tx: None,
+            auth_manager: None,
+            node_shutdown: None,
         }
     }
 
@@ -100,7 +163,58 @@ impl RpcManager {
         let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
         self.shutdown_tx = Some(shutdown_tx.clone());
 
-        let server = server::RpcServer::new(self.server_addr);
+        // Create control RPC with shutdown capability
+        let control_rpc = Arc::new(control::ControlRpc::with_shutdown(
+            shutdown_tx.clone(),
+            self.node_shutdown.clone(),
+        ));
+
+        // Create server with or without authentication
+        let server = if let (Some(ref storage), Some(ref mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
+            let blockchain = Arc::new(blockchain::BlockchainRpc::with_dependencies(Arc::clone(storage)));
+            let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(Arc::clone(mempool), Arc::clone(&storage)));
+            let rawtx_rpc = Arc::new(rawtx::RawTxRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool)));
+            let mining = Arc::new(mining::MiningRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool)));
+            let network = if let Some(ref network_manager) = self.network_manager {
+                Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(network_manager)))
+            } else {
+                Arc::new(network::NetworkRpc::new())
+            };
+            
+            // Use auth manager if configured
+            if let Some(ref auth_manager) = self.auth_manager {
+                server::RpcServer::with_dependencies_and_auth(
+                    self.server_addr,
+                    blockchain,
+                    network,
+                    mempool_rpc,
+                    mining,
+                    rawtx_rpc,
+                    Arc::clone(&control_rpc),
+                    Arc::clone(auth_manager),
+                )
+            } else {
+                server::RpcServer::with_dependencies(
+                    self.server_addr,
+                    blockchain,
+                    network,
+                    mempool_rpc,
+                    mining,
+                    rawtx_rpc,
+                    Arc::clone(&control_rpc),
+                )
+            }
+        } else {
+            // No dependencies - use auth if configured
+            if let Some(ref auth_manager) = self.auth_manager {
+                server::RpcServer::with_auth(
+                    self.server_addr,
+                    Arc::clone(auth_manager),
+                )
+            } else {
+                server::RpcServer::new(self.server_addr)
+            }
+        };
 
         // Start TCP server in a background task
         let tcp_handle = tokio::spawn(async move {

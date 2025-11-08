@@ -67,6 +67,9 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "sendpkgtxn",
     "pkgtxn",
     "pkgtxnreject",
+    // Ban List Sharing
+    "getbanlist",
+    "banlist",
 ];
 
 /// Bitcoin protocol message types
@@ -109,6 +112,9 @@ pub enum ProtocolMessage {
     SendPkgTxn(SendPkgTxnMessage),
     PkgTxn(PkgTxnMessage),
     PkgTxnReject(PkgTxnRejectMessage),
+    // Ban List Sharing
+    GetBanList(GetBanListMessage),
+    BanList(BanListMessage),
 }
 
 /// Version message
@@ -268,6 +274,8 @@ pub struct GetUTXOSetMessage {
 /// UTXOSet message - Response with UTXO set commitment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UTXOSetMessage {
+    /// Request ID (echo from GetUTXOSet for matching)
+    pub request_id: u64,
     /// UTXO commitment (Merkle root, supply, count, etc.)
     pub commitment: UTXOCommitment,
     /// UTXO set size hint (for chunking)
@@ -291,6 +299,8 @@ pub struct UTXOCommitment {
 /// GetFilteredBlock message - Request filtered block (spam-filtered)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetFilteredBlockMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
     /// Block hash to request
     pub block_hash: Hash,
     /// Filter preferences (what spam types to filter)
@@ -320,6 +330,8 @@ pub struct FilterPreferences {
 /// FilteredBlock message - Response with filtered transactions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilteredBlockMessage {
+    /// Request ID (echo from GetFilteredBlock for matching)
+    pub request_id: u64,
     /// Block header
     pub header: BlockHeader,
     /// UTXO commitment for this block
@@ -510,6 +522,9 @@ pub struct PkgTxnMessage {
 }
 
 /// pkgtxnreject message - Package rejection
+    // Ban List Sharing
+    "getbanlist",
+    "banlist",
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PkgTxnRejectMessage {
     /// Package ID that was rejected
@@ -644,6 +659,9 @@ impl ProtocolParser {
             "pkgtxnreject" => Ok(ProtocolMessage::PkgTxnReject(bincode::deserialize(
                 payload,
             )?)),
+            // Ban List Sharing
+            "getbanlist" => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
+            "banlist" => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
             _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
         }
     }
@@ -692,6 +710,9 @@ impl ProtocolParser {
             ProtocolMessage::SendPkgTxn(msg) => ("sendpkgtxn", bincode::serialize(msg)?),
             ProtocolMessage::PkgTxn(msg) => ("pkgtxn", bincode::serialize(msg)?),
             ProtocolMessage::PkgTxnReject(msg) => ("pkgtxnreject", bincode::serialize(msg)?),
+            // Ban List Sharing
+            ProtocolMessage::GetBanList(msg) => ("getbanlist", bincode::serialize(msg)?),
+            ProtocolMessage::BanList(msg) => ("banlist", bincode::serialize(msg)?),
         };
 
         let mut message = Vec::new();
@@ -728,4 +749,39 @@ impl ProtocolParser {
         checksum.copy_from_slice(&hash2[..4]);
         checksum
     }
+}
+
+// Ban List Sharing messages
+
+/// GetBanList message - Request peer's ban list (or hashed version)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetBanListMessage {
+    /// Request full ban list (true) or just hash (false)
+    pub request_full: bool,
+    /// Minimum ban duration to include (seconds, 0 = all)
+    pub min_ban_duration: u64,
+}
+
+/// BanList message - Response with ban list or hash
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanListMessage {
+    /// If false, only ban_list_hash is valid
+    pub is_full: bool,
+    /// Hash of full ban list (SHA256 of sorted entries)
+    pub ban_list_hash: Hash,
+    /// Full ban list entries (only if is_full = true)
+    pub ban_entries: Vec<BanEntry>,
+    /// Timestamp when ban list was generated
+    pub timestamp: u64,
+}
+
+/// Single ban entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanEntry {
+    /// Banned peer address
+    pub addr: NetworkAddress,
+    /// Unix timestamp when ban expires (u64::MAX = permanent)
+    pub unban_timestamp: u64,
+    /// Reason for ban (optional)
+    pub reason: Option<String>,
 }

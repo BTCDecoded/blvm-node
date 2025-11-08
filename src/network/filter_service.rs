@@ -182,12 +182,11 @@ impl BlockFilterService {
             .cloned()
     }
 
-    /// Calculate block hash from header (simplified)
-    /// In production, this should use proper Bitcoin block hash calculation
+    /// Calculate block hash from header using proper Bitcoin double SHA256
     fn calculate_block_hash(&self, header: &BlockHeader) -> Hash {
-        use sha2::{Digest, Sha256};
+        use crate::storage::hashing::double_sha256;
 
-        // Serialize header (simplified)
+        // Serialize header
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&header.version.to_le_bytes());
         bytes.extend_from_slice(&header.prev_block_hash);
@@ -197,17 +196,36 @@ impl BlockFilterService {
         bytes.extend_from_slice(&header.nonce.to_le_bytes());
 
         // Double SHA256
-        let first = Sha256::digest(&bytes);
-        let second = Sha256::digest(&first);
-
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&second);
-        hash
+        double_sha256(&bytes)
     }
 
     /// Get current chain height
     pub fn current_height(&self) -> u32 {
         *self.current_height.read().unwrap()
+    }
+
+    /// Remove filter for a pruned block (keeps filter header for verification)
+    ///
+    /// When a block is pruned, we can remove the filter data to save memory,
+    /// but we must keep the filter header for chain verification.
+    pub fn remove_filter_for_pruned_block(&self, block_hash: &Hash) -> Result<()> {
+        // Remove filter from cache
+        self.filters.write().unwrap().remove(block_hash);
+        
+        // Note: We do NOT remove the filter header - it's required for verification
+        // The filter header chain must remain intact even after pruning
+        
+        Ok(())
+    }
+
+    /// Check if a filter exists for a block
+    pub fn has_filter(&self, block_hash: &Hash) -> bool {
+        self.filters.read().unwrap().contains_key(block_hash)
+    }
+
+    /// Get all block hashes that have filters cached
+    pub fn get_cached_filter_hashes(&self) -> Vec<Hash> {
+        self.filters.read().unwrap().keys().cloned().collect()
     }
 }
 

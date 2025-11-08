@@ -145,6 +145,16 @@ impl TransportConnection for TcpConnection {
             return Ok(Vec::new());
         }
 
+        // Validate message size before allocation (DoS protection)
+        use crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH;
+        if len > MAX_PROTOCOL_MESSAGE_LENGTH {
+            return Err(anyhow::anyhow!(
+                "Message too large: {} bytes (max: {} bytes)",
+                len,
+                MAX_PROTOCOL_MESSAGE_LENGTH
+            ));
+        }
+
         // Read data
         let mut buffer = vec![0u8; len];
         let bytes_read = self.stream.read_exact(&mut buffer).await?;

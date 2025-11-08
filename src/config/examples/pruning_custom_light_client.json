@@ -1,0 +1,35 @@
+{
+  "listen_addr": "127.0.0.1:8333",
+  "transport_preference": "tcp_only",
+  "max_peers": 100,
+  "protocol_version": "BitcoinV1",
+  "storage": {
+    "database_backend": "auto",
+    "data_dir": "data",
+    "pruning": {
+      "mode": {
+        "type": "custom",
+        "keep_headers": true,
+        "keep_bodies_from_height": 0,
+        "keep_commitments": false,
+        "keep_filters": true,
+        "keep_filtered_blocks": false,
+        "keep_witnesses": false,
+        "keep_tx_index": false
+      },
+      "auto_prune": false,
+      "min_blocks_to_keep": 144,
+      "bip158_filters": {
+        "keep_filters": true,
+        "keep_filter_headers": true,
+        "max_filter_age_days": 0
+      }
+    },
+    "cache": {
+      "block_cache_mb": 10,
+      "utxo_cache_mb": 10,
+      "header_cache_mb": 50
+    }
+  }
+}
+

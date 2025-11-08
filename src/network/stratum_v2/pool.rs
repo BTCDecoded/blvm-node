@@ -164,7 +164,8 @@ impl StratumV2Pool {
     }
 
     /// Set current block template
-    pub fn set_template(&mut self, template: Block) {
+    /// Returns the job_id and messages to distribute
+    pub fn set_template(&mut self, template: Block) -> (u32, Vec<(String, NewMiningJobMessage)>) {
         // Generate new job ID
         let job_id = self.job_id_counter;
         self.job_id_counter = self.job_id_counter.wrapping_add(1);
@@ -177,8 +178,8 @@ impl StratumV2Pool {
             timestamp: template.header.timestamp,
         };
 
-        // Distribute new job to all open channels
-        self.distribute_new_job(job_id, &job_info);
+        // Distribute new job to all open channels (returns messages)
+        let messages = self.distribute_new_job(job_id, &job_info);
 
         // Store job info in all channels
         for miner in self.miners.values_mut() {
@@ -190,6 +191,8 @@ impl StratumV2Pool {
 
         // Store template
         self.current_template = Some(template);
+        
+        (job_id, messages)
     }
 
     /// Distribute new mining job to all miners
@@ -458,19 +461,94 @@ impl StratumV2Pool {
     fn extract_template_parts(&self, template: &Block) -> (Vec<u8>, Vec<u8>, Vec<Hash>) {
         // Extract coinbase transaction
         if let Some(coinbase) = template.transactions.first() {
-            // For now, return full coinbase as prefix (full implementation would split)
+            // Serialize coinbase transaction
             let coinbase_bytes = self.serialize_transaction(coinbase);
-            (coinbase_bytes, vec![], vec![]) // TODO: Properly extract merkle path
+            
+            // Extract merkle path from coinbase (index 0) to root
+            let merkle_path = self.extract_merkle_path(template, 0);
+            
+            // For Stratum V2, coinbase prefix is the full coinbase (miners can modify it)
+            // Coinbase suffix is empty (not used in Stratum V2)
+            (coinbase_bytes, vec![], merkle_path)
         } else {
             (vec![], vec![], vec![])
         }
     }
 
+    /// Extract merkle path from a specific transaction index to root
+    fn extract_merkle_path(&self, block: &Block, tx_index: usize) -> Vec<Hash> {
+        use bllvm_protocol::mempool::calculate_tx_id;
+        use crate::storage::hashing::double_sha256;
+
+        if block.transactions.is_empty() || tx_index >= block.transactions.len() {
+            return vec![];
+        }
+
+        // Calculate all transaction hashes
+        let mut tx_hashes: Vec<Hash> = block.transactions.iter()
+            .map(|tx| calculate_tx_id(tx))
+            .collect();
+
+        let mut merkle_path = Vec::new();
+        let mut current_index = tx_index;
+        let mut current_level = tx_hashes;
+
+        // Build merkle path by traversing tree bottom-up
+        while current_level.len() > 1 {
+            let mut next_level = Vec::new();
+
+            // Process pairs of hashes
+            for (pair_idx, chunk) in current_level.chunks(2).enumerate() {
+                if chunk.len() == 2 {
+                    // Hash two hashes together
+                    let mut combined = Vec::with_capacity(64);
+                    combined.extend_from_slice(&chunk[0]);
+                    combined.extend_from_slice(&chunk[1]);
+                    let parent_hash = double_sha256(&combined);
+                    next_level.push(parent_hash);
+
+                    // Check if current_index is in this pair
+                    let pair_start = pair_idx * 2;
+                    if current_index >= pair_start && current_index < pair_start + 2 {
+                        // Add sibling to path
+                        if current_index % 2 == 0 {
+                            // Left child - add right sibling
+                            merkle_path.push(chunk[1]);
+                        } else {
+                            // Right child - add left sibling
+                            merkle_path.push(chunk[0]);
+                        }
+                        // Update index for next level
+                        current_index = pair_idx;
+                    }
+                } else {
+                    // Odd number: duplicate the last hash
+                    let mut combined = Vec::with_capacity(64);
+                    combined.extend_from_slice(&chunk[0]);
+                    combined.extend_from_slice(&chunk[0]);
+                    let parent_hash = double_sha256(&combined);
+                    next_level.push(parent_hash);
+                    
+                    // If current_index is the last (odd) transaction, no sibling to add
+                    let pair_start = pair_idx * 2;
+                    if current_index == pair_start {
+                        // Last transaction in odd-numbered level - no sibling
+                        current_index = pair_idx;
+                    }
+                }
+            }
+
+            current_level = next_level;
+        }
+
+        merkle_path
+    }
+
     /// Serialize transaction for template extraction
-    fn serialize_transaction(&self, _tx: &bllvm_protocol::types::Transaction) -> Vec<u8> {
-        // TODO: Implement proper transaction serialization
-        // For now, return empty
-        vec![]
+    fn serialize_transaction(&self, tx: &bllvm_protocol::types::Transaction) -> Vec<u8> {
+        // Use consensus-proof serialization function
+        use bllvm_consensus::serialization::transaction::serialize_transaction;
+        serialize_transaction(tx)
     }
 
     /// Get miner statistics

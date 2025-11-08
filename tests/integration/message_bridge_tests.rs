@@ -5,7 +5,7 @@ use bllvm_node::network::{
     message_bridge::MessageBridge,
     transport::TransportType,
 };
-use bllvm_consensus::network::{
+use bllvm_protocol::network::{
     NetworkMessage, NetworkResponse, VersionMessage, NetworkAddress, PingMessage,
 };
 

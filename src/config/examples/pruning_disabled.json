@@ -1,0 +1,18 @@
+{
+  "listen_addr": "127.0.0.1:8333",
+  "transport_preference": "tcp_only",
+  "max_peers": 100,
+  "protocol_version": "BitcoinV1",
+  "storage": {
+    "database_backend": "auto",
+    "data_dir": "data",
+    "pruning": {
+      "mode": {
+        "type": "disabled"
+      },
+      "auto_prune": false,
+      "min_blocks_to_keep": 144
+    }
+  }
+}
+

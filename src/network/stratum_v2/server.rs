@@ -212,35 +212,19 @@ impl StratumV2Server {
     /// Generate and distribute new block template
     pub async fn update_template(&self) -> StratumV2Result<()> {
         // Get block template from MiningCoordinator
-        let coordinator = self.mining_coordinator.read().await;
-        // TODO: In full implementation, would call coordinator.generate_block_template()
-        // For now, placeholder
-        debug!("Template update requested (would generate from MiningCoordinator)");
-
-        // Set template in pool and distribute
-        // let template = coordinator.generate_block_template().await?;
-        let mut pool = self.pool.write().await;
-
-        // For now, create placeholder template and job info
-        // In full implementation, would call: pool.set_template(template);
-        // set_template() internally calls distribute_new_job and creates job_info
-
-        // Create placeholder job info for distribution
-        // In real implementation, this would come from pool.set_template()
-        let job_id = 1u32; // Placeholder
-        let job_info = JobInfo {
-            job_id,
-            prev_hash: [0u8; 32],
-            bits: 0x1d00ffff,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as u64,
+        let template = {
+            let mut coordinator = self.mining_coordinator.write().await;
+            coordinator.generate_block_template().await
+                .map_err(|e| StratumV2Error::MiningJob(format!("Failed to generate block template: {}", e)))?
         };
 
-        // Get messages from pool (distribute_new_job is now public)
-        let messages = pool.distribute_new_job(job_id, &job_info);
-        drop(pool); // Release lock before async operations
+        debug!("Generated new block template with {} transactions", template.transactions.len());
+
+        // Set template in pool and get distribution messages
+        let (job_id, messages) = {
+            let mut pool = self.pool.write().await;
+            pool.set_template(template)
+        };
 
         // Send messages to all miners (parallel where possible via QUIC streams)
         // QUIC streams enable parallel sends even if we iterate sequentially

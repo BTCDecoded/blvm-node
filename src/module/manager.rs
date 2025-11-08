@@ -45,8 +45,8 @@ pub struct ModuleManager {
 struct ManagedModule {
     /// Module metadata
     metadata: ModuleMetadata,
-    /// Module process (optional, may be owned by monitor)
-    process: Option<ModuleProcess>,
+    /// Module process (shared with monitor via Arc<Mutex<>>)
+    process: Option<Arc<Mutex<ModuleProcess>>>,
     /// Module state
     state: ModuleState,
     /// Monitoring handle
@@ -155,12 +155,18 @@ impl ModuleManager {
             .await?;
         let process_id = process.id();
 
-        // Create monitor (monitor will take ownership of process)
+        // Share process between manager and monitor using Arc<Mutex<>>
+        // This allows both to access the process for different purposes
+        use std::sync::{Arc, Mutex};
+        let shared_process = Arc::new(Mutex::new(process));
+        
+        // Create monitor with shared process
         let monitor = ModuleProcessMonitor::new(self.crash_tx.clone());
         let module_name_clone = module_name.to_string();
+        let shared_process_for_monitor = Arc::clone(&shared_process);
         let monitor_handle = tokio::spawn(async move {
             if let Err(e) = monitor
-                .monitor_module(module_name_clone.clone(), process)
+                .monitor_module_shared(module_name_clone.clone(), shared_process_for_monitor)
                 .await
             {
                 error!("Module {} monitor error: {}", module_name_clone, e);
@@ -174,12 +180,10 @@ impl ModuleManager {
             hub_guard.register_module_permissions(module_name.to_string(), permissions);
         }
 
-        // Store module (without process, monitor owns it)
-        // Note: We need to restructure this to share process properly
-        // For now, we'll store minimal info and let monitor handle lifecycle
+        // Store module with shared process
         let managed = ManagedModule {
             metadata,
-            process: None, // TODO: Refactor to share process properly
+            process: Some(shared_process),
             state: ModuleState::Running,
             monitor_handle: Some(monitor_handle),
             process_id,
@@ -204,8 +208,9 @@ impl ModuleManager {
             }
 
             // Kill process if we have a reference
-            if let Some(mut process) = managed.process.take() {
-                process.kill().await?;
+            if let Some(shared_process) = managed.process.take() {
+                let mut process_guard = shared_process.lock().unwrap();
+                process_guard.kill().await?;
             } else if let Some(pid) = managed.process_id {
                 // Kill by PID if we don't have process reference
                 use tokio::process::Command;

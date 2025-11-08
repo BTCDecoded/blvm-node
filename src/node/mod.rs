@@ -26,13 +26,13 @@ use std::sync::Arc;
 
 /// Main node orchestrator
 pub struct Node {
-    protocol: BitcoinProtocolEngine,
+    protocol: Arc<BitcoinProtocolEngine>,
     storage: Storage,
     network: NetworkManager,
     rpc: RpcManager,
     #[allow(dead_code)]
     sync_coordinator: sync::SyncCoordinator,
-    mempool_manager: mempool::MempoolManager,
+    mempool_manager: Arc<mempool::MempoolManager>,
     #[allow(dead_code)]
     mining_coordinator: miner::MiningCoordinator,
     /// Module manager for process-isolated modules
@@ -56,25 +56,31 @@ impl Node {
         // Initialize components
         let protocol =
             BitcoinProtocolEngine::new(protocol_version.unwrap_or(ProtocolVersion::Regtest))?;
+        let protocol_arc = Arc::new(protocol);
         let storage = Storage::new(data_dir)?;
         let storage_arc = Arc::new(storage);
-        let network = NetworkManager::new(network_addr);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
+        let network = NetworkManager::new(network_addr)
+            .with_dependencies(Arc::clone(&protocol_arc), Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc));
+        let network_arc = Arc::new(network);
         let rpc = RpcManager::new(rpc_addr)
-            .with_dependencies(Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc));
+            .with_dependencies(Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc))
+            .with_network_manager(Arc::clone(&network_arc));
         let sync_coordinator = sync::SyncCoordinator::default();
-        let mempool_manager =
-            Arc::try_unwrap(mempool_manager_arc).unwrap_or_else(|_| mempool::MempoolManager::new());
-        let mining_coordinator = miner::MiningCoordinator::default();
+        let mining_coordinator = miner::MiningCoordinator::new(
+            Arc::clone(&mempool_manager_arc),
+            Some(Arc::clone(&storage_arc)),
+        );
 
         Ok(Self {
-            protocol,
+            protocol: protocol_arc,
             storage: Arc::try_unwrap(storage_arc)
                 .unwrap_or_else(|_| Storage::new(data_dir).unwrap()),
-            network,
+            network: Arc::try_unwrap(network_arc)
+                .unwrap_or_else(|_| NetworkManager::new(network_addr)),
             rpc,
             sync_coordinator,
-            mempool_manager,
+            mempool_manager: mempool_manager_arc,
             mining_coordinator,
             module_manager: None,
             event_publisher: None,
@@ -149,6 +155,60 @@ impl Node {
         info!("Mempool manager initialized");
         info!("Mining coordinator initialized");
 
+        // Prune on startup if configured
+        if let Some(pruning_manager) = self.storage.pruning() {
+            let config = &pruning_manager.config;
+            if config.prune_on_startup {
+                let current_height = self.storage.chain().get_height()?.unwrap_or(0);
+                let is_ibd = current_height == 0;
+                
+                if !is_ibd && pruning_manager.is_enabled() {
+                    info!("Prune on startup enabled, checking if pruning is needed...");
+                    
+                    // Calculate prune height based on configuration
+                    let prune_height = match &config.mode {
+                        crate::config::PruningMode::Disabled => {
+                            // Skip if disabled
+                            None
+                        }
+                        crate::config::PruningMode::Normal { keep_from_height, .. } => {
+                            // Prune up to keep_from_height
+                            Some(*keep_from_height)
+                        }
+                        #[cfg(feature = "utxo-commitments")]
+                        crate::config::PruningMode::Aggressive { keep_from_height, .. } => {
+                            // Prune up to keep_from_height
+                            Some(*keep_from_height)
+                        }
+                        crate::config::PruningMode::Custom { keep_bodies_from_height, .. } => {
+                            // Prune up to keep_bodies_from_height
+                            Some(*keep_bodies_from_height)
+                        }
+                    };
+                    
+                    if let Some(prune_to_height) = prune_height {
+                        if prune_to_height < current_height {
+                            match pruning_manager.prune_to_height(prune_to_height, current_height, is_ibd) {
+                                Ok(stats) => {
+                                    info!("Startup pruning completed: {} blocks pruned, {} blocks kept", 
+                                          stats.blocks_pruned, stats.blocks_kept);
+                                    // Flush storage to persist pruning changes
+                                    if let Err(e) = self.storage.flush() {
+                                        warn!("Failed to flush storage after startup pruning: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Startup pruning failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                } else if is_ibd {
+                    info!("Skipping startup pruning: initial block download in progress");
+                }
+            }
+        }
+
         // Start module manager if enabled
         if let Some(ref mut module_manager) = self.module_manager {
             // Create new Storage instance for modules (Storage doesn't implement Clone)
@@ -197,8 +257,9 @@ impl Node {
             // Process any received blocks (non-blocking)
             while let Some(block_data) = self.network.try_recv_block() {
                 info!("Processing block from network");
+                let blocks_arc = self.storage.blocks();
                 match self.sync_coordinator.process_block(
-                    self.storage.blocks(),
+                    &*blocks_arc,
                     &block_data,
                     current_height,
                     &mut utxo_set,
@@ -206,6 +267,60 @@ impl Node {
                     Ok(true) => {
                         info!("Block accepted at height {}", current_height);
                         current_height += 1;
+                        
+                        // Check for automatic pruning after block acceptance
+                        if let Some(pruning_manager) = self.storage.pruning() {
+                            let stats = pruning_manager.get_stats();
+                            let should_prune = pruning_manager.should_auto_prune(
+                                current_height,
+                                stats.last_prune_height,
+                            );
+                            
+                            if should_prune {
+                                info!("Automatic pruning triggered at height {}", current_height);
+                                
+                                // Calculate prune height based on configuration
+                                let prune_height = match &pruning_manager.config.mode {
+                                    crate::config::PruningMode::Disabled => None,
+                                    crate::config::PruningMode::Normal { keep_from_height, .. } => {
+                                        // Prune to keep_from_height, but ensure we keep min_blocks
+                                        let min_keep = pruning_manager.config.min_blocks_to_keep;
+                                        let effective_keep = (*keep_from_height).max(current_height.saturating_sub(min_keep));
+                                        Some(effective_keep)
+                                    }
+                                    #[cfg(feature = "utxo-commitments")]
+                                    crate::config::PruningMode::Aggressive { keep_from_height, min_blocks, .. } => {
+                                        // Prune to keep_from_height, respecting min_blocks
+                                        let effective_keep = (*keep_from_height).max(current_height.saturating_sub(*min_blocks));
+                                        Some(effective_keep)
+                                    }
+                                    crate::config::PruningMode::Custom { keep_bodies_from_height, .. } => {
+                                        // Prune to keep_bodies_from_height, respecting min_blocks
+                                        let min_keep = pruning_manager.config.min_blocks_to_keep;
+                                        let effective_keep = (*keep_bodies_from_height).max(current_height.saturating_sub(min_keep));
+                                        Some(effective_keep)
+                                    }
+                                };
+                                
+                                if let Some(prune_to_height) = prune_height {
+                                    if prune_to_height < current_height {
+                                        match pruning_manager.prune_to_height(prune_to_height, current_height, false) {
+                                            Ok(prune_stats) => {
+                                                info!("Automatic pruning completed: {} blocks pruned, {} blocks kept", 
+                                                      prune_stats.blocks_pruned, prune_stats.blocks_kept);
+                                                // Flush storage to persist pruning changes
+                                                if let Err(e) = self.storage.flush() {
+                                                    warn!("Failed to flush storage after automatic pruning: {}", e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Automatic pruning failed: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     Ok(false) => {
                         warn!("Block rejected at height {}", current_height);
@@ -301,7 +416,7 @@ impl Node {
 
     /// Get protocol engine
     pub fn protocol(&self) -> &BitcoinProtocolEngine {
-        &self.protocol
+        &*self.protocol
     }
 
     /// Get storage

@@ -119,9 +119,15 @@ impl ModuleIpcServer {
         let reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
         let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
 
-        // Module ID will be provided during connection handshake
-        // For now, generate a temporary ID (will be replaced when module connects)
-        let module_id = format!("module_{}", self.connections.len());
+        // Generate unique module ID using connection counter and timestamp
+        // In production, module would provide its ID during handshake
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let connection_count = self.connections.len();
+        let module_id = format!("module_{}_{}_{}", connection_count, timestamp, connection_count);
 
         // Create unified outgoing message channel (for both responses and events)
         // This allows us to share the writer between response handler and event handler

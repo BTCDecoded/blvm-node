@@ -136,6 +136,14 @@ impl PackageId {
 impl TransactionPackage {
     /// Create a new transaction package
     pub fn new(transactions: Vec<Transaction>) -> Result<Self, PackageError> {
+        Self::new_with_utxo_set(transactions, None)
+    }
+    
+    /// Create a new transaction package with UTXO set for fee calculation
+    pub fn new_with_utxo_set(
+        transactions: Vec<Transaction>,
+        utxo_set: Option<&bllvm_protocol::UtxoSet>,
+    ) -> Result<Self, PackageError> {
         if transactions.is_empty() {
             return Err(PackageError::EmptyPackage);
         }
@@ -157,9 +165,26 @@ impl TransactionPackage {
         pkg_hash.copy_from_slice(&final_bytes);
         let package_id = PackageId(pkg_hash);
 
-        // Calculate combined fee (requires UTXO lookups - simplified here)
-        // In real implementation, would look up UTXOs and calculate actual fees
-        let combined_fee = 0; // TODO: Calculate from UTXO set
+        // Calculate combined fee from UTXO set if provided
+        let combined_fee = if let Some(utxo_set) = utxo_set {
+            // Calculate fee for each transaction: sum(inputs) - sum(outputs)
+            transactions.iter().map(|tx| {
+                let input_total: u64 = tx.inputs.iter()
+                    .filter_map(|inp| utxo_set.get(&inp.prevout))
+                    .map(|utxo| utxo.value as u64)
+                    .sum();
+                let output_total: u64 = tx.outputs.iter()
+                    .map(|out| out.value as u64)
+                    .sum();
+                if input_total > output_total {
+                    input_total - output_total
+                } else {
+                    0
+                }
+            }).sum()
+        } else {
+            0 // Fee calculation requires UTXO set
+        };
 
         // Calculate combined weight
         let combined_weight: usize = transactions
