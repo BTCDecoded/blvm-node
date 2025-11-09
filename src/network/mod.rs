@@ -3,7 +3,9 @@
 //! This module provides P2P networking, peer management, and Bitcoin protocol
 //! message handling for communication with other Bitcoin nodes.
 
+pub mod address_db;
 pub mod chain_access;
+pub mod dns_seeds;
 pub mod inventory;
 pub mod message_bridge;
 pub mod peer;
@@ -357,6 +359,12 @@ pub struct NetworkManager {
     pending_ban_shares: Arc<Mutex<Vec<(SocketAddr, u64, String)>>>, // (addr, unban_timestamp, reason)
     /// Ban list sharing configuration
     ban_list_sharing_config: Option<crate::config::BanListSharingConfig>,
+    /// Address database for peer discovery
+    address_database: Arc<Mutex<address_db::AddressDatabase>>,
+    /// Last time we sent addr message (Unix timestamp)
+    last_addr_sent: Arc<Mutex<u64>>,
+    /// Enable self-advertisement (send own address to peers)
+    enable_self_advertisement: bool,
 }
 
 /// Pending request metadata
@@ -439,6 +447,9 @@ impl NetworkManager {
             dos_protection: Arc::new(dos_protection::DosProtectionManager::default()),
             pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
             ban_list_sharing_config: None,
+            address_database: Arc::new(Mutex::new(address_db::AddressDatabase::new(10000))),
+            last_addr_sent: Arc::new(Mutex::new(0)),
+            enable_self_advertisement: true, // Default: advertise ourselves
         }
     }
     
@@ -500,12 +511,58 @@ impl NetworkManager {
             dos_protection: Arc::new(dos_protection::DosProtectionManager::default()),
             pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
             ban_list_sharing_config: None,
+            address_database: Arc::new(Mutex::new(address_db::AddressDatabase::new(10000))),
+            last_addr_sent: Arc::new(Mutex::new(0)),
+            enable_self_advertisement: true, // Default: advertise ourselves
         }
     }
 
     /// Get transport preference
     pub fn transport_preference(&self) -> TransportPreference {
         self.transport_preference
+    }
+
+    /// Discover peers from DNS seeds and add to address database
+    pub async fn discover_peers_from_dns(&self, network: &str, port: u16) -> Result<()> {
+        use crate::network::dns_seeds;
+        
+        let seeds = match network {
+            "mainnet" => dns_seeds::MAINNET_DNS_SEEDS,
+            "testnet" => dns_seeds::TESTNET_DNS_SEEDS,
+            _ => {
+                warn!("Unknown network: {}, skipping DNS seed discovery", network);
+                return Ok(());
+            }
+        };
+        
+        info!("Discovering peers from DNS seeds for {}", network);
+        let addresses = dns_seeds::resolve_dns_seeds(seeds, port, 100).await;
+        
+        // Add discovered addresses to database
+        {
+            let mut db = self.address_database.lock().unwrap();
+            for addr in addresses {
+                db.add_address(addr, 0); // Services will be updated on connection
+            }
+        }
+        
+        info!("Discovered {} addresses from DNS seeds", addresses.len());
+        Ok(())
+    }
+
+    /// Connect to persistent peers from config
+    pub async fn connect_persistent_peers(&self, persistent_peers: &[SocketAddr]) -> Result<()> {
+        for peer_addr in persistent_peers {
+            // Add to persistent peer set
+            self.add_persistent_peer(*peer_addr);
+            
+            // Try to connect
+            info!("Connecting to persistent peer: {}", peer_addr);
+            if let Err(e) = self.connect_to_peer(*peer_addr).await {
+                warn!("Failed to connect to persistent peer {}: {}", peer_addr, e);
+            }
+        }
+        Ok(())
     }
 
     /// Start the network manager
@@ -1755,6 +1812,13 @@ impl NetworkManager {
             ProtocolMessage::BanList(msg) => {
                 return self.handle_ban_list(peer_addr, msg).await;
             }
+            // Address relay
+            ProtocolMessage::GetAddr => {
+                return self.handle_get_addr(peer_addr).await;
+            }
+            ProtocolMessage::Addr(msg) => {
+                return self.handle_addr(peer_addr, msg).await;
+            }
             _ => {
                 // Continue to protocol layer processing
             }
@@ -2125,6 +2189,189 @@ impl NetworkManager {
         ban_list.clear();
     }
 
+    /// Handle GetAddr request - return known addresses
+    async fn handle_get_addr(&self, peer_addr: SocketAddr) -> Result<()> {
+        use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
+        
+        // Get fresh addresses from database (up to 2500, Bitcoin Core limit)
+        let ban_list = self.ban_list.lock().unwrap().clone();
+        let connected_peers: Vec<SocketAddr> = {
+            let pm = self.peer_manager.lock().unwrap();
+            pm.peer_socket_addresses()
+        };
+        
+        let addresses = {
+            let mut db = self.address_database.lock().unwrap();
+            let fresh = db.get_fresh_addresses(2500);
+            db.filter_addresses(fresh, &ban_list, &connected_peers)
+        };
+        
+        // Create Addr message
+        let addr_msg = AddrMessage { addresses };
+        let response = ProtocolMessage::Addr(addr_msg);
+        let wire_msg = ProtocolParser::serialize_message(&response)?;
+        
+        // Send response
+        self.send_to_peer(peer_addr, wire_msg).await?;
+        Ok(())
+    }
+
+    /// Handle Addr message - store addresses and optionally relay
+    async fn handle_addr(&self, peer_addr: SocketAddr, msg: AddrMessage) -> Result<()> {
+        use crate::network::protocol::NetworkAddress;
+        
+        // Get peer services from peer state
+        let peer_services = {
+            let peer_states = self.peer_states.lock().unwrap();
+            peer_states
+                .get(&peer_addr)
+                .map(|state| state.services)
+                .unwrap_or(0)
+        };
+        
+        // Store addresses in database
+        {
+            let mut db = self.address_database.lock().unwrap();
+            for addr in &msg.addresses {
+                db.add_address(addr.clone(), peer_services);
+            }
+        }
+        
+        // Relay addresses to other peers (with rate limiting)
+        self.relay_addresses(peer_addr, &msg.addresses).await?;
+        
+        Ok(())
+    }
+
+    /// Relay addresses to other peers (excluding sender)
+    async fn relay_addresses(
+        &self,
+        sender_addr: SocketAddr,
+        addresses: &[NetworkAddress],
+    ) -> Result<()> {
+        use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        
+        // Rate limiting: don't send addr messages too frequently (Bitcoin Core: ~every 2.4 hours)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let min_interval = 2 * 60 * 60 + 24 * 60; // 2.4 hours in seconds
+        
+        {
+            let last_sent = *self.last_addr_sent.lock().unwrap();
+            if now.saturating_sub(last_sent) < min_interval {
+                // Too soon, skip relay
+                return Ok(());
+            }
+        }
+        
+        // Filter addresses (exclude local, banned, already connected)
+        let ban_list = self.ban_list.lock().unwrap().clone();
+        let connected_peers: Vec<SocketAddr> = {
+            let pm = self.peer_manager.lock().unwrap();
+            pm.peer_socket_addresses()
+        };
+        
+        let filtered = {
+            let db = self.address_database.lock().unwrap();
+            db.filter_addresses(addresses.to_vec(), &ban_list, &connected_peers)
+        };
+        
+        if filtered.is_empty() {
+            return Ok(());
+        }
+        
+        // Limit to 1000 addresses per message (Bitcoin Core limit)
+        let addresses_to_relay: Vec<NetworkAddress> = filtered.into_iter().take(1000).collect();
+        
+        // Create Addr message
+        let addr_msg = AddrMessage {
+            addresses: addresses_to_relay,
+        };
+        let relay_msg = ProtocolMessage::Addr(addr_msg);
+        let wire_msg = ProtocolParser::serialize_message(&relay_msg)?;
+        
+        // Send to all peers except sender
+        let peer_addrs: Vec<SocketAddr> = {
+            let pm = self.peer_manager.lock().unwrap();
+            pm.peer_socket_addresses()
+                .into_iter()
+                .filter(|addr| *addr != sender_addr)
+                .collect()
+        };
+        
+        for peer_addr in peer_addrs {
+            if let Err(e) = self.send_to_peer(peer_addr, wire_msg.clone()).await {
+                warn!("Failed to relay addresses to {}: {}", peer_addr, e);
+            }
+        }
+        
+        // Update last sent time
+        *self.last_addr_sent.lock().unwrap() = now;
+        
+        Ok(())
+    }
+
+    /// Send our own address to peers (self-advertisement)
+    pub async fn advertise_self(&self, listen_addr: SocketAddr, services: u64) -> Result<()> {
+        if !self.enable_self_advertisement {
+            return Ok(()); // Self-advertisement disabled
+        }
+        
+        use crate::network::protocol::{AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser};
+        use std::net::IpAddr;
+        
+        // Convert SocketAddr to NetworkAddress
+        let ip_bytes = match listen_addr.ip() {
+            IpAddr::V4(ipv4) => {
+                // IPv4-mapped IPv6 format
+                let mut bytes = [0u8; 16];
+                bytes[10] = 0xff;
+                bytes[11] = 0xff;
+                bytes[12..16].copy_from_slice(&ipv4.octets());
+                bytes
+            }
+            IpAddr::V6(ipv6) => {
+                ipv6.octets()
+            }
+        };
+        
+        let our_addr = NetworkAddress {
+            services,
+            ip: ip_bytes,
+            port: listen_addr.port(),
+        };
+        
+        // Create Addr message with just our address
+        let addr_msg = AddrMessage {
+            addresses: vec![our_addr.clone()],
+        };
+        let relay_msg = ProtocolMessage::Addr(addr_msg);
+        let wire_msg = ProtocolParser::serialize_message(&relay_msg)?;
+        
+        // Send to all connected peers
+        let peer_addrs: Vec<SocketAddr> = {
+            let pm = self.peer_manager.lock().unwrap();
+            pm.peer_socket_addresses()
+        };
+        
+        for peer_addr in peer_addrs {
+            if let Err(e) = self.send_to_peer(peer_addr, wire_msg.clone()).await {
+                warn!("Failed to advertise self to {}: {}", peer_addr, e);
+            }
+        }
+        
+        // Also store our own address in database
+        {
+            let mut db = self.address_database.lock().unwrap();
+            db.add_address(our_addr, services);
+        }
+        
+        Ok(())
+    }
+
     /// Get list of banned peers
     pub fn get_banned_peers(&self) -> Vec<(SocketAddr, u64)> {
         let ban_list = self.ban_list.lock().unwrap();
@@ -2391,7 +2638,15 @@ impl NetworkManager {
 
     /// Create version message with service flags
     ///
-    /// Sets NODE_COMPACT_FILTERS flag if filter service is enabled
+    /// Creates version message with service flags for all supported features
+    /// 
+    /// Sets service flags based on:
+    /// - BIP157: NODE_COMPACT_FILTERS (always enabled if filter service exists)
+    /// - UTXO Commitments: NODE_UTXO_COMMITMENTS (if feature enabled)
+    /// - Ban List Sharing: NODE_BAN_LIST_SHARING (if config enabled)
+    /// - Dandelion: NODE_DANDELION (if feature enabled)
+    /// - Package Relay: NODE_PACKAGE_RELAY (always enabled)
+    /// - FIBRE: NODE_FIBRE (always enabled)
     pub fn create_version_message(
         &self,
         version: i32,
@@ -2408,12 +2663,31 @@ impl NetworkManager {
 
         // Add service flags for supported features
         let mut services_with_filters = services;
+        
+        // BIP157 Compact Block Filters (always enabled if filter service exists)
         services_with_filters |= NODE_COMPACT_FILTERS;
+        
+        // UTXO Commitments (if feature enabled)
+        #[cfg(feature = "utxo-commitments")]
+        {
+            services_with_filters |= crate::network::protocol::NODE_UTXO_COMMITMENTS;
+        }
+        
+        // Ban List Sharing (if config enabled)
+        if self.ban_list_sharing_config.is_some() {
+            services_with_filters |= crate::network::protocol::NODE_BAN_LIST_SHARING;
+        }
+        
+        // Dandelion (if feature enabled)
         #[cfg(feature = "dandelion")]
         {
             services_with_filters |= crate::network::protocol::NODE_DANDELION;
         }
+        
+        // Package Relay (BIP331) - always enabled
         services_with_filters |= crate::network::protocol::NODE_PACKAGE_RELAY;
+        
+        // FIBRE - always enabled
         services_with_filters |= crate::network::protocol::NODE_FIBRE;
 
         crate::network::protocol::VersionMessage {

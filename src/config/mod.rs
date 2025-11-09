@@ -96,6 +96,14 @@ pub struct NodeConfig {
 
     /// Storage and pruning configuration
     pub storage: Option<StorageConfig>,
+
+    /// Persistent peers (peers to connect to on startup)
+    #[serde(default)]
+    pub persistent_peers: Vec<SocketAddr>,
+
+    /// Enable self-advertisement (send own address to peers)
+    #[serde(default = "default_true")]
+    pub enable_self_advertisement: bool,
 }
 
 /// Transport preference configuration (serializable)
@@ -417,6 +425,22 @@ pub struct PruningConfig {
     #[serde(default = "default_false")]
     pub prune_on_startup: bool,
     
+    /// Allow incremental pruning during IBD (requires UTXO commitments + aggressive mode)
+    /// When enabled, old blocks are pruned incrementally during sync, keeping only a window
+    /// of recent blocks. This prevents the need to download the full blockchain before pruning.
+    #[serde(default = "default_false")]
+    pub incremental_prune_during_ibd: bool,
+    
+    /// Block window size for incremental pruning (number of recent blocks to keep)
+    /// Only used when incremental_prune_during_ibd is true
+    #[serde(default = "default_prune_window_size")]
+    pub prune_window_size: u64,
+    
+    /// Minimum blocks before starting incremental pruning during IBD
+    /// Prevents pruning too early in the sync process
+    #[serde(default = "default_min_blocks_for_incremental_prune")]
+    pub min_blocks_for_incremental_prune: u64,
+    
     /// UTXO commitments integration
     #[cfg(feature = "utxo-commitments")]
     pub utxo_commitments: Option<UtxoCommitmentsPruningConfig>,
@@ -427,7 +451,12 @@ pub struct PruningConfig {
 }
 
 fn default_pruning_mode() -> PruningMode {
-    PruningMode::Disabled
+    PruningMode::Aggressive {
+        keep_from_height: 0,
+        keep_commitments: true,
+        keep_filtered_blocks: false,
+        min_blocks: 144, // ~1 day at 10 min/block
+    }
 }
 
 fn default_auto_prune_interval() -> u64 {
@@ -438,14 +467,30 @@ fn default_min_blocks_to_keep() -> u64 {
     144 // ~1 day at 10 min/block
 }
 
+fn default_prune_window_size() -> u64 {
+    144 // Keep last 144 blocks (~1 day) during incremental pruning
+}
+
+fn default_min_blocks_for_incremental_prune() -> u64 {
+    288 // Start incremental pruning after 288 blocks (~2 days) to ensure stability
+}
+
 impl Default for PruningConfig {
     fn default() -> Self {
         Self {
-            mode: PruningMode::Disabled,
-            auto_prune: false,
-            auto_prune_interval: 144,
+            mode: PruningMode::Aggressive {
+                keep_from_height: 0,
+                keep_commitments: true,
+                keep_filtered_blocks: false,
+                min_blocks: 144, // ~1 day at 10 min/block
+            },
+            auto_prune: true, // Enable automatic pruning
+            auto_prune_interval: 144, // Prune every ~1 day
             min_blocks_to_keep: 144,
-            prune_on_startup: false,
+            prune_on_startup: false, // Still false for safety
+            incremental_prune_during_ibd: true, // Enable incremental pruning during IBD
+            prune_window_size: 144, // Keep sliding window of 144 blocks during IBD
+            min_blocks_for_incremental_prune: 288, // Start pruning after 288 blocks (~2 days)
             #[cfg(feature = "utxo-commitments")]
             utxo_commitments: None,
             #[cfg(feature = "bip158")]

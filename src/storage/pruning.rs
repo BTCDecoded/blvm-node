@@ -15,6 +15,7 @@ use crate::storage::utxostore::UtxoStore;
 #[cfg(feature = "bip158")]
 use crate::network::filter_service::BlockFilterService;
 use anyhow::{anyhow, Result};
+#[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::Hash;
 #[cfg(feature = "utxo-commitments")]
 use hex;
@@ -113,6 +114,18 @@ impl PruningManager {
         self.stats.lock().unwrap().clone()
     }
 
+    /// Get commitment store (if available)
+    #[cfg(feature = "utxo-commitments")]
+    pub fn commitment_store(&self) -> Option<Arc<CommitmentStore>> {
+        self.commitment_store.as_ref().map(Arc::clone)
+    }
+
+    /// Get UTXO store (if available)
+    #[cfg(feature = "utxo-commitments")]
+    pub fn utxostore(&self) -> Option<Arc<UtxoStore>> {
+        self.utxostore.as_ref().map(Arc::clone)
+    }
+
     /// Check if pruning is enabled
     pub fn is_enabled(&self) -> bool {
         !matches!(self.config.mode, PruningMode::Disabled)
@@ -131,6 +144,79 @@ impl PruningManager {
             // First auto-prune after reaching interval
             current_height >= self.config.auto_prune_interval
         }
+    }
+
+    /// Check if incremental pruning during IBD is possible
+    /// Requires: UTXO commitments feature enabled and available
+    fn can_incremental_prune_during_ibd(&self) -> bool {
+        #[cfg(feature = "utxo-commitments")]
+        {
+            // Check if UTXO commitments are available
+            let has_commitments = self.commitment_store.is_some() && self.utxostore.is_some();
+            
+            // Check if mode supports incremental pruning
+            let mode_supports = matches!(
+                &self.config.mode,
+                PruningMode::Aggressive { .. } | PruningMode::Custom { keep_commitments: true, .. }
+            );
+            
+            has_commitments && mode_supports
+        }
+        #[cfg(not(feature = "utxo-commitments"))]
+        {
+            false
+        }
+    }
+
+    /// Incremental prune during IBD
+    /// 
+    /// This method prunes old blocks while keeping a sliding window of recent blocks.
+    /// It's designed to be called periodically during IBD to prevent storage from growing
+    /// unbounded. Only works when incremental_prune_during_ibd is enabled and UTXO
+    /// commitments are available.
+    ///
+    /// # Arguments
+    /// * `current_height` - Current chain tip height
+    /// * `is_ibd` - Whether initial block download is in progress
+    ///
+    /// # Returns
+    /// Pruning statistics if pruning occurred, None if not needed
+    pub fn incremental_prune_during_ibd(
+        &self,
+        current_height: u64,
+        is_ibd: bool,
+    ) -> Result<Option<PruningStats>> {
+        // Only run during IBD if enabled
+        if !is_ibd || !self.config.incremental_prune_during_ibd {
+            return Ok(None);
+        }
+
+        // Check if prerequisites are met
+        if !self.can_incremental_prune_during_ibd() {
+            return Ok(None);
+        }
+
+        // Check if we have enough blocks to start pruning
+        if current_height < self.config.min_blocks_for_incremental_prune {
+            return Ok(None);
+        }
+
+        // Calculate prune height: keep only the last prune_window_size blocks
+        let prune_to_height = current_height.saturating_sub(self.config.prune_window_size);
+        
+        // Don't prune if window size is larger than current height
+        if prune_to_height == 0 || prune_to_height >= current_height {
+            return Ok(None);
+        }
+
+        info!(
+            "Incremental pruning during IBD: current_height={}, prune_to_height={}, window_size={}",
+            current_height, prune_to_height, self.config.prune_window_size
+        );
+
+        // Perform pruning
+        let stats = self.prune_to_height(prune_to_height, current_height, is_ibd)?;
+        Ok(Some(stats))
     }
 
     /// Prune blocks up to a specific height
@@ -153,11 +239,29 @@ impl PruningManager {
             return Err(anyhow!("Pruning is disabled"));
         }
 
-        // Prevent pruning during IBD
+        // Check if incremental pruning during IBD is allowed
         if is_ibd {
-            return Err(anyhow!(
-                "Cannot prune during initial block download. Wait for IBD to complete."
-            ));
+            // Allow incremental pruning during IBD if:
+            // 1. Incremental pruning is explicitly enabled
+            // 2. UTXO commitments are available (for state verification)
+            // 3. Aggressive or Custom mode with commitments enabled
+            let can_incremental_prune = self.config.incremental_prune_during_ibd
+                && self.can_incremental_prune_during_ibd();
+            
+            if !can_incremental_prune {
+                return Err(anyhow!(
+                    "Cannot prune during initial block download. Wait for IBD to complete, or enable incremental_prune_during_ibd with UTXO commitments."
+                ));
+            }
+            
+            // For incremental pruning during IBD, ensure we have enough blocks
+            if current_height < self.config.min_blocks_for_incremental_prune {
+                return Err(anyhow!(
+                    "Cannot prune during IBD until at least {} blocks are synced (currently at {})",
+                    self.config.min_blocks_for_incremental_prune,
+                    current_height
+                ));
+            }
         }
 
         // Validate prune height
@@ -521,6 +625,50 @@ impl PruningManager {
         commitment_store.store_commitment(block_hash, height, &commitment)?;
 
         debug!("Generated and stored commitment for height {} (hash: {})", 
+               height, hex::encode(block_hash));
+
+        Ok(())
+    }
+
+    /// Generate UTXO commitment from current UTXO set state
+    /// 
+    /// This method generates a commitment from the current UTXO set without replaying blocks.
+    /// Used during incremental sync when the UTXO set is maintained incrementally.
+    /// 
+    /// # Arguments
+    /// * `block_hash` - Hash of the block at this height
+    /// * `height` - Block height
+    /// * `utxo_set` - Current UTXO set (from incremental updates)
+    /// * `commitment_store` - Commitment store to save the commitment
+    /// 
+    /// # Returns
+    /// Result indicating success or failure
+    #[cfg(feature = "utxo-commitments")]
+    pub fn generate_commitment_from_current_state(
+        &self,
+        block_hash: &Hash,
+        height: u64,
+        utxo_set: &bllvm_protocol::UtxoSet,
+        commitment_store: &CommitmentStore,
+    ) -> Result<()> {
+        use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
+
+        // Build Merkle tree from current UTXO set
+        let mut utxo_tree = UtxoMerkleTree::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
+
+        for (outpoint, utxo) in utxo_set {
+            utxo_tree.insert(*outpoint, utxo.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
+        }
+
+        // Generate commitment
+        let commitment = utxo_tree.generate_commitment(*block_hash, height);
+
+        // Store commitment
+        commitment_store.store_commitment(block_hash, height, &commitment)?;
+
+        debug!("Generated commitment from current state for height {} (hash: {})", 
                height, hex::encode(block_hash));
 
         Ok(())

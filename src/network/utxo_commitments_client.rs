@@ -157,8 +157,37 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 drop(network);
             }
 
-            // Register pending request before sending
+            // Check if peer supports UTXO commitments before sending request
             let network = network_manager.read().await;
+            
+            // Get peer version to check capabilities
+            let peer_supports_utxo_commitments = {
+                let peer_states = network.peer_states.lock().unwrap();
+                if let Some(peer_state) = peer_states.get(&peer_addr) {
+                    #[cfg(feature = "utxo-commitments")]
+                    {
+                        use crate::network::protocol::NODE_UTXO_COMMITMENTS;
+                        (peer_state.services & NODE_UTXO_COMMITMENTS) != 0
+                    }
+                    #[cfg(not(feature = "utxo-commitments"))]
+                    {
+                        false
+                    }
+                } else {
+                    // No peer state yet, assume it doesn't support (will try anyway for backward compatibility)
+                    false
+                }
+            };
+            
+            // If we know the peer doesn't support UTXO commitments, return error early
+            if !peer_supports_utxo_commitments {
+                drop(network);
+                return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::VerificationFailed(
+                    format!("Peer {} does not support UTXO commitments (missing NODE_UTXO_COMMITMENTS service flag)", peer_id)
+                ));
+            }
+            
+            // Register pending request before sending
             let (request_id, response_rx) = network.register_request(peer_addr);
             drop(network); // Release read lock before async wait
             

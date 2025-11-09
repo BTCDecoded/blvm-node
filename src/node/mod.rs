@@ -14,7 +14,7 @@ pub mod performance;
 
 use anyhow::Result;
 use std::net::SocketAddr;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::NodeConfig;
 use crate::module::api::NodeApiImpl;
@@ -291,7 +291,58 @@ impl Node {
                 ) {
                     Ok(true) => {
                         info!("Block accepted at height {}", current_height);
+                        
+                        // Persist UTXO set to storage after block validation
+                        // This is critical for commitment generation and incremental pruning
+                        if let Err(e) = self.storage.utxos().store_utxo_set(&utxo_set) {
+                            warn!("Failed to persist UTXO set after block {}: {}", current_height, e);
+                        }
+                        
+                        // Generate UTXO commitment from current state (if enabled)
+                        // Use current_height (the block that was just validated) before incrementing
+                        #[cfg(feature = "utxo-commitments")]
+                        {
+                            if let Some(pruning_manager) = self.storage.pruning() {
+                                if let (Some(commitment_store), Some(_utxostore)) = 
+                                    (pruning_manager.commitment_store(), pruning_manager.utxostore()) 
+                                {
+                                    // Get block hash from storage (block was just stored at current_height)
+                                    let blocks_arc = self.storage.blocks();
+                                    if let Ok(Some(block_hash)) = blocks_arc.get_hash_by_height(current_height) {
+                                        // Generate commitment from current UTXO set state
+                                        if let Err(e) = pruning_manager.generate_commitment_from_current_state(
+                                            &block_hash,
+                                            current_height,
+                                            &utxo_set,
+                                            &commitment_store,
+                                        ) {
+                                            warn!("Failed to generate commitment for block {}: {}", current_height, e);
+                                        } else {
+                                            debug!("Generated UTXO commitment for block {}", current_height);
+                                        }
+                                    } else {
+                                        warn!("Could not find block hash for height {} to generate commitment", current_height);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Increment height after processing
                         current_height += 1;
+                        
+                        // Check for incremental pruning during IBD
+                        // Consider IBD if we're still syncing (height < tip or no recent blocks)
+                        let is_ibd = current_height < 1000; // Simple heuristic: consider IBD if < 1000 blocks
+                        if let Some(pruning_manager) = self.storage.pruning() {
+                            if let Ok(Some(prune_stats)) = pruning_manager.incremental_prune_during_ibd(current_height, is_ibd) {
+                                info!("Incremental pruning during IBD: {} blocks pruned, {} bytes freed", 
+                                      prune_stats.blocks_pruned, prune_stats.storage_freed);
+                                // Flush storage to persist pruning changes
+                                if let Err(e) = self.storage.flush() {
+                                    warn!("Failed to flush storage after incremental pruning: {}", e);
+                                }
+                            }
+                        }
                         
                         // Check for automatic pruning after block acceptance
                         if let Some(pruning_manager) = self.storage.pruning() {

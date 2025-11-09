@@ -21,6 +21,11 @@ pub const MAX_PROTOCOL_MESSAGE_LENGTH: usize = 32 * 1024 * 1024;
 pub const NODE_DANDELION: u64 = 1 << 24;
 pub const NODE_PACKAGE_RELAY: u64 = 1 << 25;
 pub const NODE_FIBRE: u64 = 1 << 26;
+/// UTXO Commitments support (GetUTXOSet, UTXOSet, GetFilteredBlock, FilteredBlock)
+#[cfg(feature = "utxo-commitments")]
+pub const NODE_UTXO_COMMITMENTS: u64 = 1 << 27;
+/// Ban List Sharing support (GetBanList, BanList)
+pub const NODE_BAN_LIST_SHARING: u64 = 1 << 28;
 
 /// Allowed Bitcoin protocol commands
 pub const ALLOWED_COMMANDS: &[&str] = &[
@@ -115,6 +120,9 @@ pub enum ProtocolMessage {
     // Ban List Sharing
     GetBanList(GetBanListMessage),
     BanList(BanListMessage),
+    // Address relay
+    GetAddr,
+    Addr(AddrMessage),
 }
 
 /// Version message
@@ -129,6 +137,41 @@ pub struct VersionMessage {
     pub user_agent: String,
     pub start_height: i32,
     pub relay: bool,
+}
+
+impl VersionMessage {
+    /// Check if peer supports UTXO commitments
+    #[cfg(feature = "utxo-commitments")]
+    pub fn supports_utxo_commitments(&self) -> bool {
+        (self.services & NODE_UTXO_COMMITMENTS) != 0
+    }
+    
+    /// Check if peer supports ban list sharing
+    pub fn supports_ban_list_sharing(&self) -> bool {
+        (self.services & NODE_BAN_LIST_SHARING) != 0
+    }
+    
+    /// Check if peer supports BIP157 compact block filters
+    pub fn supports_compact_filters(&self) -> bool {
+        use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        (self.services & NODE_COMPACT_FILTERS) != 0
+    }
+    
+    /// Check if peer supports package relay (BIP331)
+    pub fn supports_package_relay(&self) -> bool {
+        (self.services & NODE_PACKAGE_RELAY) != 0
+    }
+    
+    /// Check if peer supports FIBRE
+    pub fn supports_fibre(&self) -> bool {
+        (self.services & NODE_FIBRE) != 0
+    }
+    
+    #[cfg(feature = "dandelion")]
+    /// Check if peer supports Dandelion
+    pub fn supports_dandelion(&self) -> bool {
+        (self.services & NODE_DANDELION) != 0
+    }
 }
 
 /// Network address
@@ -659,6 +702,8 @@ impl ProtocolParser {
             // Ban List Sharing
             "getbanlist" => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
             "banlist" => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
+            "getaddr" => Ok(ProtocolMessage::GetAddr),
+            "addr" => Ok(ProtocolMessage::Addr(bincode::deserialize(payload)?)),
             _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
         }
     }
@@ -710,6 +755,9 @@ impl ProtocolParser {
             // Ban List Sharing
             ProtocolMessage::GetBanList(msg) => ("getbanlist", bincode::serialize(msg)?),
             ProtocolMessage::BanList(msg) => ("banlist", bincode::serialize(msg)?),
+            // Address relay
+            ProtocolMessage::GetAddr => ("getaddr", vec![]),
+            ProtocolMessage::Addr(msg) => ("addr", bincode::serialize(msg)?),
         };
 
         let mut message = Vec::new();
@@ -781,4 +829,13 @@ pub struct BanEntry {
     pub unban_timestamp: u64,
     /// Reason for ban (optional)
     pub reason: Option<String>,
+}
+
+// Address relay messages
+
+/// Addr message - Contains peer addresses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddrMessage {
+    /// List of network addresses
+    pub addresses: Vec<NetworkAddress>,
 }
