@@ -231,7 +231,7 @@ impl TransportConnection for IrohConnection {
     /// Opens a dedicated QUIC stream for the channel, enabling parallel operations.
     /// Streams are not reused (they're closed after sending) to avoid complexity.
     /// For true stream reuse, would need async HashMap with proper locking.
-    pub async fn send_on_channel(&mut self, channel_id: u32, data: &[u8]) -> Result<()> {
+    async fn send_on_channel(&mut self, channel_id: u32, data: &[u8]) -> Result<()> {
         if !self.connected {
             return Err(anyhow::anyhow!("Connection closed"));
         }

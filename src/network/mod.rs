@@ -565,12 +565,264 @@ impl NetworkManager {
         Ok(())
     }
 
+    /// Discover Iroh peers and add to address database
+    /// 
+    /// Iroh peers are discovered through:
+    /// 1. Incoming connections (automatically stored)
+    /// 2. DERP servers (if configured)
+    /// 3. Gossip discovery (if available)
+    /// 
+    /// This method can be extended to use Iroh's gossip discovery APIs when available.
+    #[cfg(feature = "iroh")]
+    pub async fn discover_iroh_peers(&self) -> Result<usize> {
+        // Iroh peers are primarily discovered through:
+        // 1. Incoming connections (handled automatically in accept loop)
+        // 2. DERP servers (configured in IrohTransport)
+        // 3. Gossip discovery (would require iroh-gossip-discovery crate)
+        
+        // For now, we rely on:
+        // - Persistent Iroh peers from config
+        // - Incoming connections (stored automatically)
+        // - DERP servers (handled by Iroh's MagicEndpoint)
+        
+        // Future: Integrate with iroh-gossip-discovery when available
+        info!("Iroh peer discovery: relying on DERP servers and incoming connections");
+        Ok(0) // Return 0 for now - discovery happens through Iroh's native mechanisms
+    }
+
+    /// Connect to Iroh peers from address database
+    #[cfg(feature = "iroh")]
+    pub async fn connect_iroh_peers_from_database(&self, target_count: usize) -> Result<usize> {
+        use crate::network::transport::TransportAddr;
+        use crate::network::peer::Peer;
+        
+        // Count current Iroh peers
+        let current_iroh_count = {
+            let pm = self.peer_manager.lock().unwrap();
+            pm.peer_addresses()
+                .iter()
+                .filter(|addr| matches!(addr, TransportAddr::Iroh(_)))
+                .count()
+        };
+        
+        if current_iroh_count >= target_count {
+            return Ok(0);
+        }
+        
+        let needed = target_count - current_iroh_count;
+        info!("Need {} more Iroh peers (current: {}, target: {})", needed, current_iroh_count, target_count);
+        
+        // Get fresh Iroh NodeIds from database
+        let node_ids = {
+            let db = self.address_database.lock().unwrap();
+            db.get_fresh_iroh_addresses(needed * 2) // Get 2x needed for retries
+        };
+        
+        if node_ids.is_empty() {
+            warn!("No fresh Iroh addresses available in database");
+            return Ok(0);
+        }
+        
+        // Get Iroh transport
+        let iroh_transport = match &self.iroh_transport {
+            Some(transport) => transport,
+            None => {
+                warn!("Iroh transport not initialized, cannot connect to Iroh peers");
+                return Ok(0);
+            }
+        };
+        
+        // Try to connect to Iroh peers
+        let mut connected = 0;
+        for node_id in node_ids.into_iter().take(needed * 2) {
+            let node_id_bytes = node_id.as_bytes().to_vec();
+            let transport_addr = TransportAddr::Iroh(node_id_bytes.clone());
+            
+            // Connect directly using Iroh transport
+            match iroh_transport.connect(transport_addr.clone()).await {
+                Ok(conn) => {
+                    // Create peer from Iroh connection
+                    // Iroh uses placeholder SocketAddr for peer identification
+                    let placeholder_socket = SocketAddr::from(([0, 0, 0, 0], 0));
+                    let peer = Peer::from_transport_connection(
+                        conn,
+                        placeholder_socket,
+                        transport_addr.clone(),
+                        self.peer_tx.clone(),
+                    );
+                    
+                    // Add peer to manager
+                    {
+                        let mut pm = self.peer_manager.lock().unwrap();
+                        if let Err(e) = pm.add_peer(transport_addr.clone(), peer) {
+                            warn!("Failed to add Iroh peer: {}", e);
+                            continue;
+                        }
+                    }
+                    
+                    // Store mapping for Iroh (if needed)
+                    {
+                        let mut socket_to_transport = self.socket_to_transport.lock().unwrap();
+                        socket_to_transport.insert(placeholder_socket, transport_addr.clone());
+                    }
+                    
+                    info!("Successfully connected to Iroh peer: {}", node_id);
+                    connected += 1;
+                    if connected >= needed {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    debug!("Failed to connect to Iroh peer {}: {}", node_id, e);
+                }
+            }
+        }
+        
+        info!("Connected to {} new Iroh peers from address database", connected);
+        Ok(connected)
+    }
+
+    /// Connect to peers from address database when below target count
+    /// 
+    /// Works with both SocketAddr-based addresses (TCP/Quinn) and Iroh NodeIds.
+    pub async fn connect_peers_from_database(&self, target_count: usize) -> Result<usize> {
+        let current_count = self.peer_count();
+        if current_count >= target_count {
+            return Ok(0); // Already have enough peers
+        }
+
+        let needed = target_count - current_count;
+        info!("Need {} more peers (current: {}, target: {})", needed, current_count, target_count);
+
+        // Get fresh addresses from database
+        let ban_list = self.ban_list.lock().unwrap().clone();
+        let connected_peers: Vec<SocketAddr> = {
+            let pm = self.peer_manager.lock().unwrap();
+            pm.peer_socket_addresses()
+        };
+
+        let addresses: Vec<_> = {
+            let mut db = self.address_database.lock().unwrap();
+            let fresh = db.get_fresh_addresses(needed * 3); // Get 3x needed for retries
+            db.filter_addresses(fresh, &ban_list, &connected_peers)
+        };
+
+        if addresses.is_empty() {
+            warn!("No fresh addresses available in database");
+            return Ok(0);
+        }
+
+        // Convert addresses to SocketAddrs first
+        let sockets: Vec<SocketAddr> = {
+            let db = self.address_database.lock().unwrap();
+            addresses.iter()
+                .take(needed * 2)
+                .map(|addr| db.network_addr_to_socket(addr))
+                .collect()
+        };
+
+        // Try to connect to addresses
+        let mut connected = 0;
+        for socket in sockets {
+
+            if let Err(e) = self.connect_to_peer(socket).await {
+                debug!("Failed to connect to {}: {}", socket, e);
+                // Continue trying other addresses
+            } else {
+                connected += 1;
+                if connected >= needed {
+                    break; // Got enough peers
+                }
+            }
+        }
+
+        info!("Connected to {} new peers from address database", connected);
+        
+        // Also try to connect Iroh peers if Iroh is enabled
+        #[cfg(feature = "iroh")]
+        if self.transport_preference.allows_iroh() {
+            let iroh_connected = self.connect_iroh_peers_from_database(target_count).await?;
+            connected += iroh_connected;
+        }
+        
+        Ok(connected)
+    }
+
+    /// Initialize peer connections after startup
+    /// 
+    /// This is automatically called by `start()` to:
+    /// 1. Discover peers from DNS seeds (for TCP/Quinn transports)
+    /// 2. Connect to persistent peers from config
+    /// 3. Discover Iroh peers (if Iroh is enabled) - uses Iroh's DERP servers and gossip
+    /// 4. Connect to peers from address database to reach target count
+    /// 
+    /// Note: The address database now supports both SocketAddr-based addresses (TCP/Quinn)
+    /// and Iroh NodeIds. Iroh peers are discovered through:
+    /// - DERP servers (handled by Iroh's MagicEndpoint)
+    /// - Gossip discovery (when available)
+    /// - Incoming connections (automatically stored)
+    /// - Persistent peers from config
+    pub async fn initialize_peer_connections(
+        &self,
+        config: &crate::config::NodeConfig,
+        network: &str,
+        port: u16,
+        target_peer_count: usize,
+    ) -> Result<()> {
+        // 1. Discover peers from DNS seeds (only for TCP/Quinn, not Iroh)
+        let should_discover_dns = self.transport_preference.allows_tcp() || 
+            {
+                #[cfg(feature = "quinn")]
+                {
+                    self.transport_preference.allows_quinn()
+                }
+                #[cfg(not(feature = "quinn"))]
+                {
+                    false
+                }
+            };
+        if should_discover_dns {
+            if let Err(e) = self.discover_peers_from_dns(network, port).await {
+                warn!("DNS seed discovery failed: {}", e);
+            }
+        }
+
+        // 2. Connect to persistent peers
+        if let Some(ref persistent_peers) = config.persistent_peers {
+            if !persistent_peers.is_empty() {
+                if let Err(e) = self.connect_persistent_peers(persistent_peers).await {
+                    warn!("Failed to connect to some persistent peers: {}", e);
+                }
+            }
+        }
+
+        // 3. Discover Iroh peers (if Iroh is enabled)
+        #[cfg(feature = "iroh")]
+        if self.transport_preference.allows_iroh() {
+            if let Err(e) = self.discover_iroh_peers().await {
+                warn!("Iroh peer discovery failed: {}", e);
+            }
+        }
+
+        // 4. Connect to peers from address database to reach target count
+        // Wait a bit for persistent peers to connect first
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        
+        if let Err(e) = self.connect_peers_from_database(target_peer_count).await {
+            warn!("Failed to connect peers from database: {}", e);
+        }
+
+        Ok(())
+    }
+
     /// Start the network manager
     pub async fn start(&mut self, listen_addr: SocketAddr) -> Result<()> {
         info!(
             "Starting network manager with transport preference: {:?}",
             self.transport_preference
         );
+        
+        // Start listening first
 
         // Initialize Quinn transport if enabled
         #[cfg(feature = "quinn")]
@@ -828,7 +1080,8 @@ impl NetworkManager {
                     let peer_tx = self.peer_tx.clone();
                     let peer_manager = Arc::clone(&self.peer_manager);
                     let dos_protection = Arc::clone(&self.dos_protection);
-                    
+                    let address_database = Arc::clone(&self.address_database);
+                    let socket_to_transport = Arc::clone(&self.socket_to_transport);
                     tokio::spawn(async move {
                         loop {
                             match iroh_listener.accept().await {
@@ -867,6 +1120,8 @@ impl NetworkManager {
                                     let peer_tx_clone = peer_tx.clone();
                                     let peer_manager_clone = Arc::clone(&peer_manager);
                                     let iroh_addr_clone = iroh_addr.clone();
+                                    let socket_to_transport_clone = Arc::clone(&socket_to_transport);
+                                    let address_database_clone = Arc::clone(&address_database);
                                     tokio::spawn(async move {
                                         use crate::network::peer::Peer;
                                         
@@ -906,6 +1161,21 @@ impl NetworkManager {
                                                 }
                                                 // Store mapping from placeholder SocketAddr to TransportAddr for Iroh lookups
                                                 socket_to_transport_clone.lock().unwrap().insert(placeholder_socket, iroh_addr_clone.clone());
+                                                
+                                                // Store Iroh NodeId in address database
+                                                if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
+                                                    if node_id_bytes.len() == 32 {
+                                                        use iroh_net::NodeId;
+                                                        if let Ok(node_id) = NodeId::from_bytes(node_id_bytes) {
+                                                            let address_db_clone = address_database_clone.clone();
+                                                            tokio::spawn(async move {
+                                                                let mut db = address_db_clone.lock().unwrap();
+                                                                db.add_iroh_address(node_id, 0); // Services will be updated on version exchange
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                                
                                                 info!("Successfully added Iroh peer (transport: {:?})", iroh_addr_clone);
                                             }
                                             Err(e) => {

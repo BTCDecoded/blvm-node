@@ -2,11 +2,16 @@
 //!
 //! Manages a database of known peer addresses with freshness tracking,
 //! expiration, and filtering capabilities.
+//!
+//! Supports both SocketAddr-based addresses (TCP/Quinn) and Iroh NodeIds.
 
 use crate::network::protocol::NetworkAddress;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(feature = "iroh")]
+use iroh_net::NodeId;
 
 /// Address entry with metadata
 #[derive(Debug, Clone)]
@@ -61,9 +66,12 @@ impl AddressEntry {
 
 /// Address database for peer discovery
 pub struct AddressDatabase {
-    /// Map from SocketAddr to AddressEntry
+    /// Map from SocketAddr to AddressEntry (for TCP/Quinn)
     addresses: HashMap<SocketAddr, AddressEntry>,
-    /// Maximum number of addresses to store
+    /// Map from Iroh NodeId to AddressEntry (for Iroh peers)
+    #[cfg(feature = "iroh")]
+    iroh_addresses: HashMap<NodeId, AddressEntry>,
+    /// Maximum number of addresses to store (total across both maps)
     max_addresses: usize,
     /// Address expiration time in seconds (default: 24 hours)
     expiration_seconds: u64,
@@ -74,6 +82,8 @@ impl AddressDatabase {
     pub fn new(max_addresses: usize) -> Self {
         Self {
             addresses: HashMap::new(),
+            #[cfg(feature = "iroh")]
+            iroh_addresses: HashMap::new(),
             max_addresses,
             expiration_seconds: 24 * 60 * 60, // 24 hours default
         }
@@ -83,6 +93,8 @@ impl AddressDatabase {
     pub fn with_expiration(max_addresses: usize, expiration_seconds: u64) -> Self {
         Self {
             addresses: HashMap::new(),
+            #[cfg(feature = "iroh")]
+            iroh_addresses: HashMap::new(),
             max_addresses,
             expiration_seconds,
         }
@@ -208,17 +220,82 @@ impl AddressDatabase {
             .collect()
     }
 
-    /// Get address count
+    /// Add an Iroh NodeId to the database
+    #[cfg(feature = "iroh")]
+    pub fn add_iroh_address(&mut self, node_id: NodeId, services: u64) {
+        match self.iroh_addresses.get_mut(&node_id) {
+            Some(entry) => {
+                entry.update_seen();
+                entry.services |= services;
+            }
+            None => {
+                if self.total_count() >= self.max_addresses {
+                    self.evict_oldest_iroh();
+                }
+                // Create a placeholder NetworkAddress for Iroh (not used, just for consistency)
+                let placeholder_addr = NetworkAddress {
+                    services,
+                    ip: [0; 16],
+                    port: 0,
+                };
+                self.iroh_addresses.insert(node_id, AddressEntry::new(placeholder_addr, services));
+            }
+        }
+    }
+
+    /// Get fresh Iroh NodeIds
+    #[cfg(feature = "iroh")]
+    pub fn get_fresh_iroh_addresses(&self, count: usize) -> Vec<NodeId> {
+        let mut fresh: Vec<_> = self
+            .iroh_addresses
+            .iter()
+            .filter(|(_, entry)| entry.is_fresh(self.expiration_seconds))
+            .map(|(node_id, _)| *node_id)
+            .collect();
+        
+        // Sort by last_seen (most recent first)
+        fresh.sort_by_key(|node_id| {
+            self.iroh_addresses
+                .get(node_id)
+                .map(|e| e.last_seen)
+                .unwrap_or(0)
+        });
+        fresh.reverse();
+        
+        fresh.into_iter().take(count).collect()
+    }
+
+    /// Get total address count (SocketAddr + Iroh)
+    pub fn total_count(&self) -> usize {
+        let socket_count = self.addresses.len();
+        #[cfg(feature = "iroh")]
+        {
+            socket_count + self.iroh_addresses.len()
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            socket_count
+        }
+    }
+
+    /// Get address count (SocketAddr only, for backward compatibility)
     pub fn len(&self) -> usize {
         self.addresses.len()
     }
 
     /// Check if database is empty
     pub fn is_empty(&self) -> bool {
-        self.addresses.is_empty()
+        #[cfg(feature = "iroh")]
+        {
+            self.addresses.is_empty() && self.iroh_addresses.is_empty()
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            self.addresses.is_empty()
+        }
     }
 
-    /// Evict oldest address
+    /// Evict oldest address (SocketAddr)
     fn evict_oldest(&mut self) {
         if let Some((oldest_addr, _)) = self
             .addresses
@@ -229,8 +306,22 @@ impl AddressDatabase {
         }
     }
 
+    /// Evict oldest Iroh address
+    #[cfg(feature = "iroh")]
+    fn evict_oldest_iroh(&mut self) {
+        if let Some((oldest_node_id, _)) = self
+            .iroh_addresses
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_seen)
+        {
+            self.iroh_addresses.remove(oldest_node_id);
+        }
+    }
+
     /// Convert NetworkAddress to SocketAddr
-    fn network_addr_to_socket(&self, addr: &NetworkAddress) -> SocketAddr {
+    /// 
+    /// Note: This is public for use in NetworkManager when connecting to peers.
+    pub fn network_addr_to_socket(&self, addr: &NetworkAddress) -> SocketAddr {
         // Convert IPv6 address bytes to SocketAddr
         // NetworkAddress uses 16-byte IPv6 format
         let ip = if addr.ip[0..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff] {
