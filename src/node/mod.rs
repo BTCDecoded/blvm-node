@@ -50,6 +50,12 @@ pub struct Node {
     metrics: Arc<MetricsCollector>,
     /// Performance profiler for critical path timing
     profiler: Arc<PerformanceProfiler>,
+    /// Protocol version (for determining network type)
+    protocol_version: ProtocolVersion,
+    /// Network address (for determining port)
+    network_addr: SocketAddr,
+    /// Node configuration (optional)
+    config: Option<NodeConfig>,
 }
 
 impl Node {
@@ -63,8 +69,9 @@ impl Node {
         info!("Initializing reference-node");
 
         // Initialize components
+        let protocol_version = protocol_version.unwrap_or(ProtocolVersion::Regtest);
         let protocol =
-            BitcoinProtocolEngine::new(protocol_version.unwrap_or(ProtocolVersion::Regtest))?;
+            BitcoinProtocolEngine::new(protocol_version)?;
         let protocol_arc = Arc::new(protocol);
         let storage = Storage::new(data_dir)?;
         let storage_arc = Arc::new(storage);
@@ -101,7 +108,16 @@ impl Node {
             event_publisher: None,
             metrics,
             profiler,
+            protocol_version,
+            network_addr,
+            config: None,
         })
+    }
+
+    /// Set node configuration
+    pub fn with_config(mut self, config: NodeConfig) -> Self {
+        self.config = Some(config);
+        self
     }
 
     /// Enable module system from configuration
@@ -172,10 +188,14 @@ impl Node {
         info!("Mempool manager initialized");
         info!("Mining coordinator initialized");
         
-        // Note: NetworkManager::start() and initialize_peer_connections() should be called
-        // separately with appropriate configuration. This allows the caller to:
-        // 1. Start the network manager with listen address
-        // 2. Initialize peer connections with config, network type, port, and target peer count
+        // Start network manager
+        if let Err(e) = self.network.start(self.network_addr).await {
+            warn!("Failed to start network manager: {}", e);
+            // Continue anyway - network might be optional
+        }
+        
+        // Initialize peer connections automatically
+        self.initialize_peer_connections().await?;
 
         // Prune on startup if configured
         if let Some(pruning_manager) = self.storage.pruning() {
@@ -268,6 +288,58 @@ impl Node {
             info!("Event publisher initialized");
         }
 
+        Ok(())
+    }
+
+    /// Initialize peer connections automatically
+    /// 
+    /// Determines network type from protocol version and uses config if available.
+    async fn initialize_peer_connections(&self) -> Result<()> {
+        // Determine network type from protocol version
+        let network = match self.protocol_version {
+            ProtocolVersion::BitcoinV1 => "mainnet",
+            ProtocolVersion::Testnet3 => "testnet",
+            ProtocolVersion::Regtest => {
+                // Regtest doesn't use DNS seeds
+                info!("Regtest network: skipping DNS seed discovery");
+                // Still connect to persistent peers if configured
+                if let Some(ref config) = self.config {
+                    if let Some(ref persistent_peers) = config.persistent_peers {
+                        if !persistent_peers.is_empty() {
+                            if let Err(e) = self.network.connect_persistent_peers(persistent_peers).await {
+                                warn!("Failed to connect to some persistent peers: {}", e);
+                            }
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        };
+        
+        // Get port from network address
+        let port = self.network_addr.port();
+        
+        // Default target peer count (Bitcoin Core uses 8-125, we'll use 8 as default)
+        let target_peer_count = 8;
+        
+        // Use config if available, otherwise use defaults
+        let default_config = NodeConfig {
+            listen_addr: Some(self.network_addr),
+            ..Default::default()
+        };
+        let config = self.config.as_ref().unwrap_or(&default_config);
+        
+        // Initialize peer connections
+        if let Err(e) = self.network.initialize_peer_connections(
+            config,
+            network,
+            port,
+            target_peer_count,
+        ).await {
+            warn!("Failed to initialize peer connections: {}", e);
+            // Don't fail startup - peer connections are best-effort
+        }
+        
         Ok(())
     }
 

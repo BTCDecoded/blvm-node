@@ -164,6 +164,8 @@ impl Default for NodeConfig {
             rpc_auth: None,
             ban_list_sharing: None,
             storage: None,
+            persistent_peers: Vec::new(),
+            enable_self_advertisement: true,
         }
     }
 }
