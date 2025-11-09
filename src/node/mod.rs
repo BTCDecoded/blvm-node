@@ -171,6 +171,11 @@ impl Node {
         info!("Sync coordinator initialized");
         info!("Mempool manager initialized");
         info!("Mining coordinator initialized");
+        
+        // Note: NetworkManager::start() and initialize_peer_connections() should be called
+        // separately with appropriate configuration. This allows the caller to:
+        // 1. Start the network manager with listen address
+        // 2. Initialize peer connections with config, network type, port, and target peer count
 
         // Prune on startup if configured
         if let Some(pruning_manager) = self.storage.pruning() {

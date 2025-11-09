@@ -1210,6 +1210,10 @@ impl NetworkManager {
         // Start DoS protection cleanup task
         self.start_dos_protection_cleanup_task();
         
+        // Note: Peer connection initialization (DNS seeds, persistent peers, etc.)
+        // should be called separately via initialize_peer_connections() after start()
+        // This allows the caller to provide config, network type, and target peer count
+        
         Ok(())
     }
     

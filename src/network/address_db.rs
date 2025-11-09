@@ -522,4 +522,58 @@ mod tests {
         db.add_address(addr3.clone(), 1);
         assert_eq!(db.len(), 2); // Should still be 2
     }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn test_add_iroh_address() {
+        use iroh_net::NodeId;
+        let mut db = AddressDatabase::new(100);
+        
+        // Create a test NodeId (32 bytes)
+        let node_id_bytes = [0u8; 32];
+        let node_id = NodeId::from_bytes(&node_id_bytes).unwrap();
+        
+        db.add_iroh_address(node_id, 1);
+        assert_eq!(db.total_count(), 1);
+        
+        // Add same address again (should update, not duplicate)
+        db.add_iroh_address(node_id, 2);
+        assert_eq!(db.total_count(), 1);
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn test_get_fresh_iroh_addresses() {
+        use iroh_net::NodeId;
+        let mut db = AddressDatabase::new(100);
+        
+        let node_id1_bytes = [1u8; 32];
+        let node_id2_bytes = [2u8; 32];
+        let node_id1 = NodeId::from_bytes(&node_id1_bytes).unwrap();
+        let node_id2 = NodeId::from_bytes(&node_id2_bytes).unwrap();
+        
+        db.add_iroh_address(node_id1, 1);
+        db.add_iroh_address(node_id2, 1);
+        
+        let fresh = db.get_fresh_iroh_addresses(10);
+        assert_eq!(fresh.len(), 2);
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn test_total_count_includes_iroh() {
+        use iroh_net::NodeId;
+        let mut db = AddressDatabase::new(100);
+        
+        // Add SocketAddr address
+        let addr = create_test_address("192.168.1.1", 8333);
+        db.add_address(addr, 1);
+        assert_eq!(db.total_count(), 1);
+        
+        // Add Iroh address
+        let node_id_bytes = [0u8; 32];
+        let node_id = NodeId::from_bytes(&node_id_bytes).unwrap();
+        db.add_iroh_address(node_id, 1);
+        assert_eq!(db.total_count(), 2);
+    }
 }
