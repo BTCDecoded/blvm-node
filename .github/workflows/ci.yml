@@ -20,10 +20,17 @@ jobs:
       with:
         repository: BTCDecoded/bllvm-protocol
         path: _temp-protocol-engine
-    - name: Move bllvm-protocol to parent directory
+    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-consensus
+        path: _temp-consensus-proof
+    - name: Move dependencies to parent directory
       run: |
         if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
         mv _temp-protocol-engine ../bllvm-protocol
+        mv _temp-consensus-proof ../bllvm-consensus
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
@@ -64,10 +71,17 @@ jobs:
       with:
         repository: BTCDecoded/bllvm-protocol
         path: _temp-protocol-engine
-    - name: Move bllvm-protocol to parent directory
+    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-consensus
+        path: _temp-consensus-proof
+    - name: Move dependencies to parent directory
       run: |
         if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
         mv _temp-protocol-engine ../bllvm-protocol
+        mv _temp-consensus-proof ../bllvm-consensus
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
@@ -101,10 +115,17 @@ jobs:
       with:
         repository: BTCDecoded/bllvm-protocol
         path: _temp-protocol-engine
-    - name: Move bllvm-protocol to parent directory
+    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-consensus
+        path: _temp-consensus-proof
+    - name: Move dependencies to parent directory
       run: |
         if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
         mv _temp-protocol-engine ../bllvm-protocol
+        mv _temp-consensus-proof ../bllvm-consensus
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
