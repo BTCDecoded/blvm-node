@@ -150,26 +150,67 @@ impl Storage {
     /// 
     /// Returns an estimate based on tree sizes. If any operation fails,
     /// returns 0 gracefully rather than erroring.
+    /// Includes bounds checking to prevent overflow.
     pub fn disk_size(&self) -> Result<u64> {
         // Estimate based on tree sizes (graceful degradation if counts fail)
         let mut size = 0u64;
         
-        // Block size estimate (gracefully handle errors)
+        // Block size estimate (gracefully handle errors, with bounds checking)
         if let Ok(count) = self.blockstore.block_count() {
-            size += count as u64 * 1024; // Approximate block size
+            const MAX_BLOCKS: u64 = 10_000_000; // 10M blocks max (safety limit)
+            let safe_count = count.min(MAX_BLOCKS as usize) as u64;
+            const BYTES_PER_BLOCK: u64 = 1_024_000; // ~1MB per block
+            size = size.saturating_add(safe_count.saturating_mul(BYTES_PER_BLOCK));
         }
         
-        // UTXO size estimate (gracefully handle errors)
+        // UTXO size estimate (gracefully handle errors, with bounds checking)
         if let Ok(count) = self.utxostore.utxo_count() {
-            size += count as u64 * 100; // Approximate UTXO size
+            const MAX_UTXOS: u64 = 1_000_000_000; // 1B UTXOs max (safety limit)
+            let safe_count = count.min(MAX_UTXOS as usize) as u64;
+            const BYTES_PER_UTXO: u64 = 100; // ~100 bytes per UTXO
+            size = size.saturating_add(safe_count.saturating_mul(BYTES_PER_UTXO));
         }
         
-        // Transaction size estimate (gracefully handle errors)
+        // Transaction size estimate (gracefully handle errors, with bounds checking)
         if let Ok(count) = self.txindex.transaction_count() {
-            size += count as u64 * 500; // Approximate tx size
+            const MAX_TXS: u64 = 1_000_000_000; // 1B transactions max (safety limit)
+            let safe_count = count.min(MAX_TXS as usize) as u64;
+            const BYTES_PER_TX: u64 = 500; // ~500 bytes per transaction
+            size = size.saturating_add(safe_count.saturating_mul(BYTES_PER_TX));
         }
         
-        Ok(size)
+        // Final bounds check: prevent returning unrealistic values
+        const MAX_DISK_SIZE: u64 = 10_000_000_000_000; // 10TB max (safety limit)
+        Ok(size.min(MAX_DISK_SIZE))
+    }
+    
+    /// Check storage bounds before operations
+    /// Returns true if storage is within safe bounds, false if approaching limits
+    pub fn check_storage_bounds(&self) -> Result<bool> {
+        const MAX_BLOCKS: usize = 10_000_000; // 10M blocks
+        const MAX_UTXOS: usize = 1_000_000_000; // 1B UTXOs
+        const MAX_TXS: usize = 1_000_000_000; // 1B transactions
+        
+        let block_count = self.blockstore.block_count().unwrap_or(0);
+        let utxo_count = self.utxostore.utxo_count().unwrap_or(0);
+        let tx_count = self.txindex.transaction_count().unwrap_or(0);
+        
+        // Check if we're approaching limits (80% threshold)
+        let blocks_ok = block_count < (MAX_BLOCKS * 8 / 10);
+        let utxos_ok = utxo_count < (MAX_UTXOS * 8 / 10);
+        let txs_ok = tx_count < (MAX_TXS * 8 / 10);
+        
+        if !blocks_ok {
+            warn!("Storage bounds: block count ({}) approaching limit ({})", block_count, MAX_BLOCKS);
+        }
+        if !utxos_ok {
+            warn!("Storage bounds: UTXO count ({}) approaching limit ({})", utxo_count, MAX_UTXOS);
+        }
+        if !txs_ok {
+            warn!("Storage bounds: transaction count ({}) approaching limit ({})", tx_count, MAX_TXS);
+        }
+        
+        Ok(blocks_ok && utxos_ok && txs_ok)
     }
     
     /// Get transaction count from txindex

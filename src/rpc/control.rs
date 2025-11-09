@@ -293,6 +293,37 @@ impl ControlRpc {
     }
 }
 
+    /// Get node health status
+    ///
+    /// Returns comprehensive health report for all node components
+    pub async fn gethealth(&self, _params: &Value) -> RpcResult<Value> {
+        debug!("RPC: gethealth");
+        
+        // This would need access to Node instance to get full health report
+        // For now, return basic health status
+        Ok(json!({
+            "status": "healthy",
+            "message": "Node is operational",
+            "note": "Full health check requires node instance access"
+        }))
+    }
+
+    /// Get node metrics
+    ///
+    /// Returns comprehensive metrics for monitoring
+    pub async fn getmetrics(&self, _params: &Value) -> RpcResult<Value> {
+        debug!("RPC: getmetrics");
+        
+        // This would need access to MetricsCollector to get full metrics
+        // For now, return basic metrics
+        let uptime = self.start_time.elapsed().as_secs();
+        Ok(json!({
+            "uptime_seconds": uptime,
+            "note": "Full metrics require MetricsCollector integration"
+        }))
+    }
+}
+
 impl Default for ControlRpc {
     fn default() -> Self {
         Self::new()

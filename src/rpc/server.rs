@@ -570,6 +570,12 @@ impl RpcServer {
             "logging" => {
                 self.control.logging(&params).await
             }
+            "gethealth" => {
+                self.control.gethealth(&params).await
+            }
+            "getmetrics" => {
+                self.control.getmetrics(&params).await
+            }
 
             _ => Err(errors::RpcError::method_not_found(method)),
         }

@@ -353,7 +353,6 @@ async fn test_network_rpc_getpeerinfo() {
         assert!(peer.get("inbound").is_some());
         assert!(peer.get("addnode").is_some());
         assert!(peer.get("startingheight").is_some());
-        assert!(peer.get("banscore").is_some());
         assert!(peer.get("synced_headers").is_some());
         assert!(peer.get("synced_blocks").is_some());
         assert!(peer.get("inflight").is_some());

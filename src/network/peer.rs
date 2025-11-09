@@ -31,6 +31,19 @@ pub struct Peer {
     bytes_sent: u64,
     /// Bytes received
     bytes_recv: u64,
+    /// Connection quality score (0.0-1.0, higher is better)
+    /// Based on uptime, message success rate, latency
+    quality_score: f64,
+    /// Successful message exchanges
+    successful_exchanges: u64,
+    /// Failed message exchanges
+    failed_exchanges: u64,
+    /// Average response time (milliseconds)
+    avg_response_time_ms: f64,
+    /// Last successful block received (Unix timestamp)
+    last_block_received: Option<u64>,
+    /// Last successful transaction received (Unix timestamp)
+    last_tx_received: Option<u64>,
 }
 
 impl Peer {
@@ -126,6 +139,12 @@ impl Peer {
             last_recv: now,
             bytes_sent: 0,
             bytes_recv: 0,
+            quality_score: 0.5, // Start with neutral score
+            successful_exchanges: 0,
+            failed_exchanges: 0,
+            avg_response_time_ms: 0.0,
+            last_block_received: None,
+            last_tx_received: None,
         }
     }
     

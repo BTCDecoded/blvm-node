@@ -15,4 +15,5 @@ pub mod graceful_degradation_tests;
 pub mod connection_recovery_tests;
 pub mod async_routing_integration_tests;
 pub mod pruning_integration_tests;
+pub mod full_node_tests;
 

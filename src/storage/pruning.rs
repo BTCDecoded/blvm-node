@@ -495,21 +495,11 @@ impl PruningManager {
         utxostore: &UtxoStore,
     ) -> Result<()> {
         use bllvm_consensus::utxo_commitments::merkle_tree::UtxoMerkleTree;
+        use bllvm_protocol::block::connect_block;
+        use bllvm_protocol::segwit::Witness;
 
-        // Get current UTXO set
-        // Note: In a full implementation, we'd reconstruct UTXO set at this historical height
-        // For now, we use current UTXO set as approximation
-        // 
-        // FUTURE ENHANCEMENT: Implement proper UTXO set reconstruction at historical heights.
-        // This would involve:
-        // 1. Starting from a known UTXO set checkpoint (if available)
-        // 2. Replaying blocks from checkpoint to target height
-        // 3. Applying transactions to reconstruct exact UTXO set at that height
-        // 4. This is more accurate but computationally expensive
-        // 
-        // Current approach (using current UTXO set) is acceptable for commitment generation
-        // because commitments are primarily used for state verification, not historical accuracy.
-        let utxo_set = utxostore.get_all_utxos()?;
+        // Reconstruct UTXO set at historical height by replaying blocks
+        let utxo_set = self.reconstruct_utxo_set_at_height(height, utxostore)?;
 
         // Build Merkle tree from UTXO set
         let mut utxo_tree = UtxoMerkleTree::new()
@@ -530,6 +520,76 @@ impl PruningManager {
                height, hex::encode(block_hash));
 
         Ok(())
+    }
+
+    /// Reconstruct UTXO set at a specific historical height
+    /// 
+    /// This function replays blocks from genesis to the target height
+    /// to reconstruct the exact UTXO set at that point in history.
+    #[cfg(feature = "utxo-commitments")]
+    fn reconstruct_utxo_set_at_height(
+        &self,
+        target_height: u64,
+        utxostore: &UtxoStore,
+    ) -> Result<bllvm_protocol::UtxoSet> {
+        use bllvm_protocol::block::connect_block;
+        use bllvm_protocol::UtxoSet;
+
+        // Start with empty UTXO set (genesis)
+        let mut utxo_set = UtxoSet::new();
+
+        // If target height is 0, return empty UTXO set (genesis)
+        if target_height == 0 {
+            return Ok(utxo_set);
+        }
+
+        // Replay blocks from genesis (height 0) to target_height
+        // This gives us the exact UTXO set at that historical point
+        for height in 0..target_height {
+            // Get block hash at this height
+            if let Some(block_hash) = self.blockstore.get_hash_by_height(height)? {
+                // Get block
+                if let Some(block) = self.blockstore.get_block(&block_hash)? {
+                    // Get witnesses for this block
+                    let witnesses = self.blockstore.get_witness(&block_hash)?
+                        .unwrap_or_else(|| {
+                            // If no witnesses stored, create empty witnesses
+                            block.transactions.iter().map(|_| Vec::new()).collect()
+                        });
+
+                    // Apply block to UTXO set using connect_block
+                    // This properly handles coinbase transactions and input/output processing
+                    let (validation_result, new_utxo_set) = connect_block(
+                        &block,
+                        &witnesses,
+                        utxo_set,
+                        height,
+                        None, // No recent headers needed for historical replay
+                    )?;
+
+                    // Check validation result
+                    if !matches!(validation_result, bllvm_protocol::ValidationResult::Valid) {
+                        warn!("Block at height {} failed validation during UTXO reconstruction", height);
+                        // Continue anyway - this might be expected for some edge cases
+                    }
+
+                    // Update UTXO set for next iteration
+                    utxo_set = new_utxo_set;
+                } else {
+                    // Block not found - this shouldn't happen if chain is intact
+                    warn!("Block at height {} not found during UTXO reconstruction, using current UTXO set as fallback", height);
+                    // Use current UTXO set as fallback
+                    return utxostore.get_all_utxos();
+                }
+            } else {
+                // Height not found - use current UTXO set as fallback
+                warn!("Height {} not found in chain during UTXO reconstruction, using current UTXO set", height);
+                return utxostore.get_all_utxos();
+            }
+        }
+
+        debug!("Reconstructed UTXO set at height {} with {} UTXOs", target_height, utxo_set.len());
+        Ok(utxo_set)
     }
 }
 

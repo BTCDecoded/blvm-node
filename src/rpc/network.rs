@@ -123,7 +123,6 @@ impl NetworkRpc {
                         "inbound": false,
                         "addnode": false,
                         "startingheight": 0,
-                        "banscore": 0,
                         "synced_headers": -1,
                         "synced_blocks": -1,
                         "inflight": [],

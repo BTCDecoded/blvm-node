@@ -150,6 +150,51 @@ impl PeerManager {
         self.peers.len() < self.max_peers
     }
     
+    /// Select best peers based on quality score
+    /// 
+    /// Returns peers sorted by quality score (highest first)
+    pub fn select_best_peers(&self, count: usize) -> Vec<TransportAddr> {
+        let mut peers: Vec<_> = self.peers.iter()
+            .map(|(addr, peer)| (addr.clone(), peer.quality_score()))
+            .collect();
+        
+        // Sort by quality score (descending)
+        peers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // Return top N addresses
+        peers.into_iter()
+            .take(count)
+            .map(|(addr, _)| addr)
+            .collect()
+    }
+    
+    /// Select reliable peers only
+    /// 
+    /// Returns peers that meet reliability criteria
+    pub fn select_reliable_peers(&self) -> Vec<TransportAddr> {
+        self.peers.iter()
+            .filter(|(_, peer)| peer.is_reliable())
+            .map(|(addr, _)| addr.clone())
+            .collect()
+    }
+    
+    /// Get peer quality statistics
+    pub fn get_quality_stats(&self) -> (usize, usize, f64) {
+        let total = self.peers.len();
+        let reliable = self.peers.values()
+            .filter(|peer| peer.is_reliable())
+            .count();
+        let avg_quality = if total > 0 {
+            self.peers.values()
+                .map(|peer| peer.quality_score())
+                .sum::<f64>() / total as f64
+        } else {
+            0.0
+        };
+        
+        (total, reliable, avg_quality)
+    }
+    
     /// Find peer by SocketAddr (tries TCP and Quinn variants)
     /// Returns the TransportAddr if found
     pub fn find_transport_addr_by_socket(&self, addr: SocketAddr) -> Option<TransportAddr> {
@@ -285,6 +330,10 @@ pub struct NetworkManager {
     peer_states: Arc<Mutex<HashMap<SocketAddr, bllvm_protocol::network::PeerState>>>,
     /// Persistent peer list (peers to connect to on startup)
     persistent_peers: Arc<Mutex<HashSet<SocketAddr>>>,
+    /// Eclipse attack prevention: track peer diversity
+    /// Maps IP address prefixes (first 3 octets) to connection count
+    /// Prevents too many connections from same IP range
+    peer_diversity: Arc<Mutex<HashMap<[u8; 3], usize>>>,
     /// Network active state (true = enabled, false = disabled)
     network_active: Arc<Mutex<bool>>,
     /// Ban list (banned peers with unban timestamp)
@@ -1112,6 +1161,13 @@ impl NetworkManager {
             return Err(anyhow::anyhow!("Connection rate limit exceeded for IP {}", ip));
         }
         
+        // Eclipse attack prevention: check IP diversity
+        if !self.check_eclipse_prevention(ip) {
+            warn!("Eclipse attack prevention: too many connections from IP range {}, rejecting connection from {}", 
+                  self.get_ip_prefix(ip), ip);
+            return Err(anyhow::anyhow!("Eclipse attack prevention: too many connections from IP range"));
+        }
+        
         let mut last_error = None;
         
         // Try transports in preference order with graceful degradation
@@ -1387,13 +1443,28 @@ impl NetworkManager {
                             rates.remove(&sock_addr);
                         }
                     }
+                    
+                    // Clean up eclipse attack prevention tracking
+                    if let Some(ip) = match &addr {
+                        TransportAddr::Tcp(sock) => Some(sock.ip()),
+                        #[cfg(feature = "quinn")]
+                        TransportAddr::Quinn(sock) => Some(sock.ip()),
+                        #[cfg(feature = "iroh")]
+                        TransportAddr::Iroh(_) => None,
+                    } {
+                        self.remove_peer_diversity(ip);
+                    }
                 }
                 NetworkMessage::BlockReceived(data) => {
                     info!("Block received: {} bytes", data.len());
+                    // Note: BlockReceived doesn't include peer address, so we can't track peer quality here
+                    // Peer quality tracking happens when blocks are successfully processed
                     // Block processing handled via try_recv_block() in Node::run()
                 }
                 NetworkMessage::TransactionReceived(data) => {
                     info!("Transaction received: {} bytes", data.len());
+                    // Note: TransactionReceived doesn't include peer address, so we can't track peer quality here
+                    // Peer quality tracking happens when transactions are successfully processed
                     // Process transaction with consensus layer
                 }
                 NetworkMessage::InventoryReceived(data) => {

@@ -8,6 +8,9 @@ pub mod event_publisher;
 pub mod mempool;
 pub mod miner;
 pub mod sync;
+pub mod metrics;
+pub mod health;
+pub mod performance;
 
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -432,5 +435,24 @@ impl Node {
     /// Get RPC manager
     pub fn rpc(&self) -> &RpcManager {
         &self.rpc
+    }
+
+    /// Get health report
+    pub fn health_check(&self) -> health::HealthReport {
+        use crate::node::health::HealthChecker;
+        
+        let checker = HealthChecker::new();
+        let network_healthy = self.network.is_network_active();
+        let storage_healthy = self.storage.check_storage_bounds().unwrap_or(false);
+        let rpc_healthy = true; // RPC is always healthy if node is running
+        
+        // Get metrics if available (simplified for now)
+        checker.check_health(
+            network_healthy,
+            storage_healthy,
+            rpc_healthy,
+            None, // Network metrics - would need to be passed from NetworkManager
+            None, // Storage metrics - would need to be collected
+        )
     }
 }
