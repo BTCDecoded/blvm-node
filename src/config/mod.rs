@@ -192,10 +192,6 @@ pub enum BanShareMode {
     Disabled,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_ban_share_mode() -> BanShareMode {
     BanShareMode::Periodic
 }

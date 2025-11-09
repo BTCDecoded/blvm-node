@@ -1,3 +1,0 @@
-[patch.crates-io]
-consensus-proof = { path = "../consensus-proof" }
-protocol-engine = { path = "../protocol-engine" }

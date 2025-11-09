@@ -100,3 +100,4 @@ fn test_calculate_ban_list_hash() {
     assert!(verify_ban_list_hash(&entries, &hash1));
 }
 
+

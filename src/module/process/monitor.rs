@@ -131,7 +131,7 @@ impl ModuleProcessMonitor {
     pub async fn monitor_module_shared(
         &self,
         module_name: String,
-        shared_process: Arc<Mutex<ModuleProcess>>,
+        shared_process: Arc<tokio::sync::Mutex<ModuleProcess>>,
     ) -> Result<(), ModuleError> {
         info!("Starting health monitoring for module: {}", module_name);
 
@@ -142,14 +142,14 @@ impl ModuleProcessMonitor {
 
             // Check if process is still running
             let is_running = {
-                let mut process_guard = shared_process.lock().unwrap();
+                let mut process_guard = shared_process.lock().await;
                 process_guard.is_running()
             };
             
             if !is_running {
                 // Process exited, check exit status
                 let exit_status = {
-                    let mut process_guard = shared_process.lock().unwrap();
+                    let mut process_guard = shared_process.lock().await;
                     process_guard.wait().await?
                 };
                 
@@ -180,7 +180,7 @@ impl ModuleProcessMonitor {
 
             // Check heartbeat via IPC
             {
-                let mut process_guard = shared_process.lock().unwrap();
+                let mut process_guard = shared_process.lock().await;
                 if let Some(client) = process_guard.client_mut() {
                     use crate::module::ipc::protocol::RequestMessage;
                     use crate::module::ipc::protocol::RequestPayload;

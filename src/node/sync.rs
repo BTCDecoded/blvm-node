@@ -7,10 +7,14 @@ use crate::node::block_processor::{
     parse_block_from_wire, prepare_block_validation_context, store_block_with_context,
     validate_block_with_context,
 };
+use crate::node::metrics::MetricsCollector;
+use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use bllvm_protocol::{segwit::Witness, Block, BlockHeader, UtxoSet, ValidationResult};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, error, info};
 
 /// Block provider for dependency injection
@@ -181,7 +185,14 @@ impl SyncCoordinator {
         block_data: &[u8],
         current_height: u64,
         utxo_set: &mut UtxoSet,
+        metrics: Option<Arc<MetricsCollector>>,
+        profiler: Option<Arc<PerformanceProfiler>>,
     ) -> Result<bool> {
+        let _timer = profiler.as_ref().map(|p| {
+            PerformanceTimer::start(Arc::clone(p), OperationType::BlockProcessing)
+        });
+        let start_time = Instant::now();
+
         // Parse block from wire format (extracts witness data)
         let (block, witnesses) = parse_block_from_wire(block_data)?;
 
@@ -205,11 +216,31 @@ impl SyncCoordinator {
             current_height,
         )?;
 
+        let processing_time = start_time.elapsed();
+
         if matches!(validation_result, ValidationResult::Valid) {
             // Store block with witnesses and update headers
             store_block_with_context(blockstore, &block, witnesses_to_use, current_height)?;
 
-            info!("Block validated and stored at height {}", current_height);
+            // Update metrics
+            if let Some(ref metrics) = metrics {
+                metrics.update_storage(|m| {
+                    m.block_count += 1;
+                    m.transaction_count += block.transactions.len();
+                });
+                metrics.update_performance(|m| {
+                    let time_ms = processing_time.as_secs_f64() * 1000.0;
+                    // Update average block processing time (exponential moving average)
+                    m.avg_block_processing_time_ms = 
+                        (m.avg_block_processing_time_ms * 0.9) + (time_ms * 0.1);
+                    // Update blocks per second
+                    if processing_time.as_secs_f64() > 0.0 {
+                        m.blocks_per_second = 1.0 / processing_time.as_secs_f64();
+                    }
+                });
+            }
+
+            info!("Block validated and stored at height {} (took {:?})", current_height, processing_time);
             Ok(true)
         } else {
             error!("Block validation failed at height {}", current_height);

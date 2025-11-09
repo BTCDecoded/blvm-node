@@ -38,7 +38,7 @@ impl UtxoStore {
         for (outpoint, utxo) in utxo_set {
             let key = self.outpoint_key(outpoint);
             let value = bincode::serialize(utxo)?;
-            self.utxos.insert(key, value)?;
+            self.utxos.insert(&key, &value)?;
         }
 
         Ok(())
@@ -62,21 +62,21 @@ impl UtxoStore {
     pub fn add_utxo(&self, outpoint: &OutPoint, utxo: &UTXO) -> Result<()> {
         let key = self.outpoint_key(outpoint);
         let value = bincode::serialize(utxo)?;
-        self.utxos.insert(key, value)?;
+        self.utxos.insert(&key, &value)?;
         Ok(())
     }
 
     /// Remove a UTXO from the set
     pub fn remove_utxo(&self, outpoint: &OutPoint) -> Result<()> {
         let key = self.outpoint_key(outpoint);
-        self.utxos.remove(key)?;
+        self.utxos.remove(&key)?;
         Ok(())
     }
 
     /// Get a UTXO by outpoint
     pub fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
         let key = self.outpoint_key(outpoint);
-        if let Some(data) = self.utxos.get(key)? {
+        if let Some(data) = self.utxos.get(&key)? {
             let utxo: UTXO = bincode::deserialize(&data)?;
             Ok(Some(utxo))
         } else {
@@ -87,13 +87,13 @@ impl UtxoStore {
     /// Check if a UTXO exists
     pub fn has_utxo(&self, outpoint: &OutPoint) -> Result<bool> {
         let key = self.outpoint_key(outpoint);
-        Ok(self.utxos.contains_key(key)?)
+        self.utxos.contains_key(&key)
     }
 
     /// Mark an output as spent
     pub fn mark_spent(&self, outpoint: &OutPoint) -> Result<()> {
         let key = self.outpoint_key(outpoint);
-        self.spent_outputs.insert(key, &[])?;
+        self.spent_outputs.insert(&key, &[])?;
         Ok(())
     }
 
@@ -105,12 +105,12 @@ impl UtxoStore {
     /// Check if an output is spent
     pub fn is_spent(&self, outpoint: &OutPoint) -> Result<bool> {
         let key = self.outpoint_key(outpoint);
-        Ok(self.spent_outputs.contains_key(key)?)
+        self.spent_outputs.contains_key(&key)
     }
 
     /// Get total number of UTXOs
     pub fn utxo_count(&self) -> Result<usize> {
-        Ok(self.utxos.len())
+        self.utxos.len()
     }
 
     /// Get total UTXO value

@@ -34,10 +34,6 @@ pub mod config;
 pub mod validation;
 pub mod module;
 pub mod bip21;
-pub mod bech32m;
-pub mod bip158;
-pub mod bip157;
-pub mod bip70;
 
 // Re-export config module
 pub use config::*;

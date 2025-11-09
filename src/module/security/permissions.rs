@@ -147,6 +147,10 @@ impl PermissionChecker {
         payload: &RequestPayload,
     ) -> Result<(), ModuleError> {
         let required_permission = match payload {
+            RequestPayload::Handshake { .. } => {
+                // Handshake doesn't require permissions - handled at connection level
+                return Ok(());
+            }
             RequestPayload::GetBlock { .. } => Permission::ReadBlockchain,
             RequestPayload::GetBlockHeader { .. } => Permission::ReadBlockchain,
             RequestPayload::GetTransaction { .. } => Permission::ReadBlockchain,

@@ -43,9 +43,10 @@ impl BlockStore {
         let block_hash = self.block_hash(block);
         let block_data = bincode::serialize(block)?;
 
-        self.blocks.insert(block_hash.as_slice(), block_data)?;
+        self.blocks.insert(block_hash.as_slice(), &block_data)?;
+        let header_data = bincode::serialize(&block.header)?;
         self.headers
-            .insert(block_hash.as_slice(), bincode::serialize(&block.header)?)?;
+            .insert(block_hash.as_slice(), &header_data)?;
 
         // Store header for median time-past calculation
         // We'll need height passed separately, so this will be called after store_height
@@ -80,7 +81,7 @@ impl BlockStore {
     /// Store witness data for a block
     pub fn store_witness(&self, block_hash: &Hash, witness: &[Witness]) -> Result<()> {
         let witness_data = bincode::serialize(witness)?;
-        self.witnesses.insert(block_hash.as_slice(), witness_data)?;
+        self.witnesses.insert(block_hash.as_slice(), &witness_data)?;
         Ok(())
     }
 
@@ -99,14 +100,14 @@ impl BlockStore {
     pub fn store_recent_header(&self, height: u64, header: &BlockHeader) -> Result<()> {
         let height_bytes = height.to_be_bytes();
         let header_data = bincode::serialize(header)?;
-        self.recent_headers.insert(height_bytes, header_data)?;
+        self.recent_headers.insert(&height_bytes, &header_data)?;
 
         // Clean up old headers (keep only last 11 for median time-past)
         // Remove headers older than height - 11
         if height > 11 {
             let remove_height = height - 12;
             let remove_bytes = remove_height.to_be_bytes();
-            self.recent_headers.remove(remove_bytes)?;
+            self.recent_headers.remove(&remove_bytes)?;
         }
 
         Ok(())
@@ -134,7 +135,7 @@ impl BlockStore {
             // Collect headers from current_height backwards
             for _ in 0..count {
                 let height_bytes = height.to_be_bytes();
-                if let Some(data) = self.recent_headers.get(height_bytes)? {
+                if let Some(data) = self.recent_headers.get(&height_bytes)? {
                     if let Ok(header) = bincode::deserialize::<BlockHeader>(&data) {
                         headers.push(header);
                     }
@@ -174,14 +175,14 @@ impl BlockStore {
     /// Store block height index
     pub fn store_height(&self, height: u64, hash: &Hash) -> Result<()> {
         let height_bytes = height.to_be_bytes();
-        self.height_index.insert(height_bytes, hash.as_slice())?;
+        self.height_index.insert(&height_bytes, hash.as_slice())?;
         Ok(())
     }
 
     /// Get block hash by height
     pub fn get_hash_by_height(&self, height: u64) -> Result<Option<Hash>> {
         let height_bytes = height.to_be_bytes();
-        if let Some(data) = self.height_index.get(height_bytes)? {
+        if let Some(data) = self.height_index.get(&height_bytes)? {
             let mut hash = [0u8; 32];
             hash.copy_from_slice(&data);
             Ok(Some(hash))
@@ -195,7 +196,7 @@ impl BlockStore {
         // Search through height_index to find matching hash
         for item in self.height_index.iter() {
             if let Ok((height_bytes, stored_hash)) = item {
-                if stored_hash.as_ref() == hash.as_slice() {
+                if stored_hash.as_slice() == hash.as_slice() {
                     let mut height_bytes_array = [0u8; 8];
                     height_bytes_array.copy_from_slice(&height_bytes);
                     return Ok(Some(u64::from_be_bytes(height_bytes_array)));
@@ -227,7 +228,7 @@ impl BlockStore {
 
     /// Get total number of blocks stored
     pub fn block_count(&self) -> Result<usize> {
-        Ok(self.blocks.len())
+        self.blocks.len()
     }
 
     /// Calculate block hash using proper Bitcoin double SHA256

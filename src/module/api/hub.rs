@@ -80,6 +80,24 @@ impl ModuleApiHub {
         self.request_validator
             .validate_request(module_id, &request.payload)?;
 
+        // Handle handshake specially (no validation needed, just acknowledge)
+        if let RequestPayload::Handshake { module_id: handshake_id, module_name, version } = &request.payload {
+            // Verify module_id matches
+            if handshake_id != module_id {
+                return Err(ModuleError::OperationError(
+                    format!("Handshake module_id mismatch: expected {}, got {}", module_id, handshake_id)
+                ));
+            }
+            
+            info!("Handshake from module {} (name={}, version={})", module_id, module_name, version);
+            return Ok(ResponseMessage::success(
+                request.correlation_id,
+                ResponsePayload::HandshakeAck {
+                    node_version: env!("CARGO_PKG_VERSION").to_string(),
+                }
+            ));
+        }
+
         // Get operation ID for resource limits and audit logging (avoid duplicate matching)
         let operation_id = Self::get_operation_id(&request.payload);
         self.request_validator
@@ -87,6 +105,12 @@ impl ModuleApiHub {
 
         // Route request to appropriate handler
         let response = match &request.payload {
+            RequestPayload::Handshake { .. } => {
+                // Handshake is handled at connection level, not here
+                return Err(crate::module::traits::ModuleError::IpcError(
+                    "Handshake should be handled at connection level".to_string()
+                ));
+            }
             RequestPayload::GetBlock { hash } => {
                 let block = self.node_api.get_block(hash).await?;
                 ResponsePayload::Block(block)
@@ -132,6 +156,7 @@ impl ModuleApiHub {
     #[inline]
     fn get_operation_id(payload: &RequestPayload) -> &'static str {
         match payload {
+            RequestPayload::Handshake { .. } => "handshake",
             RequestPayload::GetBlock { .. } => "get_block",
             RequestPayload::GetBlockHeader { .. } => "get_block_header",
             RequestPayload::GetTransaction { .. } => "get_transaction",

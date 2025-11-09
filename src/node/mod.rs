@@ -21,6 +21,8 @@ use crate::module::api::NodeApiImpl;
 use crate::module::ModuleManager;
 use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
+use crate::node::metrics::MetricsCollector;
+use crate::node::performance::PerformanceProfiler;
 use crate::rpc::RpcManager;
 use crate::storage::Storage;
 use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
@@ -44,6 +46,10 @@ pub struct Node {
     /// Event publisher for module notifications
     #[allow(dead_code)]
     event_publisher: Option<EventPublisher>,
+    /// Metrics collector for monitoring
+    metrics: Arc<MetricsCollector>,
+    /// Performance profiler for critical path timing
+    profiler: Arc<PerformanceProfiler>,
 }
 
 impl Node {
@@ -66,7 +72,11 @@ impl Node {
         let network = NetworkManager::new(network_addr)
             .with_dependencies(Arc::clone(&protocol_arc), Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc));
         let network_arc = Arc::new(network);
+        let metrics_arc = Arc::new(MetricsCollector::new());
+        let profiler_arc = Arc::new(PerformanceProfiler::new(1000));
         let rpc = RpcManager::new(rpc_addr)
+            .with_metrics(Arc::clone(&metrics_arc))
+            .with_profiler(Arc::clone(&profiler_arc))
             .with_dependencies(Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc))
             .with_network_manager(Arc::clone(&network_arc));
         let sync_coordinator = sync::SyncCoordinator::default();
@@ -74,6 +84,8 @@ impl Node {
             Arc::clone(&mempool_manager_arc),
             Some(Arc::clone(&storage_arc)),
         );
+        let metrics = metrics_arc;
+        let profiler = profiler_arc;
 
         Ok(Self {
             protocol: protocol_arc,
@@ -87,6 +99,8 @@ impl Node {
             mining_coordinator,
             module_manager: None,
             event_publisher: None,
+            metrics,
+            profiler,
         })
     }
 
@@ -183,6 +197,12 @@ impl Node {
                             // Prune up to keep_from_height
                             Some(*keep_from_height)
                         }
+                        #[cfg(not(feature = "utxo-commitments"))]
+                        crate::config::PruningMode::Aggressive { .. } => {
+                            // Aggressive pruning requires utxo-commitments feature
+                            // Fall back to no pruning if feature is disabled
+                            None
+                        }
                         crate::config::PruningMode::Custom { keep_bodies_from_height, .. } => {
                             // Prune up to keep_bodies_from_height
                             Some(*keep_bodies_from_height)
@@ -266,6 +286,8 @@ impl Node {
                     &block_data,
                     current_height,
                     &mut utxo_set,
+                    Some(Arc::clone(&self.metrics)),
+                    Some(Arc::clone(&self.profiler)),
                 ) {
                     Ok(true) => {
                         info!("Block accepted at height {}", current_height);
@@ -296,6 +318,12 @@ impl Node {
                                         // Prune to keep_from_height, respecting min_blocks
                                         let effective_keep = (*keep_from_height).max(current_height.saturating_sub(*min_blocks));
                                         Some(effective_keep)
+                                    }
+                                    #[cfg(not(feature = "utxo-commitments"))]
+                                    crate::config::PruningMode::Aggressive { .. } => {
+                                        // Aggressive pruning requires utxo-commitments feature
+                                        // Fall back to no pruning if feature is disabled
+                                        None
                                     }
                                     crate::config::PruningMode::Custom { keep_bodies_from_height, .. } => {
                                         // Prune to keep_bodies_from_height, respecting min_blocks

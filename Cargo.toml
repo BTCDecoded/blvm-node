@@ -77,6 +77,10 @@ bitflags = "2.4"
 # Memory allocator optimization (not in bllvm-consensus to maintain Kani compatibility)
 mimalloc = { version = "0.1", default-features = false }
 
+# System calls for process sandboxing (Unix)
+nix = { version = "0.28", features = ["process", "resource"], optional = true }
+libc = { version = "0.2", optional = true }
+
 # Parallel processing for block validation (Phase 4.2)
 rayon = { version = "1.8", optional = true }
 
@@ -91,7 +95,7 @@ rcgen = { version = "0.11", optional = true }
 rustls = { version = "0.23", optional = true }
 
 [features]
-default = ["sysinfo", "redb"]
+default = ["sysinfo", "redb", "nix", "libc"]
 iroh = ["dep:iroh-net", "dep:quinn"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
 utxo-commitments = ["bllvm-protocol/utxo-commitments"]
@@ -101,6 +105,9 @@ sysinfo = ["dep:sysinfo"]
 # Storage backends
 sled = ["dep:sled"]
 redb = ["dep:redb"]
+# Process sandboxing (Unix)
+nix = ["dep:nix", "dep:libc"]
+libc = ["dep:libc"]
 # Production optimizations (parallel block validation, etc.)
 production = ["bllvm-protocol/production", "dep:rayon"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF

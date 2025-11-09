@@ -213,6 +213,9 @@ pub enum ModuleError {
     #[error("Serialization error: {0}")]
     SerializationError(String),
 
+    #[error("Rate limit exceeded: {0}")]
+    RateLimitExceeded(String),
+
     #[error("Timeout waiting for module response")]
     Timeout,
 

@@ -3,8 +3,8 @@
 //! Generates, caches, and serves compact block filters for light client support.
 //! Maintains filter header chain for efficient verification.
 
-use crate::bip157;
-use crate::bip158::{build_block_filter, CompactBlockFilter};
+use bllvm_protocol::bip157;
+use bllvm_protocol::bip158::{build_block_filter, CompactBlockFilter};
 use anyhow::{anyhow, Result};
 use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use std::collections::HashMap;

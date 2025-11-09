@@ -192,12 +192,12 @@ impl MempoolManager {
         // Sum input values from UTXO set
         for input in &tx.inputs {
             if let Some(utxo) = utxo_set.get(&input.prevout) {
-                input_total += utxo.value;
+                input_total += utxo.value as u64;
             }
         }
         
         // Sum output values
-        let output_total: u64 = tx.outputs.iter().map(|out| out.value).sum();
+        let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
         
         // Fee is difference (inputs - outputs)
         if input_total > output_total {
@@ -253,6 +253,29 @@ impl MempoolManager {
         self.mempool.clear();
         self.spent_outputs.clear();
     }
+    
+    /// Save mempool to disk for persistence
+    pub fn save_to_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
+        use std::fs::File;
+        use std::io::Write;
+        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        
+        let transactions = self.get_transactions();
+        let mut file = File::create(path)?;
+        
+        // Write transaction count
+        file.write_all(&(transactions.len() as u32).to_le_bytes())?;
+        
+        // Write each transaction
+        for tx in transactions {
+            let serialized = serialize_transaction(&tx);
+            file.write_all(&(serialized.len() as u32).to_le_bytes())?;
+            file.write_all(&serialized)?;
+        }
+        
+        file.sync_all()?;
+        Ok(())
+    }
 }
 
 impl Default for MempoolManager {
@@ -287,34 +310,11 @@ impl crate::node::miner::MempoolProvider for MempoolManager {
 }
 
 impl MempoolManager {
-    /// Save mempool to disk for persistence
-    pub fn save_to_disk<P: AsRef<std::path::Path>>>(&self, path: P) -> Result<()> {
-        use std::fs::File;
-        use std::io::Write;
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
-        
-        let transactions = self.get_transactions();
-        let mut file = File::create(path)?;
-        
-        // Write transaction count
-        file.write_all(&(transactions.len() as u32).to_le_bytes())?;
-        
-        // Write each transaction
-        for tx in transactions {
-            let serialized = serialize_transaction(&tx);
-            file.write_all(&(serialized.len() as u32).to_le_bytes())?;
-            file.write_all(&serialized)?;
-        }
-        
-        file.sync_all()?;
-        Ok(())
-    }
-    
     /// Load mempool from disk
     pub fn load_from_disk<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
         use std::fs::File;
         use std::io::Read;
-        use bllvm_consensus::serialization::transaction::deserialize_transaction;
+        use bllvm_protocol::serialization::transaction::deserialize_transaction;
         
         let mut file = File::open(path)?;
         let mut count_bytes = [0u8; 4];

@@ -88,7 +88,6 @@ impl NetworkIO {
 /// Uses TransportAddr as key to support all transport types (TCP, Quinn, Iroh).
 /// This allows proper peer identification for Iroh (NodeId) while maintaining
 /// compatibility with TCP/Quinn (SocketAddr).
-#[derive(Clone)]
 pub struct PeerManager {
     peers: HashMap<TransportAddr, peer::Peer>,
     max_peers: usize,
@@ -173,7 +172,7 @@ impl PeerManager {
     /// Returns peers that meet reliability criteria
     pub fn select_reliable_peers(&self) -> Vec<TransportAddr> {
         self.peers.iter()
-            .filter(|(_, peer)| peer.is_reliable())
+            .filter(|(_, peer)| peer.quality_score() > 0.5) // Use quality_score as reliability indicator
             .map(|(addr, _)| addr.clone())
             .collect()
     }
@@ -182,7 +181,7 @@ impl PeerManager {
     pub fn get_quality_stats(&self) -> (usize, usize, f64) {
         let total = self.peers.len();
         let reliable = self.peers.values()
-            .filter(|peer| peer.is_reliable())
+            .filter(|peer| peer.quality_score() > 0.5) // Use quality_score as reliability indicator
             .count();
         let avg_quality = if total > 0 {
             self.peers.values()
@@ -303,7 +302,7 @@ impl ConnectionManager {
 ///
 /// Supports multiple transports (TCP, Quinn, Iroh) based on configuration.
 pub struct NetworkManager {
-    peer_manager: PeerManager,
+    peer_manager: Arc<Mutex<PeerManager>>,
     tcp_transport: TcpTransport,
     #[cfg(feature = "quinn")]
     quinn_transport: Option<crate::network::quinn_transport::QuinnTransport>,
@@ -410,6 +409,7 @@ impl NetworkManager {
 
         Self {
             peer_manager: Arc::new(Mutex::new(PeerManager::new(100))), // Default max peers
+            peer_diversity: Arc::new(Mutex::new(HashMap::new())),
             tcp_transport: TcpTransport::new(),
             #[cfg(feature = "quinn")]
             quinn_transport: None,
@@ -470,6 +470,7 @@ impl NetworkManager {
 
         Self {
             peer_manager: Arc::new(Mutex::new(PeerManager::new(max_peers))),
+            peer_diversity: Arc::new(Mutex::new(HashMap::new())),
             tcp_transport: TcpTransport::new(),
             #[cfg(feature = "quinn")]
             quinn_transport: None, // Will be initialized on start if needed
@@ -618,7 +619,7 @@ impl NetworkManager {
                                 use crate::network::peer::Peer;
                                 use crate::network::transport::TransportAddr;
                                 
-                                let peer = Peer::from_transport_connection(
+                                let peer = peer::Peer::from_transport_connection(
                                     conn,
                                     socket_addr,
                                     TransportAddr::Tcp(socket_addr),
@@ -721,7 +722,7 @@ impl NetworkManager {
                                         use crate::network::transport::TransportAddr;
                                         
                                         let quinn_addr = TransportAddr::Quinn(socket_addr);
-                                        let peer = Peer::from_transport_connection(
+                                        let peer = peer::Peer::from_transport_connection(
                                             conn,
                                             socket_addr,
                                             quinn_addr,
@@ -831,7 +832,7 @@ impl NetworkManager {
                                             std::net::SocketAddr::from(([0, 0, 0, 0], 0))
                                         };
                                         
-                                        let peer = Peer::from_transport_connection(
+                                        let peer = peer::Peer::from_transport_connection(
                                             conn,
                                             placeholder_socket,
                                             iroh_addr_clone.clone(),
@@ -1093,6 +1094,83 @@ impl NetworkManager {
         Ok(())
     }
 
+    /// Broadcast to reliable peers first, then others
+    /// Uses peer quality to prioritize reliable peers for critical messages
+    pub async fn broadcast_with_quality_priority(&self, message: Vec<u8>) -> Result<()> {
+        let pm = self.peer_manager.lock().unwrap();
+        
+        // Get reliable peers first
+        let reliable_peers = pm.select_reliable_peers();
+        drop(pm);
+        
+        // Send to reliable peers first
+        for addr in &reliable_peers {
+            if let Err(e) = self.send_to_peer_by_transport(addr.clone(), message.clone()).await {
+                warn!("Failed to send to reliable peer {:?}: {}", addr, e);
+            }
+        }
+        
+        // Then send to remaining peers
+        let pm = self.peer_manager.lock().unwrap();
+        let all_peers = pm.peer_addresses();
+        let remaining_peers: Vec<_> = all_peers.iter()
+            .filter(|addr| !reliable_peers.contains(addr))
+            .collect();
+        drop(pm);
+        
+        for addr in remaining_peers {
+            if let Err(e) = self.send_to_peer_by_transport(addr.clone(), message.clone()).await {
+                warn!("Failed to send to peer {:?}: {}", addr, e);
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Send to best peer (highest quality score)
+    /// Returns the peer address used, or error if no peers available
+    pub async fn send_to_best_peer(&self, message: Vec<u8>) -> Result<TransportAddr> {
+        let pm = self.peer_manager.lock().unwrap();
+        let best_peers = pm.select_best_peers(1);
+        drop(pm);
+        
+        if let Some(addr) = best_peers.first() {
+            self.send_to_peer_by_transport(addr.clone(), message).await?;
+            Ok(addr.clone())
+        } else {
+            Err(anyhow::anyhow!("No peers available"))
+        }
+    }
+
+    /// Send to reliable peer only (for critical operations)
+    /// Returns error if no reliable peers available
+    pub async fn send_to_reliable_peer(&self, message: Vec<u8>) -> Result<TransportAddr> {
+        let pm = self.peer_manager.lock().unwrap();
+        let reliable_peers = pm.select_reliable_peers();
+        drop(pm);
+        
+        if reliable_peers.is_empty() {
+            return Err(anyhow::anyhow!("No reliable peers available"));
+        }
+        
+        // Select best reliable peer
+        let pm = self.peer_manager.lock().unwrap();
+        let best_reliable = reliable_peers.iter()
+            .max_by(|a, b| {
+                let score_a = pm.get_peer(a).map(|p| p.quality_score()).unwrap_or(0.0);
+                let score_b = pm.get_peer(b).map(|p| p.quality_score()).unwrap_or(0.0);
+                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        drop(pm);
+        
+        if let Some(addr) = best_reliable {
+            self.send_to_peer_by_transport(addr.clone(), message).await?;
+            Ok(addr.clone())
+        } else {
+            Err(anyhow::anyhow!("No reliable peers available"))
+        }
+    }
+
     /// Send a message to a specific peer (by SocketAddr - for TCP/Quinn)
     /// For Iroh peers, uses the socket_to_transport mapping
     pub async fn send_to_peer(&self, addr: SocketAddr, message: Vec<u8>) -> Result<()> {
@@ -1163,8 +1241,9 @@ impl NetworkManager {
         
         // Eclipse attack prevention: check IP diversity
         if !self.check_eclipse_prevention(ip) {
-            warn!("Eclipse attack prevention: too many connections from IP range {}, rejecting connection from {}", 
-                  self.get_ip_prefix(ip), ip);
+            let prefix = self.get_ip_prefix(ip);
+            warn!("Eclipse attack prevention: too many connections from IP range {:?}, rejecting connection from {}", 
+                  prefix, ip);
             return Err(anyhow::anyhow!("Eclipse attack prevention: too many connections from IP range"));
         }
         
@@ -1173,8 +1252,8 @@ impl NetworkManager {
         // Try transports in preference order with graceful degradation
         let transports_to_try = self.get_transports_for_connection();
         
-        for transport_info in transports_to_try {
-            match self.try_connect_with_transport(&transport_info, addr).await {
+        for transport_type in transports_to_try {
+            match self.try_connect_with_transport(&transport_type, addr).await {
                 Ok((peer, transport_addr)) => {
                     // Successfully connected
                     {
@@ -1185,11 +1264,11 @@ impl NetworkManager {
                     // Note: Peer handler is managed by Peer::from_transport_connection
                     // No need to spawn additional handler task
                     
-                    info!("Successfully connected to {} via {:?} (transport: {:?})", addr, transport_info.transport_type, transport_addr);
+                    info!("Successfully connected to {} via {:?} (transport: {:?})", addr, transport_type, transport_addr);
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("Failed to connect to {} via {:?}: {}", addr, transport_info.transport_type, e);
+                    warn!("Failed to connect to {} via {:?}: {}", addr, transport_type, e);
                     last_error = Some(e);
                     // Continue to next transport
                 }
@@ -1201,61 +1280,49 @@ impl NetworkManager {
     }
     
     /// Helper: Get list of transports to try for a connection
-    fn get_transports_for_connection(&self) -> Vec<TransportInfo> {
+    fn get_transports_for_connection(&self) -> Vec<crate::network::transport::TransportType> {
         let mut transports = Vec::new();
         
         // Add transports in preference order
         if self.transport_preference.allows_tcp() {
-            transports.push(TransportInfo {
-                transport_type: crate::network::transport::TransportType::Tcp,
-                addr: None, // TCP uses SocketAddr directly
-            });
+            transports.push(crate::network::transport::TransportType::Tcp);
         }
         
         #[cfg(feature = "quinn")]
         if self.transport_preference.allows_quinn() {
             if let Some(ref _quinn) = self.quinn_transport {
-                transports.push(TransportInfo {
-                    transport_type: crate::network::transport::TransportType::Quinn,
-                    addr: None,
-                });
+                transports.push(crate::network::transport::TransportType::Quinn);
             }
         }
         
         #[cfg(feature = "iroh")]
         if self.transport_preference.allows_iroh() {
             if let Some(ref _iroh) = self.iroh_transport {
-                transports.push(TransportInfo {
-                    transport_type: crate::network::transport::TransportType::Iroh,
-                    addr: None, // Iroh uses public key, not SocketAddr
-                });
+                transports.push(crate::network::transport::TransportType::Iroh);
             }
         }
         
         // Always try TCP as fallback if not already in list
-        if !transports.iter().any(|t| matches!(t.transport_type, crate::network::transport::TransportType::Tcp)) {
-            transports.push(TransportInfo {
-                transport_type: crate::network::transport::TransportType::Tcp,
-                addr: None,
-            });
+        if !transports.iter().any(|t| matches!(t, crate::network::transport::TransportType::Tcp)) {
+            transports.push(crate::network::transport::TransportType::Tcp);
         }
         
         transports
     }
     
     /// Helper: Try connecting with a specific transport
-    async fn try_connect_with_transport(&self, transport_info: &TransportInfo, addr: SocketAddr) -> Result<(Peer, TransportAddr)> {
+    async fn try_connect_with_transport(&self, transport_type: &crate::network::transport::TransportType, addr: SocketAddr) -> Result<(peer::Peer, TransportAddr)> {
         use crate::network::transport::TransportAddr;
         use crate::network::peer::Peer;
         
-        match transport_info.transport_type {
+        match transport_type {
             crate::network::transport::TransportType::Tcp => {
                 // Use TcpTransport to create connection properly
                 let tcp_addr = TransportAddr::Tcp(addr);
                 let tcp_conn = self.tcp_transport.connect(tcp_addr).await?;
                 let transport_addr = TransportAddr::Tcp(addr);
                 Ok((
-                    Peer::from_transport_connection(
+                    peer::Peer::from_transport_connection(
                         tcp_conn,
                         addr,
                         transport_addr.clone(),
@@ -1270,7 +1337,7 @@ impl NetworkManager {
                     let quinn_addr = TransportAddr::Quinn(addr);
                     let conn = quinn.connect(quinn_addr).await?;
                     Ok((
-                        Peer::from_transport_connection(
+                        peer::Peer::from_transport_connection(
                             conn,
                             addr,
                             quinn_addr.clone(),
@@ -1288,21 +1355,7 @@ impl NetworkManager {
                 // For now, return error - would need peer discovery or address resolution
                 Err(anyhow::anyhow!("Iroh transport requires public key, not SocketAddr"))
             }
-            #[cfg(not(feature = "quinn"))]
-            crate::network::transport::TransportType::Quinn => {
-                Err(anyhow::anyhow!("Quinn transport not compiled"))
-            }
-            #[cfg(not(feature = "iroh"))]
-            crate::network::transport::TransportType::Iroh => {
-                Err(anyhow::anyhow!("Iroh transport not compiled"))
-            }
         }
-    }
-    
-    /// Helper struct for transport selection
-    struct TransportInfo {
-        transport_type: crate::network::transport::TransportType,
-        addr: Option<TransportAddr>,
     }
     
     /// Send ping message to all connected peers
@@ -1321,8 +1374,25 @@ impl NetworkManager {
         
         let peer_addrs = self.peer_manager.lock().unwrap().peer_addresses();
         for addr in peer_addrs {
-            if let Err(e) = self.send_to_peer(addr, wire_msg.clone()).await {
-                warn!("Failed to ping peer {}: {}", addr, e);
+            // Convert TransportAddr to SocketAddr for send_to_peer, or use send_to_peer_by_transport
+            match addr {
+                crate::network::transport::TransportAddr::Tcp(sock) => {
+                    if let Err(e) = self.send_to_peer(sock, wire_msg.clone()).await {
+                        warn!("Failed to ping peer {}: {}", sock, e);
+                    }
+                }
+                #[cfg(feature = "quinn")]
+                crate::network::transport::TransportAddr::Quinn(sock) => {
+                    if let Err(e) = self.send_to_peer_by_transport(addr, wire_msg.clone()).await {
+                        warn!("Failed to ping peer {}: {}", sock, e);
+                    }
+                }
+                #[cfg(feature = "iroh")]
+                crate::network::transport::TransportAddr::Iroh(_) => {
+                    if let Err(e) = self.send_to_peer_by_transport(addr, wire_msg.clone()).await {
+                        warn!("Failed to ping peer {}: {}", addr, e);
+                    }
+                }
             }
         }
         
@@ -1967,6 +2037,43 @@ impl NetworkManager {
         self.peer_manager.lock().unwrap()
     }
 
+    /// Check eclipse prevention for an IP address
+    /// Returns true if connection is allowed, false if it would violate eclipse prevention
+    pub fn check_eclipse_prevention(&self, ip: std::net::IpAddr) -> bool {
+        let prefix = self.get_ip_prefix(ip);
+        let mut diversity = self.peer_diversity.lock().unwrap();
+        let count = diversity.get(&prefix).copied().unwrap_or(0);
+        count < 3 // Allow max 3 connections from same IP prefix
+    }
+
+    /// Get IP prefix (first 3 octets) for eclipse prevention
+    pub fn get_ip_prefix(&self, ip: std::net::IpAddr) -> [u8; 3] {
+        match ip {
+            std::net::IpAddr::V4(ipv4) => {
+                let octets = ipv4.octets();
+                [octets[0], octets[1], octets[2]]
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                let octets = ipv6.octets();
+                [octets[0], octets[1], octets[2]]
+            }
+        }
+    }
+
+    /// Remove peer diversity tracking for an IP address
+    pub fn remove_peer_diversity(&self, ip: std::net::IpAddr) {
+        let prefix = self.get_ip_prefix(ip);
+        let mut diversity = self.peer_diversity.lock().unwrap();
+        if let Some(count) = diversity.get_mut(&prefix) {
+            if *count > 0 {
+                *count -= 1;
+            }
+            if *count == 0 {
+                diversity.remove(&prefix);
+            }
+        }
+    }
+
     /// Get filter service reference
     pub fn filter_service(&self) -> &crate::network::filter_service::BlockFilterService {
         &self.filter_service
@@ -2241,17 +2348,8 @@ impl NetworkManager {
         Ok(())
     }
 
-    /// Network statistics
-    pub struct NetworkStats {
-        pub bytes_sent: u64,
-        pub bytes_received: u64,
-        pub active_connections: usize,
-        pub banned_peers_count: usize,
-        pub message_queue_size: usize,
-    }
-
     /// Get network statistics
-    pub async fn get_network_stats(&self) -> NetworkStats {
+    pub async fn get_network_stats(&self) -> crate::node::metrics::NetworkMetrics {
         let sent = *self.bytes_sent.lock().unwrap();
         let received = *self.bytes_received.lock().unwrap();
         let active_connections = {
@@ -2264,12 +2362,23 @@ impl NetworkManager {
         };
         let resource_metrics = self.dos_protection.get_metrics().await;
         
-        NetworkStats {
+        crate::node::metrics::NetworkMetrics {
+            peer_count: active_connections,
             bytes_sent: sent,
             bytes_received: received,
+            messages_sent: 0, // Would need to track this
+            messages_received: 0, // Would need to track this
             active_connections,
-            banned_peers_count,
-            message_queue_size: resource_metrics.message_queue_size,
+            banned_peers: banned_peers_count,
+            connection_attempts: 0, // Would need to track this
+            connection_failures: 0, // Would need to track this
+            dos_protection: crate::node::metrics::DosMetrics {
+                connection_rate_violations: 0, // Would need to track this
+                auto_bans: 0, // Would need to track this
+                message_queue_overflows: 0, // Would need to track this
+                active_connection_limit_hits: 0, // Would need to track this
+                resource_exhaustion_events: 0, // Would need to track this
+            },
         }
     }
 
@@ -2295,7 +2404,7 @@ impl NetworkManager {
         start_height: i32,
         relay: bool,
     ) -> crate::network::protocol::VersionMessage {
-        use crate::bip157::NODE_COMPACT_FILTERS;
+        use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
 
         // Add service flags for supported features
         let mut services_with_filters = services;

@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use crate::module::api::events::EventManager;
 use crate::module::api::hub::ModuleApiHub;
 use crate::module::ipc::protocol::{
-    ModuleMessage, RequestMessage, RequestPayload, ResponseMessage,
+    ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
 use crate::module::traits::{EventType, ModuleError, NodeAPI};
 
@@ -116,18 +116,64 @@ impl ModuleIpcServer {
         node_api: Arc<A>,
     ) -> Result<(), ModuleError> {
         let (read_half, write_half) = tokio::io::split(stream);
-        let reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
+        let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
         let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
 
-        // Generate unique module ID using connection counter and timestamp
-        // In production, module would provide its ID during handshake
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let connection_count = self.connections.len();
-        let module_id = format!("module_{}_{}_{}", connection_count, timestamp, connection_count);
+        // Wait for handshake message from module
+        let module_id = match reader.next().await {
+            Some(Ok(bytes)) => {
+                let message: ModuleMessage = bincode::deserialize(bytes.as_ref())
+                    .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+                
+                match message {
+                    ModuleMessage::Request(request) => {
+                        if let RequestPayload::Handshake { module_id, module_name, version } = request.payload {
+                            info!(
+                                "Module handshake: id={}, name={}, version={}",
+                                module_id, module_name, version
+                            );
+                            
+                            // Send handshake acknowledgment
+                            let ack = ResponseMessage {
+                                correlation_id: request.correlation_id,
+                                success: true,
+                                payload: Some(ResponsePayload::HandshakeAck {
+                                    node_version: env!("CARGO_PKG_VERSION").to_string(),
+                                }),
+                                error: None,
+                            };
+                            
+                            let ack_bytes = bincode::serialize(&ModuleMessage::Response(ack))
+                                .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+                            writer.send(bytes::Bytes::from(ack_bytes)).await
+                                .map_err(|e| ModuleError::IpcError(format!("Failed to send handshake ack: {}", e)))?;
+                            
+                            module_id
+                        } else {
+                            // No handshake - use fallback ID (backward compatibility)
+                            warn!("Module did not send handshake, using fallback ID");
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_nanos();
+                            let connection_count = self.connections.len();
+                            format!("module_{}_{}", connection_count, timestamp)
+                        }
+                    }
+                    _ => {
+                        return Err(ModuleError::IpcError(
+                            "First message must be a handshake request".to_string()
+                        ));
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                return Err(ModuleError::IpcError(format!("Failed to read handshake: {}", e)));
+            }
+            None => {
+                return Err(ModuleError::IpcError("Connection closed before handshake".to_string()));
+            }
+        };
 
         // Create unified outgoing message channel (for both responses and events)
         // This allows us to share the writer between response handler and event handler
@@ -322,6 +368,13 @@ impl ModuleIpcServer {
         use crate::module::ipc::protocol::{RequestPayload, ResponsePayload};
 
         match &request.payload {
+            RequestPayload::Handshake { .. } => {
+                // Handshake is handled at connection level
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::HandshakeAck { node_version: env!("CARGO_PKG_VERSION").to_string() },
+                ))
+            }
             RequestPayload::GetBlock { hash } => {
                 let block = node_api.get_block(hash).await?;
                 Ok(ResponseMessage::success(

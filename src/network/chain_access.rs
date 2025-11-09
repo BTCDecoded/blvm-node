@@ -138,6 +138,6 @@ pub fn process_protocol_message(
         Some(chain_access as &dyn ChainStateAccess),
         utxo_set,
         height,
-    )
+    ).map_err(|e| anyhow::anyhow!("Network message processing error: {}", e))
 }
 

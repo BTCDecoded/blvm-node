@@ -55,7 +55,7 @@ impl TxIndex {
         let tx_data = bincode::serialize(tx)?;
 
         // Store transaction by hash
-        self.tx_by_hash.insert(tx_hash.as_slice(), tx_data)?;
+        self.tx_by_hash.insert(tx_hash.as_slice(), &tx_data)?;
 
         // Store transaction metadata
         let metadata = TxMetadata {
@@ -68,11 +68,11 @@ impl TxIndex {
         };
 
         let metadata_data = bincode::serialize(&metadata)?;
-        self.tx_metadata.insert(tx_hash.as_slice(), metadata_data)?;
+        self.tx_metadata.insert(tx_hash.as_slice(), &metadata_data)?;
 
         // Index by block
         let block_key = self.block_tx_key(block_hash, tx_index);
-        self.tx_by_block.insert(block_key, tx_hash.as_slice())?;
+        self.tx_by_block.insert(&block_key, tx_hash.as_slice())?;
 
         Ok(())
     }
@@ -104,7 +104,7 @@ impl TxIndex {
 
         loop {
             let block_key = self.block_tx_key(block_hash, tx_index);
-            if let Some(tx_hash_data) = self.tx_by_block.get(block_key)? {
+            if let Some(tx_hash_data) = self.tx_by_block.get(&block_key)? {
                 let mut tx_hash = [0u8; 32];
                 tx_hash.copy_from_slice(&tx_hash_data);
                 if let Some(tx) = self.get_transaction(&tx_hash)? {
@@ -128,7 +128,7 @@ impl TxIndex {
 
     /// Get transaction count
     pub fn transaction_count(&self) -> Result<usize> {
-        Ok(self.tx_by_hash.len())
+        self.tx_by_hash.len()
     }
 
     /// Get transactions by block height range
@@ -150,7 +150,7 @@ impl TxIndex {
     pub fn remove_transaction(&self, tx_hash: &Hash) -> Result<()> {
         if let Some(metadata) = self.get_metadata(tx_hash)? {
             let block_key = self.block_tx_key(&metadata.block_hash, metadata.tx_index);
-            self.tx_by_block.remove(block_key)?;
+            self.tx_by_block.remove(&block_key)?;
         }
 
         self.tx_by_hash.remove(tx_hash.as_slice())?;

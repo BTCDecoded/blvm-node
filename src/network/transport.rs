@@ -55,11 +55,34 @@ impl TransportAddr {
     pub fn is_iroh(&self) -> bool {
         matches!(self, Self::Iroh(_))
     }
+
+    /// Get port number if available (TCP/Quinn only)
+    pub fn port(&self) -> Option<u16> {
+        match self {
+            Self::Tcp(addr) => Some(addr.port()),
+            #[cfg(feature = "quinn")]
+            Self::Quinn(addr) => Some(addr.port()),
+            #[cfg(feature = "iroh")]
+            Self::Iroh(_) => None, // Iroh uses public keys, no port
+        }
+    }
 }
 
 impl From<SocketAddr> for TransportAddr {
     fn from(addr: SocketAddr) -> Self {
         Self::Tcp(addr)
+    }
+}
+
+impl std::fmt::Display for TransportAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportAddr::Tcp(addr) => write!(f, "{}", addr),
+            #[cfg(feature = "quinn")]
+            TransportAddr::Quinn(addr) => write!(f, "quinn://{}", addr),
+            #[cfg(feature = "iroh")]
+            TransportAddr::Iroh(pubkey) => write!(f, "iroh://{}", hex::encode(&pubkey[..8])),
+        }
     }
 }
 
@@ -110,6 +133,17 @@ pub trait TransportConnection: Send + Sync {
     /// Returns Ok(Vec<u8>) with received data, or error on failure
     /// May return Ok(vec![]) if connection closed gracefully
     async fn recv(&mut self) -> Result<Vec<u8>>;
+
+    /// Send data on a specific channel (for protocols like Stratum V2 that use channels)
+    ///
+    /// Default implementation just calls `send()` - transports that don't support channels
+    /// will use the default behavior. Transports that support channels (e.g., QUIC streams)
+    /// should override this method.
+    async fn send_on_channel(&mut self, channel_id: Option<u32>, data: &[u8]) -> Result<()> {
+        // Default: ignore channel_id and use standard send
+        // Transports that support channels should override this
+        self.send(data).await
+    }
 
     /// Get the peer's transport address
     fn peer_addr(&self) -> TransportAddr;

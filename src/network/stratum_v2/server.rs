@@ -252,6 +252,9 @@ impl StratumV2Server {
     ) -> StratumV2Result<()> {
         use crate::network::transport::TransportConnection;
 
+        // Extract channel ID from message
+        let channel_id = Some(msg.channel_id);
+
         // Serialize message
         let payload = msg.to_bytes().map_err(|e| {
             StratumV2Error::Serialization(format!("Failed to serialize job message: {}", e))
@@ -265,13 +268,12 @@ impl StratumV2Server {
                 StratumV2Error::Serialization(format!("Failed to encode job message: {}", e))
             })?;
 
-        // Send via connection with channel-specific stream if Iroh
+        // Send via connection with channel-specific stream
         let mut conn = connection.write().await;
         if let Some(ref mut conn) = *conn {
-            // For Iroh connections, we use send_on_channel which is handled by the trait
-            // For now, use standard send - channel-specific streams are handled at the transport level
-            // TODO: Add trait method for channel-specific sending if needed
-            conn.send(&encoded).await.map_err(|e| {
+            // Use channel-specific sending - transports that support channels (QUIC/Iroh)
+            // will route to the appropriate channel stream, others will use default send()
+            conn.send_on_channel(channel_id, &encoded).await.map_err(|e| {
                 StratumV2Error::Network(format!("Failed to send job message: {}", e))
             })?;
         } else {

@@ -117,7 +117,7 @@ pub fn handle_getcfheaders(
         .get_prev_filter_header(request.start_height)
         .unwrap_or_else(|| {
             // Genesis filter header (all zeros)
-            crate::bip157::FilterHeader {
+            bllvm_protocol::bip157::FilterHeader {
                 filter_hash: [0u8; 32],
                 prev_header_hash: [0u8; 32],
             }

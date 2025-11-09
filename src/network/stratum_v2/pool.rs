@@ -547,7 +547,7 @@ impl StratumV2Pool {
     /// Serialize transaction for template extraction
     fn serialize_transaction(&self, tx: &bllvm_protocol::types::Transaction) -> Vec<u8> {
         // Use consensus-proof serialization function
-        use bllvm_consensus::serialization::transaction::serialize_transaction;
+        use bllvm_protocol::serialization::serialize_transaction;
         serialize_transaction(tx)
     }
 

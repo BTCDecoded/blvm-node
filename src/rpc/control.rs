@@ -220,23 +220,23 @@ impl ControlRpc {
                 "logging" => "Gets and sets the logging configuration.\n\nArguments:\n1. \"include\" (array of strings, optional) A list of categories to add debug logging\n2. \"exclude\" (array of strings, optional) A list of categories to remove debug logging\n\nResult:\n{ (json object)\n  \"active\" (boolean) Whether debug logging is active\n}\n\nExamples:\n> bitcoin-cli logging [\"all\"]\n> bitcoin-cli logging [\"http\"] [\"net\"]",
                 _ => return Err(RpcError::invalid_params(format!("Unknown command: {}", command))),
             };
-            Ok(json!(help_text))
+            Ok(json!(help_text.to_string()))
+        } else {
+            // No command specified, return list of all commands
+            let commands = vec![
+                "getblockchaininfo", "getblock", "getblockhash", "getblockheader",
+                "getbestblockhash", "getblockcount", "getdifficulty", "gettxoutsetinfo",
+                "verifychain", "getrawtransaction", "sendrawtransaction", "testmempoolaccept",
+                "decoderawtransaction", "gettxout", "gettxoutproof", "verifytxoutproof",
+                "getmempoolinfo", "getrawmempool", "savemempool", "getnetworkinfo",
+                "getpeerinfo", "getconnectioncount", "ping", "addnode", "disconnectnode",
+                "getnettotals", "clearbanned", "setban", "listbanned", "getmininginfo",
+                "getblocktemplate", "submitblock", "estimatesmartfee", "stop", "uptime",
+                "getmemoryinfo", "getrpcinfo", "help", "logging",
+            ];
+
+            Ok(json!(commands.join("\n")))
         }
-
-        // Return list of all commands
-        let commands = vec![
-            "getblockchaininfo", "getblock", "getblockhash", "getblockheader",
-            "getbestblockhash", "getblockcount", "getdifficulty", "gettxoutsetinfo",
-            "verifychain", "getrawtransaction", "sendrawtransaction", "testmempoolaccept",
-            "decoderawtransaction", "gettxout", "gettxoutproof", "verifytxoutproof",
-            "getmempoolinfo", "getrawmempool", "savemempool", "getnetworkinfo",
-            "getpeerinfo", "getconnectioncount", "ping", "addnode", "disconnectnode",
-            "getnettotals", "clearbanned", "setban", "listbanned", "getmininginfo",
-            "getblocktemplate", "submitblock", "estimatesmartfee", "stop", "uptime",
-            "getmemoryinfo", "getrpcinfo", "help", "logging",
-        ];
-
-        Ok(json!(commands.join("\n")))
     }
 
     /// Control logging levels
@@ -291,7 +291,6 @@ impl ControlRpc {
             "note": "Full dynamic filter updates require subscriber access. Use RUST_LOG environment variable for full control."
         }))
     }
-}
 
     /// Get node health status
     ///

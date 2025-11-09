@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::module::api::events::EventManager;
 use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::traits::{EventType, ModuleError, NodeAPI};
 use crate::storage::Storage;
@@ -15,12 +16,39 @@ use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 pub struct NodeApiImpl {
     /// Storage reference for querying blockchain data
     storage: Arc<Storage>,
+    /// Event manager for event subscriptions
+    event_manager: Option<Arc<EventManager>>,
+    /// Module ID for this API instance (used for event subscriptions)
+    module_id: Option<String>,
 }
 
 impl NodeApiImpl {
     /// Create a new Node API implementation
     pub fn new(storage: Arc<Storage>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            event_manager: None,
+            module_id: None,
+        }
+    }
+
+    /// Create a new Node API implementation with event manager
+    pub fn with_event_manager(
+        storage: Arc<Storage>,
+        event_manager: Arc<EventManager>,
+        module_id: String,
+    ) -> Self {
+        Self {
+            storage,
+            event_manager: Some(event_manager),
+            module_id: Some(module_id),
+        }
+    }
+
+    /// Set event manager (for late initialization)
+    pub fn set_event_manager(&mut self, event_manager: Arc<EventManager>, module_id: String) {
+        self.event_manager = Some(event_manager);
+        self.module_id = Some(module_id);
     }
 }
 
@@ -149,14 +177,26 @@ impl NodeAPI for NodeApiImpl {
 
     async fn subscribe_events(
         &self,
-        _event_types: Vec<EventType>,
+        event_types: Vec<EventType>,
     ) -> Result<mpsc::Receiver<ModuleMessage>, ModuleError> {
         // Create event subscription channel
-        // TODO: Integrate with actual event system when implemented
-        let (_tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
-        // For now, return empty receiver
-        // In full implementation, this would hook into the node's event system
+        // Integrate with event manager if available
+        if let (Some(event_manager), Some(module_id)) = (&self.event_manager, &self.module_id) {
+            // Register module with event manager
+            event_manager
+                .subscribe_module(module_id.clone(), event_types, tx)
+                .await?;
+        } else {
+            // Event manager not available - return empty receiver
+            // This can happen if NodeAPI is used without event manager setup
+            // (e.g., in tests or direct API usage)
+            tracing::debug!(
+                "Event manager not available for subscribe_events - returning empty receiver"
+            );
+        }
+
         Ok(rx)
     }
 }

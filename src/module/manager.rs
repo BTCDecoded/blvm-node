@@ -46,7 +46,7 @@ struct ManagedModule {
     /// Module metadata
     metadata: ModuleMetadata,
     /// Module process (shared with monitor via Arc<Mutex<>>)
-    process: Option<Arc<Mutex<ModuleProcess>>>,
+    process: Option<Arc<tokio::sync::Mutex<ModuleProcess>>>,
     /// Module state
     state: ModuleState,
     /// Monitoring handle
@@ -157,8 +157,8 @@ impl ModuleManager {
 
         // Share process between manager and monitor using Arc<Mutex<>>
         // This allows both to access the process for different purposes
-        use std::sync::{Arc, Mutex};
-        let shared_process = Arc::new(Mutex::new(process));
+        use std::sync::Arc;
+        let shared_process = Arc::new(tokio::sync::Mutex::new(process));
         
         // Create monitor with shared process
         let monitor = ModuleProcessMonitor::new(self.crash_tx.clone());
@@ -209,7 +209,7 @@ impl ModuleManager {
 
             // Kill process if we have a reference
             if let Some(shared_process) = managed.process.take() {
-                let mut process_guard = shared_process.lock().unwrap();
+                let mut process_guard = shared_process.lock().await;
                 process_guard.kill().await?;
             } else if let Some(pid) = managed.process_id {
                 // Kill by PID if we don't have process reference

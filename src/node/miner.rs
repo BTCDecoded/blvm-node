@@ -432,7 +432,7 @@ impl MiningCoordinator {
         all_transactions.extend(transactions);
 
         // Calculate merkle root from transactions
-        use bllvm_consensus::mining::calculate_merkle_root;
+        use bllvm_protocol::mining::calculate_merkle_root;
         let merkle_root = calculate_merkle_root(&all_transactions)
             .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {}", e))?;
 

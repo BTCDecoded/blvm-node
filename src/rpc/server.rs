@@ -131,6 +131,7 @@ impl RpcServer {
             mempool: Arc::clone(&self.mempool),
             mining: Arc::clone(&self.mining),
             rawtx: Arc::clone(&self.rawtx),
+            control: Arc::clone(&self.control),
             auth_manager: self.auth_manager.clone(),
         });
         
@@ -182,8 +183,11 @@ impl RpcServer {
             ));
         }
 
+        // Extract headers before consuming request body
+        let headers = req.headers().clone();
+        
         // Check Content-Type
-        if let Some(content_type) = req.headers().get("content-type") {
+        if let Some(content_type) = headers.get("content-type") {
             if content_type != "application/json" {
                 warn!("Invalid Content-Type from {}: {:?}", addr, content_type);
             }
@@ -216,7 +220,7 @@ impl RpcServer {
 
         // Authenticate request if authentication is enabled
         if let Some(ref auth_manager) = server.auth_manager {
-            let auth_result = auth_manager.authenticate_request(req.headers(), addr).await;
+            let auth_result = auth_manager.authenticate_request(&headers, addr).await;
             
             // Check if authentication failed
             if let Some(error) = auth_result.error {

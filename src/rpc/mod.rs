@@ -17,7 +17,10 @@ pub mod types;
 #[cfg(feature = "quinn")]
 pub mod quinn_server;
 
+use crate::config::RpcAuthConfig;
 use crate::node::mempool::MempoolManager;
+use crate::node::metrics::MetricsCollector;
+use crate::node::performance::PerformanceProfiler;
 use crate::storage::Storage;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -45,6 +48,10 @@ pub struct RpcManager {
     auth_manager: Option<Arc<auth::RpcAuthManager>>,
     /// Node shutdown callback (optional)
     node_shutdown: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    /// Metrics collector (optional)
+    metrics: Option<Arc<MetricsCollector>>,
+    /// Performance profiler (optional)
+    profiler: Option<Arc<PerformanceProfiler>>,
 }
 
 impl RpcManager {
@@ -58,6 +65,8 @@ impl RpcManager {
             mining_rpc: mining::MiningRpc::new(),
             control_rpc: control::ControlRpc::new(),
             storage: None,
+            metrics: None,
+            profiler: None,
             mempool: None,
             network_manager: None,
             shutdown_tx: None,
@@ -112,12 +121,29 @@ impl RpcManager {
             mining::MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
         self.blockchain_rpc = blockchain::BlockchainRpc::with_dependencies(Arc::clone(&storage));
         let mempool_rpc = mempool::MempoolRpc::with_dependencies(Arc::clone(&mempool), Arc::clone(&storage));
-        let rawtx_rpc = rawtx::RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
+        let rawtx_rpc = rawtx::RawTxRpc::with_dependencies(
+            Arc::clone(&storage),
+            Arc::clone(&mempool),
+            self.metrics.clone(),
+            self.profiler.clone(),
+        );
 
         self.mempool = Some(Arc::clone(&mempool));
 
         self.storage = Some(storage);
         self.mempool = Some(mempool);
+        self
+    }
+
+    /// Set metrics collector
+    pub fn with_metrics(mut self, metrics: Arc<MetricsCollector>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Set performance profiler
+    pub fn with_profiler(mut self, profiler: Arc<PerformanceProfiler>) -> Self {
+        self.profiler = Some(profiler);
         self
     }
 
@@ -173,7 +199,7 @@ impl RpcManager {
         let server = if let (Some(ref storage), Some(ref mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
             let blockchain = Arc::new(blockchain::BlockchainRpc::with_dependencies(Arc::clone(storage)));
             let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(Arc::clone(mempool), Arc::clone(&storage)));
-            let rawtx_rpc = Arc::new(rawtx::RawTxRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool)));
+            let rawtx_rpc = Arc::new(rawtx::RawTxRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool), None, None));
             let mining = Arc::new(mining::MiningRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool)));
             let network = if let Some(ref network_manager) = self.network_manager {
                 Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(network_manager)))

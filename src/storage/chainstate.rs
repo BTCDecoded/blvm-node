@@ -82,7 +82,7 @@ impl ChainState {
     /// Store chain information
     pub fn store_chain_info(&self, info: &ChainInfo) -> Result<()> {
         let data = bincode::serialize(info)?;
-        self.chain_info.insert(b"current", data)?;
+        self.chain_info.insert(b"current", &data)?;
         Ok(())
     }
 

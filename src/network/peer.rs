@@ -58,52 +58,58 @@ impl Peer {
         message_tx: mpsc::UnboundedSender<NetworkMessage>,
     ) -> Self {
         // Create channel for sending messages
-        let (send_tx, send_rx) = mpsc::unbounded_channel();
+        let (send_tx, send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         
         let transport_addr_clone = transport_addr.clone();
         let message_tx_clone = message_tx.clone();
         
+        // Wrap connection in Arc<Mutex> to share between read and write tasks
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        let conn = Arc::new(Mutex::new(conn));
+        let conn_read = Arc::clone(&conn);
+        let conn_write = Arc::clone(&conn);
+        
         // Spawn read task using TransportConnection::recv
         tokio::spawn(async move {
             loop {
-                match conn.recv().await {
-                    Ok(data) => {
-                        if data.is_empty() {
-                            // Graceful close
+                let data = {
+                    let mut conn_guard = conn_read.lock().await;
+                    match conn_guard.recv().await {
+                        Ok(data) => data,
+                        Err(e) => {
+                            warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
                             break;
                         }
-                        
-                        // Send to network manager for processing
-                        // For backward compatibility with SocketAddr-based messages, extract SocketAddr if available
-                        let peer_addr = match &transport_addr_clone {
-                            super::transport::TransportAddr::Tcp(sock) => *sock,
-                            #[cfg(feature = "quinn")]
-                            super::transport::TransportAddr::Quinn(sock) => *sock,
-                            #[cfg(feature = "iroh")]
-                            super::transport::TransportAddr::Iroh(_) => {
-                                // For Iroh, use placeholder - will be looked up via transport_addr
-                                std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-                            }
-                        };
-                        let _ = message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_addr));
                     }
-                    Err(e) => {
-                        warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
-                        break; // Connection error
-                    }
+                };
+                
+                if data.is_empty() {
+                    break;
                 }
+                
+                let peer_addr = match &transport_addr_clone {
+                    super::transport::TransportAddr::Tcp(sock) => *sock,
+                    #[cfg(feature = "quinn")]
+                    super::transport::TransportAddr::Quinn(sock) => *sock,
+                    #[cfg(feature = "iroh")]
+                    super::transport::TransportAddr::Iroh(_) => {
+                        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+                    }
+                };
+                let _ = message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_addr));
             }
         });
         
         // Spawn write task using TransportConnection::send
         tokio::spawn(async move {
             let mut send_rx = send_rx;
-            let mut conn = conn;
             
             loop {
                 match send_rx.recv().await {
                     Some(data) => {
-                        match conn.send(&data).await {
+                        let mut conn_guard = conn_write.lock().await;
+                        match conn_guard.send(&data).await {
                             Ok(_) => {
                                 debug!("Sent {} bytes to peer", data.len());
                             }
@@ -120,7 +126,7 @@ impl Peer {
             }
             
             // Gracefully close connection on write task exit
-            let _ = conn.close().await;
+            // Connection will be closed when conn_guard is dropped
         });
         
         let now = SystemTime::now()
@@ -245,10 +251,11 @@ impl Peer {
     /// 
     /// Messages are sent via a channel to a background write task.
     pub async fn send_message(&self, message: Vec<u8>) -> Result<()> {
+        let message_len = message.len();
         self.send_tx
             .send(message)
             .map_err(|e| anyhow::anyhow!("Failed to send message to peer {}: {}", self.addr, e))?;
-        debug!("Queued {} bytes for peer {}", message.len(), self.addr);
+        debug!("Queued {} bytes for peer {}", message_len, self.addr);
         Ok(())
     }
 
@@ -260,5 +267,53 @@ impl Peer {
     /// Get peer address
     pub fn address(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Get quality score
+    pub fn quality_score(&self) -> f64 {
+        self.quality_score
+    }
+
+    /// Record a send operation
+    pub fn record_send(&mut self, bytes: usize) {
+        self.bytes_sent += bytes as u64;
+        self.last_send = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+    }
+
+    /// Record a receive operation
+    pub fn record_receive(&mut self, bytes: usize) {
+        self.bytes_recv += bytes as u64;
+        self.last_recv = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+    }
+
+    /// Get last send time
+    pub fn last_send(&self) -> u64 {
+        self.last_send
+    }
+
+    /// Get last receive time
+    pub fn last_recv(&self) -> u64 {
+        self.last_recv
+    }
+
+    /// Get bytes sent
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
+    }
+
+    /// Get bytes received
+    pub fn bytes_recv(&self) -> u64 {
+        self.bytes_recv
+    }
+
+    /// Get connection time
+    pub fn conntime(&self) -> u64 {
+        self.conntime
     }
 }

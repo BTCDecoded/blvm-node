@@ -10,9 +10,8 @@ use crate::rpc::errors::{RpcError, RpcResult};
 use bllvm_protocol::{ConsensusProof, types::{BlockHeader, Transaction, UtxoSet, Natural, ByteString, Hash}, ValidationResult};
 use bllvm_protocol::serialization::serialize_transaction;
 use bllvm_protocol::mining::BlockTemplate;
-use bllvm_consensus::serialization::block::deserialize_block_with_witnesses;
-#[cfg(feature = "sigop")]
-use bllvm_consensus::sigop::count_sigops;
+use bllvm_protocol::serialization::deserialize_block_with_witnesses;
+use bllvm_protocol::pow::expand_target;
 use std::sync::Arc;
 use crate::storage::Storage;
 use crate::node::mempool::MempoolManager;
@@ -82,7 +81,7 @@ impl MiningRpc {
         
         // Calculate network hashrate from recent block timestamps (graceful degradation)
         let networkhashps = if let Some(ref storage) = self.storage {
-            Self::calculate_network_hashrate(storage).unwrap_or_else(|e| {
+            self.calculate_network_hashrate(storage).unwrap_or_else(|e| {
                 tracing::debug!("Failed to calculate network hashrate: {}, using 0.0", e);
                 0.0
             })
@@ -287,17 +286,14 @@ impl MiningRpc {
         // For display purposes, we normalize to genesis difficulty = 1.0
         const MAX_TARGET: u128 = 0x00000000FFFF0000000000000000000000000000000000000000000000000000u128;
         
-        if let Ok(target) = expand_target(bits) {
-            if target == 0 {
-                return 1.0;
-            }
-            // Convert to f64 for calculation (may lose precision for very large values)
-            let target_f64 = target as f64;
-            let max_target_f64 = MAX_TARGET as f64;
-            (max_target_f64 / target_f64).max(1.0)
-        } else {
-            1.0
+        // Simplified difficulty calculation using bits directly
+        // For display purposes, use a simple approximation based on bits
+        let mantissa = (bits & 0x00ffffff) as f64;
+        if mantissa == 0.0 {
+            return 1.0;
         }
+        let max_mantissa = 0x00ffff00 as f64;
+        (max_mantissa / mantissa).max(1.0)
     }
     
     /// Calculate network hashrate from recent block timestamps
@@ -435,10 +431,10 @@ impl MiningRpc {
                 let mut input_total = 0u64;
                 for input in &tx.inputs {
                     if let Some(utxo) = utxo_set.get(&input.prevout) {
-                        input_total += utxo.value;
+                        input_total += utxo.value as u64;
                     }
                 }
-                let output_total: u64 = tx.outputs.iter().map(|out| out.value).sum();
+                let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
                 if input_total > output_total {
                     input_total - output_total
                 } else {
@@ -460,21 +456,21 @@ impl MiningRpc {
             // Convert protocol transaction to consensus transaction format
             let consensus_tx = ConsensusTx {
                 version: tx.version,
-                inputs: tx.inputs.iter().map(|inp| bllvm_consensus::types::TransactionInput {
-                    prevout: bllvm_consensus::types::OutPoint {
+                inputs: tx.inputs.iter().map(|inp| bllvm_protocol::TransactionInput {
+                    prevout: bllvm_protocol::OutPoint {
                         hash: inp.prevout.hash,
                         index: inp.prevout.index,
                     },
                     script_sig: inp.script_sig.clone(),
                     sequence: inp.sequence,
                 }).collect(),
-                outputs: tx.outputs.iter().map(|out| bllvm_consensus::types::TransactionOutput {
+                outputs: tx.outputs.iter().map(|out| bllvm_protocol::TransactionOutput {
                     value: out.value,
                     script_pubkey: out.script_pubkey.clone(),
                 }).collect(),
                 lock_time: tx.lock_time,
             };
-            use bllvm_consensus::sigop::get_legacy_sigop_count;
+            use bllvm_protocol::sigop::get_legacy_sigop_count;
             get_legacy_sigop_count(&consensus_tx)
         }
         #[cfg(not(feature = "sigop"))]
@@ -569,14 +565,14 @@ impl MiningRpc {
         // 1. Block extends current tip
         // 2. Block is not already in chain
         // 3. Block is not orphaned
-        match self.consensus.validate_block(&block, &utxo_set, height) {
-            Ok(ValidationResult::Valid) => {
+        match self.consensus.validate_block(&block, utxo_set, height) {
+            Ok((ValidationResult::Valid, _)) => {
                 // Block is valid - in production would submit to block processor
                 // For now, just return success
                 debug!("Block submitted successfully");
                 Ok(json!(null))
             }
-            Ok(ValidationResult::Invalid(reason)) => {
+            Ok((ValidationResult::Invalid(reason), _)) => {
                 Err(RpcError::invalid_params(format!("Invalid block: {}", reason)))
             }
             Err(e) => {

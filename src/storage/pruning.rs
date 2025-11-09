@@ -418,17 +418,20 @@ impl PruningManager {
 
                 // Handle commitments if enabled
                 if keep_commitments {
-                    if let (Some(ref commitment_store), Some(ref utxostore)) = 
-                        (self.commitment_store.as_ref(), self.utxostore.as_ref()) 
+                    #[cfg(feature = "utxo-commitments")]
                     {
-                        // Generate commitment if not exists
-                        if !commitment_store.has_commitment(&hash)? {
-                            self.generate_commitment_for_block(
-                                &hash,
-                                height,
-                                commitment_store,
-                                utxostore,
-                            )?;
+                        if let (Some(ref commitment_store), Some(ref utxostore)) = 
+                            (self.commitment_store.as_ref(), self.utxostore.as_ref()) 
+                        {
+                            // Generate commitment if not exists
+                            if !commitment_store.has_commitment(&hash)? {
+                                self.generate_commitment_for_block(
+                                    &hash,
+                                    height,
+                                    commitment_store,
+                                    utxostore,
+                                )?;
+                            }
                         }
                     }
                 }
@@ -494,7 +497,8 @@ impl PruningManager {
         commitment_store: &CommitmentStore,
         utxostore: &UtxoStore,
     ) -> Result<()> {
-        use bllvm_consensus::utxo_commitments::merkle_tree::UtxoMerkleTree;
+        #[cfg(feature = "utxo-commitments")]
+        use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
         use bllvm_protocol::block::connect_block;
         use bllvm_protocol::segwit::Witness;
 

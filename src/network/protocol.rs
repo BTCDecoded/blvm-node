@@ -2,7 +2,7 @@
 //!
 //! Implements Bitcoin P2P protocol message serialization and deserialization.
 
-use crate::bip157::NODE_COMPACT_FILTERS;
+use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
 use crate::network::transport::TransportType;
 use anyhow::Result;
 use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
@@ -132,7 +132,7 @@ pub struct VersionMessage {
 }
 
 /// Network address
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkAddress {
     pub services: u64,
     pub ip: [u8; 16],
@@ -233,7 +233,7 @@ impl SendCmpctMessage {
 
     /// Check if peer also supports BIP157 filters (based on version message services)
     pub fn supports_filters(&self, peer_services: u64) -> bool {
-        use crate::bip157::NODE_COMPACT_FILTERS;
+        use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
         (peer_services & NODE_COMPACT_FILTERS) != 0
     }
 }
@@ -460,7 +460,7 @@ pub struct GetPaymentRequestMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentRequestMessage {
     /// Payment request details (from bip70 module)
-    pub payment_request: crate::bip70::PaymentRequest,
+    pub payment_request: bllvm_protocol::payment::PaymentRequest,
     /// Signature over payment_request by merchant's Bitcoin key
     #[serde(with = "serde_bytes")]
     pub merchant_signature: Vec<u8>,
@@ -475,8 +475,8 @@ pub struct PaymentRequestMessage {
 /// payment message - Customer payment transaction(s)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentMessage {
-    /// Payment details (from bip70 module)
-    pub payment: crate::bip70::Payment,
+    /// Payment details (from payment protocol module)
+    pub payment: bllvm_protocol::payment::Payment,
     /// Payment ID (echo from PaymentRequest)
     #[serde(with = "serde_bytes")]
     pub payment_id: Vec<u8>,
@@ -488,8 +488,8 @@ pub struct PaymentMessage {
 /// paymentack message - Merchant payment confirmation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentACKMessage {
-    /// Payment acknowledgment (from bip70 module)
-    pub payment_ack: crate::bip70::PaymentACK,
+    /// Payment acknowledgment (from payment protocol module)
+    pub payment_ack: bllvm_protocol::payment::PaymentACK,
     /// Payment ID (echo from Payment)
     #[serde(with = "serde_bytes")]
     pub payment_id: Vec<u8>,
@@ -522,9 +522,6 @@ pub struct PkgTxnMessage {
 }
 
 /// pkgtxnreject message - Package rejection
-    // Ban List Sharing
-    "getbanlist",
-    "banlist",
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PkgTxnRejectMessage {
     /// Package ID that was rejected

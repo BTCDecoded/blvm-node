@@ -55,6 +55,7 @@ pub enum MessageType {
     GetBlockHeight,
     GetUtxo,
     SubscribeEvents,
+    Handshake,
     /// Response messages
     Response,
     /// Event messages
@@ -74,6 +75,8 @@ pub struct RequestMessage {
 /// Request payload types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestPayload {
+    /// Handshake: Module identifies itself (first message)
+    Handshake { module_id: String, module_name: String, version: String },
     GetBlock { hash: Hash },
     GetBlockHeader { hash: Hash },
     GetTransaction { hash: Hash },
@@ -96,6 +99,8 @@ pub struct ResponseMessage {
 /// Response payload types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ResponsePayload {
+    /// Handshake acknowledgment with node version
+    HandshakeAck { node_version: String },
     Block(Option<Block>),
     BlockHeader(Option<BlockHeader>),
     Transaction(Option<Transaction>),

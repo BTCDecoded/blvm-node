@@ -8,6 +8,7 @@
 use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::RpcResult;
 use crate::storage::Storage;
+use bllvm_protocol::Hash;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::debug;
@@ -87,13 +88,14 @@ impl MempoolRpc {
                 for tx in transactions {
                     let txid = calculate_tx_id(&tx);
                     let txid_hex = hex::encode(txid);
+                    let txid_hex_clone = txid_hex.clone();
                     let size = serialize_transaction(&tx).len();
                     
                     result.insert(txid_hex, json!({
                         "size": size,
                         "fee": if let (Some(ref mempool), Some(ref storage)) = (self.mempool.as_ref(), self.storage.as_ref()) {
                             let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                            let fee_satoshis = mempool.calculate_transaction_fee(tx, &utxo_set);
+                            let fee_satoshis = mempool.calculate_transaction_fee(&tx, &utxo_set);
                             fee_satoshis as f64 / 100_000_000.0
                         } else {
                             0.00001000
@@ -110,7 +112,7 @@ impl MempoolRpc {
                         "ancestorcount": 1,
                         "ancestorsize": size,
                         "ancestorfees": 0.00001000,
-                        "wtxid": txid_hex.clone(),
+                        "wtxid": txid_hex_clone,
                         "fees": {
                             "base": 0.00001000,
                             "modified": 0.00001000,
@@ -169,10 +171,11 @@ impl MempoolRpc {
     pub async fn savemempool(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: savemempool");
 
-        if let Some(ref mempool) = self.mempool {
+        if let Some(mempool) = &self.mempool {
             let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
             let mempool_path = std::path::Path::new(&data_dir).join("mempool.dat");
             
+            // Arc implements Deref, so we can call methods directly
             if let Err(e) = mempool.save_to_disk(&mempool_path) {
                 return Err(crate::rpc::errors::RpcError::internal_error(
                     format!("Failed to save mempool: {}", e)
@@ -216,6 +219,7 @@ impl MempoolRpc {
                 for ancestor_hash in ancestors {
                     if let Some(ancestor_tx) = mempool.get_transaction(&ancestor_hash) {
                         let ancestor_txid = hex::encode(ancestor_hash);
+                        let ancestor_txid_clone = ancestor_txid.clone();
                         use bllvm_protocol::serialization::transaction::serialize_transaction;
                         let size = serialize_transaction(&ancestor_tx).len();
                         
@@ -223,7 +227,7 @@ impl MempoolRpc {
                             "size": size,
                             "fee": if let Some(ref storage) = self.storage {
                                 let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                                let fee_satoshis = mempool.calculate_transaction_fee(ancestor_tx.clone(), &utxo_set);
+                                let fee_satoshis = mempool.calculate_transaction_fee(&ancestor_tx, &utxo_set);
                                 fee_satoshis as f64 / 100_000_000.0
                             } else {
                                 0.0
@@ -240,7 +244,7 @@ impl MempoolRpc {
                             "ancestorcount": 1,
                             "ancestorsize": size,
                             "ancestorfees": 0.0,
-                            "wtxid": ancestor_txid.clone(),
+                            "wtxid": ancestor_txid_clone,
                             "fees": {
                                 "base": 0.0,
                                 "modified": 0.0,
@@ -303,10 +307,13 @@ impl MempoolRpc {
                 }
 
                 // Find transactions that spend these outputs
-                for (descendant_hash, descendant_tx) in &mempool.transactions {
+                use bllvm_protocol::mempool::calculate_tx_id;
+                let transactions = mempool.get_transactions();
+                for descendant_tx in transactions {
+                    let descendant_hash = calculate_tx_id(&descendant_tx);
                     for input in &descendant_tx.inputs {
                         if output_outpoints.contains(&input.prevout) {
-                            descendants.push(*descendant_hash);
+                            descendants.push(descendant_hash);
                             break;
                         }
                     }
@@ -319,6 +326,7 @@ impl MempoolRpc {
                 for descendant_hash in descendants {
                     if let Some(descendant_tx) = mempool.get_transaction(&descendant_hash) {
                         let descendant_txid = hex::encode(descendant_hash);
+                        let descendant_txid_clone = descendant_txid.clone();
                         use bllvm_protocol::serialization::transaction::serialize_transaction;
                         let size = serialize_transaction(&descendant_tx).len();
                         
@@ -326,7 +334,7 @@ impl MempoolRpc {
                             "size": size,
                             "fee": if let Some(ref storage) = self.storage {
                                 let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                                let fee_satoshis = mempool.calculate_transaction_fee(descendant_tx.clone(), &utxo_set);
+                                let fee_satoshis = mempool.calculate_transaction_fee(&descendant_tx, &utxo_set);
                                 fee_satoshis as f64 / 100_000_000.0
                             } else {
                                 0.0
@@ -343,7 +351,7 @@ impl MempoolRpc {
                             "ancestorcount": 1,
                             "ancestorsize": size,
                             "ancestorfees": 0.0,
-                            "wtxid": descendant_txid.clone(),
+                            "wtxid": descendant_txid_clone,
                             "fees": {
                                 "base": 0.0,
                                 "modified": 0.0,
@@ -413,7 +421,7 @@ impl MempoolRpc {
 
                 let fee = if let Some(ref storage) = self.storage {
                     let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                    let fee_satoshis = mempool.calculate_transaction_fee(tx.clone(), &utxo_set);
+                    let fee_satoshis = mempool.calculate_transaction_fee(&tx, &utxo_set);
                     fee_satoshis as f64 / 100_000_000.0
                 } else {
                     0.0
@@ -463,13 +471,16 @@ impl MempoolRpc {
         
         if let Some(tx) = mempool.get_transaction(tx_hash) {
             // Find transactions that this transaction depends on (spends their outputs)
+            use bllvm_protocol::mempool::calculate_tx_id;
             for input in &tx.inputs {
-                // Find transaction that created this output
-                for (ancestor_hash, ancestor_tx) in &mempool.transactions {
+                // Find transaction that created this output by checking all transactions
+                let transactions = mempool.get_transactions();
+                for ancestor_tx in transactions {
+                    let ancestor_hash = calculate_tx_id(&ancestor_tx);
                     for (idx, _output) in ancestor_tx.outputs.iter().enumerate() {
-                        if input.prevout.hash == *ancestor_hash && input.prevout.index == idx as u64 {
-                            if !ancestors.contains(ancestor_hash) {
-                                ancestors.push(*ancestor_hash);
+                        if input.prevout.hash == ancestor_hash && input.prevout.index == idx as u64 {
+                            if !ancestors.contains(&ancestor_hash) {
+                                ancestors.push(ancestor_hash);
                             }
                         }
                     }
@@ -495,11 +506,14 @@ impl MempoolRpc {
             }
 
             // Find transactions that spend these outputs
-            for (descendant_hash, descendant_tx) in &mempool.transactions {
+            use bllvm_protocol::mempool::calculate_tx_id;
+            let transactions = mempool.get_transactions();
+            for descendant_tx in transactions {
+                let descendant_hash = calculate_tx_id(&descendant_tx);
                 for input in &descendant_tx.inputs {
                     if output_outpoints.contains(&input.prevout) {
-                        if !descendants.contains(descendant_hash) {
-                            descendants.push(*descendant_hash);
+                        if !descendants.contains(&descendant_hash) {
+                            descendants.push(descendant_hash);
                         }
                         break;
                     }
