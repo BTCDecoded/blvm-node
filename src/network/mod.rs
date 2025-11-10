@@ -2777,7 +2777,7 @@ impl NetworkManager {
         let response = BanListMessage {
             is_full: msg.request_full,
             ban_list_hash,
-            ban_entries: if msg.request_full { ban_entries } else { Vec::new() },
+            ban_entries: if msg.request_full { ban_entries.clone() } else { Vec::new() },
             timestamp: now,
         };
 
