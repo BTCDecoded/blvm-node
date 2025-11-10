@@ -205,13 +205,54 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 ))?;
             
             // Send message to peer via NetworkManager
+            // Extract transport address first, then send without holding the guard across await
+            let transport_addr = {
+                let network = network_manager.read().await;
+                let pm_guard = network.peer_manager.lock().unwrap();
+                let transport_addr_opt = pm_guard.find_transport_addr_by_socket(peer_addr);
+                drop(pm_guard);
+                transport_addr_opt
+                    .or_else(|| {
+                        let network = network_manager.read().await;
+                        let socket_guard = network.socket_to_transport.lock().unwrap();
+                        let result = socket_guard.get(&peer_addr).cloned();
+                        drop(socket_guard);
+                        result
+                    })
+                    .unwrap_or_else(|| crate::network::transport::TransportAddr::Tcp(peer_addr))
+            };
+            
+            // Now send without holding the guard - extract peer's send channel and send directly
+            // This avoids holding the RwLockReadGuard across await points
+            // Also track bytes sent for statistics
+            let (send_tx, message_len) = {
+                let network = network_manager.read().await;
+                network.track_bytes_sent(wire_format.len() as u64);
+                let pm_guard = network.peer_manager.lock().unwrap();
+                let send_tx_opt = pm_guard.get_peer(&transport_addr).map(|peer| peer.send_tx.clone());
+                drop(pm_guard);
+                if let Some(send_tx) = send_tx_opt {
+                    (send_tx, wire_format.len())
+                } else {
+                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        format!("Peer not found: {:?}", transport_addr)
+                    ));
+                }
+            };
+            
+            // Send message via channel (non-blocking, doesn't require holding guard)
+            send_tx.send(wire_format)
+                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
+                ))?;
+            
+            // Update peer statistics (need to hold lock briefly for this)
             {
                 let network = network_manager.read().await;
-                network.send_to_peer(peer_addr, wire_format).await
-                    .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
-                    ))?;
-                drop(network);
+                let mut pm = network.peer_manager.lock().unwrap();
+                if let Some(peer) = pm.get_peer_mut(&transport_addr) {
+                    peer.record_send(message_len);
+                }
             }
             
             // Await response with timeout (30 seconds)
@@ -374,13 +415,54 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 ))?;
             
             // Send message to peer via NetworkManager
+            // Extract transport address first, then send without holding the guard across await
+            let transport_addr = {
+                let network = network_manager.read().await;
+                let pm_guard = network.peer_manager.lock().unwrap();
+                let transport_addr_opt = pm_guard.find_transport_addr_by_socket(peer_addr);
+                drop(pm_guard);
+                transport_addr_opt
+                    .or_else(|| {
+                        let network = network_manager.read().await;
+                        let socket_guard = network.socket_to_transport.lock().unwrap();
+                        let result = socket_guard.get(&peer_addr).cloned();
+                        drop(socket_guard);
+                        result
+                    })
+                    .unwrap_or_else(|| crate::network::transport::TransportAddr::Tcp(peer_addr))
+            };
+            
+            // Now send without holding the guard - extract peer's send channel and send directly
+            // This avoids holding the RwLockReadGuard across await points
+            // Also track bytes sent for statistics
+            let (send_tx, message_len) = {
+                let network = network_manager.read().await;
+                network.track_bytes_sent(wire_format.len() as u64);
+                let pm_guard = network.peer_manager.lock().unwrap();
+                let send_tx_opt = pm_guard.get_peer(&transport_addr).map(|peer| peer.send_tx.clone());
+                drop(pm_guard);
+                if let Some(send_tx) = send_tx_opt {
+                    (send_tx, wire_format.len())
+                } else {
+                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        format!("Peer not found: {:?}", transport_addr)
+                    ));
+                }
+            };
+            
+            // Send message via channel (non-blocking, doesn't require holding guard)
+            send_tx.send(wire_format)
+                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
+                ))?;
+            
+            // Update peer statistics (need to hold lock briefly for this)
             {
                 let network = network_manager.read().await;
-                network.send_to_peer(peer_addr, wire_format).await
-                    .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
-                    ))?;
-                drop(network);
+                let mut pm = network.peer_manager.lock().unwrap();
+                if let Some(peer) = pm.get_peer_mut(&transport_addr) {
+                    peer.record_send(message_len);
+                }
             }
             
             // Await response with timeout (30 seconds)

@@ -143,13 +143,18 @@ impl RpcServer {
                     let server = Arc::clone(&server);
                     
                     // Spawn task to handle connection
+                    // Clone values before moving into async block to ensure Send
+                    let server_for_spawn = Arc::clone(&server);
+                    let peer_addr_for_spawn = peer_addr;
                     tokio::spawn(async move {
                         // Use hyper for HTTP - it will handle protocol detection and parsing
                         let io = TokioIo::new(stream);
-                        let server_clone = Arc::clone(&server);
-                        let peer_addr_clone = peer_addr;
+                        let server_clone = Arc::clone(&server_for_spawn);
+                        let peer_addr_clone = peer_addr_for_spawn;
                         let service = service_fn(move |req| {
-                            Self::handle_http_request_with_server(Arc::clone(&server_clone), req, peer_addr_clone)
+                            let server_inner = Arc::clone(&server_clone);
+                            let addr_inner = peer_addr_clone;
+                            Self::handle_http_request_with_server(server_inner, req, addr_inner)
                         });
                         
                         // Try to serve as HTTP

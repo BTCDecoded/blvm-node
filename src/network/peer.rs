@@ -19,7 +19,7 @@ pub struct Peer {
     addr: SocketAddr,
     transport_addr: TransportAddr, // Full transport address (may differ from SocketAddr for Iroh)
     message_tx: mpsc::UnboundedSender<NetworkMessage>,
-    send_tx: mpsc::UnboundedSender<Vec<u8>>, // Channel for sending messages
+    pub(crate) send_tx: mpsc::UnboundedSender<Vec<u8>>, // Channel for sending messages
     connected: bool,
     /// Connection time (Unix timestamp)
     conntime: u64,
