@@ -50,14 +50,11 @@ impl BlockchainRpc {
         // Use bits directly for difficulty approximation
         // Lower bits value = higher difficulty
         let mantissa = (bits & 0x00ffffff) as f64;
-            if mantissa == 0.0 {
-                return 1.0;
-            }
-            let max_mantissa = 0x00ffff00 as f64;
-            (max_mantissa / mantissa).max(1.0)
-        } else {
-            1.0
+        if mantissa == 0.0 {
+            return 1.0;
         }
+        let max_mantissa = 0x00ffff00 as f64;
+        (max_mantissa / mantissa).max(1.0)
     }
 
     /// Calculate median time from recent headers (BIP113)
