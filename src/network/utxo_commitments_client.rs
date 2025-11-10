@@ -206,14 +206,12 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             
             // Send message to peer via NetworkManager
             {
-                let send_future = {
-                    let network = network_manager.read().await;
-                    network.send_to_peer(peer_addr, wire_format)
-                };
-                send_future.await
+                let network = network_manager.read().await;
+                network.send_to_peer(peer_addr, wire_format).await
                     .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
                     ))?;
+                drop(network);
             }
             
             // Await response with timeout (30 seconds)
@@ -377,14 +375,12 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             
             // Send message to peer via NetworkManager
             {
-                let send_future = {
-                    let network = network_manager.read().await;
-                    network.send_to_peer(peer_addr, wire_format)
-                };
-                send_future.await
+                let network = network_manager.read().await;
+                network.send_to_peer(peer_addr, wire_format).await
                     .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
                     ))?;
+                drop(network);
             }
             
             // Await response with timeout (30 seconds)
