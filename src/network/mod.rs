@@ -57,7 +57,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use crate::storage::Storage;
 use crate::node::mempool::MempoolManager;
 
