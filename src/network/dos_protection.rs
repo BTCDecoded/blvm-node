@@ -353,18 +353,18 @@ mod tests {
     async fn test_message_queue_limit() {
         let dos = DosProtectionManager::new(10, 60, 100, 50);
 
-        assert!(dos.check_message_queue_size(50));
-        assert!(dos.check_message_queue_size(100));
-        assert!(!dos.check_message_queue_size(101));
+        assert!(dos.check_message_queue_size(50).await);
+        assert!(dos.check_message_queue_size(100).await);
+        assert!(!dos.check_message_queue_size(101).await);
     }
 
     #[tokio::test]
     async fn test_active_connection_limit() {
         let dos = DosProtectionManager::new(10, 60, 100, 50);
 
-        assert!(dos.check_active_connections(49));
-        assert!(dos.check_active_connections(50));
-        assert!(!dos.check_active_connections(51));
+        assert!(dos.check_active_connections(49).await);
+        assert!(dos.check_active_connections(50).await);
+        assert!(!dos.check_active_connections(51).await);
     }
 
     #[tokio::test]

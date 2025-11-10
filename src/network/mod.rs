@@ -3238,12 +3238,13 @@ mod tests {
     async fn test_peer_manager_remove_peer() {
         let mut manager = PeerManager::new(10);
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let transport_addr = TransportAddr::from(addr);
 
         // Test manager logic without creating real peers
         assert_eq!(manager.peer_count(), 0);
 
         // Test removing non-existent peer
-        let removed_peer = manager.remove_peer(addr);
+        let removed_peer = manager.remove_peer(&transport_addr);
         assert!(removed_peer.is_none());
         assert_eq!(manager.peer_count(), 0);
     }
@@ -3252,12 +3253,13 @@ mod tests {
     async fn test_peer_manager_get_peer() {
         let mut manager = PeerManager::new(10);
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let transport_addr = TransportAddr::from(addr);
 
         // Test manager logic without creating real peers
         assert_eq!(manager.peer_count(), 0);
 
         // Test getting non-existent peer
-        let retrieved_peer = manager.get_peer(addr);
+        let retrieved_peer = manager.get_peer(&transport_addr);
         assert!(retrieved_peer.is_none());
     }
 
@@ -3366,10 +3368,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_message_peer_connected() {
-        let message = NetworkMessage::PeerConnected("127.0.0.1:8080".parse().unwrap());
+        let socket_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let transport_addr = TransportAddr::from(socket_addr);
+        let message = NetworkMessage::PeerConnected(transport_addr.clone());
         match message {
             NetworkMessage::PeerConnected(addr) => {
-                assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+                assert_eq!(addr, transport_addr);
             }
             _ => panic!("Expected PeerConnected message"),
         }
@@ -3377,10 +3381,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_message_peer_disconnected() {
-        let message = NetworkMessage::PeerDisconnected("127.0.0.1:8080".parse().unwrap());
+        let socket_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let transport_addr = TransportAddr::from(socket_addr);
+        let message = NetworkMessage::PeerDisconnected(transport_addr.clone());
         match message {
             NetworkMessage::PeerDisconnected(addr) => {
-                assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+                assert_eq!(addr, transport_addr);
             }
             _ => panic!("Expected PeerDisconnected message"),
         }
