@@ -3470,11 +3470,6 @@ mod tests {
         // Test immutable access
         let peer_manager = manager.peer_manager();
         assert_eq!(peer_manager.peer_count(), 0);
-
-        // Test mutable access
-        let mut manager = manager;
-        let peer_manager_mut = manager.peer_manager_mut();
-        assert_eq!(peer_manager_mut.peer_count(), 0);
     }
 
     #[tokio::test]

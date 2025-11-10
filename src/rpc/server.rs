@@ -517,6 +517,7 @@ mod tests {
         // Start server on random port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
+        let server = Arc::new(RpcServer::new(server_addr));
 
         // Spawn server task using hyper
         let server_handle = tokio::spawn(async move {
@@ -524,10 +525,11 @@ mod tests {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
                         let peer_addr = addr;
+                        let server_clone = server.clone();
                         tokio::spawn(async move {
                             let io = TokioIo::new(stream);
                             let service = service_fn(move |req| {
-                                RpcServer::handle_http_request(req, peer_addr)
+                                RpcServer::handle_http_request_with_server(server_clone.clone(), req, peer_addr)
                             });
                             let _ = http1::Builder::new().serve_connection(io, service).await;
                         });
@@ -651,7 +653,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_getblockchaininfo() {
-        let result = RpcServer::call_method("getblockchaininfo", json!([])).await;
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        let result = server.call_method("getblockchaininfo", json!([])).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.get("chain").is_some());
@@ -659,8 +662,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_getblock() {
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
         let params = json!(["000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"]);
-        let result = RpcServer::call_method("getblock", params).await;
+        let result = server.call_method("getblock", params).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.get("hash").is_some());
@@ -668,8 +672,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_getblockhash() {
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
         let params = json!([0]);
-        let result = RpcServer::call_method("getblockhash", params).await;
+        let result = server.call_method("getblockhash", params).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.is_string());
@@ -677,8 +682,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_getrawtransaction() {
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
         let params = json!(["0000000000000000000000000000000000000000000000000000000000000000"]);
-        let result = RpcServer::call_method("getrawtransaction", params).await;
+        let result = server.call_method("getrawtransaction", params).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.get("txid").is_some());
@@ -686,7 +692,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_getnetworkinfo() {
-        let result = RpcServer::call_method("getnetworkinfo", json!([])).await;
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        let result = server.call_method("getnetworkinfo", json!([])).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.get("version").is_some());
@@ -694,7 +701,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_getpeerinfo() {
-        let result = RpcServer::call_method("getpeerinfo", json!([])).await;
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        let result = server.call_method("getpeerinfo", json!([])).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.is_array());
@@ -702,7 +710,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_getmininginfo() {
-        let result = RpcServer::call_method("getmininginfo", json!([])).await;
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        let result = server.call_method("getmininginfo", json!([])).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.get("blocks").is_some());
@@ -710,7 +719,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_getblocktemplate() {
-        let result = RpcServer::call_method("getblocktemplate", json!([])).await;
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        let result = server.call_method("getblocktemplate", json!([])).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.get("version").is_some());
@@ -718,7 +728,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_method_unknown_method() {
-        let result = RpcServer::call_method("unknown_method", json!([])).await;
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        let result = server.call_method("unknown_method", json!([])).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Method not found"));
     }

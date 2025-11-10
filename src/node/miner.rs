@@ -976,9 +976,11 @@ mod tests {
     #[tokio::test]
     async fn test_mining_coordinator_mempool_operations() {
         use std::sync::Arc;
-        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        // Create mempool and add transaction before wrapping in Arc
+        let mut mempool_manager = crate::node::mempool::MempoolManager::new();
         let tx = create_test_transaction(1, 1000);
-        let _ = mempool.add_transaction(tx).await;
+        let _ = mempool_manager.add_transaction(tx).await;
+        let mempool = Arc::new(mempool_manager);
         let coordinator = MiningCoordinator::new(mempool, None);
 
         assert_eq!(coordinator.get_mempool_size(), 1);
@@ -987,9 +989,11 @@ mod tests {
     #[tokio::test]
     async fn test_mining_coordinator_block_template_generation() {
         use std::sync::Arc;
-        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        // Create mempool and add transaction before wrapping in Arc
+        let mut mempool_manager = crate::node::mempool::MempoolManager::new();
         let tx = create_test_transaction(1, 1000);
-        let _ = mempool.add_transaction(tx).await;
+        let _ = mempool_manager.add_transaction(tx).await;
+        let mempool = Arc::new(mempool_manager);
 
         let mut coordinator = MiningCoordinator::new(mempool, None);
 
