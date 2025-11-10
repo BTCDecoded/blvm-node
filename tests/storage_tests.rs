@@ -4,11 +4,11 @@ use bllvm_consensus::*;
 use bllvm_node::storage::*;
 use tempfile::TempDir;
 mod common;
-use common::*;
 use bllvm_node::storage::blockstore::BlockStore;
 use bllvm_node::storage::chainstate::ChainState;
 use bllvm_node::storage::txindex::TxIndex;
 use bllvm_node::storage::utxostore::UtxoStore;
+use common::*;
 
 #[test]
 fn test_storage_creation() {

@@ -4,13 +4,13 @@
 //! without requiring full block history.
 
 #[cfg(feature = "utxo-commitments")]
+use crate::storage::database::{Database, Tree};
+#[cfg(feature = "utxo-commitments")]
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
 #[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::Hash;
-#[cfg(feature = "utxo-commitments")]
-use crate::storage::database::{Database, Tree};
 #[cfg(feature = "utxo-commitments")]
 use std::sync::Arc;
 
@@ -48,11 +48,13 @@ impl CommitmentStore {
         let commitment_data = bincode::serialize(commitment)?;
 
         // Store by block hash
-        self.commitments.insert(block_hash.as_slice(), &commitment_data)?;
+        self.commitments
+            .insert(block_hash.as_slice(), &commitment_data)?;
 
         // Store height index for quick lookup
         let height_bytes = height.to_be_bytes();
-        self.height_index.insert(&height_bytes, block_hash.as_slice())?;
+        self.height_index
+            .insert(&height_bytes, block_hash.as_slice())?;
 
         Ok(())
     }
@@ -128,4 +130,3 @@ impl CommitmentStore {
         Err(anyhow::anyhow!("UTXO commitments feature not enabled"))
     }
 }
-

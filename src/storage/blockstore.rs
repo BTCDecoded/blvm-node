@@ -2,10 +2,10 @@
 //!
 //! Stores blocks by hash and maintains block index by height.
 
+use crate::storage::database::{Database, Tree};
 use anyhow::Result;
 use bllvm_protocol::segwit::Witness;
 use bllvm_protocol::{Block, BlockHeader, Hash};
-use crate::storage::database::{Database, Tree};
 use std::sync::Arc;
 
 /// Block storage manager
@@ -45,8 +45,7 @@ impl BlockStore {
 
         self.blocks.insert(block_hash.as_slice(), &block_data)?;
         let header_data = bincode::serialize(&block.header)?;
-        self.headers
-            .insert(block_hash.as_slice(), &header_data)?;
+        self.headers.insert(block_hash.as_slice(), &header_data)?;
 
         // Store header for median time-past calculation
         // We'll need height passed separately, so this will be called after store_height
@@ -81,7 +80,8 @@ impl BlockStore {
     /// Store witness data for a block
     pub fn store_witness(&self, block_hash: &Hash, witness: &[Witness]) -> Result<()> {
         let witness_data = bincode::serialize(witness)?;
-        self.witnesses.insert(block_hash.as_slice(), &witness_data)?;
+        self.witnesses
+            .insert(block_hash.as_slice(), &witness_data)?;
         Ok(())
     }
 

@@ -7,44 +7,44 @@ use anyhow::Result;
 use std::path::Path;
 
 /// Database abstraction trait
-/// 
+///
 /// Provides a unified interface for key-value storage operations
 /// that can be implemented by different backends (sled, redb).
 pub trait Database: Send + Sync {
     /// Open a named tree/table
     fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>>;
-    
+
     /// Flush all pending writes
     fn flush(&self) -> Result<()>;
 }
 
 /// Tree/Table abstraction trait
-/// 
+///
 /// Represents a named collection of key-value pairs within a database.
 pub trait Tree: Send + Sync {
     /// Insert a key-value pair
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()>;
-    
+
     /// Get a value by key
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
-    
+
     /// Remove a key-value pair
     fn remove(&self, key: &[u8]) -> Result<()>;
-    
+
     /// Check if a key exists
     fn contains_key(&self, key: &[u8]) -> Result<bool>;
-    
+
     /// Clear all entries
     fn clear(&self) -> Result<()>;
-    
+
     /// Get number of entries
     fn len(&self) -> Result<usize>;
-    
+
     /// Check if tree is empty
     fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
     }
-    
+
     /// Iterate over all key-value pairs
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_>;
 }
@@ -63,26 +63,22 @@ pub fn create_database<P: AsRef<Path>>(
 ) -> Result<Box<dyn Database>> {
     match backend {
         #[cfg(feature = "sled")]
-        DatabaseBackend::Sled => {
-            Ok(Box::new(sled_impl::SledDatabase::new(data_dir)?))
-        }
+        DatabaseBackend::Sled => Ok(Box::new(sled_impl::SledDatabase::new(data_dir)?)),
         #[cfg(not(feature = "sled"))]
-        DatabaseBackend::Sled => {
-            Err(anyhow::anyhow!("Sled backend not available (feature not enabled)"))
-        }
+        DatabaseBackend::Sled => Err(anyhow::anyhow!(
+            "Sled backend not available (feature not enabled)"
+        )),
         #[cfg(feature = "redb")]
-        DatabaseBackend::Redb => {
-            Ok(Box::new(redb_impl::RedbDatabase::new(data_dir)?))
-        }
+        DatabaseBackend::Redb => Ok(Box::new(redb_impl::RedbDatabase::new(data_dir)?)),
         #[cfg(not(feature = "redb"))]
-        DatabaseBackend::Redb => {
-            Err(anyhow::anyhow!("Redb backend not available (feature not enabled)"))
-        }
+        DatabaseBackend::Redb => Err(anyhow::anyhow!(
+            "Redb backend not available (feature not enabled)"
+        )),
     }
 }
 
 /// Get default database backend
-/// 
+///
 /// Returns the preferred backend (redb if available, otherwise sled).
 /// This function will not panic - it returns a backend if at least one is available.
 pub fn default_backend() -> DatabaseBackend {
@@ -104,7 +100,7 @@ pub fn default_backend() -> DatabaseBackend {
 }
 
 /// Get fallback database backend
-/// 
+///
 /// Returns an alternative backend if the primary fails.
 /// Returns None if no fallback is available.
 pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
@@ -148,9 +144,7 @@ mod sled_impl {
     impl SledDatabase {
         pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
             let db = sled::open(data_dir)?;
-            Ok(Self {
-                db: Arc::new(db),
-            })
+            Ok(Self { db: Arc::new(db) })
         }
     }
 
@@ -224,15 +218,18 @@ mod redb_impl {
     static HEADERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("headers");
     static HEIGHT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("height_index");
     static WITNESSES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("witnesses");
-    static RECENT_HEADERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("recent_headers");
+    static RECENT_HEADERS_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("recent_headers");
     static UTXOS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("utxos");
-    static SPENT_OUTPUTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("spent_outputs");
+    static SPENT_OUTPUTS_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("spent_outputs");
     static CHAIN_INFO_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_info");
     static WORK_CACHE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("work_cache");
     static TX_BY_HASH_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_by_hash");
     static TX_BY_BLOCK_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_by_block");
     static TX_METADATA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_metadata");
-    static INVALID_BLOCKS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("invalid_blocks");
+    static INVALID_BLOCKS_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("invalid_blocks");
     static CHAIN_TIPS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_tips");
 
     pub struct RedbDatabase {
@@ -243,7 +240,7 @@ mod redb_impl {
         pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
             let db_path = data_dir.as_ref().join("redb.db");
             let db = RedbDb::create(&db_path)?;
-            
+
             // Initialize all tables in a write transaction
             let write_txn = db.begin_write()?;
             {
@@ -264,13 +261,14 @@ mod redb_impl {
                 let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
             }
             write_txn.commit()?;
-            
-            Ok(Self {
-                db: Arc::new(db),
-            })
+
+            Ok(Self { db: Arc::new(db) })
         }
-        
-        fn get_table_def(&self, name: &str) -> Option<&'static TableDefinition<'static, &'static [u8], &'static [u8]>> {
+
+        fn get_table_def(
+            &self,
+            name: &str,
+        ) -> Option<&'static TableDefinition<'static, &'static [u8], &'static [u8]>> {
             match name {
                 "blocks" => Some(&BLOCKS_TABLE),
                 "headers" => Some(&HEADERS_TABLE),
@@ -293,9 +291,13 @@ mod redb_impl {
 
     impl Database for RedbDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            let table_def = self.get_table_def(name)
-                .ok_or_else(|| anyhow::anyhow!("Unknown table name: {}. Redb requires pre-defined tables.", name))?;
-            
+            let table_def = self.get_table_def(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown table name: {}. Redb requires pre-defined tables.",
+                    name
+                )
+            })?;
+
             Ok(Box::new(RedbTree {
                 db: Arc::clone(&self.db),
                 table_def,
@@ -376,4 +378,3 @@ mod redb_impl {
         }
     }
 }
-

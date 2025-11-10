@@ -7,8 +7,8 @@
 //! - FilteredBlock: Response with filtered transactions
 
 use crate::network::protocol::*;
-use crate::storage::Storage;
 use crate::network::txhash::calculate_txid;
+use crate::storage::Storage;
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
@@ -41,7 +41,7 @@ pub async fn handle_get_utxo_set(
     // Get UTXO set from storage
     let utxo_set = storage.utxos().get_all_utxos()?;
     let utxo_count = utxo_set.len() as u64;
-    
+
     // Calculate total supply
     let total_supply: u64 = utxo_set.values().map(|utxo| utxo.value as u64).sum();
 
@@ -49,10 +49,11 @@ pub async fn handle_get_utxo_set(
     #[cfg(feature = "utxo-commitments")]
     let mut utxo_tree = UtxoMerkleTree::new()
         .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
-    
+
     #[cfg(feature = "utxo-commitments")]
     for (outpoint, utxo) in &utxo_set {
-        utxo_tree.insert(outpoint.clone(), utxo.clone())
+        utxo_tree
+            .insert(outpoint.clone(), utxo.clone())
             .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
     }
 
@@ -68,7 +69,7 @@ pub async fn handle_get_utxo_set(
     // Generate commitment
     #[cfg(feature = "utxo-commitments")]
     let commitment = utxo_tree.generate_commitment(block_hash, block_height);
-    
+
     #[cfg(not(feature = "utxo-commitments"))]
     let commitment = crate::network::protocol::UTXOCommitment {
         merkle_root: [0; 32],
@@ -161,17 +162,23 @@ pub async fn handle_get_filtered_block(
     #[cfg(feature = "utxo-commitments")]
     let (filtered_txs, spam_summary_from_filter) = spam_filter.filter_block(&block.transactions);
     #[cfg(not(feature = "utxo-commitments"))]
-    let (filtered_txs, spam_summary_from_filter): (Vec<bllvm_protocol::Transaction>, crate::network::protocol::SpamSummary) = (block.transactions.clone(), crate::network::protocol::SpamSummary {
-        filtered_count: 0,
-        filtered_size: 0,
-        by_type: crate::network::protocol::SpamBreakdown {
-            ordinals: 0,
-            inscriptions: 0,
-            dust: 0,
-            brc20: 0,
+    let (filtered_txs, spam_summary_from_filter): (
+        Vec<bllvm_protocol::Transaction>,
+        crate::network::protocol::SpamSummary,
+    ) = (
+        block.transactions.clone(),
+        crate::network::protocol::SpamSummary {
+            filtered_count: 0,
+            filtered_size: 0,
+            by_type: crate::network::protocol::SpamBreakdown {
+                ordinals: 0,
+                inscriptions: 0,
+                dust: 0,
+                brc20: 0,
+            },
         },
-    });
-    
+    );
+
     // Convert spam summary to protocol types
     let spam_summary = SpamSummary {
         filtered_count: spam_summary_from_filter.filtered_count,
@@ -186,9 +193,8 @@ pub async fn handle_get_filtered_block(
 
     // Generate transaction indices (positions of filtered transactions in original block)
     let mut transaction_indices = Vec::new();
-    let filtered_txids: std::collections::HashSet<_> = filtered_txs.iter()
-        .map(|tx| calculate_txid(tx))
-        .collect();
+    let filtered_txids: std::collections::HashSet<_> =
+        filtered_txs.iter().map(|tx| calculate_txid(tx)).collect();
     for (original_idx, tx) in block.transactions.iter().enumerate() {
         let txid = calculate_txid(tx);
         if filtered_txids.contains(&txid) {
@@ -200,7 +206,7 @@ pub async fn handle_get_filtered_block(
     #[cfg(feature = "utxo-commitments")]
     let mut utxo_tree = UtxoMerkleTree::new()
         .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
-    
+
     #[cfg(feature = "utxo-commitments")]
     // Add outputs from filtered transactions
     for tx in &filtered_txs {
@@ -227,7 +233,7 @@ pub async fn handle_get_filtered_block(
     // Generate commitment for filtered block
     #[cfg(feature = "utxo-commitments")]
     let commitment = utxo_tree.generate_commitment(message.block_hash, block_height);
-    
+
     #[cfg(not(feature = "utxo-commitments"))]
     let commitment = crate::network::protocol::UTXOCommitment {
         merkle_root: [0; 32],

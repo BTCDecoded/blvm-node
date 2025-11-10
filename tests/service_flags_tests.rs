@@ -2,10 +2,12 @@
 
 #[cfg(test)]
 mod tests {
-    use bllvm_node::network::protocol::VersionMessage;
-    use bllvm_node::network::protocol::{NODE_UTXO_COMMITMENTS, NODE_BAN_LIST_SHARING, NODE_PACKAGE_RELAY, NODE_FIBRE};
-    use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
     use bllvm_node::network::protocol::NetworkAddress;
+    use bllvm_node::network::protocol::VersionMessage;
+    use bllvm_node::network::protocol::{
+        NODE_BAN_LIST_SHARING, NODE_FIBRE, NODE_PACKAGE_RELAY, NODE_UTXO_COMMITMENTS,
+    };
+    use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
 
     fn create_version_message(services: u64) -> VersionMessage {
         VersionMessage {
@@ -36,19 +38,34 @@ mod tests {
             // Peer with UTXO commitments support
             let services = NODE_UTXO_COMMITMENTS;
             let version = create_version_message(services);
-            assert!(version.supports_utxo_commitments(), "Should support UTXO commitments");
+            assert!(
+                version.supports_utxo_commitments(),
+                "Should support UTXO commitments"
+            );
 
             // Peer without UTXO commitments support
             let services = 0;
             let version = create_version_message(services);
-            assert!(!version.supports_utxo_commitments(), "Should not support UTXO commitments");
+            assert!(
+                !version.supports_utxo_commitments(),
+                "Should not support UTXO commitments"
+            );
 
             // Peer with multiple flags including UTXO commitments
             let services = NODE_UTXO_COMMITMENTS | NODE_COMPACT_FILTERS | NODE_PACKAGE_RELAY;
             let version = create_version_message(services);
-            assert!(version.supports_utxo_commitments(), "Should support UTXO commitments with other flags");
-            assert!(version.supports_compact_filters(), "Should also support compact filters");
-            assert!(version.supports_package_relay(), "Should also support package relay");
+            assert!(
+                version.supports_utxo_commitments(),
+                "Should support UTXO commitments with other flags"
+            );
+            assert!(
+                version.supports_compact_filters(),
+                "Should also support compact filters"
+            );
+            assert!(
+                version.supports_package_relay(),
+                "Should also support package relay"
+            );
         }
     }
 
@@ -57,18 +74,30 @@ mod tests {
         // Peer with ban list sharing support
         let services = NODE_BAN_LIST_SHARING;
         let version = create_version_message(services);
-        assert!(version.supports_ban_list_sharing(), "Should support ban list sharing");
+        assert!(
+            version.supports_ban_list_sharing(),
+            "Should support ban list sharing"
+        );
 
         // Peer without ban list sharing support
         let services = 0;
         let version = create_version_message(services);
-        assert!(!version.supports_ban_list_sharing(), "Should not support ban list sharing");
+        assert!(
+            !version.supports_ban_list_sharing(),
+            "Should not support ban list sharing"
+        );
 
         // Peer with multiple flags including ban list sharing
         let services = NODE_BAN_LIST_SHARING | NODE_COMPACT_FILTERS | NODE_FIBRE;
         let version = create_version_message(services);
-        assert!(version.supports_ban_list_sharing(), "Should support ban list sharing with other flags");
-        assert!(version.supports_compact_filters(), "Should also support compact filters");
+        assert!(
+            version.supports_ban_list_sharing(),
+            "Should support ban list sharing with other flags"
+        );
+        assert!(
+            version.supports_compact_filters(),
+            "Should also support compact filters"
+        );
         assert!(version.supports_fibre(), "Should also support FIBRE");
     }
 
@@ -77,12 +106,18 @@ mod tests {
         // Peer with compact filters support
         let services = NODE_COMPACT_FILTERS;
         let version = create_version_message(services);
-        assert!(version.supports_compact_filters(), "Should support compact filters");
+        assert!(
+            version.supports_compact_filters(),
+            "Should support compact filters"
+        );
 
         // Peer without compact filters support
         let services = 0;
         let version = create_version_message(services);
-        assert!(!version.supports_compact_filters(), "Should not support compact filters");
+        assert!(
+            !version.supports_compact_filters(),
+            "Should not support compact filters"
+        );
     }
 
     #[test]
@@ -90,12 +125,18 @@ mod tests {
         // Peer with package relay support
         let services = NODE_PACKAGE_RELAY;
         let version = create_version_message(services);
-        assert!(version.supports_package_relay(), "Should support package relay");
+        assert!(
+            version.supports_package_relay(),
+            "Should support package relay"
+        );
 
         // Peer without package relay support
         let services = 0;
         let version = create_version_message(services);
-        assert!(!version.supports_package_relay(), "Should not support package relay");
+        assert!(
+            !version.supports_package_relay(),
+            "Should not support package relay"
+        );
     }
 
     #[test]
@@ -115,18 +156,33 @@ mod tests {
     fn test_multiple_flags() {
         // Peer with all flags
         #[cfg(feature = "utxo-commitments")]
-        let services = NODE_UTXO_COMMITMENTS | NODE_BAN_LIST_SHARING | NODE_COMPACT_FILTERS | 
-                      NODE_PACKAGE_RELAY | NODE_FIBRE;
+        let services = NODE_UTXO_COMMITMENTS
+            | NODE_BAN_LIST_SHARING
+            | NODE_COMPACT_FILTERS
+            | NODE_PACKAGE_RELAY
+            | NODE_FIBRE;
         #[cfg(not(feature = "utxo-commitments"))]
-        let services = NODE_BAN_LIST_SHARING | NODE_COMPACT_FILTERS | 
-                      NODE_PACKAGE_RELAY | NODE_FIBRE;
+        let services =
+            NODE_BAN_LIST_SHARING | NODE_COMPACT_FILTERS | NODE_PACKAGE_RELAY | NODE_FIBRE;
         let version = create_version_message(services);
-        
+
         #[cfg(feature = "utxo-commitments")]
-        assert!(version.supports_utxo_commitments(), "Should support UTXO commitments");
-        assert!(version.supports_ban_list_sharing(), "Should support ban list sharing");
-        assert!(version.supports_compact_filters(), "Should support compact filters");
-        assert!(version.supports_package_relay(), "Should support package relay");
+        assert!(
+            version.supports_utxo_commitments(),
+            "Should support UTXO commitments"
+        );
+        assert!(
+            version.supports_ban_list_sharing(),
+            "Should support ban list sharing"
+        );
+        assert!(
+            version.supports_compact_filters(),
+            "Should support compact filters"
+        );
+        assert!(
+            version.supports_package_relay(),
+            "Should support package relay"
+        );
         assert!(version.supports_fibre(), "Should support FIBRE");
     }
 
@@ -137,10 +193,19 @@ mod tests {
         {
             let services = NODE_UTXO_COMMITMENTS;
             let version = create_version_message(services);
-            
-            assert!(version.supports_utxo_commitments(), "Should support UTXO commitments");
-            assert!(!version.supports_ban_list_sharing(), "Should not support ban list sharing");
-            assert!(!version.supports_compact_filters(), "Should not support compact filters");
+
+            assert!(
+                version.supports_utxo_commitments(),
+                "Should support UTXO commitments"
+            );
+            assert!(
+                !version.supports_ban_list_sharing(),
+                "Should not support ban list sharing"
+            );
+            assert!(
+                !version.supports_compact_filters(),
+                "Should not support compact filters"
+            );
         }
     }
 
@@ -149,22 +214,57 @@ mod tests {
         // Verify bit positions don't overlap
         #[cfg(feature = "utxo-commitments")]
         {
-            assert_eq!(NODE_UTXO_COMMITMENTS, 1 << 27, "UTXO commitments should be bit 27");
+            assert_eq!(
+                NODE_UTXO_COMMITMENTS,
+                1 << 27,
+                "UTXO commitments should be bit 27"
+            );
         }
-        assert_eq!(NODE_BAN_LIST_SHARING, 1 << 28, "Ban list sharing should be bit 28");
-        assert_eq!(NODE_PACKAGE_RELAY, 1 << 25, "Package relay should be bit 25");
+        assert_eq!(
+            NODE_BAN_LIST_SHARING,
+            1 << 28,
+            "Ban list sharing should be bit 28"
+        );
+        assert_eq!(
+            NODE_PACKAGE_RELAY,
+            1 << 25,
+            "Package relay should be bit 25"
+        );
         assert_eq!(NODE_FIBRE, 1 << 26, "FIBRE should be bit 26");
-        
+
         // Verify no overlap
         #[cfg(feature = "utxo-commitments")]
         {
-            assert_eq!(NODE_UTXO_COMMITMENTS & NODE_BAN_LIST_SHARING, 0, "Flags should not overlap");
-            assert_eq!(NODE_UTXO_COMMITMENTS & NODE_PACKAGE_RELAY, 0, "Flags should not overlap");
-            assert_eq!(NODE_UTXO_COMMITMENTS & NODE_FIBRE, 0, "Flags should not overlap");
+            assert_eq!(
+                NODE_UTXO_COMMITMENTS & NODE_BAN_LIST_SHARING,
+                0,
+                "Flags should not overlap"
+            );
+            assert_eq!(
+                NODE_UTXO_COMMITMENTS & NODE_PACKAGE_RELAY,
+                0,
+                "Flags should not overlap"
+            );
+            assert_eq!(
+                NODE_UTXO_COMMITMENTS & NODE_FIBRE,
+                0,
+                "Flags should not overlap"
+            );
         }
-        assert_eq!(NODE_BAN_LIST_SHARING & NODE_PACKAGE_RELAY, 0, "Flags should not overlap");
-        assert_eq!(NODE_BAN_LIST_SHARING & NODE_FIBRE, 0, "Flags should not overlap");
-        assert_eq!(NODE_PACKAGE_RELAY & NODE_FIBRE, 0, "Flags should not overlap");
+        assert_eq!(
+            NODE_BAN_LIST_SHARING & NODE_PACKAGE_RELAY,
+            0,
+            "Flags should not overlap"
+        );
+        assert_eq!(
+            NODE_BAN_LIST_SHARING & NODE_FIBRE,
+            0,
+            "Flags should not overlap"
+        );
+        assert_eq!(
+            NODE_PACKAGE_RELAY & NODE_FIBRE,
+            0,
+            "Flags should not overlap"
+        );
     }
 }
-

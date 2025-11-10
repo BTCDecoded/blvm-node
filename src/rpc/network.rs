@@ -18,12 +18,16 @@ pub struct NetworkRpc {
 impl NetworkRpc {
     /// Create a new network RPC handler
     pub fn new() -> Self {
-        Self { network_manager: None }
+        Self {
+            network_manager: None,
+        }
     }
 
     /// Create with dependencies
     pub fn with_dependencies(network_manager: Arc<NetworkManager>) -> Self {
-        Self { network_manager: Some(network_manager) }
+        Self {
+            network_manager: Some(network_manager),
+        }
     }
 
     /// Get network information
@@ -103,39 +107,42 @@ impl NetworkRpc {
         if let Some(ref network) = self.network_manager {
             let peer_manager = network.peer_manager();
             let peer_addresses = peer_manager.peer_addresses();
-            let peers: Vec<Value> = peer_addresses.iter().map(|addr| {
-                if let Some(peer) = peer_manager.get_peer(addr) {
-                    json!({
-                        "id": addr.port().unwrap_or(0) as u64, // Use port as peer ID (unique per connection)
-                        "addr": addr.to_string(),
-                        "addrlocal": "",
-                        "services": "0000000000000001",
-                        "relaytxes": true,
-                        "lastsend": peer.last_send(),
-                        "lastrecv": peer.last_recv(),
-                        "bytessent": peer.bytes_sent(),
-                        "bytesrecv": peer.bytes_recv(),
-                        "conntime": peer.conntime(),
-                        "timeoffset": 0,
-                        "pingtime": 0.0,
-                        "minping": 0.0,
-                        "version": 70015,
-                        "subver": "/reference-node:0.1.0/",
-                        "inbound": false,
-                        "addnode": false,
-                        "startingheight": 0,
-                        "synced_headers": -1,
-                        "synced_blocks": -1,
-                        "inflight": [],
-                        "whitelisted": false,
-                        "minfeefilter": 0.00001000,
-                        "bytessent_per_msg": {},
-                        "bytesrecv_per_msg": {}
-                    })
-                } else {
-                    json!({})
-                }
-            }).collect();
+            let peers: Vec<Value> = peer_addresses
+                .iter()
+                .map(|addr| {
+                    if let Some(peer) = peer_manager.get_peer(addr) {
+                        json!({
+                            "id": addr.port().unwrap_or(0) as u64, // Use port as peer ID (unique per connection)
+                            "addr": addr.to_string(),
+                            "addrlocal": "",
+                            "services": "0000000000000001",
+                            "relaytxes": true,
+                            "lastsend": peer.last_send(),
+                            "lastrecv": peer.last_recv(),
+                            "bytessent": peer.bytes_sent(),
+                            "bytesrecv": peer.bytes_recv(),
+                            "conntime": peer.conntime(),
+                            "timeoffset": 0,
+                            "pingtime": 0.0,
+                            "minping": 0.0,
+                            "version": 70015,
+                            "subver": "/reference-node:0.1.0/",
+                            "inbound": false,
+                            "addnode": false,
+                            "startingheight": 0,
+                            "synced_headers": -1,
+                            "synced_blocks": -1,
+                            "inflight": [],
+                            "whitelisted": false,
+                            "minfeefilter": 0.00001000,
+                            "bytessent_per_msg": {},
+                            "bytesrecv_per_msg": {}
+                        })
+                    } else {
+                        json!({})
+                    }
+                })
+                .collect();
             Ok(json!(peers))
         } else {
             Ok(json!([]))
@@ -164,7 +171,10 @@ impl NetworkRpc {
         if let Some(ref network) = self.network_manager {
             // Send ping to all peers
             if let Err(e) = network.ping_all_peers().await {
-                return Err(RpcError::internal_error(format!("Failed to ping peers: {}", e)));
+                return Err(RpcError::internal_error(format!(
+                    "Failed to ping peers: {}",
+                    e
+                )));
             }
             debug!("Sent ping to all connected peers");
         }
@@ -205,7 +215,10 @@ impl NetworkRpc {
                 "onetry" => {
                     // Try to connect to node once
                     if let Err(e) = network.connect_to_peer(addr).await {
-                        return Err(RpcError::internal_error(format!("Failed to connect to {}: {}", addr, e)));
+                        return Err(RpcError::internal_error(format!(
+                            "Failed to connect to {}: {}",
+                            addr, e
+                        )));
                     }
                     debug!("Connected to node {} (onetry)", addr);
                     Ok(json!(null))
@@ -310,7 +323,7 @@ impl NetworkRpc {
                 active_connection_limit_hits: 0,
                 resource_exhaustion_events: 0,
             };
-            
+
             Ok(json!({
                 "metrics": {
                     "connection_rate_violations": metrics.connection_rate_violations,
@@ -365,20 +378,20 @@ impl NetworkRpc {
         let addr: SocketAddr = subnet
             .parse()
             .map_err(|_| RpcError::invalid_params(format!("Invalid address/subnet: {}", subnet)))?;
-        
+
         // Parse bantime (seconds) - 0 = permanent
         let bantime = params.get(2).and_then(|p| p.as_u64()).unwrap_or(86400); // Default 24 hours
-        
+
         // Parse absolute (whether bantime is absolute timestamp or relative)
         let absolute = params.get(3).and_then(|p| p.as_bool()).unwrap_or(false);
-        
+
         if let Some(ref network) = self.network_manager {
             use std::time::{SystemTime, UNIX_EPOCH};
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            
+
             let unban_timestamp = if absolute {
                 bantime // Already a timestamp
             } else if bantime == 0 {
@@ -386,7 +399,7 @@ impl NetworkRpc {
             } else {
                 now + bantime // Relative ban
             };
-            
+
             match command {
                 "add" => {
                     network.ban_peer(addr, unban_timestamp);
@@ -422,17 +435,20 @@ impl NetworkRpc {
 
         if let Some(ref network) = self.network_manager {
             let banned = network.get_banned_peers();
-            let result: Vec<Value> = banned.iter().map(|(addr, unban_timestamp)| {
-                json!({
-                    "address": addr.to_string(),
-                    "banned_until": if *unban_timestamp == u64::MAX {
-                        serde_json::Value::Null // Permanent ban
-                    } else {
-                        serde_json::Value::Number((*unban_timestamp).into())
-                    },
-                    "banned_until_absolute": *unban_timestamp == u64::MAX
+            let result: Vec<Value> = banned
+                .iter()
+                .map(|(addr, unban_timestamp)| {
+                    json!({
+                        "address": addr.to_string(),
+                        "banned_until": if *unban_timestamp == u64::MAX {
+                            serde_json::Value::Null // Permanent ban
+                        } else {
+                            serde_json::Value::Number((*unban_timestamp).into())
+                        },
+                        "banned_until_absolute": *unban_timestamp == u64::MAX
+                    })
                 })
-            }).collect();
+                .collect();
             Ok(json!(result))
         } else {
             Ok(json!([]))
@@ -445,7 +461,8 @@ impl NetworkRpc {
     pub async fn getaddednodeinfo(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getaddednodeinfo");
 
-        let node = params.get(0)
+        let node = params
+            .get(0)
             .and_then(|p| p.as_str())
             .ok_or_else(|| RpcError::invalid_params("Node address required".to_string()))?;
 
@@ -453,7 +470,8 @@ impl NetworkRpc {
 
         if let Some(ref network) = self.network_manager {
             // Parse node address
-            let addr: SocketAddr = node.parse()
+            let addr: SocketAddr = node
+                .parse()
                 .map_err(|e| RpcError::invalid_params(format!("Invalid node address: {}", e)))?;
 
             // Check if node is in persistent peer list
@@ -494,15 +512,12 @@ impl NetworkRpc {
     pub async fn getnodeaddresses(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getnodeaddresses");
 
-        let count = params.get(0)
-            .and_then(|p| p.as_u64())
-            .unwrap_or(1)
-            .min(100) as usize; // Limit to 100
+        let count = params.get(0).and_then(|p| p.as_u64()).unwrap_or(1).min(100) as usize; // Limit to 100
 
         if let Some(ref network) = self.network_manager {
             // Get peer addresses
             let peer_addrs = network.get_peer_addresses().await;
-            
+
             // Convert to node address format
             let mut addresses = Vec::new();
             for addr in peer_addrs.into_iter().take(count) {
@@ -551,16 +566,19 @@ impl NetworkRpc {
     pub async fn setnetworkactive(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: setnetworkactive");
 
-        let state = params.get(0)
-            .and_then(|p| p.as_bool())
-            .ok_or_else(|| RpcError::invalid_params("State parameter required (true/false)".to_string()))?;
+        let state = params.get(0).and_then(|p| p.as_bool()).ok_or_else(|| {
+            RpcError::invalid_params("State parameter required (true/false)".to_string())
+        })?;
 
         if let Some(ref network) = self.network_manager {
-            network.set_network_active(state).await
-                .map_err(|e| RpcError::internal_error(format!("Failed to set network active: {}", e)))?;
+            network.set_network_active(state).await.map_err(|e| {
+                RpcError::internal_error(format!("Failed to set network active: {}", e))
+            })?;
             Ok(json!(state))
         } else {
-            Err(RpcError::internal_error("Network manager not available".to_string()))
+            Err(RpcError::internal_error(
+                "Network manager not available".to_string(),
+            ))
         }
     }
 }

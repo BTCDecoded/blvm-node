@@ -155,11 +155,9 @@ impl RequestValidator {
         let mut limiters = self.rate_limiters.lock().unwrap();
 
         // Get or create rate limiter for this module
-        let limiter = limiters
-            .entry(module_id.to_string())
-            .or_insert_with(|| {
-                RateLimiter::new(self.max_requests_per_second, self.time_window_seconds)
-            });
+        let limiter = limiters.entry(module_id.to_string()).or_insert_with(|| {
+            RateLimiter::new(self.max_requests_per_second, self.time_window_seconds)
+        });
 
         // Check rate limit
         if !limiter.check_rate_limit(self.max_requests_per_second, self.time_window_seconds) {

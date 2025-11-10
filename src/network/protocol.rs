@@ -2,9 +2,9 @@
 //!
 //! Implements Bitcoin P2P protocol message serialization and deserialization.
 
-use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
 use crate::network::transport::TransportType;
 use anyhow::Result;
+use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
 use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
 
@@ -145,28 +145,28 @@ impl VersionMessage {
     pub fn supports_utxo_commitments(&self) -> bool {
         (self.services & NODE_UTXO_COMMITMENTS) != 0
     }
-    
+
     /// Check if peer supports ban list sharing
     pub fn supports_ban_list_sharing(&self) -> bool {
         (self.services & NODE_BAN_LIST_SHARING) != 0
     }
-    
+
     /// Check if peer supports BIP157 compact block filters
     pub fn supports_compact_filters(&self) -> bool {
         use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
         (self.services & NODE_COMPACT_FILTERS) != 0
     }
-    
+
     /// Check if peer supports package relay (BIP331)
     pub fn supports_package_relay(&self) -> bool {
         (self.services & NODE_PACKAGE_RELAY) != 0
     }
-    
+
     /// Check if peer supports FIBRE
     pub fn supports_fibre(&self) -> bool {
         (self.services & NODE_FIBRE) != 0
     }
-    
+
     #[cfg(feature = "dandelion")]
     /// Check if peer supports Dandelion
     pub fn supports_dandelion(&self) -> bool {

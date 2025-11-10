@@ -38,7 +38,7 @@ pub async fn resolve_dns_seeds(
     max_addresses: usize,
 ) -> Vec<NetworkAddress> {
     let mut addresses = Vec::new();
-    
+
     for seed in seeds {
         match resolve_dns_seed(*seed, port).await {
             Ok(mut addrs) => {
@@ -53,7 +53,7 @@ pub async fn resolve_dns_seeds(
             }
         }
     }
-    
+
     // Limit to max_addresses
     addresses.truncate(max_addresses);
     addresses
@@ -63,29 +63,29 @@ pub async fn resolve_dns_seeds(
 async fn resolve_dns_seed(seed: &str, port: u16) -> Result<Vec<NetworkAddress>, String> {
     // Create hostname:port string for DNS lookup
     let hostname = format!("{}:{}", seed, port);
-    
+
     // Perform DNS lookup with timeout
     let timeout = Duration::from_secs(5);
     let lookup_result = tokio::time::timeout(timeout, lookup_host(&hostname))
         .await
         .map_err(|_| format!("DNS lookup timeout for {}", seed))?;
-    
-    let socket_addrs = lookup_result
-        .map_err(|e| format!("DNS lookup failed for {}: {}", seed, e))?;
-    
+
+    let socket_addrs =
+        lookup_result.map_err(|e| format!("DNS lookup failed for {}: {}", seed, e))?;
+
     // Convert SocketAddr to NetworkAddress
     let mut addresses = Vec::new();
     for socket_addr in socket_addrs {
         addresses.push(socket_addr_to_network_address(socket_addr));
     }
-    
+
     Ok(addresses)
 }
 
 /// Convert SocketAddr to NetworkAddress
 fn socket_addr_to_network_address(socket_addr: SocketAddr) -> NetworkAddress {
     use std::net::IpAddr;
-    
+
     let ip_bytes = match socket_addr.ip() {
         IpAddr::V4(ipv4) => {
             // IPv4-mapped IPv6 format
@@ -95,11 +95,9 @@ fn socket_addr_to_network_address(socket_addr: SocketAddr) -> NetworkAddress {
             bytes[12..16].copy_from_slice(&ipv4.octets());
             bytes
         }
-        IpAddr::V6(ipv6) => {
-            ipv6.octets()
-        }
+        IpAddr::V6(ipv6) => ipv6.octets(),
     };
-    
+
     NetworkAddress {
         services: 0, // Will be updated when we connect
         ip: ip_bytes,
@@ -125,4 +123,3 @@ mod tests {
         assert_eq!(addr.ip[15], 1);
     }
 }
-

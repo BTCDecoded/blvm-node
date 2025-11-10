@@ -87,23 +87,22 @@ impl ModuleProcessMonitor {
 
             // Check heartbeat via IPC
             if let Some(client) = process.client_mut() {
+                use crate::module::ipc::protocol::MessageType;
                 use crate::module::ipc::protocol::RequestMessage;
                 use crate::module::ipc::protocol::RequestPayload;
-                use crate::module::ipc::protocol::MessageType;
-                
+
                 // Use GetChainTip as a lightweight heartbeat check
                 let heartbeat_request = RequestMessage {
                     correlation_id: 0, // Use 0 for heartbeat (won't match any real request)
                     request_type: MessageType::GetChainTip,
                     payload: RequestPayload::GetChainTip,
                 };
-                
+
                 // Send heartbeat with timeout
-                let heartbeat_result = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    client.request(heartbeat_request)
-                ).await;
-                
+                let heartbeat_result =
+                    tokio::time::timeout(Duration::from_secs(2), client.request(heartbeat_request))
+                        .await;
+
                 match heartbeat_result {
                     Ok(Ok(_)) => {
                         // Heartbeat successful - module is responsive
@@ -120,9 +119,12 @@ impl ModuleProcessMonitor {
                 }
             } else {
                 // No IPC client available - can't check heartbeat
-                debug!("Module {} has no IPC client for heartbeat check", module_name);
+                debug!(
+                    "Module {} has no IPC client for heartbeat check",
+                    module_name
+                );
             }
-            
+
             // Loop continues to next iteration
         }
     }
@@ -145,14 +147,14 @@ impl ModuleProcessMonitor {
                 let mut process_guard = shared_process.lock().await;
                 process_guard.is_running()
             };
-            
+
             if !is_running {
                 // Process exited, check exit status
                 let exit_status = {
                     let mut process_guard = shared_process.lock().await;
                     process_guard.wait().await?
                 };
-                
+
                 match exit_status {
                     Some(status) => {
                         if status.success() {
@@ -182,23 +184,24 @@ impl ModuleProcessMonitor {
             {
                 let mut process_guard = shared_process.lock().await;
                 if let Some(client) = process_guard.client_mut() {
+                    use crate::module::ipc::protocol::MessageType;
                     use crate::module::ipc::protocol::RequestMessage;
                     use crate::module::ipc::protocol::RequestPayload;
-                    use crate::module::ipc::protocol::MessageType;
-                    
+
                     // Use GetChainTip as a lightweight heartbeat check
                     let heartbeat_request = RequestMessage {
                         correlation_id: 0, // Use 0 for heartbeat (won't match any real request)
                         request_type: MessageType::GetChainTip,
                         payload: RequestPayload::GetChainTip,
                     };
-                    
+
                     // Send heartbeat with timeout
                     let heartbeat_result = tokio::time::timeout(
                         Duration::from_secs(2),
-                        client.request(heartbeat_request)
-                    ).await;
-                    
+                        client.request(heartbeat_request),
+                    )
+                    .await;
+
                     match heartbeat_result {
                         Ok(Ok(_)) => {
                             // Heartbeat successful - module is responsive
@@ -215,10 +218,13 @@ impl ModuleProcessMonitor {
                     }
                 } else {
                     // No IPC client available - can't check heartbeat
-                    debug!("Module {} has no IPC client for heartbeat check", module_name);
+                    debug!(
+                        "Module {} has no IPC client for heartbeat check",
+                        module_name
+                    );
                 }
             }
-            
+
             // Loop continues to next iteration
         }
     }
@@ -229,24 +235,24 @@ impl ModuleProcessMonitor {
             ModuleHealth::Crashed("Process exited".to_string())
         } else if let Some(client) = process.client_mut() {
             // Check heartbeat via IPC with short timeout
-            use crate::module::ipc::protocol::{RequestMessage, RequestPayload, MessageType};
+            use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
             use tokio::time::timeout;
-            
+
             let heartbeat_request = RequestMessage {
                 correlation_id: 0,
                 request_type: MessageType::GetChainTip,
                 payload: RequestPayload::GetChainTip,
             };
-            
+
             // Use tokio::runtime::Handle to run async code in sync context
             // This is a simplified check - in production would use proper async context
             match tokio::runtime::Handle::try_current() {
                 Ok(handle) => {
                     let result = handle.block_on(timeout(
                         Duration::from_secs(1),
-                        client.request(heartbeat_request)
+                        client.request(heartbeat_request),
                     ));
-                    
+
                     match result {
                         Ok(Ok(_)) => ModuleHealth::Healthy,
                         _ => ModuleHealth::Unresponsive,

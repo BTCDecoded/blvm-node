@@ -214,11 +214,15 @@ impl StratumV2Server {
         // Get block template from MiningCoordinator
         let template = {
             let mut coordinator = self.mining_coordinator.write().await;
-            coordinator.generate_block_template().await
-                .map_err(|e| StratumV2Error::MiningJob(format!("Failed to generate block template: {}", e)))?
+            coordinator.generate_block_template().await.map_err(|e| {
+                StratumV2Error::MiningJob(format!("Failed to generate block template: {}", e))
+            })?
         };
 
-        debug!("Generated new block template with {} transactions", template.transactions.len());
+        debug!(
+            "Generated new block template with {} transactions",
+            template.transactions.len()
+        );
 
         // Set template in pool and get distribution messages
         let (job_id, messages) = {
@@ -273,9 +277,11 @@ impl StratumV2Server {
         if let Some(ref mut conn) = *conn {
             // Use channel-specific sending - transports that support channels (QUIC/Iroh)
             // will route to the appropriate channel stream, others will use default send()
-            conn.send_on_channel(channel_id, &encoded).await.map_err(|e| {
-                StratumV2Error::Network(format!("Failed to send job message: {}", e))
-            })?;
+            conn.send_on_channel(channel_id, &encoded)
+                .await
+                .map_err(|e| {
+                    StratumV2Error::Network(format!("Failed to send job message: {}", e))
+                })?;
         } else {
             return Err(StratumV2Error::Connection(anyhow::anyhow!(
                 "Connection not available"

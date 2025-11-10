@@ -76,15 +76,31 @@ pub struct RequestMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestPayload {
     /// Handshake: Module identifies itself (first message)
-    Handshake { module_id: String, module_name: String, version: String },
-    GetBlock { hash: Hash },
-    GetBlockHeader { hash: Hash },
-    GetTransaction { hash: Hash },
-    HasTransaction { hash: Hash },
+    Handshake {
+        module_id: String,
+        module_name: String,
+        version: String,
+    },
+    GetBlock {
+        hash: Hash,
+    },
+    GetBlockHeader {
+        hash: Hash,
+    },
+    GetTransaction {
+        hash: Hash,
+    },
+    HasTransaction {
+        hash: Hash,
+    },
     GetChainTip,
     GetBlockHeight,
-    GetUtxo { outpoint: OutPoint },
-    SubscribeEvents { event_types: Vec<EventType> },
+    GetUtxo {
+        outpoint: OutPoint,
+    },
+    SubscribeEvents {
+        event_types: Vec<EventType>,
+    },
 }
 
 /// Response message from node to module
@@ -100,7 +116,9 @@ pub struct ResponseMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ResponsePayload {
     /// Handshake acknowledgment with node version
-    HandshakeAck { node_version: String },
+    HandshakeAck {
+        node_version: String,
+    },
     Block(Option<Block>),
     BlockHeader(Option<BlockHeader>),
     Transaction(Option<Transaction>),

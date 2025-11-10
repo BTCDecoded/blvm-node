@@ -4,16 +4,16 @@
 
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
-use std::sync::Arc;
 
+use super::transport::{TransportAddr, TransportConnection};
 use super::NetworkMessage;
-use super::transport::{TransportConnection, TransportAddr};
 
 /// Peer connection state
-/// 
+///
 /// Supports multiple transport types (TCP, Quinn, Iroh) via TransportConnection trait
 pub struct Peer {
     addr: SocketAddr,
@@ -48,7 +48,7 @@ pub struct Peer {
 
 impl Peer {
     /// Create a new peer connection from a TransportConnection
-    /// 
+    ///
     /// This is the preferred method as it supports all transport types (TCP, Quinn, Iroh).
     /// The connection is managed via channels for concurrent read/write.
     pub fn from_transport_connection<C: TransportConnection + 'static>(
@@ -59,17 +59,17 @@ impl Peer {
     ) -> Self {
         // Create channel for sending messages
         let (send_tx, send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        
+
         let transport_addr_clone = transport_addr.clone();
         let message_tx_clone = message_tx.clone();
-        
+
         // Wrap connection in Arc<Mutex> to share between read and write tasks
         use std::sync::Arc;
         use tokio::sync::Mutex;
         let conn = Arc::new(Mutex::new(conn));
         let conn_read = Arc::clone(&conn);
         let conn_write = Arc::clone(&conn);
-        
+
         // Spawn read task using TransportConnection::recv
         tokio::spawn(async move {
             loop {
@@ -83,11 +83,11 @@ impl Peer {
                         }
                     }
                 };
-                
+
                 if data.is_empty() {
                     break;
                 }
-                
+
                 let peer_addr = match &transport_addr_clone {
                     super::transport::TransportAddr::Tcp(sock) => *sock,
                     #[cfg(feature = "quinn")]
@@ -100,11 +100,11 @@ impl Peer {
                 let _ = message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_addr));
             }
         });
-        
+
         // Spawn write task using TransportConnection::send
         tokio::spawn(async move {
             let mut send_rx = send_rx;
-            
+
             loop {
                 match send_rx.recv().await {
                     Some(data) => {
@@ -124,16 +124,16 @@ impl Peer {
                     }
                 }
             }
-            
+
             // Gracefully close connection on write task exit
             // Connection will be closed when conn_guard is dropped
         });
-        
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         Self {
             addr,
             transport_addr,
@@ -153,9 +153,9 @@ impl Peer {
             last_tx_received: None,
         }
     }
-    
+
     /// Create a new peer connection from a TCP stream (backward compatibility)
-    /// 
+    ///
     /// This is a convenience method that wraps a TcpStream in a TcpConnection.
     #[deprecated(note = "Use from_transport_connection instead for transport abstraction")]
     pub fn new(
@@ -165,14 +165,14 @@ impl Peer {
     ) -> Self {
         use super::tcp_transport::TcpConnection;
         use super::transport::TransportAddr;
-        
+
         let peer_addr = stream.peer_addr().unwrap_or(addr);
         let tcp_conn = TcpConnection {
             stream,
             peer_addr: TransportAddr::Tcp(peer_addr),
             connected: true,
         };
-        
+
         Self::from_transport_connection(tcp_conn, addr, TransportAddr::Tcp(addr), message_tx)
     }
 
@@ -189,15 +189,15 @@ impl Peer {
         self.handle_peer_communication().await?;
 
         // Send disconnection notification
-        let _ = self
-            .message_tx
-            .send(NetworkMessage::PeerDisconnected(self.transport_addr.clone()));
+        let _ = self.message_tx.send(NetworkMessage::PeerDisconnected(
+            self.transport_addr.clone(),
+        ));
 
         Ok(())
     }
 
     /// Handle peer communication loop
-    /// 
+    ///
     /// Note: The read loop is now handled in `new()` via stream splitting.
     /// This method just waits for the connection to close.
     async fn handle_peer_communication(&mut self) -> Result<()> {
@@ -205,7 +205,7 @@ impl Peer {
         // We just wait here to detect when connection closes
         // In a real implementation, we'd monitor the read task or connection state
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        
+
         // Connection close is automatically detected by the read task in from_transport_connection
         // When recv() returns empty data or error, the task breaks and sends PeerDisconnected
         self.connected = false;
@@ -248,7 +248,7 @@ impl Peer {
     }
 
     /// Send a message to the peer
-    /// 
+    ///
     /// Messages are sent via a channel to a background write task.
     pub async fn send_message(&self, message: Vec<u8>) -> Result<()> {
         let message_len = message.len();

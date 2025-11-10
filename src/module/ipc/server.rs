@@ -124,15 +124,20 @@ impl ModuleIpcServer {
             Some(Ok(bytes)) => {
                 let message: ModuleMessage = bincode::deserialize(bytes.as_ref())
                     .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
-                
+
                 match message {
                     ModuleMessage::Request(request) => {
-                        if let RequestPayload::Handshake { module_id, module_name, version } = request.payload {
+                        if let RequestPayload::Handshake {
+                            module_id,
+                            module_name,
+                            version,
+                        } = request.payload
+                        {
                             info!(
                                 "Module handshake: id={}, name={}, version={}",
                                 module_id, module_name, version
                             );
-                            
+
                             // Send handshake acknowledgment
                             let ack = ResponseMessage {
                                 correlation_id: request.correlation_id,
@@ -142,12 +147,19 @@ impl ModuleIpcServer {
                                 }),
                                 error: None,
                             };
-                            
+
                             let ack_bytes = bincode::serialize(&ModuleMessage::Response(ack))
                                 .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
-                            writer.send(bytes::Bytes::from(ack_bytes)).await
-                                .map_err(|e| ModuleError::IpcError(format!("Failed to send handshake ack: {}", e)))?;
-                            
+                            writer
+                                .send(bytes::Bytes::from(ack_bytes))
+                                .await
+                                .map_err(|e| {
+                                    ModuleError::IpcError(format!(
+                                        "Failed to send handshake ack: {}",
+                                        e
+                                    ))
+                                })?;
+
                             module_id
                         } else {
                             // No handshake - use fallback ID (backward compatibility)
@@ -162,16 +174,21 @@ impl ModuleIpcServer {
                     }
                     _ => {
                         return Err(ModuleError::IpcError(
-                            "First message must be a handshake request".to_string()
+                            "First message must be a handshake request".to_string(),
                         ));
                     }
                 }
             }
             Some(Err(e)) => {
-                return Err(ModuleError::IpcError(format!("Failed to read handshake: {}", e)));
+                return Err(ModuleError::IpcError(format!(
+                    "Failed to read handshake: {}",
+                    e
+                )));
             }
             None => {
-                return Err(ModuleError::IpcError("Connection closed before handshake".to_string()));
+                return Err(ModuleError::IpcError(
+                    "Connection closed before handshake".to_string(),
+                ));
             }
         };
 
@@ -372,7 +389,9 @@ impl ModuleIpcServer {
                 // Handshake is handled at connection level
                 Ok(ResponseMessage::success(
                     request.correlation_id,
-                    ResponsePayload::HandshakeAck { node_version: env!("CARGO_PKG_VERSION").to_string() },
+                    ResponsePayload::HandshakeAck {
+                        node_version: env!("CARGO_PKG_VERSION").to_string(),
+                    },
                 ))
             }
             RequestPayload::GetBlock { hash } => {

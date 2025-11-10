@@ -159,7 +159,7 @@ impl ModuleManager {
         // This allows both to access the process for different purposes
         use std::sync::Arc;
         let shared_process = Arc::new(tokio::sync::Mutex::new(process));
-        
+
         // Create monitor with shared process
         let monitor = ModuleProcessMonitor::new(self.crash_tx.clone());
         let module_name_clone = module_name.to_string();

@@ -25,27 +25,26 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-pub mod storage;
-pub mod network;
-pub mod rpc;
-pub mod node;
+pub mod bip21;
 pub mod config;
+pub mod module;
+pub mod network;
+pub mod node;
+pub mod rpc;
+pub mod storage;
 #[cfg(feature = "production")]
 pub mod validation;
-pub mod module;
-pub mod bip21;
 
 // Re-export config module
 pub use config::*;
 
 // Re-export commonly used types from protocol-engine
 // This allows depending only on protocol-engine (which transitively provides consensus-proof)
-pub use bllvm_protocol::{
-    Block, BlockHeader, Transaction, TransactionInput, TransactionOutput,
-    OutPoint, UTXO, UtxoSet, ValidationResult, Hash, ByteString, Natural, Integer,
-    ConsensusError, Result,
-};
 pub use bllvm_protocol::mempool::Mempool;
+pub use bllvm_protocol::{
+    Block, BlockHeader, ByteString, ConsensusError, Hash, Integer, Natural, OutPoint, Result,
+    Transaction, TransactionInput, TransactionOutput, UtxoSet, ValidationResult, UTXO,
+};
 
 // Re-export protocol-engine types
 pub use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
@@ -81,10 +80,10 @@ mod tests {
         // Test that protocol-engine works in reference-node context
         let node = ReferenceNode::new(Some(ProtocolVersion::Regtest)).unwrap();
         let protocol = node.protocol();
-        
+
         // Verify protocol version
         assert_eq!(protocol.get_protocol_version(), ProtocolVersion::Regtest);
-        
+
         // Test feature support
         assert!(protocol.supports_feature("fast_mining"));
     }
@@ -94,7 +93,7 @@ mod tests {
         // Test consensus validation through protocol-engine
         let node = ReferenceNode::new(None).unwrap(); // Uses default Regtest
         let protocol = node.protocol();
-        
+
         // Create a simple transaction
         let tx = Transaction {
             version: 1,
@@ -105,7 +104,7 @@ mod tests {
             }],
             lock_time: 0,
         };
-        
+
         // Test transaction validation
         let result = protocol.validate_transaction(&tx);
         assert!(result.is_ok());
@@ -115,10 +114,16 @@ mod tests {
     fn test_reference_node_creation() {
         // Test default (Regtest) creation
         let node = ReferenceNode::new(None).unwrap();
-        assert_eq!(node.protocol().get_protocol_version(), ProtocolVersion::Regtest);
-        
+        assert_eq!(
+            node.protocol().get_protocol_version(),
+            ProtocolVersion::Regtest
+        );
+
         // Test mainnet creation
         let mainnet_node = ReferenceNode::new(Some(ProtocolVersion::BitcoinV1)).unwrap();
-        assert_eq!(mainnet_node.protocol().get_protocol_version(), ProtocolVersion::BitcoinV1);
+        assert_eq!(
+            mainnet_node.protocol().get_protocol_version(),
+            ProtocolVersion::BitcoinV1
+        );
     }
 }

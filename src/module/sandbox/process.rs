@@ -99,13 +99,9 @@ impl ProcessSandbox {
                 if let Some(max_memory) = limits.max_memory_bytes {
                     let soft_limit = max_memory as u64;
                     let hard_limit = max_memory as u64;
-                    setrlimit(Resource::RLIMIT_AS, soft_limit, hard_limit)
-                        .map_err(|e| {
-                            ModuleError::OperationError(format!(
-                                "Failed to set memory limit: {}",
-                                e
-                            ))
-                        })?;
+                    setrlimit(Resource::RLIMIT_AS, soft_limit, hard_limit).map_err(|e| {
+                        ModuleError::OperationError(format!("Failed to set memory limit: {}", e))
+                    })?;
                     debug!("Set memory limit: {} bytes", max_memory);
                 }
 
@@ -116,13 +112,14 @@ impl ProcessSandbox {
                     #[cfg(feature = "nix")]
                     {
                         use nix::sys::resource::{setrlimit, Resource};
-                        setrlimit(Resource::RLIMIT_NOFILE, soft_limit, hard_limit)
-                            .map_err(|e| {
+                        setrlimit(Resource::RLIMIT_NOFILE, soft_limit, hard_limit).map_err(
+                            |e| {
                                 ModuleError::OperationError(format!(
                                     "Failed to set file descriptor limit: {}",
                                     e
                                 ))
-                            })?;
+                            },
+                        )?;
                     }
                     #[cfg(not(feature = "nix"))]
                     {
@@ -139,13 +136,9 @@ impl ProcessSandbox {
                     #[cfg(feature = "nix")]
                     let hard_limit = max_children as u64;
                     #[cfg(feature = "nix")]
-                    setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit)
-                        .map_err(|e| {
-                            ModuleError::OperationError(format!(
-                                "Failed to set process limit: {}",
-                                e
-                            ))
-                        })?;
+                    setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit).map_err(|e| {
+                        ModuleError::OperationError(format!("Failed to set process limit: {}", e))
+                    })?;
                     debug!("Set process limit: {}", max_children);
                 }
 
@@ -191,7 +184,8 @@ impl ProcessSandbox {
                         // Field 23 (index 22): rss - Resident Set Size (pages)
                         let utime: u64 = fields.get(13).and_then(|s| s.parse().ok()).unwrap_or(0);
                         let stime: u64 = fields.get(14).and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let rss_pages: u64 = fields.get(22).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let rss_pages: u64 =
+                            fields.get(22).and_then(|s| s.parse().ok()).unwrap_or(0);
 
                         // Get page size (typically 4096 bytes on Linux)
                         #[cfg(feature = "libc")]

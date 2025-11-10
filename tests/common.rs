@@ -1,4 +1,3 @@
-use bllvm_protocol::ProtocolVersion;
 use bllvm_node::storage::blockstore::BlockStore;
 use bllvm_node::storage::chainstate::ChainState;
 use bllvm_node::storage::txindex::TxIndex;
@@ -9,6 +8,7 @@ use bllvm_node::Hash;
 use bllvm_node::OutPoint;
 use bllvm_node::Transaction;
 use bllvm_node::{ByteString, TransactionInput, TransactionOutput};
+use bllvm_protocol::ProtocolVersion;
 use std::collections::HashMap;
 use tempfile::TempDir;
 

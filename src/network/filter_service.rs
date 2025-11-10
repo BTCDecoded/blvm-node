@@ -3,9 +3,9 @@
 //! Generates, caches, and serves compact block filters for light client support.
 //! Maintains filter header chain for efficient verification.
 
+use anyhow::{anyhow, Result};
 use bllvm_protocol::bip157;
 use bllvm_protocol::bip158::{build_block_filter, CompactBlockFilter};
-use anyhow::{anyhow, Result};
 use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -211,10 +211,10 @@ impl BlockFilterService {
     pub fn remove_filter_for_pruned_block(&self, block_hash: &Hash) -> Result<()> {
         // Remove filter from cache
         self.filters.write().unwrap().remove(block_hash);
-        
+
         // Note: We do NOT remove the filter header - it's required for verification
         // The filter header chain must remain intact even after pruning
-        
+
         Ok(())
     }
 

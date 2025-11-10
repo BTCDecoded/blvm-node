@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use iroh_net::NodeId;
 
 /// Get current Unix timestamp in seconds
-/// 
+///
 /// Helper function to avoid code duplication of time calculation.
 fn current_timestamp() -> u64 {
     SystemTime::now()
@@ -104,7 +104,7 @@ impl AddressDatabase {
     pub fn add_address(&mut self, addr: NetworkAddress, services: u64) {
         // Convert NetworkAddress to SocketAddr for key
         let socket_addr = self.network_addr_to_socket(&addr);
-        
+
         match self.addresses.get_mut(&socket_addr) {
             Some(entry) => {
                 // Update existing entry
@@ -117,7 +117,8 @@ impl AddressDatabase {
                 if self.total_count() >= self.max_addresses {
                     self.evict_oldest_unified();
                 }
-                self.addresses.insert(socket_addr, AddressEntry::new(addr, services));
+                self.addresses
+                    .insert(socket_addr, AddressEntry::new(addr, services));
             }
         }
     }
@@ -138,13 +139,14 @@ impl AddressDatabase {
             .filter(|(_, entry)| entry.is_fresh(self.expiration_seconds))
             .map(|(_, entry)| (entry.last_seen, entry.addr.clone()))
             .collect();
-        
+
         // Sort by last_seen in descending order (most recent first)
         // Use sort_by with reverse to avoid double sort
         fresh.sort_by(|a, b| b.0.cmp(&a.0));
-        
+
         // Extract addresses and take requested count
-        fresh.into_iter()
+        fresh
+            .into_iter()
             .map(|(_, addr)| addr)
             .take(count)
             .collect()
@@ -158,7 +160,8 @@ impl AddressDatabase {
     /// Remove expired addresses
     pub fn remove_expired(&mut self) -> usize {
         let before = self.addresses.len();
-        self.addresses.retain(|_, entry| entry.is_fresh(self.expiration_seconds));
+        self.addresses
+            .retain(|_, entry| entry.is_fresh(self.expiration_seconds));
         before - self.addresses.len()
     }
 
@@ -239,7 +242,8 @@ impl AddressDatabase {
                     ip: [0; 16],
                     port: 0,
                 };
-                self.iroh_addresses.insert(node_id, AddressEntry::new(placeholder_addr, services));
+                self.iroh_addresses
+                    .insert(node_id, AddressEntry::new(placeholder_addr, services));
             }
         }
     }
@@ -254,12 +258,13 @@ impl AddressDatabase {
             .filter(|(_, entry)| entry.is_fresh(self.expiration_seconds))
             .map(|(node_id, entry)| (entry.last_seen, *node_id))
             .collect();
-        
+
         // Sort by last_seen in descending order (most recent first)
         fresh.sort_by(|a, b| b.0.cmp(&a.0));
-        
+
         // Extract node IDs and take requested count
-        fresh.into_iter()
+        fresh
+            .into_iter()
             .map(|(_, node_id)| node_id)
             .take(count)
             .collect()
@@ -296,13 +301,13 @@ impl AddressDatabase {
     }
 
     /// Evict oldest address across both maps (unified eviction)
-    /// 
+    ///
     /// This ensures we respect max_addresses as a total limit across both
     /// SocketAddr and Iroh address maps, not per-map limits.
     fn evict_oldest_unified(&mut self) {
         // Find oldest across both maps
         let mut oldest_socket: Option<(SocketAddr, u64)> = None;
-        
+
         // Find oldest SocketAddr entry
         if let Some((addr, entry)) = self
             .addresses
@@ -311,7 +316,7 @@ impl AddressDatabase {
         {
             oldest_socket = Some((*addr, entry.last_seen));
         }
-        
+
         #[cfg(feature = "iroh")]
         {
             // Find oldest Iroh entry
@@ -323,7 +328,7 @@ impl AddressDatabase {
             {
                 oldest_iroh = Some((*node_id, entry.last_seen));
             }
-            
+
             // Evict the oldest entry across both maps
             match (oldest_socket, oldest_iroh) {
                 (Some((socket_addr, socket_time)), Some((iroh_id, iroh_time))) => {
@@ -347,7 +352,7 @@ impl AddressDatabase {
                 }
             }
         }
-        
+
         #[cfg(not(feature = "iroh"))]
         {
             // Only SocketAddr map exists
@@ -358,7 +363,7 @@ impl AddressDatabase {
     }
 
     /// Evict oldest address (SocketAddr only)
-    /// 
+    ///
     /// Deprecated: Use evict_oldest_unified() instead for proper cross-map eviction.
     #[deprecated(note = "Use evict_oldest_unified() instead")]
     fn evict_oldest(&mut self) {
@@ -366,7 +371,7 @@ impl AddressDatabase {
     }
 
     /// Evict oldest Iroh address
-    /// 
+    ///
     /// Deprecated: Use evict_oldest_unified() instead for proper cross-map eviction.
     #[cfg(feature = "iroh")]
     #[deprecated(note = "Use evict_oldest_unified() instead")]
@@ -375,7 +380,7 @@ impl AddressDatabase {
     }
 
     /// Convert NetworkAddress to SocketAddr
-    /// 
+    ///
     /// Note: This is public for use in NetworkManager when connecting to peers.
     pub fn network_addr_to_socket(&self, addr: &NetworkAddress) -> SocketAddr {
         // Convert IPv6 address bytes to SocketAddr
@@ -383,7 +388,10 @@ impl AddressDatabase {
         let ip = if addr.ip[0..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff] {
             // IPv4-mapped IPv6 address
             IpAddr::V4(std::net::Ipv4Addr::new(
-                addr.ip[12], addr.ip[13], addr.ip[14], addr.ip[15],
+                addr.ip[12],
+                addr.ip[13],
+                addr.ip[14],
+                addr.ip[15],
             ))
         } else {
             // Native IPv6
@@ -398,8 +406,14 @@ impl AddressDatabase {
                 u16::from_be_bytes([addr.ip[14], addr.ip[15]]),
             ];
             IpAddr::V6(std::net::Ipv6Addr::new(
-                segments[0], segments[1], segments[2], segments[3],
-                segments[4], segments[5], segments[6], segments[7],
+                segments[0],
+                segments[1],
+                segments[2],
+                segments[3],
+                segments[4],
+                segments[5],
+                segments[6],
+                segments[7],
             ))
         };
         SocketAddr::new(ip, addr.port)
@@ -463,7 +477,7 @@ mod tests {
         let addr2 = create_test_address("192.168.1.2", 8333);
         db.add_address(addr1.clone(), 1);
         db.add_address(addr2.clone(), 1);
-        
+
         let fresh = db.get_fresh_addresses(10);
         assert_eq!(fresh.len(), 2);
     }
@@ -474,10 +488,10 @@ mod tests {
         let addr = create_test_address("192.168.1.1", 8333);
         db.add_address(addr.clone(), 1);
         assert_eq!(db.len(), 1);
-        
+
         // Wait for expiration
         std::thread::sleep(std::time::Duration::from_secs(2));
-        
+
         let fresh = db.get_fresh_addresses(10);
         assert_eq!(fresh.len(), 0); // Should be expired
     }
@@ -490,10 +504,10 @@ mod tests {
         db.add_address(addr1.clone(), 1);
         db.add_address(addr2.clone(), 1);
         assert_eq!(db.len(), 2);
-        
+
         // Wait for expiration
         std::thread::sleep(std::time::Duration::from_secs(2));
-        
+
         let removed = db.remove_expired();
         assert_eq!(removed, 2);
         assert_eq!(db.len(), 0);
@@ -505,7 +519,7 @@ mod tests {
         let localhost = create_test_address("127.0.0.1", 8333);
         let private = create_test_address("192.168.1.1", 8333);
         let public = create_test_address("8.8.8.8", 8333);
-        
+
         assert!(db.is_local(&localhost));
         assert!(db.is_local(&private));
         assert!(!db.is_local(&public));
@@ -514,27 +528,27 @@ mod tests {
     #[test]
     fn test_is_local_ipv6() {
         let db = AddressDatabase::new(100);
-        
+
         // IPv6 localhost
         let ipv6_localhost = create_test_address("::1", 8333);
         assert!(db.is_local(&ipv6_localhost));
-        
+
         // IPv6 unspecified
         let ipv6_unspecified = create_test_address("::", 8333);
         assert!(db.is_local(&ipv6_unspecified));
-        
+
         // IPv6 unique local (fc00::/7)
         let ipv6_unique_local = create_test_address("fc00::1", 8333);
         assert!(db.is_local(&ipv6_unique_local));
-        
+
         // IPv6 link-local (fe80::/10)
         let ipv6_link_local = create_test_address("fe80::1", 8333);
         assert!(db.is_local(&ipv6_link_local));
-        
+
         // IPv6 multicast (ff00::/8)
         let ipv6_multicast = create_test_address("ff02::1", 8333);
         assert!(db.is_local(&ipv6_multicast));
-        
+
         // IPv6 public address (should not be local)
         let ipv6_public = create_test_address("2001:4860:4860::8888", 8333);
         assert!(!db.is_local(&ipv6_public));
@@ -546,29 +560,31 @@ mod tests {
         let addr = create_test_address("192.168.1.1", 8333);
         let socket = SocketAddr::new("192.168.1.1".parse().unwrap(), 8333);
         let mut ban_list = HashMap::new();
-        
+
         // Not banned
         assert!(!db.is_banned(&addr, &ban_list));
-        
+
         // Banned (permanent)
         ban_list.insert(socket, u64::MAX);
         assert!(db.is_banned(&addr, &ban_list));
-        
+
         // Banned (temporary, not expired)
         ban_list.clear();
         let future_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600;
+            .as_secs()
+            + 3600;
         ban_list.insert(socket, future_time);
         assert!(db.is_banned(&addr, &ban_list));
-        
+
         // Banned (expired)
         ban_list.clear();
         let past_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() - 3600;
+            .as_secs()
+            - 3600;
         ban_list.insert(socket, past_time);
         assert!(!db.is_banned(&addr, &ban_list));
     }
@@ -579,16 +595,16 @@ mod tests {
         let local = create_test_address("127.0.0.1", 8333);
         let banned = create_test_address("192.168.1.1", 8333);
         let public = create_test_address("8.8.8.8", 8333);
-        
+
         let socket_banned = SocketAddr::new("192.168.1.1".parse().unwrap(), 8333);
         let socket_connected = SocketAddr::new("8.8.8.8".parse().unwrap(), 8333);
         let mut ban_list = HashMap::new();
         ban_list.insert(socket_banned, u64::MAX);
         let connected_peers = vec![socket_connected];
-        
+
         let addresses = vec![local, banned, public];
         let filtered = db.filter_addresses(addresses, &ban_list, &connected_peers);
-        
+
         // Should filter out local, banned, and connected
         assert_eq!(filtered.len(), 0);
     }
@@ -599,11 +615,11 @@ mod tests {
         let addr1 = create_test_address("192.168.1.1", 8333);
         let addr2 = create_test_address("192.168.1.2", 8333);
         let addr3 = create_test_address("192.168.1.3", 8333);
-        
+
         db.add_address(addr1.clone(), 1);
         db.add_address(addr2.clone(), 1);
         assert_eq!(db.len(), 2);
-        
+
         // Adding third should evict oldest
         db.add_address(addr3.clone(), 1);
         assert_eq!(db.len(), 2); // Should still be 2
@@ -614,14 +630,14 @@ mod tests {
     fn test_add_iroh_address() {
         use iroh_net::NodeId;
         let mut db = AddressDatabase::new(100);
-        
+
         // Create a test NodeId (32 bytes)
         let node_id_bytes = [0u8; 32];
         let node_id = NodeId::from_bytes(&node_id_bytes).unwrap();
-        
+
         db.add_iroh_address(node_id, 1);
         assert_eq!(db.total_count(), 1);
-        
+
         // Add same address again (should update, not duplicate)
         db.add_iroh_address(node_id, 2);
         assert_eq!(db.total_count(), 1);
@@ -632,15 +648,15 @@ mod tests {
     fn test_get_fresh_iroh_addresses() {
         use iroh_net::NodeId;
         let mut db = AddressDatabase::new(100);
-        
+
         let node_id1_bytes = [1u8; 32];
         let node_id2_bytes = [2u8; 32];
         let node_id1 = NodeId::from_bytes(&node_id1_bytes).unwrap();
         let node_id2 = NodeId::from_bytes(&node_id2_bytes).unwrap();
-        
+
         db.add_iroh_address(node_id1, 1);
         db.add_iroh_address(node_id2, 1);
-        
+
         let fresh = db.get_fresh_iroh_addresses(10);
         assert_eq!(fresh.len(), 2);
     }
@@ -650,12 +666,12 @@ mod tests {
     fn test_total_count_includes_iroh() {
         use iroh_net::NodeId;
         let mut db = AddressDatabase::new(100);
-        
+
         // Add SocketAddr address
         let addr = create_test_address("192.168.1.1", 8333);
         db.add_address(addr, 1);
         assert_eq!(db.total_count(), 1);
-        
+
         // Add Iroh address
         let node_id_bytes = [0u8; 32];
         let node_id = NodeId::from_bytes(&node_id_bytes).unwrap();

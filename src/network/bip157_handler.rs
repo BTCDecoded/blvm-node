@@ -4,11 +4,11 @@
 //! using the BlockFilterService.
 
 use crate::network::filter_service::BlockFilterService;
-use crate::storage::Storage;
 use crate::network::protocol::{
     CfcheckptMessage, CfheadersMessage, CfilterMessage, FilterHeaderData, GetCfcheckptMessage,
     GetCfheadersMessage, GetCfiltersMessage, ProtocolMessage,
 };
+use crate::storage::Storage;
 use anyhow::{anyhow, Result};
 use bllvm_protocol::Hash;
 use std::sync::Arc;
@@ -30,17 +30,16 @@ pub fn handle_getcfilters(
         // Get current height to determine stop height
         let current_height = storage.chain().get_height()?.unwrap_or(0) as u32;
         let start_height = request.start_height;
-        
+
         // Find stop height by iterating from start until we find stop_hash
         let mut stop_height = start_height;
         let mut found_stop = false;
-        
+
         // Iterate through blocks from start_height
         for height in start_height..=current_height.min(start_height + 2000) {
             // Get block hash by height, then get block
             if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height as u64) {
                 if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
-                
                     // Calculate block hash properly
                     use crate::storage::hashing::double_sha256;
                     let mut header_data = Vec::new();
@@ -51,13 +50,13 @@ pub fn handle_getcfilters(
                     header_data.extend_from_slice(&block.header.bits.to_le_bytes());
                     header_data.extend_from_slice(&block.header.nonce.to_le_bytes());
                     let calculated_hash = double_sha256(&header_data);
-                    
+
                     // Check if this is the stop hash
                     if calculated_hash == request.stop_hash {
                         found_stop = true;
                         stop_height = height;
                     }
-                    
+
                     // Try to get cached filter
                     let filter = if let Some(cached) = filter_service.get_filter(&calculated_hash) {
                         cached
@@ -72,24 +71,24 @@ pub fn handle_getcfilters(
                                 }
                             }
                         }
-                        
+
                         filter_service.generate_and_cache_filter(&block, &prev_scripts, height)?
                     };
-                    
+
                     responses.push(ProtocolMessage::Cfilter(CfilterMessage {
                         filter_type: 0,
                         block_hash: calculated_hash,
                         filter_data: filter.filter_data,
                         num_elements: filter.num_elements,
                     }));
-                    
+
                     if found_stop {
                         break;
                     }
                 }
             }
         }
-        
+
         if !found_stop && stop_height < current_height {
             // Stop hash not found in reasonable range, return what we have
         }

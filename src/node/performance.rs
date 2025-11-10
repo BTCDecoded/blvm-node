@@ -2,10 +2,10 @@
 //!
 //! Provides performance tracking, profiling hooks, and performance metrics collection.
 
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
 
 /// Performance profiler for tracking operation timings
 pub struct PerformanceProfiler {
@@ -87,10 +87,10 @@ impl PerformanceProfiler {
         let total: Duration = times.iter().sum();
         let count = times.len();
         let avg = total / count as u32;
-        
+
         let mut sorted = times.to_vec();
         sorted.sort();
-        
+
         let p50 = sorted[count / 2];
         let p95 = sorted[(count * 95) / 100];
         let p99 = sorted[(count * 99) / 100];
@@ -166,7 +166,7 @@ impl PerformanceTimer {
     /// Stop the timer and record the duration
     pub fn stop(self) -> Duration {
         let duration = self.start.elapsed();
-        
+
         match self.operation_type {
             OperationType::BlockProcessing => {
                 self.profiler.record_block_processing(duration);
@@ -181,7 +181,7 @@ impl PerformanceTimer {
                 self.profiler.record_network_operation(duration);
             }
         }
-        
+
         duration
     }
 }
@@ -191,4 +191,3 @@ impl Default for PerformanceProfiler {
         Self::new(1000) // Keep last 1000 samples
     }
 }
-

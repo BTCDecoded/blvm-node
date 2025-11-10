@@ -85,7 +85,10 @@ impl RpcRateLimiter {
         let elapsed = now.saturating_sub(self.last_refill);
         if elapsed > 0 {
             let tokens_to_add = (elapsed as u32).saturating_mul(self.rate);
-            self.tokens = self.tokens.saturating_add(tokens_to_add).min(self.burst_limit);
+            self.tokens = self
+                .tokens
+                .saturating_add(tokens_to_add)
+                .min(self.burst_limit);
             self.last_refill = now;
         }
 
@@ -134,11 +137,7 @@ impl RpcAuthManager {
     }
 
     /// Create with custom rate limits
-    pub fn with_rate_limits(
-        auth_required: bool,
-        default_burst: u32,
-        default_rate: u32,
-    ) -> Self {
+    pub fn with_rate_limits(auth_required: bool, default_burst: u32, default_rate: u32) -> Self {
         Self {
             valid_tokens: Arc::new(Mutex::new(HashMap::new())),
             valid_certificates: Arc::new(Mutex::new(HashMap::new())),
@@ -154,12 +153,12 @@ impl RpcAuthManager {
         let user_id = UserId::Token(AuthToken::new(token.clone()));
         let mut tokens = self.valid_tokens.lock().await;
         tokens.insert(token, user_id.clone());
-        
+
         // Initialize rate limiter for this user
         let (burst, rate) = self.get_rate_limit_for_user(&user_id).await;
         let mut limiters = self.rate_limiters.lock().await;
         limiters.insert(user_id, RpcRateLimiter::new(burst, rate));
-        
+
         Ok(())
     }
 
@@ -178,12 +177,12 @@ impl RpcAuthManager {
         let user_id = UserId::Certificate(fingerprint.clone());
         let mut certs = self.valid_certificates.lock().await;
         certs.insert(fingerprint, user_id.clone());
-        
+
         // Initialize rate limiter for this user
         let (burst, rate) = self.get_rate_limit_for_user(&user_id).await;
         let mut limiters = self.rate_limiters.lock().await;
         limiters.insert(user_id, RpcRateLimiter::new(burst, rate));
-        
+
         Ok(())
     }
 
@@ -201,7 +200,7 @@ impl RpcAuthManager {
     pub async fn set_user_rate_limit(&self, user_id: &UserId, burst: u32, rate: u32) {
         let mut limits = self.user_rate_limits.lock().await;
         limits.insert(user_id.clone(), (burst, rate));
-        
+
         // Update existing rate limiter if present
         let mut limiters = self.rate_limiters.lock().await;
         if let Some(limiter) = limiters.get_mut(user_id) {
@@ -212,7 +211,10 @@ impl RpcAuthManager {
     /// Get rate limit for a user (checks per-user limits first)
     async fn get_rate_limit_for_user(&self, user_id: &UserId) -> (u32, u32) {
         let limits = self.user_rate_limits.lock().await;
-        limits.get(user_id).copied().unwrap_or(self.default_rate_limit)
+        limits
+            .get(user_id)
+            .copied()
+            .unwrap_or(self.default_rate_limit)
     }
 
     /// Authenticate a request from HTTP headers
@@ -283,13 +285,13 @@ impl RpcAuthManager {
     /// Check rate limit for a user
     pub async fn check_rate_limit(&self, user_id: &UserId) -> bool {
         let mut limiters = self.rate_limiters.lock().await;
-        
+
         // Get or create rate limiter for this user
         let limiter = limiters.entry(user_id.clone()).or_insert_with(|| {
             let (burst, rate) = self.default_rate_limit;
             RpcRateLimiter::new(burst, rate)
         });
-        
+
         limiter.check_and_consume()
     }
 
@@ -311,10 +313,7 @@ mod tests {
         auth.add_token("test-token-123".to_string()).await.unwrap();
 
         let mut headers = hyper::HeaderMap::new();
-        headers.insert(
-            "authorization",
-            "Bearer test-token-123".parse().unwrap(),
-        );
+        headers.insert("authorization", "Bearer test-token-123".parse().unwrap());
 
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let result = auth.authenticate_request(&headers, addr).await;
@@ -329,10 +328,7 @@ mod tests {
         auth.add_token("valid-token".to_string()).await.unwrap();
 
         let mut headers = hyper::HeaderMap::new();
-        headers.insert(
-            "authorization",
-            "Bearer invalid-token".parse().unwrap(),
-        );
+        headers.insert("authorization", "Bearer invalid-token".parse().unwrap());
 
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let result = auth.authenticate_request(&headers, addr).await;
@@ -368,4 +364,3 @@ mod tests {
         assert!(result.error.is_none());
     }
 }
-

@@ -23,12 +23,18 @@ pub struct MempoolRpc {
 impl MempoolRpc {
     /// Create a new mempool RPC handler
     pub fn new() -> Self {
-        Self { mempool: None, storage: None }
+        Self {
+            mempool: None,
+            storage: None,
+        }
     }
 
     /// Create with dependencies
     pub fn with_dependencies(mempool: Arc<MempoolManager>, storage: Arc<Storage>) -> Self {
-        Self { mempool: Some(mempool), storage: Some(storage) }
+        Self {
+            mempool: Some(mempool),
+            storage: Some(storage),
+        }
     }
 
     /// Get mempool information
@@ -40,10 +46,13 @@ impl MempoolRpc {
         if let Some(ref mempool) = self.mempool {
             let size = mempool.size();
             let transactions = mempool.get_transactions();
-            let bytes: usize = transactions.iter().map(|tx| {
-                use bllvm_protocol::serialization::transaction::serialize_transaction;
-                serialize_transaction(tx).len()
-            }).sum();
+            let bytes: usize = transactions
+                .iter()
+                .map(|tx| {
+                    use bllvm_protocol::serialization::transaction::serialize_transaction;
+                    serialize_transaction(tx).len()
+                })
+                .sum();
 
             Ok(json!({
                 "loaded": true,
@@ -56,7 +65,9 @@ impl MempoolRpc {
             }))
         } else {
             // Graceful degradation: return empty mempool info when mempool unavailable
-            tracing::debug!("getmempoolinfo called but mempool not available, returning empty mempool");
+            tracing::debug!(
+                "getmempoolinfo called but mempool not available, returning empty mempool"
+            );
             Ok(json!({
                 "loaded": false,
                 "size": 0,
@@ -82,7 +93,7 @@ impl MempoolRpc {
             let transactions = mempool.get_transactions();
             use bllvm_protocol::mempool::calculate_tx_id;
             use bllvm_protocol::serialization::transaction::serialize_transaction;
-            
+
             if verbose {
                 let mut result = serde_json::Map::new();
                 for tx in transactions {
@@ -90,7 +101,7 @@ impl MempoolRpc {
                     let txid_hex = hex::encode(txid);
                     let txid_hex_clone = txid_hex.clone();
                     let size = serialize_transaction(&tx).len();
-                    
+
                     result.insert(txid_hex, json!({
                         "size": size,
                         "fee": if let (Some(ref mempool), Some(ref storage)) = (self.mempool.as_ref(), self.storage.as_ref()) {
@@ -126,10 +137,13 @@ impl MempoolRpc {
                 }
                 Ok(json!(result))
             } else {
-                let txids: Vec<String> = transactions.iter().map(|tx| {
-                    let txid = calculate_tx_id(tx);
-                    hex::encode(txid)
-                }).collect();
+                let txids: Vec<String> = transactions
+                    .iter()
+                    .map(|tx| {
+                        let txid = calculate_tx_id(tx);
+                        hex::encode(txid)
+                    })
+                    .collect();
                 Ok(json!(txids))
             }
         } else {
@@ -174,17 +188,18 @@ impl MempoolRpc {
         if let Some(mempool) = &self.mempool {
             let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
             let mempool_path = std::path::Path::new(&data_dir).join("mempool.dat");
-            
+
             // Arc implements Deref, so we can call methods directly
             if let Err(e) = mempool.save_to_disk(&mempool_path) {
-                return Err(crate::rpc::errors::RpcError::internal_error(
-                    format!("Failed to save mempool: {}", e)
-                ));
+                return Err(crate::rpc::errors::RpcError::internal_error(format!(
+                    "Failed to save mempool: {}",
+                    e
+                )));
             }
             Ok(json!(null))
         } else {
             Err(crate::rpc::errors::RpcError::internal_error(
-                "Mempool not initialized".to_string()
+                "Mempool not initialized".to_string(),
             ))
         }
     }
@@ -195,16 +210,19 @@ impl MempoolRpc {
     pub async fn getmempoolancestors(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmempoolancestors");
 
-        let txid = params.get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string()))?;
+        let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
+            crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
+        })?;
 
         let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
-        let hash_bytes = hex::decode(txid)
-            .map_err(|e| crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e)))?;
+        let hash_bytes = hex::decode(txid).map_err(|e| {
+            crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e))
+        })?;
         if hash_bytes.len() != 32 {
-            return Err(crate::rpc::errors::RpcError::invalid_params("Transaction ID must be 32 bytes".to_string()));
+            return Err(crate::rpc::errors::RpcError::invalid_params(
+                "Transaction ID must be 32 bytes".to_string(),
+            ));
         }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hash_bytes);
@@ -222,7 +240,7 @@ impl MempoolRpc {
                         let ancestor_txid_clone = ancestor_txid.clone();
                         use bllvm_protocol::serialization::transaction::serialize_transaction;
                         let size = serialize_transaction(&ancestor_tx).len();
-                        
+
                         result.insert(ancestor_txid, json!({
                             "size": size,
                             "fee": if let Some(ref storage) = self.storage {
@@ -278,16 +296,19 @@ impl MempoolRpc {
     pub async fn getmempooldescendants(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmempooldescendants");
 
-        let txid = params.get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string()))?;
+        let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
+            crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
+        })?;
 
         let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
-        let hash_bytes = hex::decode(txid)
-            .map_err(|e| crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e)))?;
+        let hash_bytes = hex::decode(txid).map_err(|e| {
+            crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e))
+        })?;
         if hash_bytes.len() != 32 {
-            return Err(crate::rpc::errors::RpcError::invalid_params("Transaction ID must be 32 bytes".to_string()));
+            return Err(crate::rpc::errors::RpcError::invalid_params(
+                "Transaction ID must be 32 bytes".to_string(),
+            ));
         }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hash_bytes);
@@ -295,7 +316,7 @@ impl MempoolRpc {
         if let Some(ref mempool) = self.mempool {
             // Find descendants by checking which transactions spend outputs created by this transaction
             let mut descendants = Vec::new();
-            
+
             if let Some(tx) = mempool.get_transaction(&hash) {
                 // Get all output outpoints from this transaction
                 let mut output_outpoints = Vec::new();
@@ -329,7 +350,7 @@ impl MempoolRpc {
                         let descendant_txid_clone = descendant_txid.clone();
                         use bllvm_protocol::serialization::transaction::serialize_transaction;
                         let size = serialize_transaction(&descendant_tx).len();
-                        
+
                         result.insert(descendant_txid, json!({
                             "size": size,
                             "fee": if let Some(ref storage) = self.storage {
@@ -385,16 +406,19 @@ impl MempoolRpc {
     pub async fn getmempoolentry(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmempoolentry");
 
-        let txid = params.get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string()))?;
+        let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
+            crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
+        })?;
 
         let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
-        let hash_bytes = hex::decode(txid)
-            .map_err(|e| crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e)))?;
+        let hash_bytes = hex::decode(txid).map_err(|e| {
+            crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e))
+        })?;
         if hash_bytes.len() != 32 {
-            return Err(crate::rpc::errors::RpcError::invalid_params("Transaction ID must be 32 bytes".to_string()));
+            return Err(crate::rpc::errors::RpcError::invalid_params(
+                "Transaction ID must be 32 bytes".to_string(),
+            ));
         }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hash_bytes);
@@ -403,18 +427,20 @@ impl MempoolRpc {
             if let Some(tx) = mempool.get_transaction(&hash) {
                 use bllvm_protocol::serialization::transaction::serialize_transaction;
                 let size = serialize_transaction(&tx).len();
-                
+
                 // Get ancestors and descendants
                 let ancestors = self.get_ancestors(mempool, &hash);
                 let descendants = self.get_descendants(mempool, &hash);
-                
+
                 let ancestor_count = ancestors.len();
                 let descendant_count = descendants.len();
-                let ancestor_size: usize = ancestors.iter()
+                let ancestor_size: usize = ancestors
+                    .iter()
                     .filter_map(|h| mempool.get_transaction(h))
                     .map(|tx| serialize_transaction(&tx).len())
                     .sum();
-                let descendant_size: usize = descendants.iter()
+                let descendant_size: usize = descendants
+                    .iter()
                     .filter_map(|h| mempool.get_transaction(h))
                     .map(|tx| serialize_transaction(&tx).len())
                     .sum();
@@ -454,13 +480,14 @@ impl MempoolRpc {
                     "bip125-replaceable": false
                 }))
             } else {
-                Err(crate::rpc::errors::RpcError::invalid_params(
-                    format!("Transaction {} not found in mempool", txid)
-                ))
+                Err(crate::rpc::errors::RpcError::invalid_params(format!(
+                    "Transaction {} not found in mempool",
+                    txid
+                )))
             }
         } else {
             Err(crate::rpc::errors::RpcError::internal_error(
-                "Mempool not initialized".to_string()
+                "Mempool not initialized".to_string(),
             ))
         }
     }
@@ -468,7 +495,7 @@ impl MempoolRpc {
     /// Helper: Get ancestors for a transaction
     fn get_ancestors(&self, mempool: &MempoolManager, tx_hash: &Hash) -> Vec<Hash> {
         let mut ancestors = Vec::new();
-        
+
         if let Some(tx) = mempool.get_transaction(tx_hash) {
             // Find transactions that this transaction depends on (spends their outputs)
             use bllvm_protocol::mempool::calculate_tx_id;
@@ -478,7 +505,8 @@ impl MempoolRpc {
                 for ancestor_tx in transactions {
                     let ancestor_hash = calculate_tx_id(&ancestor_tx);
                     for (idx, _output) in ancestor_tx.outputs.iter().enumerate() {
-                        if input.prevout.hash == ancestor_hash && input.prevout.index == idx as u64 {
+                        if input.prevout.hash == ancestor_hash && input.prevout.index == idx as u64
+                        {
                             if !ancestors.contains(&ancestor_hash) {
                                 ancestors.push(ancestor_hash);
                             }
@@ -487,14 +515,14 @@ impl MempoolRpc {
                 }
             }
         }
-        
+
         ancestors
     }
 
     /// Helper: Get descendants for a transaction
     fn get_descendants(&self, mempool: &MempoolManager, tx_hash: &Hash) -> Vec<Hash> {
         let mut descendants = Vec::new();
-        
+
         if let Some(tx) = mempool.get_transaction(tx_hash) {
             // Get all output outpoints from this transaction
             let mut output_outpoints = Vec::new();
@@ -520,7 +548,7 @@ impl MempoolRpc {
                 }
             }
         }
-        
+
         descendants
     }
 }

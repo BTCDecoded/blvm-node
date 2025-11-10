@@ -9,7 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-use tracing::{debug, warn, error};
+use tracing::{debug, error, warn};
 
 /// Connection rate limiter (tracks connection attempts per time window)
 pub struct ConnectionRateLimiter {
@@ -40,14 +40,18 @@ impl ConnectionRateLimiter {
 
         // Clean up old entries outside the time window
         let cutoff = now.saturating_sub(self.window_seconds);
-        
+
         let attempts = self.connection_attempts.entry(ip).or_insert_with(Vec::new);
         attempts.retain(|&timestamp| timestamp > cutoff);
 
         // Check if we're within the limit
         if attempts.len() >= self.max_connections_per_window {
-            warn!("Connection rate limit exceeded for IP {}: {} attempts in {} seconds", 
-                  ip, attempts.len(), self.window_seconds);
+            warn!(
+                "Connection rate limit exceeded for IP {}: {} attempts in {} seconds",
+                ip,
+                attempts.len(),
+                self.window_seconds
+            );
             false
         } else {
             // Record this connection attempt
@@ -72,7 +76,10 @@ impl ConnectionRateLimiter {
 
     /// Get current connection attempt count for an IP
     pub fn get_attempt_count(&self, ip: IpAddr) -> usize {
-        self.connection_attempts.get(&ip).map(|v| v.len()).unwrap_or(0)
+        self.connection_attempts
+            .get(&ip)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 }
 
@@ -171,10 +178,10 @@ impl DosProtectionManager {
     /// Create with default settings
     pub fn default() -> Self {
         Self::new(
-            10,   // Max 10 connections per IP per window
-            60,   // 60 second window
+            10,    // Max 10 connections per IP per window
+            60,    // 60 second window
             10000, // Max 10k messages in queue
-            200,  // Max 200 active connections
+            200,   // Max 200 active connections
         )
     }
 
@@ -194,8 +201,10 @@ impl DosProtectionManager {
             metrics.connection_rate_violations += 1;
 
             if *count >= self.auto_ban_connection_violations {
-                warn!("Auto-banning IP {} for repeated connection rate violations ({} violations)", 
-                      ip, *count);
+                warn!(
+                    "Auto-banning IP {} for repeated connection rate violations ({} violations)",
+                    ip, *count
+                );
                 metrics.auto_bans_applied += 1;
                 // Return false to reject, caller should ban
                 return false;
@@ -212,7 +221,10 @@ impl DosProtectionManager {
     /// Check if message queue is within limits
     pub async fn check_message_queue_size(&self, current_size: usize) -> bool {
         if current_size > self.max_message_queue_size {
-            warn!("Message queue size exceeded: {} > {}", current_size, self.max_message_queue_size);
+            warn!(
+                "Message queue size exceeded: {} > {}",
+                current_size, self.max_message_queue_size
+            );
             let mut metrics = self.metrics.lock().await;
             metrics.message_queue_overflows += 1;
             false
@@ -224,7 +236,10 @@ impl DosProtectionManager {
     /// Check if we can accept more connections
     pub async fn check_active_connections(&self, current_count: usize) -> bool {
         if current_count >= self.max_active_connections {
-            warn!("Active connection limit exceeded: {} >= {}", current_count, self.max_active_connections);
+            warn!(
+                "Active connection limit exceeded: {} >= {}",
+                current_count, self.max_active_connections
+            );
             let mut metrics = self.metrics.lock().await;
             metrics.active_connection_limit_hits += 1;
             false
@@ -262,13 +277,12 @@ impl DosProtectionManager {
     /// Check if we're under DoS attack (heuristic)
     pub async fn detect_dos_attack(&self) -> bool {
         let metrics = self.resource_metrics.lock().await;
-        
+
         // Heuristic: If message queue is > 80% full and connections are > 80% of max
         let queue_threshold = (self.max_message_queue_size as f64 * 0.8) as usize;
         let conn_threshold = (self.max_active_connections as f64 * 0.8) as usize;
 
-        metrics.message_queue_size > queue_threshold 
-            && metrics.active_connections > conn_threshold
+        metrics.message_queue_size > queue_threshold && metrics.active_connections > conn_threshold
     }
 
     /// Cleanup old connection rate limiter entries
@@ -368,4 +382,3 @@ mod tests {
         assert!(dos.should_auto_ban(ip).await);
     }
 }
-

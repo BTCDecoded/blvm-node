@@ -2,9 +2,9 @@
 //!
 //! Stores and manages the UTXO set for efficient transaction validation.
 
+use crate::storage::database::{Database, Tree};
 use anyhow::Result;
 use bllvm_protocol::{OutPoint, UtxoSet, UTXO};
-use crate::storage::database::{Database, Tree};
 use std::collections::HashMap;
 use std::sync::Arc;
 

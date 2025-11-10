@@ -188,9 +188,9 @@ impl SyncCoordinator {
         metrics: Option<Arc<MetricsCollector>>,
         profiler: Option<Arc<PerformanceProfiler>>,
     ) -> Result<bool> {
-        let _timer = profiler.as_ref().map(|p| {
-            PerformanceTimer::start(Arc::clone(p), OperationType::BlockProcessing)
-        });
+        let _timer = profiler
+            .as_ref()
+            .map(|p| PerformanceTimer::start(Arc::clone(p), OperationType::BlockProcessing));
         let start_time = Instant::now();
 
         // Parse block from wire format (extracts witness data)
@@ -231,7 +231,7 @@ impl SyncCoordinator {
                 metrics.update_performance(|m| {
                     let time_ms = processing_time.as_secs_f64() * 1000.0;
                     // Update average block processing time (exponential moving average)
-                    m.avg_block_processing_time_ms = 
+                    m.avg_block_processing_time_ms =
                         (m.avg_block_processing_time_ms * 0.9) + (time_ms * 0.1);
                     // Update blocks per second
                     if processing_time.as_secs_f64() > 0.0 {
@@ -240,7 +240,10 @@ impl SyncCoordinator {
                 });
             }
 
-            info!("Block validated and stored at height {} (took {:?})", current_height, processing_time);
+            info!(
+                "Block validated and stored at height {} (took {:?})",
+                current_height, processing_time
+            );
             Ok(true)
         } else {
             error!("Block validation failed at height {}", current_height);

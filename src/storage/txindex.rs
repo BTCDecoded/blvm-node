@@ -2,10 +2,10 @@
 //!
 //! Provides fast lookup of transactions by hash and maintains transaction metadata.
 
+use crate::storage::database::{Database, Tree};
 use anyhow::Result;
 use bllvm_protocol::{Hash, Transaction};
 use serde::{Deserialize, Serialize};
-use crate::storage::database::{Database, Tree};
 use std::sync::Arc;
 
 /// Transaction metadata
@@ -68,7 +68,8 @@ impl TxIndex {
         };
 
         let metadata_data = bincode::serialize(&metadata)?;
-        self.tx_metadata.insert(tx_hash.as_slice(), &metadata_data)?;
+        self.tx_metadata
+            .insert(tx_hash.as_slice(), &metadata_data)?;
 
         // Index by block
         let block_key = self.block_tx_key(block_hash, tx_index);

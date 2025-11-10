@@ -138,7 +138,7 @@ impl TransactionPackage {
     pub fn new(transactions: Vec<Transaction>) -> Result<Self, PackageError> {
         Self::new_with_utxo_set(transactions, None)
     }
-    
+
     /// Create a new transaction package with UTXO set for fee calculation
     pub fn new_with_utxo_set(
         transactions: Vec<Transaction>,
@@ -168,20 +168,23 @@ impl TransactionPackage {
         // Calculate combined fee from UTXO set if provided
         let combined_fee = if let Some(utxo_set) = utxo_set {
             // Calculate fee for each transaction: sum(inputs) - sum(outputs)
-            transactions.iter().map(|tx| {
-                let input_total: u64 = tx.inputs.iter()
-                    .filter_map(|inp| utxo_set.get(&inp.prevout))
-                    .map(|utxo| utxo.value as u64)
-                    .sum();
-                let output_total: u64 = tx.outputs.iter()
-                    .map(|out| out.value as u64)
-                    .sum();
-                if input_total > output_total {
-                    input_total - output_total
-                } else {
-                    0
-                }
-            }).sum()
+            transactions
+                .iter()
+                .map(|tx| {
+                    let input_total: u64 = tx
+                        .inputs
+                        .iter()
+                        .filter_map(|inp| utxo_set.get(&inp.prevout))
+                        .map(|utxo| utxo.value as u64)
+                        .sum();
+                    let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
+                    if input_total > output_total {
+                        input_total - output_total
+                    } else {
+                        0
+                    }
+                })
+                .sum()
         } else {
             0 // Fee calculation requires UTXO set
         };

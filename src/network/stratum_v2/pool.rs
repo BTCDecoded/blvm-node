@@ -191,7 +191,7 @@ impl StratumV2Pool {
 
         // Store template
         self.current_template = Some(template);
-        
+
         (job_id, messages)
     }
 
@@ -463,10 +463,10 @@ impl StratumV2Pool {
         if let Some(coinbase) = template.transactions.first() {
             // Serialize coinbase transaction
             let coinbase_bytes = self.serialize_transaction(coinbase);
-            
+
             // Extract merkle path from coinbase (index 0) to root
             let merkle_path = self.extract_merkle_path(template, 0);
-            
+
             // For Stratum V2, coinbase prefix is the full coinbase (miners can modify it)
             // Coinbase suffix is empty (not used in Stratum V2)
             (coinbase_bytes, vec![], merkle_path)
@@ -477,15 +477,17 @@ impl StratumV2Pool {
 
     /// Extract merkle path from a specific transaction index to root
     fn extract_merkle_path(&self, block: &Block, tx_index: usize) -> Vec<Hash> {
-        use bllvm_protocol::mempool::calculate_tx_id;
         use crate::storage::hashing::double_sha256;
+        use bllvm_protocol::mempool::calculate_tx_id;
 
         if block.transactions.is_empty() || tx_index >= block.transactions.len() {
             return vec![];
         }
 
         // Calculate all transaction hashes
-        let mut tx_hashes: Vec<Hash> = block.transactions.iter()
+        let mut tx_hashes: Vec<Hash> = block
+            .transactions
+            .iter()
             .map(|tx| calculate_tx_id(tx))
             .collect();
 
@@ -528,7 +530,7 @@ impl StratumV2Pool {
                     combined.extend_from_slice(&chunk[0]);
                     let parent_hash = double_sha256(&combined);
                     next_level.push(parent_hash);
-                    
+
                     // If current_index is the last (odd) transaction, no sibling to add
                     let pair_start = pair_idx * 2;
                     if current_index == pair_start {

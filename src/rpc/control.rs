@@ -89,10 +89,7 @@ impl ControlRpc {
     pub async fn getmemoryinfo(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmemoryinfo");
 
-        let mode = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .unwrap_or("stats");
+        let mode = params.get(0).and_then(|p| p.as_str()).unwrap_or("stats");
 
         match mode {
             "stats" => {
@@ -224,15 +221,45 @@ impl ControlRpc {
         } else {
             // No command specified, return list of all commands
             let commands = vec![
-                "getblockchaininfo", "getblock", "getblockhash", "getblockheader",
-                "getbestblockhash", "getblockcount", "getdifficulty", "gettxoutsetinfo",
-                "verifychain", "getrawtransaction", "sendrawtransaction", "testmempoolaccept",
-                "decoderawtransaction", "gettxout", "gettxoutproof", "verifytxoutproof",
-                "getmempoolinfo", "getrawmempool", "savemempool", "getnetworkinfo",
-                "getpeerinfo", "getconnectioncount", "ping", "addnode", "disconnectnode",
-                "getnettotals", "clearbanned", "setban", "listbanned", "getmininginfo",
-                "getblocktemplate", "submitblock", "estimatesmartfee", "stop", "uptime",
-                "getmemoryinfo", "getrpcinfo", "help", "logging",
+                "getblockchaininfo",
+                "getblock",
+                "getblockhash",
+                "getblockheader",
+                "getbestblockhash",
+                "getblockcount",
+                "getdifficulty",
+                "gettxoutsetinfo",
+                "verifychain",
+                "getrawtransaction",
+                "sendrawtransaction",
+                "testmempoolaccept",
+                "decoderawtransaction",
+                "gettxout",
+                "gettxoutproof",
+                "verifytxoutproof",
+                "getmempoolinfo",
+                "getrawmempool",
+                "savemempool",
+                "getnetworkinfo",
+                "getpeerinfo",
+                "getconnectioncount",
+                "ping",
+                "addnode",
+                "disconnectnode",
+                "getnettotals",
+                "clearbanned",
+                "setban",
+                "listbanned",
+                "getmininginfo",
+                "getblocktemplate",
+                "submitblock",
+                "estimatesmartfee",
+                "stop",
+                "uptime",
+                "getmemoryinfo",
+                "getrpcinfo",
+                "help",
+                "logging",
             ];
 
             Ok(json!(commands.join("\n")))
@@ -275,15 +302,14 @@ impl ControlRpc {
         // 1. Store a reference to the EnvFilter layer
         // 2. Provide methods to update the filter dynamically
         // 3. Rebuild the subscriber with the new filter
-        
+
         // Check current filter state from environment
-        let current_filter = std::env::var("RUST_LOG")
-            .unwrap_or_else(|_| "info".to_string());
-        
+        let current_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+
         // Determine if debug logging is active based on filter
-        let active = current_filter.contains("debug") || 
-                     current_filter.contains("trace") ||
-                     !exclude.contains(&"all".to_string());
+        let active = current_filter.contains("debug")
+            || current_filter.contains("trace")
+            || !exclude.contains(&"all".to_string());
 
         Ok(json!({
             "active": active,
@@ -297,7 +323,7 @@ impl ControlRpc {
     /// Returns comprehensive health report for all node components
     pub async fn gethealth(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: gethealth");
-        
+
         // This would need access to Node instance to get full health report
         // For now, return basic health status
         Ok(json!({
@@ -312,7 +338,7 @@ impl ControlRpc {
     /// Returns comprehensive metrics for monitoring
     pub async fn getmetrics(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmetrics");
-        
+
         // This would need access to MetricsCollector to get full metrics
         // For now, return basic metrics
         let uptime = self.start_time.elapsed().as_secs();
@@ -328,4 +354,3 @@ impl Default for ControlRpc {
         Self::new()
     }
 }
-

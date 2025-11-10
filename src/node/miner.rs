@@ -20,7 +20,11 @@ pub trait MempoolProvider: Send + Sync {
 
     /// Get prioritized transactions (by fee rate)
     /// Requires UTXO set for accurate fee calculation
-    fn get_prioritized_transactions(&self, limit: usize, utxo_set: &bllvm_protocol::UtxoSet) -> Vec<Transaction>;
+    fn get_prioritized_transactions(
+        &self,
+        limit: usize,
+        utxo_set: &bllvm_protocol::UtxoSet,
+    ) -> Vec<Transaction>;
 
     /// Remove transaction from mempool
     fn remove_transaction(&mut self, hash: &[u8; 32]) -> bool;
@@ -57,7 +61,11 @@ impl TransactionSelector {
 
     /// Select transactions for block
     /// Note: Requires UTXO set for fee calculation - caller must provide it
-    pub fn select_transactions(&self, mempool: &dyn MempoolProvider, utxo_set: &bllvm_protocol::UtxoSet) -> Vec<Transaction> {
+    pub fn select_transactions(
+        &self,
+        mempool: &dyn MempoolProvider,
+        utxo_set: &bllvm_protocol::UtxoSet,
+    ) -> Vec<Transaction> {
         let mut selected = Vec::new();
         let mut current_size = 0;
         let mut current_weight = 0;
@@ -392,12 +400,19 @@ impl MiningCoordinator {
 
         // Get chain tip from storage for prev_block_hash and difficulty
         let (prev_block_hash, bits, height) = if let Some(ref storage) = self.storage {
-            if let Some(tip_header) = storage.chain().get_tip_header()
-                .map_err(|e| anyhow::anyhow!("Failed to get tip header: {}", e))? {
-                let tip_hash = storage.chain().get_tip_hash()
+            if let Some(tip_header) = storage
+                .chain()
+                .get_tip_header()
+                .map_err(|e| anyhow::anyhow!("Failed to get tip header: {}", e))?
+            {
+                let tip_hash = storage
+                    .chain()
+                    .get_tip_hash()
                     .map_err(|e| anyhow::anyhow!("Failed to get tip hash: {}", e))?
                     .unwrap_or([0u8; 32]);
-                let chain_height = storage.chain().get_height()
+                let chain_height = storage
+                    .chain()
+                    .get_height()
                     .map_err(|e| anyhow::anyhow!("Failed to get chain height: {}", e))?
                     .unwrap_or(0);
                 (tip_hash, tip_header.bits, chain_height)
@@ -412,7 +427,9 @@ impl MiningCoordinator {
 
         // Get UTXO set from storage for fee calculation
         let utxo_set = if let Some(ref storage) = self.storage {
-            storage.utxos().get_all_utxos()
+            storage
+                .utxos()
+                .get_all_utxos()
                 .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?
         } else {
             // No storage - use empty UTXO set (will result in 0 fees)
@@ -616,7 +633,11 @@ impl MempoolProvider for MockMempoolProvider {
         self.transactions.len()
     }
 
-    fn get_prioritized_transactions(&self, limit: usize, _utxo_set: &bllvm_protocol::UtxoSet) -> Vec<Transaction> {
+    fn get_prioritized_transactions(
+        &self,
+        limit: usize,
+        _utxo_set: &bllvm_protocol::UtxoSet,
+    ) -> Vec<Transaction> {
         // Mock implementation ignores UTXO set and uses pre-calculated priorities
         self.prioritized_transactions
             .iter()
@@ -786,7 +807,9 @@ mod tests {
         assert_eq!(mempool.get_mempool_size(), 0);
         assert!(mempool.get_transactions().is_empty());
         let empty_utxo_set = bllvm_protocol::UtxoSet::new();
-        assert!(mempool.get_prioritized_transactions(10, &empty_utxo_set).is_empty());
+        assert!(mempool
+            .get_prioritized_transactions(10, &empty_utxo_set)
+            .is_empty());
     }
 
     #[test]

@@ -5,12 +5,12 @@
 
 pub mod block_processor;
 pub mod event_publisher;
-pub mod mempool;
-pub mod miner;
-pub mod sync;
-pub mod metrics;
 pub mod health;
+pub mod mempool;
+pub mod metrics;
+pub mod miner;
 pub mod performance;
+pub mod sync;
 
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -70,14 +70,16 @@ impl Node {
 
         // Initialize components
         let protocol_version = protocol_version.unwrap_or(ProtocolVersion::Regtest);
-        let protocol =
-            BitcoinProtocolEngine::new(protocol_version)?;
+        let protocol = BitcoinProtocolEngine::new(protocol_version)?;
         let protocol_arc = Arc::new(protocol);
         let storage = Storage::new(data_dir)?;
         let storage_arc = Arc::new(storage);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
-        let network = NetworkManager::new(network_addr)
-            .with_dependencies(Arc::clone(&protocol_arc), Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc));
+        let network = NetworkManager::new(network_addr).with_dependencies(
+            Arc::clone(&protocol_arc),
+            Arc::clone(&storage_arc),
+            Arc::clone(&mempool_manager_arc),
+        );
         let network_arc = Arc::new(network);
         let metrics_arc = Arc::new(MetricsCollector::new());
         let profiler_arc = Arc::new(PerformanceProfiler::new(1000));
@@ -187,13 +189,13 @@ impl Node {
         info!("Sync coordinator initialized");
         info!("Mempool manager initialized");
         info!("Mining coordinator initialized");
-        
+
         // Start network manager
         if let Err(e) = self.network.start(self.network_addr).await {
             warn!("Failed to start network manager: {}", e);
             // Continue anyway - network might be optional
         }
-        
+
         // Initialize peer connections automatically
         self.initialize_peer_connections().await?;
 
@@ -203,22 +205,26 @@ impl Node {
             if config.prune_on_startup {
                 let current_height = self.storage.chain().get_height()?.unwrap_or(0);
                 let is_ibd = current_height == 0;
-                
+
                 if !is_ibd && pruning_manager.is_enabled() {
                     info!("Prune on startup enabled, checking if pruning is needed...");
-                    
+
                     // Calculate prune height based on configuration
                     let prune_height = match &config.mode {
                         crate::config::PruningMode::Disabled => {
                             // Skip if disabled
                             None
                         }
-                        crate::config::PruningMode::Normal { keep_from_height, .. } => {
+                        crate::config::PruningMode::Normal {
+                            keep_from_height, ..
+                        } => {
                             // Prune up to keep_from_height
                             Some(*keep_from_height)
                         }
                         #[cfg(feature = "utxo-commitments")]
-                        crate::config::PruningMode::Aggressive { keep_from_height, .. } => {
+                        crate::config::PruningMode::Aggressive {
+                            keep_from_height, ..
+                        } => {
                             // Prune up to keep_from_height
                             Some(*keep_from_height)
                         }
@@ -228,21 +234,31 @@ impl Node {
                             // Fall back to no pruning if feature is disabled
                             None
                         }
-                        crate::config::PruningMode::Custom { keep_bodies_from_height, .. } => {
+                        crate::config::PruningMode::Custom {
+                            keep_bodies_from_height,
+                            ..
+                        } => {
                             // Prune up to keep_bodies_from_height
                             Some(*keep_bodies_from_height)
                         }
                     };
-                    
+
                     if let Some(prune_to_height) = prune_height {
                         if prune_to_height < current_height {
-                            match pruning_manager.prune_to_height(prune_to_height, current_height, is_ibd) {
+                            match pruning_manager.prune_to_height(
+                                prune_to_height,
+                                current_height,
+                                is_ibd,
+                            ) {
                                 Ok(stats) => {
                                     info!("Startup pruning completed: {} blocks pruned, {} blocks kept", 
                                           stats.blocks_pruned, stats.blocks_kept);
                                     // Flush storage to persist pruning changes
                                     if let Err(e) = self.storage.flush() {
-                                        warn!("Failed to flush storage after startup pruning: {}", e);
+                                        warn!(
+                                            "Failed to flush storage after startup pruning: {}",
+                                            e
+                                        );
                                     }
                                 }
                                 Err(e) => {
@@ -292,7 +308,7 @@ impl Node {
     }
 
     /// Initialize peer connections automatically
-    /// 
+    ///
     /// Determines network type from protocol version and uses config if available.
     async fn initialize_peer_connections(&self) -> Result<()> {
         // Determine network type from protocol version
@@ -306,7 +322,11 @@ impl Node {
                 if let Some(ref config) = self.config {
                     if !config.persistent_peers.is_empty() {
                         let persistent_peers = &config.persistent_peers;
-                        if let Err(e) = self.network.connect_persistent_peers(persistent_peers).await {
+                        if let Err(e) = self
+                            .network
+                            .connect_persistent_peers(persistent_peers)
+                            .await
+                        {
                             warn!("Failed to connect to some persistent peers: {}", e);
                         }
                     }
@@ -314,31 +334,30 @@ impl Node {
                 return Ok(());
             }
         };
-        
+
         // Get port from network address
         let port = self.network_addr.port();
-        
+
         // Default target peer count (Bitcoin Core uses 8-125, we'll use 8 as default)
         let target_peer_count = 8;
-        
+
         // Use config if available, otherwise use defaults
         let default_config = NodeConfig {
             listen_addr: Some(self.network_addr),
             ..Default::default()
         };
         let config = self.config.as_ref().unwrap_or(&default_config);
-        
+
         // Initialize peer connections
-        if let Err(e) = self.network.initialize_peer_connections(
-            config,
-            network,
-            port,
-            target_peer_count,
-        ).await {
+        if let Err(e) = self
+            .network
+            .initialize_peer_connections(config, network, port, target_peer_count)
+            .await
+        {
             warn!("Failed to initialize peer connections: {}", e);
             // Don't fail startup - peer connections are best-effort
         }
-        
+
         Ok(())
     }
 
@@ -367,34 +386,48 @@ impl Node {
                 ) {
                     Ok(true) => {
                         info!("Block accepted at height {}", current_height);
-                        
+
                         // Persist UTXO set to storage after block validation
                         // This is critical for commitment generation and incremental pruning
                         if let Err(e) = self.storage.utxos().store_utxo_set(&utxo_set) {
-                            warn!("Failed to persist UTXO set after block {}: {}", current_height, e);
+                            warn!(
+                                "Failed to persist UTXO set after block {}: {}",
+                                current_height, e
+                            );
                         }
-                        
+
                         // Generate UTXO commitment from current state (if enabled)
                         // Use current_height (the block that was just validated) before incrementing
                         #[cfg(feature = "utxo-commitments")]
                         {
                             if let Some(pruning_manager) = self.storage.pruning() {
-                                if let (Some(commitment_store), Some(_utxostore)) = 
-                                    (pruning_manager.commitment_store(), pruning_manager.utxostore()) 
-                                {
+                                if let (Some(commitment_store), Some(_utxostore)) = (
+                                    pruning_manager.commitment_store(),
+                                    pruning_manager.utxostore(),
+                                ) {
                                     // Get block hash from storage (block was just stored at current_height)
                                     let blocks_arc = self.storage.blocks();
-                                    if let Ok(Some(block_hash)) = blocks_arc.get_hash_by_height(current_height) {
+                                    if let Ok(Some(block_hash)) =
+                                        blocks_arc.get_hash_by_height(current_height)
+                                    {
                                         // Generate commitment from current UTXO set state
-                                        if let Err(e) = pruning_manager.generate_commitment_from_current_state(
-                                            &block_hash,
-                                            current_height,
-                                            &utxo_set,
-                                            &commitment_store,
-                                        ) {
-                                            warn!("Failed to generate commitment for block {}: {}", current_height, e);
+                                        if let Err(e) = pruning_manager
+                                            .generate_commitment_from_current_state(
+                                                &block_hash,
+                                                current_height,
+                                                &utxo_set,
+                                                &commitment_store,
+                                            )
+                                        {
+                                            warn!(
+                                                "Failed to generate commitment for block {}: {}",
+                                                current_height, e
+                                            );
                                         } else {
-                                            debug!("Generated UTXO commitment for block {}", current_height);
+                                            debug!(
+                                                "Generated UTXO commitment for block {}",
+                                                current_height
+                                            );
                                         }
                                     } else {
                                         warn!("Could not find block hash for height {} to generate commitment", current_height);
@@ -402,48 +435,59 @@ impl Node {
                                 }
                             }
                         }
-                        
+
                         // Increment height after processing
                         current_height += 1;
-                        
+
                         // Check for incremental pruning during IBD
                         // Consider IBD if we're still syncing (height < tip or no recent blocks)
                         let is_ibd = current_height < 1000; // Simple heuristic: consider IBD if < 1000 blocks
                         if let Some(pruning_manager) = self.storage.pruning() {
-                            if let Ok(Some(prune_stats)) = pruning_manager.incremental_prune_during_ibd(current_height, is_ibd) {
+                            if let Ok(Some(prune_stats)) =
+                                pruning_manager.incremental_prune_during_ibd(current_height, is_ibd)
+                            {
                                 info!("Incremental pruning during IBD: {} blocks pruned, {} bytes freed", 
                                       prune_stats.blocks_pruned, prune_stats.storage_freed);
                                 // Flush storage to persist pruning changes
                                 if let Err(e) = self.storage.flush() {
-                                    warn!("Failed to flush storage after incremental pruning: {}", e);
+                                    warn!(
+                                        "Failed to flush storage after incremental pruning: {}",
+                                        e
+                                    );
                                 }
                             }
                         }
-                        
+
                         // Check for automatic pruning after block acceptance
                         if let Some(pruning_manager) = self.storage.pruning() {
                             let stats = pruning_manager.get_stats();
-                            let should_prune = pruning_manager.should_auto_prune(
-                                current_height,
-                                stats.last_prune_height,
-                            );
-                            
+                            let should_prune = pruning_manager
+                                .should_auto_prune(current_height, stats.last_prune_height);
+
                             if should_prune {
                                 info!("Automatic pruning triggered at height {}", current_height);
-                                
+
                                 // Calculate prune height based on configuration
                                 let prune_height = match &pruning_manager.config.mode {
                                     crate::config::PruningMode::Disabled => None,
-                                    crate::config::PruningMode::Normal { keep_from_height, .. } => {
+                                    crate::config::PruningMode::Normal {
+                                        keep_from_height, ..
+                                    } => {
                                         // Prune to keep_from_height, but ensure we keep min_blocks
                                         let min_keep = pruning_manager.config.min_blocks_to_keep;
-                                        let effective_keep = (*keep_from_height).max(current_height.saturating_sub(min_keep));
+                                        let effective_keep = (*keep_from_height)
+                                            .max(current_height.saturating_sub(min_keep));
                                         Some(effective_keep)
                                     }
                                     #[cfg(feature = "utxo-commitments")]
-                                    crate::config::PruningMode::Aggressive { keep_from_height, min_blocks, .. } => {
+                                    crate::config::PruningMode::Aggressive {
+                                        keep_from_height,
+                                        min_blocks,
+                                        ..
+                                    } => {
                                         // Prune to keep_from_height, respecting min_blocks
-                                        let effective_keep = (*keep_from_height).max(current_height.saturating_sub(*min_blocks));
+                                        let effective_keep = (*keep_from_height)
+                                            .max(current_height.saturating_sub(*min_blocks));
                                         Some(effective_keep)
                                     }
                                     #[cfg(not(feature = "utxo-commitments"))]
@@ -452,17 +496,25 @@ impl Node {
                                         // Fall back to no pruning if feature is disabled
                                         None
                                     }
-                                    crate::config::PruningMode::Custom { keep_bodies_from_height, .. } => {
+                                    crate::config::PruningMode::Custom {
+                                        keep_bodies_from_height,
+                                        ..
+                                    } => {
                                         // Prune to keep_bodies_from_height, respecting min_blocks
                                         let min_keep = pruning_manager.config.min_blocks_to_keep;
-                                        let effective_keep = (*keep_bodies_from_height).max(current_height.saturating_sub(min_keep));
+                                        let effective_keep = (*keep_bodies_from_height)
+                                            .max(current_height.saturating_sub(min_keep));
                                         Some(effective_keep)
                                     }
                                 };
-                                
+
                                 if let Some(prune_to_height) = prune_height {
                                     if prune_to_height < current_height {
-                                        match pruning_manager.prune_to_height(prune_to_height, current_height, false) {
+                                        match pruning_manager.prune_to_height(
+                                            prune_to_height,
+                                            current_height,
+                                            false,
+                                        ) {
                                             Ok(prune_stats) => {
                                                 info!("Automatic pruning completed: {} blocks pruned, {} blocks kept", 
                                                       prune_stats.blocks_pruned, prune_stats.blocks_kept);
@@ -595,12 +647,12 @@ impl Node {
     /// Get health report
     pub fn health_check(&self) -> health::HealthReport {
         use crate::node::health::HealthChecker;
-        
+
         let checker = HealthChecker::new();
         let network_healthy = self.network.is_network_active();
         let storage_healthy = self.storage.check_storage_bounds().unwrap_or(false);
         let rpc_healthy = true; // RPC is always healthy if node is running
-        
+
         // Get metrics if available (simplified for now)
         checker.check_health(
             network_healthy,

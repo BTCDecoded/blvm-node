@@ -54,10 +54,7 @@ impl RpcServer {
     }
 
     /// Create a new RPC server with authentication
-    pub fn with_auth(
-        addr: SocketAddr,
-        auth_manager: Arc<auth::RpcAuthManager>,
-    ) -> Self {
+    pub fn with_auth(addr: SocketAddr, auth_manager: Arc<auth::RpcAuthManager>) -> Self {
         Self {
             addr,
             blockchain: Arc::new(blockchain::BlockchainRpc::new()),
@@ -134,14 +131,14 @@ impl RpcServer {
             control: Arc::clone(&self.control),
             auth_manager: self.auth_manager.clone(),
         });
-        
+
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     debug!("New RPC connection from {}", addr);
                     let peer_addr = addr;
                     let server = Arc::clone(&server);
-                    
+
                     // Spawn task to handle connection
                     // Clone values before moving into async block to ensure Send
                     let server_for_spawn = Arc::clone(&server);
@@ -160,16 +157,16 @@ impl RpcServer {
                                 Self::handle_http_request_with_server(server_inner, req, addr_inner)
                             }
                         });
-                        
+
                         // Try to serve as HTTP
-                        if let Err(e) = http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                        {
+                        if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
                             // If hyper fails, it might be raw TCP
                             // But we can't recover here since hyper consumed the connection
                             // For now, log and continue - raw TCP support would need separate port
-                            debug!("HTTP connection failed from {} (might be raw TCP): {}", peer_addr_clone, e);
+                            debug!(
+                                "HTTP connection failed from {} (might be raw TCP): {}",
+                                peer_addr_clone, e
+                            );
                         }
                     });
                 }
@@ -196,7 +193,7 @@ impl RpcServer {
 
         // Extract headers before consuming request body
         let headers = req.headers().clone();
-        
+
         // Check Content-Type
         if let Some(content_type) = headers.get("content-type") {
             if content_type != "application/json" {
@@ -207,12 +204,16 @@ impl RpcServer {
         // Read request body with size limit
         let body = req.collect().await?;
         let body_bytes = body.to_bytes();
-        
+
         // Enforce maximum request size
         if body_bytes.len() > MAX_REQUEST_SIZE {
             return Ok(Self::http_error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                &format!("Request body too large: {} bytes (max: {} bytes)", body_bytes.len(), MAX_REQUEST_SIZE),
+                &format!(
+                    "Request body too large: {} bytes (max: {} bytes)",
+                    body_bytes.len(),
+                    MAX_REQUEST_SIZE
+                ),
             ));
         }
 
@@ -232,13 +233,10 @@ impl RpcServer {
         // Authenticate request if authentication is enabled
         if let Some(ref auth_manager) = server.auth_manager {
             let auth_result = auth_manager.authenticate_request(&headers, addr).await;
-            
+
             // Check if authentication failed
             if let Some(error) = auth_result.error {
-                return Ok(Self::http_error_response(
-                    StatusCode::UNAUTHORIZED,
-                    &error,
-                ));
+                return Ok(Self::http_error_response(StatusCode::UNAUTHORIZED, &error));
             }
 
             // Check rate limiting
@@ -254,8 +252,7 @@ impl RpcServer {
 
         // Process JSON-RPC request (reuse server instance with cached handlers)
         let response = Self::process_request_with_server(server, &json_body).await;
-        let response_json =
-            serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
 
         // Build HTTP response
         Ok(Response::builder()
@@ -265,7 +262,6 @@ impl RpcServer {
             .body(Full::new(Bytes::from(response_json)))
             .unwrap())
     }
-
 
     /// Create HTTP error response
     fn http_error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
@@ -332,12 +328,11 @@ impl RpcServer {
     async fn call_method(&self, method: &str, params: Value) -> Result<Value, errors::RpcError> {
         match method {
             // Blockchain methods
-            "getblockchaininfo" => {
-                self.blockchain
-                    .get_blockchain_info()
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
+            "getblockchaininfo" => self
+                .blockchain
+                .get_blockchain_info()
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
             "getblock" => {
                 let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
                 self.blockchain
@@ -360,30 +355,26 @@ impl RpcServer {
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
-            "getbestblockhash" => {
-                self.blockchain
-                    .get_best_block_hash()
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "getblockcount" => {
-                self.blockchain
-                    .get_block_count()
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "getdifficulty" => {
-                self.blockchain
-                    .get_difficulty()
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "gettxoutsetinfo" => {
-                self.blockchain
-                    .get_txoutset_info()
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
+            "getbestblockhash" => self
+                .blockchain
+                .get_best_block_hash()
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getblockcount" => self
+                .blockchain
+                .get_block_count()
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getdifficulty" => self
+                .blockchain
+                .get_difficulty()
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "gettxoutsetinfo" => self
+                .blockchain
+                .get_txoutset_info()
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
             "verifychain" => {
                 let checklevel = params.get(0).and_then(|p| p.as_u64());
                 let numblocks = params.get(1).and_then(|p| p.as_u64());
@@ -392,205 +383,115 @@ impl RpcServer {
                     .await
                     .map_err(|e| errors::RpcError::internal_error(e.to_string()))
             }
-            "getchaintips" => {
-                self.blockchain
-                    .get_chain_tips()
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "getchaintxstats" => {
-                self.blockchain
-                    .get_chain_tx_stats(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "getblockstats" => {
-                self.blockchain
-                    .get_block_stats(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "pruneblockchain" => {
-                self.blockchain
-                    .prune_blockchain(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "getpruneinfo" => {
-                self.blockchain
-                    .get_prune_info(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "invalidateblock" => {
-                self.blockchain
-                    .invalidate_block(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "reconsiderblock" => {
-                self.blockchain
-                    .reconsider_block(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "waitfornewblock" => {
-                self.blockchain
-                    .wait_for_new_block(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "waitforblock" => {
-                self.blockchain
-                    .wait_for_block(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "waitforblockheight" => {
-                self.blockchain
-                    .wait_for_block_height(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
+            "getchaintips" => self
+                .blockchain
+                .get_chain_tips()
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getchaintxstats" => self
+                .blockchain
+                .get_chain_tx_stats(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getblockstats" => self
+                .blockchain
+                .get_block_stats(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "pruneblockchain" => self
+                .blockchain
+                .prune_blockchain(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getpruneinfo" => self
+                .blockchain
+                .get_prune_info(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "invalidateblock" => self
+                .blockchain
+                .invalidate_block(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "reconsiderblock" => self
+                .blockchain
+                .reconsider_block(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "waitfornewblock" => self
+                .blockchain
+                .wait_for_new_block(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "waitforblock" => self
+                .blockchain
+                .wait_for_block(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "waitforblockheight" => self
+                .blockchain
+                .wait_for_block_height(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
 
             // Raw Transaction methods
-            "getrawtransaction" => {
-                self.rawtx.getrawtransaction(&params).await
-            }
-            "sendrawtransaction" => {
-                self.rawtx.sendrawtransaction(&params).await
-            }
-            "testmempoolaccept" => {
-                self.rawtx.testmempoolaccept(&params).await
-            }
-            "decoderawtransaction" => {
-                self.rawtx.decoderawtransaction(&params).await
-            }
-            "gettxout" => {
-                self.rawtx.gettxout(&params).await
-            }
-            "gettxoutproof" => {
-                self.rawtx.gettxoutproof(&params).await
-            }
-            "verifytxoutproof" => {
-                self.rawtx.verifytxoutproof(&params).await
-            }
+            "getrawtransaction" => self.rawtx.getrawtransaction(&params).await,
+            "sendrawtransaction" => self.rawtx.sendrawtransaction(&params).await,
+            "testmempoolaccept" => self.rawtx.testmempoolaccept(&params).await,
+            "decoderawtransaction" => self.rawtx.decoderawtransaction(&params).await,
+            "gettxout" => self.rawtx.gettxout(&params).await,
+            "gettxoutproof" => self.rawtx.gettxoutproof(&params).await,
+            "verifytxoutproof" => self.rawtx.verifytxoutproof(&params).await,
 
             // Mempool methods
-            "getmempoolinfo" => {
-                self.mempool.getmempoolinfo(&params).await
-            }
-            "getrawmempool" => {
-                self.mempool.getrawmempool(&params).await
-            }
-            "savemempool" => {
-                self.mempool.savemempool(&params).await
-            }
-            "getmempoolancestors" => {
-                self.mempool.getmempoolancestors(&params).await
-            }
-            "getmempooldescendants" => {
-                self.mempool.getmempooldescendants(&params).await
-            }
-            "getmempoolentry" => {
-                self.mempool.getmempoolentry(&params).await
-            }
+            "getmempoolinfo" => self.mempool.getmempoolinfo(&params).await,
+            "getrawmempool" => self.mempool.getrawmempool(&params).await,
+            "savemempool" => self.mempool.savemempool(&params).await,
+            "getmempoolancestors" => self.mempool.getmempoolancestors(&params).await,
+            "getmempooldescendants" => self.mempool.getmempooldescendants(&params).await,
+            "getmempoolentry" => self.mempool.getmempoolentry(&params).await,
 
             // Network methods
-            "getnetworkinfo" => {
-                self.network.get_network_info().await
-            }
-            "getpeerinfo" => {
-                self.network.get_peer_info().await
-            }
-            "getconnectioncount" => {
-                self.network.get_connection_count(&params).await
-            }
-            "ping" => {
-                self.network.ping(&params).await
-            }
-            "addnode" => {
-                self.network.add_node(&params).await
-            }
-            "disconnectnode" => {
-                self.network.disconnect_node(&params).await
-            }
-            "getnettotals" => {
-                self.network.get_net_totals(&params).await
-            }
-            "clearbanned" => {
-                self.network.clear_banned(&params).await
-            }
-            "setban" => {
-                self.network.set_ban(&params).await
-            }
-            "listbanned" => {
-                self.network.list_banned(&params).await
-            }
-            "getaddednodeinfo" => {
-                self.network.getaddednodeinfo(&params).await
-            }
-            "getnodeaddresses" => {
-                self.network.getnodeaddresses(&params).await
-            }
-            "setnetworkactive" => {
-                self.network.setnetworkactive(&params).await
-            }
+            "getnetworkinfo" => self.network.get_network_info().await,
+            "getpeerinfo" => self.network.get_peer_info().await,
+            "getconnectioncount" => self.network.get_connection_count(&params).await,
+            "ping" => self.network.ping(&params).await,
+            "addnode" => self.network.add_node(&params).await,
+            "disconnectnode" => self.network.disconnect_node(&params).await,
+            "getnettotals" => self.network.get_net_totals(&params).await,
+            "clearbanned" => self.network.clear_banned(&params).await,
+            "setban" => self.network.set_ban(&params).await,
+            "listbanned" => self.network.list_banned(&params).await,
+            "getaddednodeinfo" => self.network.getaddednodeinfo(&params).await,
+            "getnodeaddresses" => self.network.getnodeaddresses(&params).await,
+            "setnetworkactive" => self.network.setnetworkactive(&params).await,
 
             // Mining methods
-            "getmininginfo" => {
-                self.mining.get_mining_info().await
-            }
-            "getblocktemplate" => {
-                self.mining.get_block_template(&params).await
-            }
-            "submitblock" => {
-                self.mining.submit_block(&params).await
-            }
-            "estimatesmartfee" => {
-                self.mining.estimate_smart_fee(&params).await
-            }
-            "prioritisetransaction" => {
-                self.mining.prioritise_transaction(&params).await
-            }
-            "getblockfilter" => {
-                self.blockchain
-                    .get_block_filter(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
-            "getindexinfo" => {
-                self.blockchain
-                    .get_index_info(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
+            "getmininginfo" => self.mining.get_mining_info().await,
+            "getblocktemplate" => self.mining.get_block_template(&params).await,
+            "submitblock" => self.mining.submit_block(&params).await,
+            "estimatesmartfee" => self.mining.estimate_smart_fee(&params).await,
+            "prioritisetransaction" => self.mining.prioritise_transaction(&params).await,
+            "getblockfilter" => self
+                .blockchain
+                .get_block_filter(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getindexinfo" => self
+                .blockchain
+                .get_index_info(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
 
             // Control methods
-            "stop" => {
-                self.control.stop(&params).await
-            }
-            "uptime" => {
-                self.control.uptime(&params).await
-            }
-            "getmemoryinfo" => {
-                self.control.getmemoryinfo(&params).await
-            }
-            "getrpcinfo" => {
-                self.control.getrpcinfo(&params).await
-            }
-            "help" => {
-                self.control.help(&params).await
-            }
-            "logging" => {
-                self.control.logging(&params).await
-            }
-            "gethealth" => {
-                self.control.gethealth(&params).await
-            }
-            "getmetrics" => {
-                self.control.getmetrics(&params).await
-            }
+            "stop" => self.control.stop(&params).await,
+            "uptime" => self.control.uptime(&params).await,
+            "getmemoryinfo" => self.control.getmemoryinfo(&params).await,
+            "getrpcinfo" => self.control.getrpcinfo(&params).await,
+            "help" => self.control.help(&params).await,
+            "logging" => self.control.logging(&params).await,
+            "gethealth" => self.control.gethealth(&params).await,
+            "getmetrics" => self.control.getmetrics(&params).await,
 
             _ => Err(errors::RpcError::method_not_found(method)),
         }
@@ -616,7 +517,7 @@ mod tests {
         // Start server on random port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        
+
         // Spawn server task using hyper
         let server_handle = tokio::spawn(async move {
             loop {
@@ -628,9 +529,7 @@ mod tests {
                             let service = service_fn(move |req| {
                                 RpcServer::handle_http_request(req, peer_addr)
                             });
-                            let _ = http1::Builder::new()
-                                .serve_connection(io, service)
-                                .await;
+                            let _ = http1::Builder::new().serve_connection(io, service).await;
                         });
                     }
                     Err(_) => break,
@@ -643,7 +542,7 @@ mod tests {
 
         // Connect to server
         let mut client = TokioTcpStream::connect(server_addr).await.unwrap();
-        
+
         // Send HTTP POST request
         let json_body = r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#;
         let http_request = format!(
@@ -656,27 +555,36 @@ mod tests {
             json_body.len(),
             json_body
         );
-        
+
         client.write_all(http_request.as_bytes()).await.unwrap();
-        
+
         // Read response
         let mut response = vec![0u8; 4096];
         let n = tokio::time::timeout(
             tokio::time::Duration::from_secs(2),
-            client.read(&mut response)
-        ).await.unwrap().unwrap();
-        
+            client.read(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
         let response_str = String::from_utf8_lossy(&response[..n]);
-        
+
         // Verify HTTP response (hyper uses lowercase headers)
-        assert!(response_str.contains("HTTP/1.1 200 OK") || response_str.contains("200 OK"), "Response: {}", response_str);
-        assert!(response_str.contains("content-type: application/json") || response_str.contains("Content-Type: application/json"));
+        assert!(
+            response_str.contains("HTTP/1.1 200 OK") || response_str.contains("200 OK"),
+            "Response: {}",
+            response_str
+        );
+        assert!(
+            response_str.contains("content-type: application/json")
+                || response_str.contains("Content-Type: application/json")
+        );
         assert!(response_str.contains("jsonrpc"));
         assert!(response_str.contains("\"result\""));
-        
+
         server_handle.abort();
     }
-
 
     #[tokio::test]
     async fn test_process_request_valid_json() {
@@ -695,8 +603,16 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32700);
-        assert!(response["error"]["message"].as_str().unwrap().contains("Parse error") || 
-                response["error"]["message"].as_str().unwrap().contains("Invalid JSON"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Parse error")
+                || response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Invalid JSON")
+        );
     }
 
     #[tokio::test]
@@ -706,7 +622,10 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
-        assert!(response["error"]["message"].as_str().unwrap().contains("Method not found"));
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Method not found"));
         assert_eq!(response["id"], 1);
     }
 
@@ -833,8 +752,16 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32700);
-        assert!(response["error"]["message"].as_str().unwrap().contains("Parse error") ||
-                response["error"]["message"].as_str().unwrap().contains("Invalid JSON"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Parse error")
+                || response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Invalid JSON")
+        );
     }
 
     #[tokio::test]
@@ -844,7 +771,10 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
-        assert!(response["error"]["message"].as_str().unwrap().contains("Method not found"));
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Method not found"));
         assert!(response["error"]["data"].is_string() || response["error"]["data"].is_null());
         assert_eq!(response["id"], 42);
     }
@@ -866,7 +796,10 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
-        assert!(response["error"]["message"].as_str().unwrap().contains("Method not found"));
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Method not found"));
         assert_eq!(response["id"], 1);
     }
 

@@ -51,7 +51,12 @@ impl ParallelBlockValidator {
         context: &BlockValidationContext,
     ) -> Result<(ValidationResult, UtxoSet)> {
         // Create empty witnesses for each transaction
-        let witnesses: Vec<Witness> = context.block.transactions.iter().map(|_| Vec::new()).collect();
+        let witnesses: Vec<Witness> = context
+            .block
+            .transactions
+            .iter()
+            .map(|_| Vec::new())
+            .collect();
         connect_block(
             &context.block,
             &witnesses,
@@ -87,7 +92,12 @@ impl ParallelBlockValidator {
             .par_iter()
             .map(|context| {
                 // Create empty witnesses for each transaction
-                let witnesses: Vec<Witness> = context.block.transactions.iter().map(|_| Vec::new()).collect();
+                let witnesses: Vec<Witness> = context
+                    .block
+                    .transactions
+                    .iter()
+                    .map(|_| Vec::new())
+                    .collect();
                 connect_block(
                     &context.block,
                     &witnesses,
@@ -116,7 +126,12 @@ impl ParallelBlockValidator {
 
         for context in contexts {
             // Create empty witnesses for each transaction
-            let witnesses: Vec<Witness> = context.block.transactions.iter().map(|_| Vec::new()).collect();
+            let witnesses: Vec<Witness> = context
+                .block
+                .transactions
+                .iter()
+                .map(|_| Vec::new())
+                .collect();
             let result = connect_block(
                 &context.block,
                 &witnesses,

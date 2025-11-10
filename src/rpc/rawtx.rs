@@ -68,28 +68,36 @@ impl RawTxRpc {
         let tx_bytes = hex::decode(hex_string)
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {}", e)))?;
 
-        if let (Some(ref storage), Some(ref mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
+        if let (Some(ref storage), Some(ref mempool)) =
+            (self.storage.as_ref(), self.mempool.as_ref())
+        {
             use bllvm_protocol::serialization::transaction::deserialize_transaction;
-            let tx = deserialize_transaction(&tx_bytes)
-                .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {}", e)))?;
-            
+            let tx = deserialize_transaction(&tx_bytes).map_err(|e| {
+                RpcError::invalid_params(format!("Failed to parse transaction: {}", e))
+            })?;
+
             use bllvm_protocol::mempool::calculate_tx_id;
             let txid = calculate_tx_id(&tx);
-            
+
             // Check if already in mempool
             if mempool.get_transaction(&txid).is_some() {
                 return Err(RpcError::invalid_params("Transaction already in mempool"));
             }
-            
+
             // Check if in chain
-            if storage.transactions().has_transaction(&txid).unwrap_or(false) {
+            if storage
+                .transactions()
+                .has_transaction(&txid)
+                .unwrap_or(false)
+            {
                 return Err(RpcError::invalid_params("Transaction already in chain"));
             }
-            
+
             // Validate transaction using consensus layer
-            let _timer = self.profiler.as_ref().map(|p| {
-                PerformanceTimer::start(Arc::clone(p), OperationType::TxValidation)
-            });
+            let _timer = self
+                .profiler
+                .as_ref()
+                .map(|p| PerformanceTimer::start(Arc::clone(p), OperationType::TxValidation));
             let validation_start = Instant::now();
             use bllvm_protocol::ConsensusProof;
             let consensus = ConsensusProof::new();
@@ -97,13 +105,13 @@ impl RawTxRpc {
                 Ok(bllvm_protocol::ValidationResult::Valid) => {
                     let validation_time = validation_start.elapsed();
                     // Timer will record duration when dropped
-                    
+
                     // Update metrics
                     if let Some(ref metrics) = self.metrics {
                         metrics.update_performance(|m| {
                             let time_ms = validation_time.as_secs_f64() * 1000.0;
                             // Update average transaction validation time (exponential moving average)
-                            m.avg_tx_validation_time_ms = 
+                            m.avg_tx_validation_time_ms =
                                 (m.avg_tx_validation_time_ms * 0.9) + (time_ms * 0.1);
                             // Update transactions per second
                             if validation_time.as_secs_f64() > 0.0 {
@@ -111,11 +119,12 @@ impl RawTxRpc {
                             }
                         });
                     }
-                    
+
                     // Transaction structure is valid, now check inputs against UTXO set
-                    let utxo_set = storage.utxos().get_all_utxos()
-                        .map_err(|e| RpcError::internal_error(format!("Failed to get UTXO set: {}", e)))?;
-                    
+                    let utxo_set = storage.utxos().get_all_utxos().map_err(|e| {
+                        RpcError::internal_error(format!("Failed to get UTXO set: {}", e))
+                    })?;
+
                     // Check if all inputs exist in UTXO set
                     for input in &tx.inputs {
                         if !utxo_set.contains_key(&input.prevout) {
@@ -126,24 +135,34 @@ impl RawTxRpc {
                             )));
                         }
                     }
-                    
+
                     // Add to mempool
                     // Note: add_transaction requires &mut self, but we have Arc<MempoolManager>
                     // In production, this would need to use interior mutability (Mutex/RwLock)
                     // For now, we'll skip adding to mempool as it requires mutable access
-                    debug!("Transaction validated but not added to mempool (requires mutable access)");
+                    debug!(
+                        "Transaction validated but not added to mempool (requires mutable access)"
+                    );
                 }
                 Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => {
-                    return Err(RpcError::invalid_params(format!("Transaction validation failed: {}", reason)));
+                    return Err(RpcError::invalid_params(format!(
+                        "Transaction validation failed: {}",
+                        reason
+                    )));
                 }
                 Err(e) => {
-                    return Err(RpcError::internal_error(format!("Transaction validation error: {}", e)));
+                    return Err(RpcError::internal_error(format!(
+                        "Transaction validation error: {}",
+                        e
+                    )));
                 }
             }
-            
+
             Ok(json!(hex::encode(txid)))
         } else {
-            Err(RpcError::invalid_params("RPC not initialized with dependencies"))
+            Err(RpcError::invalid_params(
+                "RPC not initialized with dependencies",
+            ))
         }
     }
 
@@ -175,7 +194,10 @@ impl RawTxRpc {
         let consensus = ConsensusProof::new();
         let validation_result = consensus.validate_transaction(&tx);
 
-        let allowed = matches!(validation_result, Ok(bllvm_protocol::ValidationResult::Valid));
+        let allowed = matches!(
+            validation_result,
+            Ok(bllvm_protocol::ValidationResult::Valid)
+        );
         let reject_reason = if !allowed {
             match validation_result {
                 Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => Some(reason),
@@ -232,12 +254,12 @@ impl RawTxRpc {
         use bllvm_protocol::serialization::transaction::deserialize_transaction;
         let tx = deserialize_transaction(&tx_bytes)
             .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {}", e)))?;
-        
+
         use bllvm_protocol::mempool::calculate_tx_id;
         let txid = calculate_tx_id(&tx);
         let txid_hex = hex::encode(txid);
         let size = tx_bytes.len();
-        
+
         Ok(json!({
             "txid": txid_hex.clone(),
             "hash": txid_hex,
@@ -295,7 +317,7 @@ impl RawTxRpc {
             if let Ok(Some(tx)) = storage.transactions().get_transaction(&txid_array) {
                 use bllvm_protocol::serialization::transaction::serialize_transaction;
                 let tx_hex = hex::encode(serialize_transaction(&tx));
-                
+
                 if verbose {
                     use bllvm_protocol::mempool::calculate_tx_id;
                     let calculated_txid = calculate_tx_id(&tx);
@@ -417,7 +439,7 @@ impl RawTxRpc {
             if let Ok(Some(utxo)) = storage.utxos().get_utxo(&outpoint) {
                 let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
                 let tip_height = storage.chain().get_height()?.unwrap_or(0);
-                
+
                 // Find block height containing this transaction
                 let mut tx_height: Option<u64> = None;
                 for h in 0..=tip_height {
@@ -437,7 +459,7 @@ impl RawTxRpc {
                         }
                     }
                 }
-                
+
                 let confirmations = tx_height
                     .map(|h| {
                         if h > tip_height {
@@ -447,7 +469,7 @@ impl RawTxRpc {
                         }
                     })
                     .unwrap_or(0);
-                
+
                 Ok(json!({
                     "bestblock": hex::encode(best_hash),
                     "confirmations": confirmations,
@@ -470,18 +492,22 @@ impl RawTxRpc {
     }
 
     /// Build merkle proof for transactions in a block
-    fn build_merkle_proof(transactions: &[bllvm_protocol::Transaction], tx_indices: &[usize]) -> Result<Vec<[u8; 32]>, RpcError> {
-        use bllvm_protocol::mempool::calculate_tx_id;
+    fn build_merkle_proof(
+        transactions: &[bllvm_protocol::Transaction],
+        tx_indices: &[usize],
+    ) -> Result<Vec<[u8; 32]>, RpcError> {
         use crate::storage::hashing::double_sha256;
+        use bllvm_protocol::mempool::calculate_tx_id;
 
         if transactions.is_empty() {
-            return Err(RpcError::internal_error("Block has no transactions".to_string()));
+            return Err(RpcError::internal_error(
+                "Block has no transactions".to_string(),
+            ));
         }
 
         // Calculate all transaction hashes
-        let mut tx_hashes: Vec<[u8; 32]> = transactions.iter()
-            .map(|tx| calculate_tx_id(tx))
-            .collect();
+        let mut tx_hashes: Vec<[u8; 32]> =
+            transactions.iter().map(|tx| calculate_tx_id(tx)).collect();
 
         let mut proof = Vec::new();
         let mut current_level = tx_hashes.clone();
@@ -501,7 +527,7 @@ impl RawTxRpc {
                     combined.extend_from_slice(&chunk[1]);
                     let parent_hash = double_sha256(&combined);
                     next_level.push(parent_hash);
-                    
+
                     // Check if we need to add sibling to proof
                     if !proof_added {
                         for &idx in tx_indices {
@@ -581,7 +607,10 @@ impl RawTxRpc {
                             for tx in &b.transactions {
                                 let txid = calculate_tx_id(tx);
                                 let txid_hex = hex::encode(txid);
-                                if txids.iter().any(|tid| tid.as_str() == Some(txid_hex.as_str())) {
+                                if txids
+                                    .iter()
+                                    .any(|tid| tid.as_str() == Some(txid_hex.as_str()))
+                                {
                                     block = Some(b);
                                     break;
                                 }
@@ -601,18 +630,25 @@ impl RawTxRpc {
                 for (idx, tx) in block.transactions.iter().enumerate() {
                     let txid = calculate_tx_id(tx);
                     let txid_hex = hex::encode(txid);
-                    if txids.iter().any(|tid| tid.as_str() == Some(txid_hex.as_str())) {
+                    if txids
+                        .iter()
+                        .any(|tid| tid.as_str() == Some(txid_hex.as_str()))
+                    {
                         tx_indices.push(idx);
                     }
                 }
 
                 if tx_indices.is_empty() {
-                    return Err(RpcError::invalid_params("None of the specified transactions found in block"));
+                    return Err(RpcError::invalid_params(
+                        "None of the specified transactions found in block",
+                    ));
                 }
 
                 // Build merkle proof
                 let proof_hashes = Self::build_merkle_proof(&block.transactions, &tx_indices)
-                    .map_err(|e| RpcError::internal_error(format!("Failed to build merkle proof: {}", e)))?;
+                    .map_err(|e| {
+                        RpcError::internal_error(format!("Failed to build merkle proof: {}", e))
+                    })?;
 
                 // Serialize proof (simplified - Bitcoin Core uses a more complex format)
                 let mut proof_bytes = Vec::new();
@@ -626,7 +662,9 @@ impl RawTxRpc {
                 Err(RpcError::invalid_params("Block not found"))
             }
         } else {
-            Err(RpcError::invalid_params("RPC not initialized with dependencies"))
+            Err(RpcError::invalid_params(
+                "RPC not initialized with dependencies",
+            ))
         }
     }
 
@@ -650,7 +688,7 @@ impl RawTxRpc {
             // Decode proof
             let proof_bytes = hex::decode(proof_hex)
                 .map_err(|e| RpcError::invalid_params(format!("Invalid proof hex: {}", e)))?;
-            
+
             if proof_bytes.is_empty() {
                 return Err(RpcError::invalid_params("Empty proof"));
             }
@@ -681,8 +719,9 @@ impl RawTxRpc {
             if let Ok(Some(block)) = storage.blocks().get_block(&blockhash_array) {
                 // Calculate merkle root from block
                 use bllvm_protocol::mining::calculate_merkle_root;
-                let calculated_root = calculate_merkle_root(&block.transactions)
-                    .map_err(|e| RpcError::internal_error(format!("Failed to calculate merkle root: {}", e)))?;
+                let calculated_root = calculate_merkle_root(&block.transactions).map_err(|e| {
+                    RpcError::internal_error(format!("Failed to calculate merkle root: {}", e))
+                })?;
 
                 // Verify proof by reconstructing root (simplified - would need txids from proof)
                 // For now, just verify the block's merkle root matches the header
@@ -690,7 +729,9 @@ impl RawTxRpc {
 
                 // Extract transaction IDs from proof (simplified - full implementation would decode txids)
                 use bllvm_protocol::mempool::calculate_tx_id;
-                let txids: Vec<String> = block.transactions.iter()
+                let txids: Vec<String> = block
+                    .transactions
+                    .iter()
                     .map(|tx| hex::encode(calculate_tx_id(tx)))
                     .collect();
 
@@ -703,7 +744,9 @@ impl RawTxRpc {
                 Err(RpcError::invalid_params("Block not found"))
             }
         } else {
-            Err(RpcError::invalid_params("RPC not initialized with dependencies"))
+            Err(RpcError::invalid_params(
+                "RPC not initialized with dependencies",
+            ))
         }
     }
 }

@@ -7,13 +7,13 @@
 //! - Custom: Fine-grained control over what to keep
 
 use crate::config::{PruningConfig, PruningMode};
+#[cfg(feature = "bip158")]
+use crate::network::filter_service::BlockFilterService;
 use crate::storage::blockstore::BlockStore;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::commitment_store::CommitmentStore;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::utxostore::UtxoStore;
-#[cfg(feature = "bip158")]
-use crate::network::filter_service::BlockFilterService;
 use anyhow::{anyhow, Result};
 #[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::Hash;
@@ -89,12 +89,9 @@ impl PruningManager {
     pub fn with_features(
         config: PruningConfig,
         blockstore: Arc<BlockStore>,
-        #[cfg(feature = "utxo-commitments")]
-        commitment_store: Option<Arc<CommitmentStore>>,
-        #[cfg(feature = "utxo-commitments")]
-        utxostore: Option<Arc<UtxoStore>>,
-        #[cfg(feature = "bip158")]
-        filter_service: Option<Arc<BlockFilterService>>,
+        #[cfg(feature = "utxo-commitments")] commitment_store: Option<Arc<CommitmentStore>>,
+        #[cfg(feature = "utxo-commitments")] utxostore: Option<Arc<UtxoStore>>,
+        #[cfg(feature = "bip158")] filter_service: Option<Arc<BlockFilterService>>,
     ) -> Self {
         Self {
             config,
@@ -153,13 +150,17 @@ impl PruningManager {
         {
             // Check if UTXO commitments are available
             let has_commitments = self.commitment_store.is_some() && self.utxostore.is_some();
-            
+
             // Check if mode supports incremental pruning
             let mode_supports = matches!(
                 &self.config.mode,
-                PruningMode::Aggressive { .. } | PruningMode::Custom { keep_commitments: true, .. }
+                PruningMode::Aggressive { .. }
+                    | PruningMode::Custom {
+                        keep_commitments: true,
+                        ..
+                    }
             );
-            
+
             has_commitments && mode_supports
         }
         #[cfg(not(feature = "utxo-commitments"))]
@@ -169,7 +170,7 @@ impl PruningManager {
     }
 
     /// Incremental prune during IBD
-    /// 
+    ///
     /// This method prunes old blocks while keeping a sliding window of recent blocks.
     /// It's designed to be called periodically during IBD to prevent storage from growing
     /// unbounded. Only works when incremental_prune_during_ibd is enabled and UTXO
@@ -203,7 +204,7 @@ impl PruningManager {
 
         // Calculate prune height: keep only the last prune_window_size blocks
         let prune_to_height = current_height.saturating_sub(self.config.prune_window_size);
-        
+
         // Don't prune if window size is larger than current height
         if prune_to_height == 0 || prune_to_height >= current_height {
             return Ok(None);
@@ -245,15 +246,15 @@ impl PruningManager {
             // 1. Incremental pruning is explicitly enabled
             // 2. UTXO commitments are available (for state verification)
             // 3. Aggressive or Custom mode with commitments enabled
-            let can_incremental_prune = self.config.incremental_prune_during_ibd
-                && self.can_incremental_prune_during_ibd();
-            
+            let can_incremental_prune =
+                self.config.incremental_prune_during_ibd && self.can_incremental_prune_during_ibd();
+
             if !can_incremental_prune {
                 return Err(anyhow!(
                     "Cannot prune during initial block download. Wait for IBD to complete, or enable incremental_prune_during_ibd with UTXO commitments."
                 ));
             }
-            
+
             // For incremental pruning during IBD, ensure we have enough blocks
             if current_height < self.config.min_blocks_for_incremental_prune {
                 return Err(anyhow!(
@@ -295,7 +296,12 @@ impl PruningManager {
             PruningMode::Normal {
                 keep_from_height,
                 min_recent_blocks,
-            } => self.prune_normal(prune_to_height, current_height, *keep_from_height, *min_recent_blocks)?,
+            } => self.prune_normal(
+                prune_to_height,
+                current_height,
+                *keep_from_height,
+                *min_recent_blocks,
+            )?,
             PruningMode::Aggressive {
                 keep_from_height,
                 keep_commitments,
@@ -370,9 +376,8 @@ impl PruningManager {
         let mut stats = PruningStats::default();
 
         // Calculate actual keep height (max of keep_from_height and min_recent_blocks)
-        let effective_keep_height = keep_from_height.max(
-            current_height.saturating_sub(min_recent_blocks)
-        );
+        let effective_keep_height =
+            keep_from_height.max(current_height.saturating_sub(min_recent_blocks));
 
         // Ensure we don't prune below effective keep height
         let actual_prune_height = prune_to_height.min(effective_keep_height);
@@ -415,9 +420,7 @@ impl PruningManager {
         let mut stats = PruningStats::default();
 
         // Calculate effective keep height
-        let effective_keep_height = keep_from_height.max(
-            current_height.saturating_sub(min_blocks)
-        );
+        let effective_keep_height = keep_from_height.max(current_height.saturating_sub(min_blocks));
 
         let actual_prune_height = prune_to_height.min(effective_keep_height);
 
@@ -428,8 +431,8 @@ impl PruningManager {
 
         // Generate UTXO commitments before pruning if enabled
         if keep_commitments {
-            if let (Some(ref commitment_store), Some(ref utxostore)) = 
-                (self.commitment_store.as_ref(), self.utxostore.as_ref()) 
+            if let (Some(ref commitment_store), Some(ref utxostore)) =
+                (self.commitment_store.as_ref(), self.utxostore.as_ref())
             {
                 info!("Generating UTXO commitments for blocks to be pruned...");
                 self.generate_commitments_before_prune(
@@ -439,7 +442,9 @@ impl PruningManager {
                     utxostore,
                 )?;
             } else {
-                warn!("UTXO commitments requested but commitment store or UTXO store not available");
+                warn!(
+                    "UTXO commitments requested but commitment store or UTXO store not available"
+                );
             }
         }
 
@@ -464,7 +469,10 @@ impl PruningManager {
                     // Remove filter from cache but keep filter header
                     if filter_service.has_filter(&hash) {
                         filter_service.remove_filter_for_pruned_block(&hash)?;
-                        debug!("Removed BIP158 filter for pruned block at height {} (header kept)", height);
+                        debug!(
+                            "Removed BIP158 filter for pruned block at height {} (header kept)",
+                            height
+                        );
                     }
                 }
             }
@@ -524,8 +532,8 @@ impl PruningManager {
                 if keep_commitments {
                     #[cfg(feature = "utxo-commitments")]
                     {
-                        if let (Some(ref commitment_store), Some(ref utxostore)) = 
-                            (self.commitment_store.as_ref(), self.utxostore.as_ref()) 
+                        if let (Some(ref commitment_store), Some(ref utxostore)) =
+                            (self.commitment_store.as_ref(), self.utxostore.as_ref())
                         {
                             // Generate commitment if not exists
                             if !commitment_store.has_commitment(&hash)? {
@@ -547,7 +555,10 @@ impl PruningManager {
                         // Filter headers are always kept for chain verification
                         if filter_service.has_filter(&hash) {
                             filter_service.remove_filter_for_pruned_block(&hash)?;
-                            debug!("Removed BIP158 filter for pruned block at height {} (header kept)", height);
+                            debug!(
+                                "Removed BIP158 filter for pruned block at height {} (header kept)",
+                                height
+                            );
                         }
                     }
                 }
@@ -569,7 +580,10 @@ impl PruningManager {
         commitment_store: &CommitmentStore,
         utxostore: &UtxoStore,
     ) -> Result<()> {
-        info!("Generating UTXO commitments for heights 0..{}", prune_to_height);
+        info!(
+            "Generating UTXO commitments for heights 0..{}",
+            prune_to_height
+        );
 
         // For each block to be pruned, generate a commitment
         // We'll generate commitments at checkpoint intervals to save computation
@@ -601,10 +615,10 @@ impl PruningManager {
         commitment_store: &CommitmentStore,
         utxostore: &UtxoStore,
     ) -> Result<()> {
-        #[cfg(feature = "utxo-commitments")]
-        use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
         use bllvm_protocol::block::connect_block;
         use bllvm_protocol::segwit::Witness;
+        #[cfg(feature = "utxo-commitments")]
+        use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 
         // Reconstruct UTXO set at historical height by replaying blocks
         let utxo_set = self.reconstruct_utxo_set_at_height(height, utxostore)?;
@@ -614,7 +628,8 @@ impl PruningManager {
             .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
 
         for (outpoint, utxo) in &utxo_set {
-            utxo_tree.insert(outpoint.clone(), utxo.clone())
+            utxo_tree
+                .insert(outpoint.clone(), utxo.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
         }
 
@@ -624,23 +639,26 @@ impl PruningManager {
         // Store commitment
         commitment_store.store_commitment(block_hash, height, &commitment)?;
 
-        debug!("Generated and stored commitment for height {} (hash: {})", 
-               height, hex::encode(block_hash));
+        debug!(
+            "Generated and stored commitment for height {} (hash: {})",
+            height,
+            hex::encode(block_hash)
+        );
 
         Ok(())
     }
 
     /// Generate UTXO commitment from current UTXO set state
-    /// 
+    ///
     /// This method generates a commitment from the current UTXO set without replaying blocks.
     /// Used during incremental sync when the UTXO set is maintained incrementally.
-    /// 
+    ///
     /// # Arguments
     /// * `block_hash` - Hash of the block at this height
     /// * `height` - Block height
     /// * `utxo_set` - Current UTXO set (from incremental updates)
     /// * `commitment_store` - Commitment store to save the commitment
-    /// 
+    ///
     /// # Returns
     /// Result indicating success or failure
     #[cfg(feature = "utxo-commitments")]
@@ -658,7 +676,8 @@ impl PruningManager {
             .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
 
         for (outpoint, utxo) in utxo_set {
-            utxo_tree.insert(outpoint.clone(), utxo.clone())
+            utxo_tree
+                .insert(outpoint.clone(), utxo.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
         }
 
@@ -668,14 +687,17 @@ impl PruningManager {
         // Store commitment
         commitment_store.store_commitment(block_hash, height, &commitment)?;
 
-        debug!("Generated commitment from current state for height {} (hash: {})", 
-               height, hex::encode(block_hash));
+        debug!(
+            "Generated commitment from current state for height {} (hash: {})",
+            height,
+            hex::encode(block_hash)
+        );
 
         Ok(())
     }
 
     /// Reconstruct UTXO set at a specific historical height
-    /// 
+    ///
     /// This function replays blocks from genesis to the target height
     /// to reconstruct the exact UTXO set at that point in history.
     #[cfg(feature = "utxo-commitments")]
@@ -703,25 +725,27 @@ impl PruningManager {
                 // Get block
                 if let Some(block) = self.blockstore.get_block(&block_hash)? {
                     // Get witnesses for this block
-                    let witnesses = self.blockstore.get_witness(&block_hash)?
-                        .unwrap_or_else(|| {
-                            // If no witnesses stored, create empty witnesses
-                            block.transactions.iter().map(|_| Vec::new()).collect()
-                        });
+                    let witnesses =
+                        self.blockstore
+                            .get_witness(&block_hash)?
+                            .unwrap_or_else(|| {
+                                // If no witnesses stored, create empty witnesses
+                                block.transactions.iter().map(|_| Vec::new()).collect()
+                            });
 
                     // Apply block to UTXO set using connect_block
                     // This properly handles coinbase transactions and input/output processing
                     let (validation_result, new_utxo_set) = connect_block(
-                        &block,
-                        &witnesses,
-                        utxo_set,
-                        height,
+                        &block, &witnesses, utxo_set, height,
                         None, // No recent headers needed for historical replay
                     )?;
 
                     // Check validation result
                     if !matches!(validation_result, bllvm_protocol::ValidationResult::Valid) {
-                        warn!("Block at height {} failed validation during UTXO reconstruction", height);
+                        warn!(
+                            "Block at height {} failed validation during UTXO reconstruction",
+                            height
+                        );
                         // Continue anyway - this might be expected for some edge cases
                     }
 
@@ -740,8 +764,11 @@ impl PruningManager {
             }
         }
 
-        debug!("Reconstructed UTXO set at height {} with {} UTXOs", target_height, utxo_set.len());
+        debug!(
+            "Reconstructed UTXO set at height {} with {} UTXOs",
+            target_height,
+            utxo_set.len()
+        );
         Ok(utxo_set)
     }
 }
-

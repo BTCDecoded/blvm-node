@@ -81,20 +81,29 @@ impl ModuleApiHub {
             .validate_request(module_id, &request.payload)?;
 
         // Handle handshake specially (no validation needed, just acknowledge)
-        if let RequestPayload::Handshake { module_id: handshake_id, module_name, version } = &request.payload {
+        if let RequestPayload::Handshake {
+            module_id: handshake_id,
+            module_name,
+            version,
+        } = &request.payload
+        {
             // Verify module_id matches
             if handshake_id != module_id {
-                return Err(ModuleError::OperationError(
-                    format!("Handshake module_id mismatch: expected {}, got {}", module_id, handshake_id)
-                ));
+                return Err(ModuleError::OperationError(format!(
+                    "Handshake module_id mismatch: expected {}, got {}",
+                    module_id, handshake_id
+                )));
             }
-            
-            info!("Handshake from module {} (name={}, version={})", module_id, module_name, version);
+
+            info!(
+                "Handshake from module {} (name={}, version={})",
+                module_id, module_name, version
+            );
             return Ok(ResponseMessage::success(
                 request.correlation_id,
                 ResponsePayload::HandshakeAck {
                     node_version: env!("CARGO_PKG_VERSION").to_string(),
-                }
+                },
             ));
         }
 
@@ -108,7 +117,7 @@ impl ModuleApiHub {
             RequestPayload::Handshake { .. } => {
                 // Handshake is handled at connection level, not here
                 return Err(crate::module::traits::ModuleError::IpcError(
-                    "Handshake should be handled at connection level".to_string()
+                    "Handshake should be handled at connection level".to_string(),
                 ));
             }
             RequestPayload::GetBlock { hash } => {

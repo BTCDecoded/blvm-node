@@ -1,10 +1,10 @@
 //! Unit tests for Mining RPC methods
 
-use bllvm_protocol::serialization::serialize_transaction;
-use bllvm_protocol::{BlockHeader, Natural, OutPoint, Transaction, UtxoSet, UTXO};
 use bllvm_node::node::mempool::MempoolManager;
 use bllvm_node::rpc::mining::MiningRpc;
 use bllvm_node::storage::Storage;
+use bllvm_protocol::serialization::serialize_transaction;
+use bllvm_protocol::{BlockHeader, Natural, OutPoint, Transaction, UtxoSet, UTXO};
 use std::sync::Arc;
 use tempfile::TempDir;
 // Sha256 not needed directly in tests

@@ -2,10 +2,10 @@
 //!
 //! Stores chain metadata including tip, height, and chain parameters.
 
+use crate::storage::database::{Database, Tree};
 use anyhow::Result;
 use bllvm_protocol::{BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
-use crate::storage::database::{Database, Tree};
 use std::sync::Arc;
 
 /// Chain state information
@@ -223,14 +223,20 @@ impl ChainState {
     }
 
     /// Add a chain tip (for fork tracking)
-    pub fn add_chain_tip(&self, hash: &Hash, height: u64, branchlen: u64, status: &str) -> Result<()> {
+    pub fn add_chain_tip(
+        &self,
+        hash: &Hash,
+        height: u64,
+        branchlen: u64,
+        status: &str,
+    ) -> Result<()> {
         #[derive(Serialize, Deserialize)]
         struct TipInfo {
             height: u64,
             branchlen: u64,
             status: String,
         }
-        
+
         let tip_info = TipInfo {
             height,
             branchlen,
@@ -255,7 +261,7 @@ impl ChainState {
             branchlen: u64,
             status: String,
         }
-        
+
         let mut tips = Vec::new();
         for result in self.chain_tips.iter() {
             let (key, data) = result?;

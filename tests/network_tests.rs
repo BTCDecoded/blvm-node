@@ -8,9 +8,9 @@ use bllvm_node::network::*;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 mod common;
-use common::*;
 use bllvm_node::network::inventory::{InventoryRequest, MSG_BLOCK, MSG_TX};
 use bllvm_node::network::protocol::InventoryItem as NetworkInventoryItem;
+use common::*;
 
 #[tokio::test]
 async fn test_network_manager_creation() {
@@ -878,19 +878,19 @@ async fn test_getdata_message() {
 async fn test_persistent_peers() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
-    
+
     let peer1: SocketAddr = "127.0.0.1:8333".parse().unwrap();
     let peer2: SocketAddr = "127.0.0.1:8334".parse().unwrap();
-    
+
     // Test adding persistent peers
     manager.add_persistent_peer(peer1);
     manager.add_persistent_peer(peer2);
-    
+
     let persistent = manager.get_persistent_peers();
     assert_eq!(persistent.len(), 2);
     assert!(persistent.contains(&peer1));
     assert!(persistent.contains(&peer2));
-    
+
     // Test removing persistent peer
     manager.remove_persistent_peer(peer1);
     let persistent = manager.get_persistent_peers();
@@ -903,22 +903,22 @@ async fn test_persistent_peers() {
 async fn test_ban_list() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
-    
+
     let banned_peer: SocketAddr = "127.0.0.1:8333".parse().unwrap();
-    
+
     // Test banning a peer (permanent ban)
     manager.ban_peer(banned_peer, 0);
     assert!(manager.is_banned(banned_peer));
-    
+
     // Test getting banned peers
     let banned = manager.get_banned_peers();
     assert_eq!(banned.len(), 1);
     assert_eq!(banned[0].0, banned_peer);
-    
+
     // Test unbanning
     manager.unban_peer(banned_peer);
     assert!(!manager.is_banned(banned_peer));
-    
+
     // Test temporary ban
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -928,7 +928,7 @@ async fn test_ban_list() {
     let unban_time = now + 3600; // 1 hour from now
     manager.ban_peer(banned_peer, unban_time);
     assert!(manager.is_banned(banned_peer));
-    
+
     // Test clearing all bans
     manager.clear_bans();
     assert!(!manager.is_banned(banned_peer));
@@ -939,24 +939,24 @@ async fn test_ban_list() {
 async fn test_network_stats() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
-    
+
     // Initially stats should be zero
     let (sent, received) = manager.get_network_stats();
     assert_eq!(sent, 0);
     assert_eq!(received, 0);
-    
+
     // Track some bytes
     manager.track_bytes_sent(100);
     manager.track_bytes_received(200);
-    
+
     let (sent, received) = manager.get_network_stats();
     assert_eq!(sent, 100);
     assert_eq!(received, 200);
-    
+
     // Track more bytes (should accumulate)
     manager.track_bytes_sent(50);
     manager.track_bytes_received(75);
-    
+
     let (sent, received) = manager.get_network_stats();
     assert_eq!(sent, 150);
     assert_eq!(received, 275);
@@ -966,11 +966,11 @@ async fn test_network_stats() {
 async fn test_ping_all_peers() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
-    
+
     // Test ping with no peers (should not error)
     let result = manager.ping_all_peers().await;
     assert!(result.is_ok());
-    
+
     // Note: Testing with actual peers would require setting up connections,
     // which is more complex. This test verifies the method doesn't panic.
 }

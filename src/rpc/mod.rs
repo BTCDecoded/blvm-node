@@ -120,7 +120,8 @@ impl RpcManager {
         self.mining_rpc =
             mining::MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
         self.blockchain_rpc = blockchain::BlockchainRpc::with_dependencies(Arc::clone(&storage));
-        let mempool_rpc = mempool::MempoolRpc::with_dependencies(Arc::clone(&mempool), Arc::clone(&storage));
+        let mempool_rpc =
+            mempool::MempoolRpc::with_dependencies(Arc::clone(&mempool), Arc::clone(&storage));
         let rawtx_rpc = rawtx::RawTxRpc::with_dependencies(
             Arc::clone(&storage),
             Arc::clone(&mempool),
@@ -148,7 +149,10 @@ impl RpcManager {
     }
 
     /// Set network manager dependency
-    pub fn with_network_manager(mut self, network_manager: Arc<crate::network::NetworkManager>) -> Self {
+    pub fn with_network_manager(
+        mut self,
+        network_manager: Arc<crate::network::NetworkManager>,
+    ) -> Self {
         self.network_rpc = network::NetworkRpc::with_dependencies(Arc::clone(&network_manager));
         self.network_manager = Some(network_manager);
         self
@@ -196,17 +200,34 @@ impl RpcManager {
         ));
 
         // Create server with or without authentication
-        let server = if let (Some(ref storage), Some(ref mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
-            let blockchain = Arc::new(blockchain::BlockchainRpc::with_dependencies(Arc::clone(storage)));
-            let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(Arc::clone(mempool), Arc::clone(&storage)));
-            let rawtx_rpc = Arc::new(rawtx::RawTxRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool), None, None));
-            let mining = Arc::new(mining::MiningRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool)));
+        let server = if let (Some(ref storage), Some(ref mempool)) =
+            (self.storage.as_ref(), self.mempool.as_ref())
+        {
+            let blockchain = Arc::new(blockchain::BlockchainRpc::with_dependencies(Arc::clone(
+                storage,
+            )));
+            let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(
+                Arc::clone(mempool),
+                Arc::clone(&storage),
+            ));
+            let rawtx_rpc = Arc::new(rawtx::RawTxRpc::with_dependencies(
+                Arc::clone(storage),
+                Arc::clone(mempool),
+                None,
+                None,
+            ));
+            let mining = Arc::new(mining::MiningRpc::with_dependencies(
+                Arc::clone(storage),
+                Arc::clone(mempool),
+            ));
             let network = if let Some(ref network_manager) = self.network_manager {
-                Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(network_manager)))
+                Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(
+                    network_manager,
+                )))
             } else {
                 Arc::new(network::NetworkRpc::new())
             };
-            
+
             // Use auth manager if configured
             if let Some(ref auth_manager) = self.auth_manager {
                 server::RpcServer::with_dependencies_and_auth(
@@ -233,10 +254,7 @@ impl RpcManager {
         } else {
             // No dependencies - use auth if configured
             if let Some(ref auth_manager) = self.auth_manager {
-                server::RpcServer::with_auth(
-                    self.server_addr,
-                    Arc::clone(auth_manager),
-                )
+                server::RpcServer::with_auth(self.server_addr, Arc::clone(auth_manager))
             } else {
                 server::RpcServer::new(self.server_addr)
             }

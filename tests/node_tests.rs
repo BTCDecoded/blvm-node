@@ -5,8 +5,8 @@ use bllvm_node::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 use std::net::SocketAddr;
 use tempfile::TempDir;
 mod common;
-use common::*;
 use bllvm_protocol::ProtocolVersion;
+use common::*;
 
 #[tokio::test]
 async fn test_node_creation() {

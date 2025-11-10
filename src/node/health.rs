@@ -144,9 +144,15 @@ impl HealthChecker {
         // Determine overall status
         let overall_status = if components.iter().any(|c| c.status == HealthStatus::Down) {
             HealthStatus::Down
-        } else if components.iter().any(|c| c.status == HealthStatus::Unhealthy) {
+        } else if components
+            .iter()
+            .any(|c| c.status == HealthStatus::Unhealthy)
+        {
             HealthStatus::Unhealthy
-        } else if components.iter().any(|c| c.status == HealthStatus::Degraded) {
+        } else if components
+            .iter()
+            .any(|c| c.status == HealthStatus::Degraded)
+        {
             HealthStatus::Degraded
         } else {
             HealthStatus::Healthy
@@ -180,4 +186,3 @@ impl Default for HealthChecker {
         Self::new()
     }
 }
-

@@ -80,10 +80,7 @@ impl MessageBridge {
     /// 3. Convert the `NetworkResponse` to wire format messages using `extract_send_messages()`
     ///
     /// For now, this method only handles message conversion, not processing.
-    pub fn process_incoming_message(
-        data: &[u8],
-        transport: TransportType,
-    ) -> Result<Vec<Vec<u8>>> {
+    pub fn process_incoming_message(data: &[u8], transport: TransportType) -> Result<Vec<Vec<u8>>> {
         // Convert to protocol message
         let protocol_msg = Self::from_transport_message(data, transport)?;
 

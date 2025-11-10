@@ -332,7 +332,7 @@ impl Default for StratumV2Config {
 pub enum PruningMode {
     /// No pruning (keep all blocks)
     Disabled,
-    
+
     /// Normal pruning (keep recent blocks for verification)
     Normal {
         /// Keep blocks from this height onwards
@@ -342,7 +342,7 @@ pub enum PruningMode {
         #[serde(default = "default_min_recent_blocks")]
         min_recent_blocks: u64,
     },
-    
+
     /// Aggressive pruning with UTXO commitments
     /// Requires: utxo-commitments feature enabled
     Aggressive {
@@ -359,7 +359,7 @@ pub enum PruningMode {
         #[serde(default = "default_min_blocks")]
         min_blocks: u64,
     },
-    
+
     /// Custom pruning configuration
     Custom {
         /// Keep block headers (always required for PoW verification)
@@ -408,45 +408,45 @@ pub struct PruningConfig {
     /// Pruning mode
     #[serde(default = "default_pruning_mode")]
     pub mode: PruningMode,
-    
+
     /// Automatic pruning (prune periodically as chain grows)
     #[serde(default = "default_false")]
     pub auto_prune: bool,
-    
+
     /// Automatic pruning interval (blocks)
     /// Prune every N blocks if auto_prune is enabled
     #[serde(default = "default_auto_prune_interval")]
     pub auto_prune_interval: u64,
-    
+
     /// Minimum blocks to keep (safety margin)
     /// Even with aggressive pruning, keep at least this many blocks
     #[serde(default = "default_min_blocks_to_keep")]
     pub min_blocks_to_keep: u64,
-    
+
     /// Prune on startup (prune old blocks when node starts)
     #[serde(default = "default_false")]
     pub prune_on_startup: bool,
-    
+
     /// Allow incremental pruning during IBD (requires UTXO commitments + aggressive mode)
     /// When enabled, old blocks are pruned incrementally during sync, keeping only a window
     /// of recent blocks. This prevents the need to download the full blockchain before pruning.
     #[serde(default = "default_false")]
     pub incremental_prune_during_ibd: bool,
-    
+
     /// Block window size for incremental pruning (number of recent blocks to keep)
     /// Only used when incremental_prune_during_ibd is true
     #[serde(default = "default_prune_window_size")]
     pub prune_window_size: u64,
-    
+
     /// Minimum blocks before starting incremental pruning during IBD
     /// Prevents pruning too early in the sync process
     #[serde(default = "default_min_blocks_for_incremental_prune")]
     pub min_blocks_for_incremental_prune: u64,
-    
+
     /// UTXO commitments integration
     #[cfg(feature = "utxo-commitments")]
     pub utxo_commitments: Option<UtxoCommitmentsPruningConfig>,
-    
+
     /// BIP158 filter integration
     #[cfg(feature = "bip158")]
     pub bip158_filters: Option<Bip158PruningConfig>,
@@ -486,12 +486,12 @@ impl Default for PruningConfig {
                 keep_filtered_blocks: false,
                 min_blocks: 144, // ~1 day at 10 min/block
             },
-            auto_prune: true, // Enable automatic pruning
+            auto_prune: true,         // Enable automatic pruning
             auto_prune_interval: 144, // Prune every ~1 day
             min_blocks_to_keep: 144,
-            prune_on_startup: false, // Still false for safety
-            incremental_prune_during_ibd: true, // Enable incremental pruning during IBD
-            prune_window_size: 144, // Keep sliding window of 144 blocks during IBD
+            prune_on_startup: false,               // Still false for safety
+            incremental_prune_during_ibd: true,    // Enable incremental pruning during IBD
+            prune_window_size: 144,                // Keep sliding window of 144 blocks during IBD
             min_blocks_for_incremental_prune: 288, // Start pruning after 288 blocks (~2 days)
             #[cfg(feature = "utxo-commitments")]
             utxo_commitments: None,
@@ -508,15 +508,15 @@ pub struct UtxoCommitmentsPruningConfig {
     /// Keep UTXO commitments for pruned blocks
     #[serde(default = "default_true")]
     pub keep_commitments: bool,
-    
+
     /// Keep filtered blocks (spam-filtered) for pruned range
     #[serde(default = "default_false")]
     pub keep_filtered_blocks: bool,
-    
+
     /// Generate commitments before pruning (if not already generated)
     #[serde(default = "default_true")]
     pub generate_before_prune: bool,
-    
+
     /// Maximum age for commitments (days, 0 = keep forever)
     #[serde(default = "default_commitment_max_age")]
     pub max_commitment_age_days: u32,
@@ -546,11 +546,11 @@ pub struct Bip158PruningConfig {
     /// Keep BIP158 filters for pruned blocks
     #[serde(default = "default_true")]
     pub keep_filters: bool,
-    
+
     /// Keep filter header chain (always required for verification)
     #[serde(default = "default_true")]
     pub keep_filter_headers: bool,
-    
+
     /// Maximum age for filters (days, 0 = keep forever)
     #[serde(default = "default_filter_max_age")]
     pub max_filter_age_days: u32,
@@ -578,14 +578,14 @@ pub struct StorageConfig {
     /// Database backend selection
     #[serde(default = "default_database_backend")]
     pub database_backend: DatabaseBackendConfig,
-    
+
     /// Storage path
     #[serde(default = "default_storage_path")]
     pub data_dir: String,
-    
+
     /// Pruning configuration
     pub pruning: Option<PruningConfig>,
-    
+
     /// Cache sizes
     pub cache: Option<StorageCacheConfig>,
 }
@@ -616,11 +616,11 @@ pub struct StorageCacheConfig {
     /// Block cache size (MB)
     #[serde(default = "default_block_cache_mb")]
     pub block_cache_mb: usize,
-    
+
     /// UTXO cache size (MB)
     #[serde(default = "default_utxo_cache_mb")]
     pub utxo_cache_mb: usize,
-    
+
     /// Header cache size (MB)
     #[serde(default = "default_header_cache_mb")]
     pub header_cache_mb: usize,
@@ -668,7 +668,7 @@ impl NodeConfig {
                 pruning.validate()?;
             }
         }
-        
+
         Ok(())
     }
 }
@@ -686,24 +686,26 @@ impl PruningConfig {
                 ));
             }
         }
-        
+
         // Validate min_blocks_to_keep is reasonable
         if self.min_blocks_to_keep == 0 {
             return Err(anyhow::anyhow!(
                 "min_blocks_to_keep must be greater than 0 for safety"
             ));
         }
-        
+
         // Validate auto_prune_interval
         if self.auto_prune && self.auto_prune_interval == 0 {
             return Err(anyhow::anyhow!(
                 "auto_prune_interval must be greater than 0 when auto_prune is enabled"
             ));
         }
-        
+
         // Validate mode-specific settings
         match &self.mode {
-            PruningMode::Normal { min_recent_blocks, .. } => {
+            PruningMode::Normal {
+                min_recent_blocks, ..
+            } => {
                 if *min_recent_blocks == 0 {
                     return Err(anyhow::anyhow!(
                         "min_recent_blocks must be greater than 0 in Normal pruning mode"
@@ -728,7 +730,7 @@ impl PruningConfig {
                 // No validation needed
             }
         }
-        
+
         Ok(())
     }
 }

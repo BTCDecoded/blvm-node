@@ -3,11 +3,11 @@
 //! Implements ChainStateAccess trait to bridge node storage modules
 //! (BlockStore, TxIndex, MempoolManager) with protocol layer network processing.
 
+use crate::node::mempool::MempoolManager;
+use crate::storage::{blockstore::BlockStore, txindex::TxIndex};
 use anyhow::Result;
 use bllvm_protocol::network::{ChainObject, ChainStateAccess};
 use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
-use crate::node::mempool::MempoolManager;
-use crate::storage::{blockstore::BlockStore, txindex::TxIndex};
 use std::sync::Arc;
 
 /// Chain state access implementation that bridges node storage to protocol layer
@@ -68,18 +68,18 @@ impl ChainStateAccess for NodeChainAccess {
     /// This implements the Bitcoin block locator algorithm
     fn get_headers_for_locator(&self, locator: &[Hash], stop: &Hash) -> Vec<BlockHeader> {
         let mut headers = Vec::new();
-        
+
         // Bitcoin block locator algorithm:
         // 1. Start with the most recent block hash
         // 2. Go back exponentially (1, 2, 4, 8, 16, ...) until we find a common ancestor
         // 3. Stop when we reach the stop hash or run out of hashes
-        
+
         for hash in locator {
             // If we've reached the stop hash, stop
             if hash == stop {
                 break;
             }
-            
+
             // Try to get the header
             if let Ok(Some(header)) = self.blockstore.get_header(hash) {
                 headers.push(header);
@@ -89,7 +89,7 @@ impl ChainStateAccess for NodeChainAccess {
                 continue;
             }
         }
-        
+
         headers
     }
 
@@ -130,7 +130,7 @@ pub fn process_protocol_message(
     height: Option<u64>,
 ) -> Result<bllvm_protocol::network::NetworkResponse> {
     use bllvm_protocol::network::{process_network_message, ChainStateAccess};
-    
+
     process_network_message(
         engine,
         message,
@@ -138,6 +138,6 @@ pub fn process_protocol_message(
         Some(chain_access as &dyn ChainStateAccess),
         utxo_set,
         height,
-    ).map_err(|e| anyhow::anyhow!("Network message processing error: {}", e))
+    )
+    .map_err(|e| anyhow::anyhow!("Network message processing error: {}", e))
 }
-

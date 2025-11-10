@@ -2,10 +2,10 @@
 //!
 //! Provides comprehensive metrics for monitoring node health, performance, and behavior.
 
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 
 /// Comprehensive node metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,4 +251,3 @@ impl Default for MetricsCollector {
         Self::new()
     }
 }
-
