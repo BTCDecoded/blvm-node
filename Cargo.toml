@@ -100,6 +100,8 @@ iroh = ["dep:iroh-net", "dep:quinn"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
 utxo-commitments = ["bllvm-protocol/utxo-commitments"]
 stratum-v2 = []
+# Block filtering (BIP158)
+bip158 = []
 # System information for memory stats
 sysinfo = ["dep:sysinfo"]
 # Storage backends
