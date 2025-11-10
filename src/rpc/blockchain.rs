@@ -46,10 +46,10 @@ impl BlockchainRpc {
         
         // Simplified difficulty calculation
         // For display purposes, use a simple approximation based on bits
-        if let Ok(_target) = expand_target(bits) {
-            // Use bits directly for difficulty approximation
-            // Lower bits value = higher difficulty
-            let mantissa = (bits & 0x00ffffff) as f64;
+        // Note: expand_target returns U256 which is private, so we just use bits directly
+        // Use bits directly for difficulty approximation
+        // Lower bits value = higher difficulty
+        let mantissa = (bits & 0x00ffffff) as f64;
             if mantissa == 0.0 {
                 return 1.0;
             }

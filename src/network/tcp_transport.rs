@@ -101,9 +101,9 @@ impl TransportListener for TcpListener {
 
 /// TCP connection implementation
 pub struct TcpConnection {
-    stream: TcpStream,
-    peer_addr: TransportAddr,
-    connected: bool,
+    pub(crate) stream: TcpStream,
+    pub(crate) peer_addr: TransportAddr,
+    pub(crate) connected: bool,
 }
 
 #[async_trait::async_trait]
