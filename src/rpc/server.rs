@@ -151,10 +151,14 @@ impl RpcServer {
                         let io = TokioIo::new(stream);
                         let server_clone = Arc::clone(&server_for_spawn);
                         let peer_addr_clone = peer_addr_for_spawn;
-                        let service = service_fn(move |req| {
-                            let server_inner = Arc::clone(&server_clone);
-                            let addr_inner = peer_addr_clone;
-                            Self::handle_http_request_with_server(server_inner, req, addr_inner)
+                        let service = service_fn({
+                            let server_for_service = Arc::clone(&server_clone);
+                            let addr_for_service = peer_addr_clone;
+                            move |req| {
+                                let server_inner = Arc::clone(&server_for_service);
+                                let addr_inner = addr_for_service;
+                                Self::handle_http_request_with_server(server_inner, req, addr_inner)
+                            }
                         });
                         
                         // Try to serve as HTTP
