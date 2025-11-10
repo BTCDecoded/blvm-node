@@ -11,9 +11,9 @@
 use crate::rpc::errors::{RpcError, RpcResult};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use tokio::sync::mpsc;
-use tracing::{debug, Level};
+use tracing::debug;
 
 /// Control RPC methods
 pub struct ControlRpc {

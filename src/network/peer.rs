@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -52,7 +51,7 @@ impl Peer {
     /// This is the preferred method as it supports all transport types (TCP, Quinn, Iroh).
     /// The connection is managed via channels for concurrent read/write.
     pub fn from_transport_connection<C: TransportConnection + 'static>(
-        mut conn: C,
+        conn: C,
         addr: SocketAddr,
         transport_addr: TransportAddr,
         message_tx: mpsc::UnboundedSender<NetworkMessage>,

@@ -4,7 +4,6 @@
 
 use crate::network::transport::TransportType;
 use anyhow::Result;
-use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
 use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
 

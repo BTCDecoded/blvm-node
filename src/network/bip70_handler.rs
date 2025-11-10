@@ -5,11 +5,10 @@
 
 use crate::network::protocol::{
     GetPaymentRequestMessage, PaymentACKMessage, PaymentMessage, PaymentRequestMessage,
-    ProtocolMessage,
 };
 use anyhow::Result;
 use bllvm_protocol::payment::{
-    Bip70Error, PaymentProtocolClient, PaymentProtocolServer, PaymentRequest,
+    Bip70Error, PaymentRequest,
 };
 use hex;
 use std::collections::HashMap;

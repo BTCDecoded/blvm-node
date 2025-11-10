@@ -3,7 +3,7 @@
 //! Provides health status monitoring and alerting for node components.
 
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Overall node health status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

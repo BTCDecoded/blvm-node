@@ -13,7 +13,7 @@
 use anyhow::Result;
 use bllvm_protocol::block::connect_block;
 use bllvm_protocol::segwit::Witness;
-use bllvm_protocol::{Block, BlockHeader, UtxoSet, ValidationResult};
+use bllvm_protocol::{Block, UtxoSet, ValidationResult};
 
 #[cfg(feature = "production")]
 use rayon::prelude::*;

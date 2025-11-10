@@ -3,7 +3,6 @@
 //! Handles event subscriptions and delivery to modules.
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;

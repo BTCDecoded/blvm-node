@@ -2,7 +2,7 @@
 //!
 //! Provides functions to sign and verify ban lists for authenticity.
 
-use crate::network::protocol::{BanEntry, BanListMessage};
+use crate::network::protocol::BanListMessage;
 use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey};
 
 /// Sign a ban list with a private key

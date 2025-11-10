@@ -4,7 +4,7 @@
 //! Based on Bitcoin Core's DNS seed mechanism.
 
 use crate::network::protocol::NetworkAddress;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::lookup_host;
 use tracing::{info, warn};

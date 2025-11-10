@@ -7,7 +7,7 @@
 use nix::sys::resource::{setrlimit, Resource};
 
 use std::path::Path;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::module::traits::ModuleError;
 

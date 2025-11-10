@@ -7,11 +7,10 @@ use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::{RpcError, RpcResult};
 use crate::storage::Storage;
 use bllvm_protocol::mining::BlockTemplate;
-use bllvm_protocol::pow::expand_target;
 use bllvm_protocol::serialization::deserialize_block_with_witnesses;
 use bllvm_protocol::serialization::serialize_transaction;
 use bllvm_protocol::{
-    types::{BlockHeader, ByteString, Hash, Natural, Transaction, UtxoSet},
+    types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
     ConsensusProof, ValidationResult,
 };
 use hex;

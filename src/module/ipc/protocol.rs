@@ -4,7 +4,6 @@
 //! between modules and the base node.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::module::traits::EventType;
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};

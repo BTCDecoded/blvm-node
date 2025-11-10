@@ -7,7 +7,7 @@ use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use bllvm_protocol::block::connect_block;
 use bllvm_protocol::serialization::deserialize_block_with_witnesses;
-use bllvm_protocol::{segwit::Witness, Block, BlockHeader, Hash, UtxoSet, ValidationResult};
+use bllvm_protocol::{segwit::Witness, Block, BlockHeader, UtxoSet, ValidationResult};
 
 /// Parse a block from Bitcoin wire format and extract witness data
 pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Witness>)> {

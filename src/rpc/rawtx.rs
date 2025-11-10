@@ -506,7 +506,7 @@ impl RawTxRpc {
         }
 
         // Calculate all transaction hashes
-        let mut tx_hashes: Vec<[u8; 32]> =
+        let tx_hashes: Vec<[u8; 32]> =
             transactions.iter().map(|tx| calculate_tx_id(tx)).collect();
 
         let mut proof = Vec::new();

@@ -14,8 +14,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};

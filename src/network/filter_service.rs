@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use bllvm_protocol::bip157;
 use bllvm_protocol::bip158::{build_block_filter, CompactBlockFilter};
-use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use bllvm_protocol::{Block, BlockHeader, Hash};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 

@@ -3,16 +3,15 @@
 //! Central API hub handling all module requests with routing,
 //! permissions, and auditing.
 
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::module::ipc::protocol::{
-    ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
+    RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
 use crate::module::security::{PermissionChecker, RequestValidator};
-use crate::module::traits::{EventType, ModuleError, NodeAPI};
+use crate::module::traits::{ModuleError, NodeAPI};
 
 /// API request router that routes module requests to appropriate handlers
 pub struct ModuleApiHub {

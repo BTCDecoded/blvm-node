@@ -7,7 +7,7 @@ use anyhow::Result;
 use tracing::{debug, warn};
 
 use crate::network::package_relay::{
-    PackageId, PackageRejectReason, PackageRelay, TransactionPackage,
+    PackageRejectReason, PackageRelay, TransactionPackage,
 };
 use crate::network::protocol::{PkgTxnMessage, PkgTxnRejectMessage, SendPkgTxnMessage};
 use bllvm_protocol::Transaction;

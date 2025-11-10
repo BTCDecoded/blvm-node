@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::module::ipc::client::ModuleIpcClient;
 use crate::module::sandbox::{FileSystemSandbox, NetworkSandbox, ProcessSandbox, SandboxConfig};
@@ -107,7 +107,7 @@ impl ModuleProcessSpawner {
             binary_path, command
         );
 
-        let mut child = command.spawn().map_err(|e| {
+        let child = command.spawn().map_err(|e| {
             ModuleError::InitializationError(format!("Failed to spawn module process: {}", e))
         })?;
 

@@ -4,8 +4,7 @@
 
 use crate::storage::Storage;
 use anyhow::Result;
-use bllvm_protocol::pow::expand_target;
-use bllvm_protocol::{BlockHeader, UtxoSet};
+use bllvm_protocol::BlockHeader;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -93,7 +92,7 @@ impl BlockchainRpc {
     /// Matches Bitcoin Core's gettxoutsetinfo hash_serialized_2 calculation.
     fn calculate_utxo_set_hash(utxo_set: &bllvm_protocol::UtxoSet) -> [u8; 32] {
         use crate::storage::hashing::double_sha256;
-        use sha2::{Digest, Sha256};
+        use sha2::Digest;
 
         // Sort UTXOs for deterministic hashing (by outpoint: hash first, then index)
         let mut entries: Vec<_> = utxo_set.iter().collect();
@@ -565,7 +564,7 @@ impl BlockchainRpc {
             };
 
             let mut errors = Vec::new();
-            let mut utxo_set = storage
+            let utxo_set = storage
                 .utxos()
                 .get_all_utxos()
                 .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;

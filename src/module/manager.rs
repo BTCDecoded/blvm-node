@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::module::api::events::EventManager;
 use crate::module::api::hub::ModuleApiHub;
@@ -17,7 +17,7 @@ use crate::module::process::{
     monitor::ModuleProcessMonitor,
     spawner::{ModuleProcess, ModuleProcessSpawner},
 };
-use crate::module::registry::{DiscoveredModule, ModuleDependencies, ModuleDiscovery};
+use crate::module::registry::{ModuleDependencies, ModuleDiscovery};
 use crate::module::security::permissions::PermissionSet;
 use crate::module::traits::{ModuleContext, ModuleError, ModuleMetadata, ModuleState};
 
@@ -308,7 +308,7 @@ impl ModuleManager {
 
     /// Parse permissions from module metadata
     fn parse_permissions_from_metadata(metadata: &ModuleMetadata) -> PermissionSet {
-        use crate::module::security::permissions::{Permission, PermissionSet};
+        use crate::module::security::permissions::PermissionSet;
 
         let mut permissions = PermissionSet::new();
 

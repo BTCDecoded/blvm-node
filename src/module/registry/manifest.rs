@@ -5,7 +5,7 @@
 use crate::module::traits::{ModuleError, ModuleMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Module manifest (module.toml structure)
 #[derive(Debug, Clone, Serialize, Deserialize)]

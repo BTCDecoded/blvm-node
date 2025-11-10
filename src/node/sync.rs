@@ -11,7 +11,7 @@ use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
-use bllvm_protocol::{segwit::Witness, Block, BlockHeader, UtxoSet, ValidationResult};
+use bllvm_protocol::{Block, BlockHeader, UtxoSet, ValidationResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;

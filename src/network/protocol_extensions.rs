@@ -13,7 +13,7 @@ use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::utxo_commitments::spam_filter::{SpamFilter, SpamFilterConfig};
+use bllvm_protocol::utxo_commitments::spam_filter::SpamFilter;
 use hex;
 use std::sync::Arc;
 
@@ -117,7 +117,7 @@ pub async fn handle_get_filtered_block(
     filter_service: Option<&crate::network::filter_service::BlockFilterService>,
 ) -> Result<FilteredBlockMessage> {
     let request_id = message.request_id; // Store for response
-    use bllvm_protocol::BlockHeader;
+    
 
     // Get block from storage
     let (block, block_height) = if let Some(ref storage) = storage {

@@ -9,7 +9,7 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 /// TCP transport implementation
 ///

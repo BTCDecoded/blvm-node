@@ -3,7 +3,7 @@
 //! Handles conversion between consensus-proof NetworkMessage types and
 //! transport-specific wire formats (TCP Bitcoin P2P vs Iroh message format).
 
-use crate::network::transport::{Transport, TransportType};
+use crate::network::transport::TransportType;
 use anyhow::Result;
 use bllvm_protocol::network::NetworkMessage as ConsensusNetworkMessage;
 
@@ -54,7 +54,7 @@ impl ProtocolAdapter {
     ///
     /// Format: [magic:4][command:12][length:4][checksum:4][payload:var]
     fn serialize_bitcoin_wire_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
-        use crate::network::protocol::ProtocolParser;
+        
         use sha2::{Digest, Sha256};
 
         // Convert consensus-proof message to protocol message
@@ -152,10 +152,7 @@ impl ProtocolAdapter {
             PongMessage as ProtoPongMessage, ProtocolMessage,
             VersionMessage as ProtoVersionMessage,
         };
-        use bllvm_protocol::network::{
-            NetworkAddress as ConsensusNetworkAddress, PingMessage as ConsensusPingMessage,
-            PongMessage as ConsensusPongMessage, VersionMessage as ConsensusVersionMessage,
-        };
+        
 
         match msg {
             ConsensusNetworkMessage::Version(v) => {
@@ -196,10 +193,7 @@ impl ProtocolAdapter {
     pub fn protocol_to_consensus_message(
         msg: &crate::network::protocol::ProtocolMessage,
     ) -> Result<ConsensusNetworkMessage> {
-        use crate::network::protocol::{
-            PingMessage as ProtoPingMessage, PongMessage as ProtoPongMessage, ProtocolMessage,
-            VersionMessage as ProtoVersionMessage,
-        };
+        use crate::network::protocol::ProtocolMessage;
         use bllvm_protocol::network::{
             NetworkAddress as ConsensusNetworkAddress, PingMessage as ConsensusPingMessage,
             PongMessage as ConsensusPongMessage, VersionMessage as ConsensusVersionMessage,
@@ -242,7 +236,7 @@ impl ProtocolAdapter {
 
     /// Get command string for a message type
     fn message_to_command(msg: &ConsensusNetworkMessage) -> &'static str {
-        use bllvm_protocol::network::*;
+        
 
         match msg {
             ConsensusNetworkMessage::Version(_) => "version",

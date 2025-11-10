@@ -7,7 +7,7 @@ use crate::node::mempool::MempoolManager;
 use crate::storage::{blockstore::BlockStore, txindex::TxIndex};
 use anyhow::Result;
 use bllvm_protocol::network::{ChainObject, ChainStateAccess};
-use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use bllvm_protocol::{BlockHeader, Hash, Transaction};
 use std::sync::Arc;
 
 /// Chain state access implementation that bridges node storage to protocol layer

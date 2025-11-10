@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::module::api::events::EventManager;
-use crate::module::ipc::protocol::{EventMessage, EventPayload, ModuleMessage};
+use crate::module::ipc::protocol::EventPayload;
 use crate::module::traits::EventType;
 use crate::Hash;
 

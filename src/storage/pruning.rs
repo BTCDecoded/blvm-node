@@ -615,8 +615,8 @@ impl PruningManager {
         commitment_store: &CommitmentStore,
         utxostore: &UtxoStore,
     ) -> Result<()> {
-        use bllvm_protocol::block::connect_block;
-        use bllvm_protocol::segwit::Witness;
+        
+        
         #[cfg(feature = "utxo-commitments")]
         use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 

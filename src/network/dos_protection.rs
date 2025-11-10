@@ -3,13 +3,12 @@
 //! Provides connection rate limiting, message queue monitoring, resource usage tracking,
 //! and automatic mitigation for DoS attacks.
 
-use anyhow::Result;
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-use tracing::{debug, error, warn};
+use tracing::warn;
 
 /// Connection rate limiter (tracks connection attempts per time window)
 pub struct ConnectionRateLimiter {
@@ -362,9 +361,9 @@ mod tests {
     async fn test_active_connection_limit() {
         let dos = DosProtectionManager::new(10, 60, 100, 50);
 
-        assert!(dos.check_active_connections(49).await);
-        assert!(dos.check_active_connections(50).await);
-        assert!(!dos.check_active_connections(51).await);
+        assert!(dos.check_active_connections(49).await); // Below limit, should accept
+        assert!(!dos.check_active_connections(50).await); // At limit, should reject
+        assert!(!dos.check_active_connections(51).await); // Above limit, should reject
     }
 
     #[tokio::test]

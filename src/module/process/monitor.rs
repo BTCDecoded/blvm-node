@@ -7,8 +7,8 @@ use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::module::process::spawner::ModuleProcess;
-use crate::module::traits::{ModuleError, ModuleState};
-use std::sync::{Arc, Mutex};
+use crate::module::traits::ModuleError;
+use std::sync::Arc;
 
 /// Module health monitor
 pub struct ModuleProcessMonitor {

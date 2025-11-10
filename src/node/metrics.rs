@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Comprehensive node metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]

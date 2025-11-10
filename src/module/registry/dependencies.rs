@@ -2,11 +2,11 @@
 //!
 //! Handles dependency checking and resolution order for modules.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use tracing::{debug, warn};
+use std::collections::{HashMap, VecDeque};
+use tracing::debug;
 
 use crate::module::registry::discovery::DiscoveredModule;
-use crate::module::traits::{ModuleError, ModuleMetadata};
+use crate::module::traits::ModuleError;
 
 /// Dependency resolution result
 #[derive(Debug, Clone)]
