@@ -1529,13 +1529,22 @@ impl NetworkManager {
         // Track bytes sent
         self.track_bytes_sent(message_len as u64);
         
-        let mut pm = self.peer_manager.lock().unwrap();
-        if let Some(peer) = pm.get_peer_mut(&addr) {
-            peer.send_message(message).await?;
-            peer.record_send(message_len);
-        } else {
-            return Err(anyhow::anyhow!("Peer not found: {:?}", addr));
-        }
+        // Extract peer's send channel without holding the guard across await
+        let send_tx = {
+            let mut pm = self.peer_manager.lock().unwrap();
+            if let Some(peer) = pm.get_peer_mut(&addr) {
+                let send_tx = peer.send_tx.clone();
+                peer.record_send(message_len);
+                send_tx
+            } else {
+                return Err(anyhow::anyhow!("Peer not found: {:?}", addr));
+            }
+        };
+        
+        // Send message via channel (non-blocking, doesn't require holding guard)
+        send_tx.send(message)
+            .map_err(|e| anyhow::anyhow!("Failed to send message to peer {:?}: {}", addr, e))?;
+        
         Ok(())
     }
 
