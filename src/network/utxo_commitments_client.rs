@@ -90,7 +90,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         Box::pin(async move {
             // Parse peer_id to get SocketAddr or TransportAddr
             // Format: "tcp:127.0.0.1:8333" or "iroh:<pubkey_hex>"
-            let (peer_addr, transport_addr_opt) = if peer_id.starts_with("tcp:") {
+            let peer_addr_opt: Option<(std::net::SocketAddr, Option<crate::network::transport::TransportAddr>)> = if peer_id.starts_with("tcp:") {
                 peer_id
                     .strip_prefix("tcp:")
                     .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
@@ -140,7 +140,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 None
             };
 
-            let (peer_addr, transport_addr_opt) = match peer_addr {
+            let (peer_addr, transport_addr_opt) = match peer_addr_opt {
                 Some((addr, transport)) => (addr, transport),
                 None => {
                     return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
@@ -191,9 +191,9 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             let (request_id, response_rx) = network.register_request(peer_addr);
             drop(network); // Release read lock before async wait
             
-            // Create GetUTXOSet message with request_id
+            // Create GetUTXOSet message
+            // Note: GetUTXOSetMessage doesn't have request_id field - request matching is handled separately
             let get_utxo_set_msg = GetUTXOSetMessage { 
-                request_id,
                 height, 
                 block_hash 
             };
@@ -280,7 +280,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         Box::pin(async move {
             // Parse peer_id to get SocketAddr or TransportAddr
             // Format: "tcp:127.0.0.1:8333" or "iroh:<pubkey_hex>"
-            let (peer_addr, transport_addr_opt) = if peer_id.starts_with("tcp:") {
+            let peer_addr_opt: Option<(std::net::SocketAddr, Option<crate::network::transport::TransportAddr>)> = if peer_id.starts_with("tcp:") {
                 peer_id
                     .strip_prefix("tcp:")
                     .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
@@ -330,7 +330,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 None
             };
 
-            let (peer_addr, transport_addr_opt) = match peer_addr {
+            let (peer_addr, transport_addr_opt) = match peer_addr_opt {
                 Some((addr, transport)) => (addr, transport),
                 None => {
                     return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
@@ -396,22 +396,23 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                             match parsed {
                                 ProtocolMessage::FilteredBlock(filtered_block_msg) => {
                                     // Convert to FilteredBlock
+                                    // FilteredBlockMessage has: header, commitment, transactions, transaction_indices, spam_summary
                                     let filtered_block = FilteredBlock {
-                                        block_hash: filtered_block_msg.block_hash,
-                                        filtered_transactions: filtered_block_msg.filtered_transactions.clone(),
-                                        utxo_commitment: bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment {
-                                            merkle_root: filtered_block_msg.utxo_commitment.merkle_root,
-                                            total_supply: filtered_block_msg.utxo_commitment.total_supply,
-                                            utxo_count: filtered_block_msg.utxo_commitment.utxo_count,
-                                            block_height: filtered_block_msg.utxo_commitment.block_height,
-                                            block_hash: filtered_block_msg.utxo_commitment.block_hash,
+                                        header: filtered_block_msg.header.clone(),
+                                        commitment: bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment {
+                                            merkle_root: filtered_block_msg.commitment.merkle_root,
+                                            total_supply: filtered_block_msg.commitment.total_supply,
+                                            utxo_count: filtered_block_msg.commitment.utxo_count,
+                                            block_height: filtered_block_msg.commitment.block_height,
+                                            block_hash: filtered_block_msg.commitment.block_hash,
                                         },
-                                        bip158_filter: filtered_block_msg.bip158_filter.map(|f| {
-                                            bllvm_protocol::utxo_commitments::network_integration::Bip158FilterData {
-                                                filter_type: f.filter_type,
-                                                filter_data: f.filter_data,
-                                            }
-                                        }),
+                                        transactions: filtered_block_msg.transactions.clone(),
+                                        transaction_indices: filtered_block_msg.transaction_indices.clone(),
+                                        spam_summary: bllvm_protocol::utxo_commitments::spam_filter::SpamSummary {
+                                            filtered_count: filtered_block_msg.spam_summary.filtered_count,
+                                            filtered_size: filtered_block_msg.spam_summary.filtered_size,
+                                            by_type: bllvm_protocol::utxo_commitments::spam_filter::SpamBreakdown::default(), // TODO: Convert SpamBreakdown if needed
+                                        },
                                     };
                                     Ok(filtered_block)
                                 }

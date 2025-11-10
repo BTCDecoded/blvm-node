@@ -48,11 +48,11 @@ impl CommitmentStore {
         let commitment_data = bincode::serialize(commitment)?;
 
         // Store by block hash
-        self.commitments.insert(block_hash.as_slice(), commitment_data)?;
+        self.commitments.insert(block_hash.as_slice(), &commitment_data)?;
 
         // Store height index for quick lookup
         let height_bytes = height.to_be_bytes();
-        self.height_index.insert(height_bytes, block_hash.as_slice())?;
+        self.height_index.insert(&height_bytes, block_hash.as_slice())?;
 
         Ok(())
     }
@@ -71,7 +71,7 @@ impl CommitmentStore {
     pub fn get_commitment_by_height(&self, height: u64) -> Result<Option<UtxoCommitment>> {
         // Look up block hash from height index
         let height_bytes = height.to_be_bytes();
-        if let Some(hash_data) = self.height_index.get(height_bytes)? {
+        if let Some(hash_data) = self.height_index.get(&height_bytes)? {
             let mut block_hash = [0u8; 32];
             block_hash.copy_from_slice(&hash_data);
             self.get_commitment(&block_hash)
@@ -89,7 +89,7 @@ impl CommitmentStore {
     pub fn remove_commitment(&self, block_hash: &Hash, height: u64) -> Result<()> {
         self.commitments.remove(block_hash.as_slice())?;
         let height_bytes = height.to_be_bytes();
-        self.height_index.remove(height_bytes)?;
+        self.height_index.remove(&height_bytes)?;
         Ok(())
     }
 

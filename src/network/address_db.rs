@@ -297,12 +297,14 @@ impl AddressDatabase {
 
     /// Evict oldest address (SocketAddr)
     fn evict_oldest(&mut self) {
-        if let Some((oldest_addr, _)) = self
+        // Find the oldest address first, then remove it
+        let oldest_addr = self
             .addresses
             .iter()
             .min_by_key(|(_, entry)| entry.last_seen)
-        {
-            self.addresses.remove(oldest_addr);
+            .map(|(addr, _)| addr.clone());
+        if let Some(addr) = oldest_addr {
+            self.addresses.remove(&addr);
         }
     }
 

@@ -49,7 +49,7 @@ pub mod package_relay; // BIP 331 Package Relay
 pub mod package_relay_handler; // BIP 331 handlers
 pub mod txhash; // Non-consensus hashing helpers for relay
 
-use crate::network::protocol::{ProtocolMessage, ProtocolParser};
+use crate::network::protocol::{AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser};
 use anyhow::Result;
 use bllvm_protocol::mempool::Mempool;
 use bllvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
@@ -537,6 +537,7 @@ impl NetworkManager {
         
         info!("Discovering peers from DNS seeds for {}", network);
         let addresses = dns_seeds::resolve_dns_seeds(seeds, port, 100).await;
+        let address_count = addresses.len();
         
         // Add discovered addresses to database
         {
@@ -546,7 +547,7 @@ impl NetworkManager {
             }
         }
         
-        info!("Discovered {} addresses from DNS seeds", addresses.len());
+        info!("Discovered {} addresses from DNS seeds", address_count);
         Ok(())
     }
 
@@ -788,11 +789,10 @@ impl NetworkManager {
         }
 
         // 2. Connect to persistent peers
-        if let Some(ref persistent_peers) = config.persistent_peers {
-            if !persistent_peers.is_empty() {
-                if let Err(e) = self.connect_persistent_peers(persistent_peers).await {
-                    warn!("Failed to connect to some persistent peers: {}", e);
-                }
+        if !config.persistent_peers.is_empty() {
+            let persistent_peers = &config.persistent_peers;
+            if let Err(e) = self.connect_persistent_peers(persistent_peers).await {
+                warn!("Failed to connect to some persistent peers: {}", e);
             }
         }
 
@@ -2492,7 +2492,7 @@ impl NetworkManager {
 
     /// Handle Addr message - store addresses and optionally relay
     async fn handle_addr(&self, peer_addr: SocketAddr, msg: AddrMessage) -> Result<()> {
-        use crate::network::protocol::NetworkAddress;
+        use crate::network::protocol::{AddrMessage, NetworkAddress};
         
         // Get peer services from peer state
         let peer_services = {
@@ -2523,7 +2523,7 @@ impl NetworkManager {
         sender_addr: SocketAddr,
         addresses: &[NetworkAddress],
     ) -> Result<()> {
-        use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
+        use crate::network::protocol::{AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser};
         use std::time::{SystemTime, UNIX_EPOCH};
         
         // Rate limiting: don't send addr messages too frequently (Bitcoin Core: ~every 2.4 hours)

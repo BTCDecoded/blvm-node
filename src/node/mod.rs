@@ -304,11 +304,10 @@ impl Node {
                 info!("Regtest network: skipping DNS seed discovery");
                 // Still connect to persistent peers if configured
                 if let Some(ref config) = self.config {
-                    if let Some(ref persistent_peers) = config.persistent_peers {
-                        if !persistent_peers.is_empty() {
-                            if let Err(e) = self.network.connect_persistent_peers(persistent_peers).await {
-                                warn!("Failed to connect to some persistent peers: {}", e);
-                            }
+                    if !config.persistent_peers.is_empty() {
+                        let persistent_peers = &config.persistent_peers;
+                        if let Err(e) = self.network.connect_persistent_peers(persistent_peers).await {
+                            warn!("Failed to connect to some persistent peers: {}", e);
                         }
                     }
                 }

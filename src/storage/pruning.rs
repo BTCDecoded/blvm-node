@@ -614,7 +614,7 @@ impl PruningManager {
             .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
 
         for (outpoint, utxo) in &utxo_set {
-            utxo_tree.insert(*outpoint, utxo.clone())
+            utxo_tree.insert(outpoint.clone(), utxo.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
         }
 
@@ -658,7 +658,7 @@ impl PruningManager {
             .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
 
         for (outpoint, utxo) in utxo_set {
-            utxo_tree.insert(*outpoint, utxo.clone())
+            utxo_tree.insert(outpoint.clone(), utxo.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
         }
 
