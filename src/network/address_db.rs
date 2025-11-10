@@ -13,6 +13,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "iroh")]
 use iroh_net::NodeId;
 
+/// Get current Unix timestamp in seconds
+/// 
+/// Helper function to avoid code duplication of time calculation.
+fn current_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 /// Address entry with metadata
 #[derive(Debug, Clone)]
 pub struct AddressEntry {
@@ -31,10 +41,7 @@ pub struct AddressEntry {
 impl AddressEntry {
     /// Create a new address entry
     pub fn new(addr: NetworkAddress, services: u64) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
         Self {
             addr,
             first_seen: now,
@@ -46,20 +53,13 @@ impl AddressEntry {
 
     /// Update last seen timestamp
     pub fn update_seen(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        self.last_seen = now;
+        self.last_seen = current_timestamp();
         self.seen_count += 1;
     }
 
     /// Check if address is fresh (seen within expiration window)
     pub fn is_fresh(&self, expiration_seconds: u64) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
         now.saturating_sub(self.last_seen) < expiration_seconds
     }
 }
@@ -113,8 +113,9 @@ impl AddressDatabase {
             }
             None => {
                 // Add new entry (evict old if needed)
-                if self.addresses.len() >= self.max_addresses {
-                    self.evict_oldest();
+                // Use total_count() to respect max_addresses across both maps
+                if self.total_count() >= self.max_addresses {
+                    self.evict_oldest_unified();
                 }
                 self.addresses.insert(socket_addr, AddressEntry::new(addr, services));
             }
@@ -130,24 +131,23 @@ impl AddressDatabase {
 
     /// Get fresh addresses (not expired)
     pub fn get_fresh_addresses(&self, count: usize) -> Vec<NetworkAddress> {
+        // Collect entries with their addresses, avoiding repeated conversions
         let mut fresh: Vec<_> = self
             .addresses
-            .values()
-            .filter(|entry| entry.is_fresh(self.expiration_seconds))
-            .map(|entry| entry.addr.clone())
+            .iter()
+            .filter(|(_, entry)| entry.is_fresh(self.expiration_seconds))
+            .map(|(_, entry)| (entry.last_seen, entry.addr.clone()))
             .collect();
         
-        // Sort by last_seen (most recent first)
-        fresh.sort_by_key(|addr| {
-            let socket = self.network_addr_to_socket(addr);
-            self.addresses
-                .get(&socket)
-                .map(|e| e.last_seen)
-                .unwrap_or(0)
-        });
-        fresh.reverse();
+        // Sort by last_seen in descending order (most recent first)
+        // Use sort_by with reverse to avoid double sort
+        fresh.sort_by(|a, b| b.0.cmp(&a.0));
         
-        fresh.into_iter().take(count).collect()
+        // Extract addresses and take requested count
+        fresh.into_iter()
+            .map(|(_, addr)| addr)
+            .take(count)
+            .collect()
     }
 
     /// Get all fresh addresses
@@ -172,11 +172,7 @@ impl AddressDatabase {
     pub fn is_banned(&self, addr: &NetworkAddress, ban_list: &HashMap<SocketAddr, u64>) -> bool {
         let socket_addr = self.network_addr_to_socket(addr);
         if let Some(unban_timestamp) = ban_list.get(&socket_addr) {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let now = current_timestamp();
             // Check if ban has expired
             if *unban_timestamp == u64::MAX || now < *unban_timestamp {
                 return true; // Still banned
@@ -197,7 +193,12 @@ impl AddressDatabase {
                     || ipv4.is_broadcast()
             }
             IpAddr::V6(ipv6) => {
-                ipv6.is_loopback() || ipv6.is_unspecified()
+                // Check for localhost, unspecified, unique local, link-local, and multicast
+                ipv6.is_loopback()
+                    || ipv6.is_unspecified()
+                    || ipv6.is_unique_local()
+                    || ipv6.is_link_local()
+                    || ipv6.is_multicast()
             }
         }
     }
@@ -230,7 +231,7 @@ impl AddressDatabase {
             }
             None => {
                 if self.total_count() >= self.max_addresses {
-                    self.evict_oldest_iroh();
+                    self.evict_oldest_unified();
                 }
                 // Create a placeholder NetworkAddress for Iroh (not used, just for consistency)
                 let placeholder_addr = NetworkAddress {
@@ -246,23 +247,22 @@ impl AddressDatabase {
     /// Get fresh Iroh NodeIds
     #[cfg(feature = "iroh")]
     pub fn get_fresh_iroh_addresses(&self, count: usize) -> Vec<NodeId> {
+        // Collect entries with their node IDs, avoiding repeated map lookups
         let mut fresh: Vec<_> = self
             .iroh_addresses
             .iter()
             .filter(|(_, entry)| entry.is_fresh(self.expiration_seconds))
-            .map(|(node_id, _)| *node_id)
+            .map(|(node_id, entry)| (entry.last_seen, *node_id))
             .collect();
         
-        // Sort by last_seen (most recent first)
-        fresh.sort_by_key(|node_id| {
-            self.iroh_addresses
-                .get(node_id)
-                .map(|e| e.last_seen)
-                .unwrap_or(0)
-        });
-        fresh.reverse();
+        // Sort by last_seen in descending order (most recent first)
+        fresh.sort_by(|a, b| b.0.cmp(&a.0));
         
-        fresh.into_iter().take(count).collect()
+        // Extract node IDs and take requested count
+        fresh.into_iter()
+            .map(|(_, node_id)| node_id)
+            .take(count)
+            .collect()
     }
 
     /// Get total address count (SocketAddr + Iroh)
@@ -295,29 +295,83 @@ impl AddressDatabase {
         }
     }
 
-    /// Evict oldest address (SocketAddr)
-    fn evict_oldest(&mut self) {
-        // Find the oldest address first, then remove it
-        let oldest_addr = self
+    /// Evict oldest address across both maps (unified eviction)
+    /// 
+    /// This ensures we respect max_addresses as a total limit across both
+    /// SocketAddr and Iroh address maps, not per-map limits.
+    fn evict_oldest_unified(&mut self) {
+        // Find oldest across both maps
+        let mut oldest_socket: Option<(SocketAddr, u64)> = None;
+        
+        // Find oldest SocketAddr entry
+        if let Some((addr, entry)) = self
             .addresses
             .iter()
             .min_by_key(|(_, entry)| entry.last_seen)
-            .map(|(addr, _)| addr.clone());
-        if let Some(addr) = oldest_addr {
-            self.addresses.remove(&addr);
+        {
+            oldest_socket = Some((*addr, entry.last_seen));
+        }
+        
+        #[cfg(feature = "iroh")]
+        {
+            // Find oldest Iroh entry
+            let mut oldest_iroh: Option<(NodeId, u64)> = None;
+            if let Some((node_id, entry)) = self
+                .iroh_addresses
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_seen)
+            {
+                oldest_iroh = Some((*node_id, entry.last_seen));
+            }
+            
+            // Evict the oldest entry across both maps
+            match (oldest_socket, oldest_iroh) {
+                (Some((socket_addr, socket_time)), Some((iroh_id, iroh_time))) => {
+                    // Both maps have entries - evict the oldest
+                    if socket_time <= iroh_time {
+                        self.addresses.remove(&socket_addr);
+                    } else {
+                        self.iroh_addresses.remove(&iroh_id);
+                    }
+                }
+                (Some((socket_addr, _)), None) => {
+                    // Only SocketAddr map has entries
+                    self.addresses.remove(&socket_addr);
+                }
+                (None, Some((iroh_id, _))) => {
+                    // Only Iroh map has entries
+                    self.iroh_addresses.remove(&iroh_id);
+                }
+                (None, None) => {
+                    // Both maps empty - nothing to evict
+                }
+            }
+        }
+        
+        #[cfg(not(feature = "iroh"))]
+        {
+            // Only SocketAddr map exists
+            if let Some((socket_addr, _)) = oldest_socket {
+                self.addresses.remove(&socket_addr);
+            }
         }
     }
 
+    /// Evict oldest address (SocketAddr only)
+    /// 
+    /// Deprecated: Use evict_oldest_unified() instead for proper cross-map eviction.
+    #[deprecated(note = "Use evict_oldest_unified() instead")]
+    fn evict_oldest(&mut self) {
+        self.evict_oldest_unified();
+    }
+
     /// Evict oldest Iroh address
+    /// 
+    /// Deprecated: Use evict_oldest_unified() instead for proper cross-map eviction.
     #[cfg(feature = "iroh")]
+    #[deprecated(note = "Use evict_oldest_unified() instead")]
     fn evict_oldest_iroh(&mut self) {
-        if let Some((oldest_node_id, _)) = self
-            .iroh_addresses
-            .iter()
-            .min_by_key(|(_, entry)| entry.last_seen)
-        {
-            self.iroh_addresses.remove(oldest_node_id);
-        }
+        self.evict_oldest_unified();
     }
 
     /// Convert NetworkAddress to SocketAddr
@@ -361,6 +415,7 @@ mod tests {
         let socket = SocketAddr::new(ip.parse().unwrap(), port);
         let ip_bytes = match socket.ip() {
             IpAddr::V4(ipv4) => {
+                // IPv4-mapped IPv6 format
                 let mut bytes = [0u8; 16];
                 bytes[10] = 0xff;
                 bytes[11] = 0xff;
@@ -454,6 +509,35 @@ mod tests {
         assert!(db.is_local(&localhost));
         assert!(db.is_local(&private));
         assert!(!db.is_local(&public));
+    }
+
+    #[test]
+    fn test_is_local_ipv6() {
+        let db = AddressDatabase::new(100);
+        
+        // IPv6 localhost
+        let ipv6_localhost = create_test_address("::1", 8333);
+        assert!(db.is_local(&ipv6_localhost));
+        
+        // IPv6 unspecified
+        let ipv6_unspecified = create_test_address("::", 8333);
+        assert!(db.is_local(&ipv6_unspecified));
+        
+        // IPv6 unique local (fc00::/7)
+        let ipv6_unique_local = create_test_address("fc00::1", 8333);
+        assert!(db.is_local(&ipv6_unique_local));
+        
+        // IPv6 link-local (fe80::/10)
+        let ipv6_link_local = create_test_address("fe80::1", 8333);
+        assert!(db.is_local(&ipv6_link_local));
+        
+        // IPv6 multicast (ff00::/8)
+        let ipv6_multicast = create_test_address("ff02::1", 8333);
+        assert!(db.is_local(&ipv6_multicast));
+        
+        // IPv6 public address (should not be local)
+        let ipv6_public = create_test_address("2001:4860:4860::8888", 8333);
+        assert!(!db.is_local(&ipv6_public));
     }
 
     #[test]
