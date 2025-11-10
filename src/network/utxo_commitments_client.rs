@@ -211,15 +211,14 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 let pm_guard = network.peer_manager.lock().unwrap();
                 let transport_addr_opt = pm_guard.find_transport_addr_by_socket(peer_addr);
                 drop(pm_guard);
-                transport_addr_opt
-                    .or_else(|| {
-                        let network = network_manager.read().await;
-                        let socket_guard = network.socket_to_transport.lock().unwrap();
-                        let result = socket_guard.get(&peer_addr).cloned();
-                        drop(socket_guard);
-                        result
-                    })
-                    .unwrap_or_else(|| crate::network::transport::TransportAddr::Tcp(peer_addr))
+                if let Some(addr) = transport_addr_opt {
+                    addr
+                } else {
+                    let socket_guard = network.socket_to_transport.lock().unwrap();
+                    let result = socket_guard.get(&peer_addr).cloned();
+                    drop(socket_guard);
+                    result.unwrap_or_else(|| crate::network::transport::TransportAddr::Tcp(peer_addr))
+                }
             };
             
             // Now send without holding the guard - extract peer's send channel and send directly
@@ -421,15 +420,14 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 let pm_guard = network.peer_manager.lock().unwrap();
                 let transport_addr_opt = pm_guard.find_transport_addr_by_socket(peer_addr);
                 drop(pm_guard);
-                transport_addr_opt
-                    .or_else(|| {
-                        let network = network_manager.read().await;
-                        let socket_guard = network.socket_to_transport.lock().unwrap();
-                        let result = socket_guard.get(&peer_addr).cloned();
-                        drop(socket_guard);
-                        result
-                    })
-                    .unwrap_or_else(|| crate::network::transport::TransportAddr::Tcp(peer_addr))
+                if let Some(addr) = transport_addr_opt {
+                    addr
+                } else {
+                    let socket_guard = network.socket_to_transport.lock().unwrap();
+                    let result = socket_guard.get(&peer_addr).cloned();
+                    drop(socket_guard);
+                    result.unwrap_or_else(|| crate::network::transport::TransportAddr::Tcp(peer_addr))
+                }
             };
             
             // Now send without holding the guard - extract peer's send channel and send directly
