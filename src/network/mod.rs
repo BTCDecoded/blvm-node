@@ -1385,13 +1385,14 @@ impl NetworkManager {
                     .map(|(addr, _)| *addr)
                     .collect();
                 
+                let expired_count = expired.len();
                 for addr in expired {
                     ban_list_guard.remove(&addr);
                     debug!("Cleaned up expired ban for {}", addr);
                 }
                 
-                if !expired.is_empty() {
-                    info!("Cleaned up {} expired ban(s)", expired.len());
+                if expired_count > 0 {
+                    info!("Cleaned up {} expired ban(s)", expired_count);
                 }
             }
         });
@@ -2785,8 +2786,8 @@ impl NetworkManager {
         let serialized = ProtocolParser::serialize_message(&response_msg)?;
         self.send_to_peer(peer_addr, serialized).await?;
 
-        debug!("Sent BanList response to {}: {} entries", peer_addr, 
-               if msg.request_full { ban_entries.len() } else { 0 });
+        let entry_count = if msg.request_full { ban_entries.len() } else { 0 };
+        debug!("Sent BanList response to {}: {} entries", peer_addr, entry_count);
 
         Ok(())
     }

@@ -284,7 +284,10 @@ impl MiningRpc {
         // Difficulty = MAX_TARGET / target
         // MAX_TARGET for Bitcoin mainnet is 0x00000000FFFF0000000000000000000000000000000000000000000000000000
         // For display purposes, we normalize to genesis difficulty = 1.0
-        const MAX_TARGET: u128 = 0x00000000FFFF0000000000000000000000000000000000000000000000000000u128;
+        // MAX_TARGET is 256 bits, use U256 from bllvm-consensus
+        // 0x00000000FFFF0000000000000000000000000000000000000000000000000000
+        // For now, use a placeholder - this should be calculated from difficulty bits
+        const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
         
         // Simplified difficulty calculation using bits directly
         // For display purposes, use a simple approximation based on bits
