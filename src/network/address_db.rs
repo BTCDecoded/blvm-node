@@ -199,9 +199,9 @@ impl AddressDatabase {
                 // Check for localhost, unspecified, unique local, link-local, and multicast
                 ipv6.is_loopback()
                     || ipv6.is_unspecified()
-                    || ipv6.is_unique_local()
-                    || ipv6.is_link_local()
-                    || ipv6.is_multicast()
+                    || ipv6.is_unicast_link_local()
+                    || ipv6.octets()[0] == 0xfc || ipv6.octets()[0] == 0xfd // Unique local (fc00::/7)
+                    || ipv6.octets()[0] == 0xff // Multicast (ff00::/8)
             }
         }
     }
