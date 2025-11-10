@@ -146,8 +146,10 @@ impl RpcServer {
                     tokio::spawn(async move {
                         // Use hyper for HTTP - it will handle protocol detection and parsing
                         let io = TokioIo::new(stream);
+                        let server_clone = Arc::clone(&server);
+                        let peer_addr_clone = peer_addr;
                         let service = service_fn(move |req| {
-                            Self::handle_http_request_with_server(Arc::clone(&server), req, peer_addr)
+                            Self::handle_http_request_with_server(Arc::clone(&server_clone), req, peer_addr_clone)
                         });
                         
                         // Try to serve as HTTP
@@ -158,7 +160,7 @@ impl RpcServer {
                             // If hyper fails, it might be raw TCP
                             // But we can't recover here since hyper consumed the connection
                             // For now, log and continue - raw TCP support would need separate port
-                            debug!("HTTP connection failed from {} (might be raw TCP): {}", peer_addr, e);
+                            debug!("HTTP connection failed from {} (might be raw TCP): {}", peer_addr_clone, e);
                         }
                     });
                 }
