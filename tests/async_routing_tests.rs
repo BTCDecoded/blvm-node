@@ -1,6 +1,6 @@
 //! Tests for async request-response routing enhancements
 
-use bllvm_node::network::{NetworkManager, transport::TransportPreference};
+use bllvm_node::network::{transport::TransportPreference, NetworkManager};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
@@ -9,7 +9,8 @@ use tokio::time::{sleep, Duration};
 async fn test_request_id_matching() {
     // Test that requests are matched by request_id, not FIFO
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let manager = NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
+    let manager =
+        NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
 
     let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
 
@@ -59,7 +60,8 @@ async fn test_request_id_matching() {
 #[tokio::test]
 async fn test_request_cancellation() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let manager = NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
+    let manager =
+        NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
     let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
 
     let (request_id, rx) = manager.register_request(peer_addr);
@@ -77,7 +79,8 @@ async fn test_request_cancellation() {
 #[tokio::test]
 async fn test_timestamp_cleanup() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let manager = NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
+    let manager =
+        NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
     let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
 
     // Register a request
@@ -94,7 +97,8 @@ async fn test_timestamp_cleanup() {
 #[tokio::test]
 async fn test_multiple_concurrent_requests_per_peer() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let manager = NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
+    let manager =
+        NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
     let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
 
     // Register multiple requests from same peer
@@ -123,7 +127,8 @@ async fn test_multiple_concurrent_requests_per_peer() {
 #[tokio::test]
 async fn test_request_metrics() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let manager = NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
+    let manager =
+        NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
     let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
 
     // Register and complete a request
@@ -154,7 +159,8 @@ async fn test_request_metrics() {
 #[tokio::test]
 async fn test_request_priority() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let manager = NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
+    let manager =
+        NetworkManager::with_transport_preference(listen_addr, 100, TransportPreference::TCP_ONLY);
     let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
 
     // Register requests with different priorities

@@ -1,13 +1,17 @@
 //! Unit tests for Stratum V2 mining and share validation
 
-use bllvm_node::network::stratum_v2::messages::ShareData;
-use bllvm_node::network::stratum_v2::pool::{JobInfo, StratumV2Pool};
-use bllvm_protocol::types::{Block, BlockHeader, Hash, Natural};
-use tempfile::TempDir;
-mod common;
-use common::*;
+#[cfg(feature = "stratum-v2")]
+mod stratum_v2_tests {
+    use bllvm_node::network::stratum_v2::messages::ShareData;
+    use bllvm_node::network::stratum_v2::pool::{JobInfo, StratumV2Pool};
+    use bllvm_protocol::types::{Block, BlockHeader, Hash, Natural};
+    use tempfile::TempDir;
+    #[path = "common.rs"]
+    mod common;
+    use common::*;
 
 #[test]
+#[cfg(feature = "stratum-v2")]
 fn test_stratum_v2_pool_new() {
     let pool = StratumV2Pool::new();
     // Should create successfully
@@ -15,6 +19,7 @@ fn test_stratum_v2_pool_new() {
 }
 
 #[test]
+#[cfg(feature = "stratum-v2")]
 fn test_validate_share_no_job() {
     let pool = StratumV2Pool::new();
 
@@ -35,6 +40,7 @@ fn test_validate_share_no_job() {
 // These are tested indirectly through the public API (validate_share, set_template, etc.)
 
 #[test]
+#[cfg(feature = "stratum-v2")]
 fn test_set_template() {
     let mut pool = StratumV2Pool::new();
 
@@ -49,6 +55,7 @@ fn test_set_template() {
 }
 
 #[test]
+#[cfg(feature = "stratum-v2")]
 fn test_job_info_storage() {
     let mut pool = StratumV2Pool::new();
 
@@ -67,6 +74,7 @@ fn test_job_info_storage() {
 // It's tested indirectly through validate_share
 
 #[tokio::test]
+#[cfg(feature = "stratum-v2")]
 async fn test_share_validation_flow() {
     let mut pool = StratumV2Pool::new();
 
@@ -89,4 +97,5 @@ async fn test_share_validation_flow() {
     // Share validation would happen here
     // Note: Full validation requires proper channel setup and job info
     assert!(true); // Placeholder - actual validation in pool.rs
+}
 }

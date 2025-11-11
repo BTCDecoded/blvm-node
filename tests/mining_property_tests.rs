@@ -6,9 +6,7 @@ use bllvm_node::node::mempool::MempoolManager;
 use bllvm_node::rpc::mining::MiningRpc;
 use bllvm_node::storage::Storage;
 use bllvm_protocol::serialization::serialize_transaction;
-use bllvm_protocol::types::{
-    BlockHeader, OutPoint, TransactionInput, TransactionOutput,
-};
+use bllvm_protocol::types::{BlockHeader, OutPoint, TransactionInput, TransactionOutput};
 use bllvm_protocol::Transaction;
 use hex;
 use proptest::prelude::*;
@@ -24,16 +22,16 @@ fn transaction_strategy() -> BoxedStrategy<Transaction> {
         any::<u64>(), // version
         prop::collection::vec(
             (
-                any::<[u8; 32]>(), // prevout hash
-                any::<u64>(), // prevout index
+                any::<[u8; 32]>(),                          // prevout hash
+                any::<u64>(),                               // prevout index
                 prop::collection::vec(any::<u8>(), 0..100), // script_sig
-                any::<u64>(), // sequence
+                any::<u64>(),                               // sequence
             ),
             0..10, // input count
         ),
         prop::collection::vec(
             (
-                any::<i64>(), // value
+                any::<i64>(),                               // value
                 prop::collection::vec(any::<u8>(), 0..100), // script_pubkey
             ),
             0..10, // output count

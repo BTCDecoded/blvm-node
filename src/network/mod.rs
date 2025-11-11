@@ -61,9 +61,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::network::tcp_transport::TcpTransport;
-use crate::network::transport::{
-    Transport, TransportAddr, TransportConnection, TransportListener, TransportPreference,
-};
+use crate::network::transport::{Transport, TransportAddr, TransportListener, TransportPreference};
 use std::collections::HashSet;
 
 /// Network I/O operations for testing

@@ -1,8 +1,8 @@
 //! Tests for BIP70 payment verification and signing
 
-use bllvm_protocol::serialization::transaction::serialize_transaction;
-use bllvm_protocol::payment::{Payment, PaymentOutput, PaymentProtocolServer, PaymentRequest};
 use bllvm_node::network::protocol::PaymentMessage;
+use bllvm_protocol::payment::{Payment, PaymentOutput, PaymentProtocolServer, PaymentRequest};
+use bllvm_protocol::serialization::transaction::serialize_transaction;
 use bllvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 use secp256k1::{Secp256k1, SecretKey};
 
@@ -105,8 +105,11 @@ fn test_payment_ack_signing() {
 
     // Process payment with merchant key
     // Note: process_payment expects &Payment, not &PaymentMessage
-    let result =
-        PaymentProtocolServer::process_payment(&payment_msg.payment, &payment_request, Some(&merchant_key));
+    let result = PaymentProtocolServer::process_payment(
+        &payment_msg.payment,
+        &payment_request,
+        Some(&merchant_key),
+    );
 
     assert!(result.is_ok());
     let ack = result.unwrap();

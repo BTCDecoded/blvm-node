@@ -756,8 +756,8 @@ async fn test_getheaders_message() {
 
 #[tokio::test]
 async fn test_headers_message() {
-    use bllvm_protocol::BlockHeader;
     use bllvm_node::network::protocol::*;
+    use bllvm_protocol::BlockHeader;
 
     let header1 = BlockHeader {
         version: 1,

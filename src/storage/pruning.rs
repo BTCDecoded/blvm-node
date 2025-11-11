@@ -495,7 +495,7 @@ impl PruningManager {
         keep_filters: bool,
         keep_filtered_blocks: bool,
         keep_witnesses: bool,
-        keep_tx_index: bool,
+        _keep_tx_index: bool,
     ) -> Result<PruningStats> {
         let mut stats = PruningStats::default();
 

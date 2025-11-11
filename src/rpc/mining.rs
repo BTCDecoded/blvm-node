@@ -567,7 +567,7 @@ impl MiningRpc {
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex data: {}", e)))?;
 
         // Deserialize block
-        let (block, witnesses) = deserialize_block_with_witnesses(&block_bytes)
+        let (block, _witnesses) = deserialize_block_with_witnesses(&block_bytes)
             .map_err(|e| RpcError::invalid_params(format!("Failed to deserialize block: {}", e)))?;
 
         // Get current chain state
@@ -632,7 +632,7 @@ impl MiningRpc {
         // Calculate fee rate based on mempool state
         // Simple algorithm: use median fee rate of top transactions
         let fee_rate = if !mempool_txs.is_empty() {
-            let utxo_set = self.get_utxo_set()?;
+            let _utxo_set = self.get_utxo_set()?;
             let mut fee_rates = Vec::new();
 
             // MempoolManager.get_prioritized_transactions() already calculates fees correctly

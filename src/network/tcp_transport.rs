@@ -45,7 +45,9 @@ impl Transport for TcpTransport {
     }
 
     async fn connect(&self, addr: TransportAddr) -> Result<Self::Connection> {
-        let TransportAddr::Tcp(socket_addr) = addr else {
+        #[allow(irrefutable_let_patterns)]
+        let TransportAddr::Tcp(socket_addr) = addr
+        else {
             return Err(anyhow::anyhow!(
                 "TCP transport can only connect to TCP addresses"
             ));

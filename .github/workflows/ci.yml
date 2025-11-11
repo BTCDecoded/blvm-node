@@ -51,7 +51,7 @@ jobs:
         path: target
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --all-features
     - name: Run tests with coverage
       run: |
         cargo install cargo-tarpaulin --version 0.27.0
@@ -236,5 +236,5 @@ jobs:
     - name: Build
       run: cargo build --release
     - name: Build tests
-      run: cargo test --no-run --release
+      run: cargo test --no-run --release --all-features
 

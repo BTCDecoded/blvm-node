@@ -1,7 +1,7 @@
 //! Storage layer tests
 
-use bllvm_protocol::*;
 use bllvm_node::storage::*;
+use bllvm_protocol::*;
 use tempfile::TempDir;
 mod common;
 use bllvm_node::storage::blockstore::BlockStore;
@@ -588,8 +588,9 @@ fn test_transaction_index_metadata() {
 #[tokio::test]
 async fn test_chainstate_work_accumulation() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+    use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    let db_arc: std::sync::Arc<dyn Database> =
+        std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
     let chainstate = ChainState::new(db_arc).unwrap();
 
     // Test work accumulation
@@ -662,8 +663,9 @@ async fn test_chainstate_persistence() {
 #[tokio::test]
 async fn test_utxostore_concurrent_operations() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+    use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    let db_arc: std::sync::Arc<dyn Database> =
+        std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
     let utxostore = UtxoStore::new(db_arc).unwrap();
 
     // Create multiple UTXOs
@@ -712,8 +714,9 @@ async fn test_utxostore_concurrent_operations() {
 #[tokio::test]
 async fn test_txindex_lookup_paths() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+    use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    let db_arc: std::sync::Arc<dyn Database> =
+        std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
     let txindex = TxIndex::new(db_arc).unwrap();
 
     // Create test transaction
@@ -758,8 +761,9 @@ async fn test_txindex_lookup_paths() {
 #[tokio::test]
 async fn test_storage_integration_workflow() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+    use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    let db_arc: std::sync::Arc<dyn Database> =
+        std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
 
     // Initialize all storage components
     let blockstore = BlockStore::new(db_arc.clone()).unwrap();

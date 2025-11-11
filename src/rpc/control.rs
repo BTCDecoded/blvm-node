@@ -273,7 +273,7 @@ impl ControlRpc {
         debug!("RPC: logging");
 
         // Get include/exclude categories
-        let include = params
+        let _include = params
             .get(0)
             .and_then(|p| p.as_array())
             .map(|arr| {

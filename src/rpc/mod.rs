@@ -122,7 +122,7 @@ impl RpcManager {
         self.blockchain_rpc = blockchain::BlockchainRpc::with_dependencies(Arc::clone(&storage));
         let mempool_rpc =
             mempool::MempoolRpc::with_dependencies(Arc::clone(&mempool), Arc::clone(&storage));
-        let rawtx_rpc = rawtx::RawTxRpc::with_dependencies(
+        let _rawtx_rpc = rawtx::RawTxRpc::with_dependencies(
             Arc::clone(&storage),
             Arc::clone(&mempool),
             self.metrics.clone(),

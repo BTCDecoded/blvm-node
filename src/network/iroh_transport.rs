@@ -11,7 +11,7 @@ use crate::network::transport::{
 #[cfg(feature = "iroh")]
 use anyhow::Result;
 #[cfg(feature = "iroh")]
-use futures::StreamExt;
+// use futures::StreamExt; // Not used
 #[cfg(feature = "iroh")]
 use std::net::SocketAddr;
 #[cfg(feature = "iroh")]

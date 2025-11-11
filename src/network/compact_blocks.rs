@@ -274,13 +274,14 @@ pub fn create_compact_block(
 /// `true` if compact blocks should be preferred for this transport
 pub fn should_prefer_compact_blocks(transport_type: TransportType) -> bool {
     match transport_type {
-        TransportType::Tcp => false, // TCP: standard blocks are fine, compact blocks optional
         #[cfg(feature = "quinn")]
         TransportType::Quinn => true, // QUIC: prefer compact blocks for lower latency
         #[cfg(feature = "iroh")]
         TransportType::Iroh => true, // Iroh QUIC: definitely prefer compact blocks
+        #[cfg(any(feature = "quinn", feature = "iroh"))]
+        TransportType::Tcp => false, // TCP: standard blocks are fine, compact blocks optional
         #[cfg(not(any(feature = "quinn", feature = "iroh")))]
-        _ => false,
+        TransportType::Tcp => false, // TCP: standard blocks are fine, compact blocks optional
     }
 }
 
@@ -350,7 +351,7 @@ pub fn recommended_compact_block_version(transport_type: TransportType) -> u64 {
         #[cfg(feature = "iroh")]
         TransportType::Iroh => 2, // Version 2 for Iroh (NAT traversal benefits from optimization)
         #[cfg(not(any(feature = "quinn", feature = "iroh")))]
-        _ => 1,
+        TransportType::Tcp => 1,
     }
 }
 
@@ -372,9 +373,10 @@ pub fn is_quic_transport(transport_type: TransportType) -> bool {
         TransportType::Quinn => true,
         #[cfg(feature = "iroh")]
         TransportType::Iroh => true,
+        #[cfg(any(feature = "quinn", feature = "iroh"))]
         TransportType::Tcp => false,
         #[cfg(not(any(feature = "quinn", feature = "iroh")))]
-        _ => false,
+        TransportType::Tcp => false,
     }
 }
 

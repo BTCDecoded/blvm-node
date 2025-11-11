@@ -22,8 +22,8 @@ pub fn sign_ban_list(
     let hash = Sha256::digest(&serialized);
 
     // Create message from hash (convert GenericArray to slice)
-    let message =
-        Message::from_slice(hash.as_slice()).map_err(|_| secp256k1::Error::InvalidMessage)?;
+    let message = Message::from_digest_slice(hash.as_slice())
+        .map_err(|_| secp256k1::Error::InvalidMessage)?;
 
     // Sign
     let signature = secp.sign_ecdsa(&message, private_key);
@@ -54,8 +54,8 @@ pub fn verify_ban_list_signature(
     let hash = Sha256::digest(&serialized);
 
     // Create message from hash (convert GenericArray to slice)
-    let message =
-        Message::from_slice(hash.as_slice()).map_err(|_| secp256k1::Error::InvalidMessage)?;
+    let message = Message::from_digest_slice(hash.as_slice())
+        .map_err(|_| secp256k1::Error::InvalidMessage)?;
 
     // Parse signature
     let sig = Signature::from_compact(signature).map_err(|_| secp256k1::Error::InvalidSignature)?;

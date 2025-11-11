@@ -13,7 +13,7 @@ async fn test_monitor_module_shared() {
     let monitor = ModuleProcessMonitor::new(crash_tx);
 
     // Create a dummy process (using true command which exits immediately)
-    let process = tokio::process::Command::new("true").spawn().unwrap();
+    let _process = tokio::process::Command::new("true").spawn().unwrap();
 
     // ModuleProcess.client is private, so we can't construct it directly
     // This test is disabled until ModuleProcess has a public constructor
