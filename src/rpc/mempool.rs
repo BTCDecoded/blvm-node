@@ -214,7 +214,7 @@ impl MempoolRpc {
             crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
         })?;
 
-        let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+        let _verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
         let hash_bytes = hex::decode(txid).map_err(|e| {
             crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e))
@@ -300,7 +300,7 @@ impl MempoolRpc {
             crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
         })?;
 
-        let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+        let _verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
         let hash_bytes = hex::decode(txid).map_err(|e| {
             crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e))
@@ -410,7 +410,7 @@ impl MempoolRpc {
             crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
         })?;
 
-        let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+        let _verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
         let hash_bytes = hex::decode(txid).map_err(|e| {
             crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {}", e))
