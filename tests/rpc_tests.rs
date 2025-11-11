@@ -415,7 +415,8 @@ async fn test_mining_rpc_getblocktemplate() {
     let mining = mining::MiningRpc::new();
 
     // Test getblocktemplate
-    let template = mining.get_block_template().await.unwrap();
+    let params = serde_json::json!([]);
+    let template = mining.get_block_template(&params).await.unwrap();
 
     // Verify block template structure
     assert!(template.get("version").is_some());

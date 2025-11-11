@@ -18,19 +18,19 @@ fn test_calculate_transaction_fee() {
     let utxo = UTXO {
         value: 100_000_000,                    // 1 BTC
         script_pubkey: vec![0x76, 0xa9, 0x14], // P2PKH script
+        height: 0,
     };
-    utxo_set.insert(outpoint, utxo);
+    utxo_set.insert(outpoint.clone(), utxo);
 
     // Create transaction with 1 input and 1 output
     let tx = Transaction {
         version: 1,
-        inputs: vec![bllvm_protocol::TxIn {
-            prevout: outpoint,
+        inputs: vec![bllvm_protocol::TransactionInput {
+            prevout: outpoint.clone(),
             script_sig: vec![],
             sequence: 0xffffffff,
-            witness: vec![],
         }],
-        outputs: vec![bllvm_protocol::TxOut {
+        outputs: vec![bllvm_protocol::TransactionOutput {
             value: 99_000_000, // 0.99 BTC (0.01 BTC fee)
             script_pubkey: vec![0x76, 0xa9, 0x14],
         }],
@@ -55,19 +55,19 @@ fn test_calculate_transaction_fee_zero_fee() {
     let utxo = UTXO {
         value: 100_000_000,
         script_pubkey: vec![],
+        height: 0,
     };
-    utxo_set.insert(outpoint, utxo);
+    utxo_set.insert(outpoint.clone(), utxo);
 
     // Transaction with same input and output (no fee)
     let tx = Transaction {
         version: 1,
-        inputs: vec![bllvm_protocol::TxIn {
-            prevout: outpoint,
+        inputs: vec![bllvm_protocol::TransactionInput {
+            prevout: outpoint.clone(),
             script_sig: vec![],
             sequence: 0xffffffff,
-            witness: vec![],
         }],
-        outputs: vec![bllvm_protocol::TxOut {
+        outputs: vec![bllvm_protocol::TransactionOutput {
             value: 100_000_000,
             script_pubkey: vec![],
         }],
@@ -91,13 +91,12 @@ fn test_calculate_transaction_fee_missing_utxo() {
 
     let tx = Transaction {
         version: 1,
-        inputs: vec![bllvm_protocol::TxIn {
+        inputs: vec![bllvm_protocol::TransactionInput {
             prevout: outpoint,
             script_sig: vec![],
             sequence: 0xffffffff,
-            witness: vec![],
         }],
-        outputs: vec![bllvm_protocol::TxOut {
+        outputs: vec![bllvm_protocol::TransactionOutput {
             value: 50_000_000,
             script_pubkey: vec![],
         }],

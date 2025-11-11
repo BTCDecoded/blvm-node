@@ -64,7 +64,7 @@ impl Transport for QuinnTransport {
         // Convert to formats expected by quinn 0.10
         let cert_der = cert.serialize_der()?;
         let key_der = cert.serialize_private_key_der();
-        
+
         // quinn 0.10 uses rustls 0.21 types
         let certs = vec![rustls::Certificate(cert_der)];
         let key = rustls::PrivateKey(key_der);

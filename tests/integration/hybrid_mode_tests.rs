@@ -12,7 +12,7 @@ async fn test_network_manager_tcp_only_mode() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
     
-    assert_eq!(manager.transport_preference(), TransportPreference::TcpOnly);
+    assert_eq!(manager.transport_preference(), TransportPreference::TCP_ONLY);
     assert!(manager.transport_preference().allows_tcp());
     
     #[cfg(feature = "iroh")]
@@ -30,10 +30,10 @@ async fn test_network_manager_iroh_only_mode() {
     let manager = NetworkManager::with_transport_preference(
         addr,
         100,
-        TransportPreference::IrohOnly,
+        TransportPreference::IROH_ONLY,
     );
     
-    assert_eq!(manager.transport_preference(), TransportPreference::IrohOnly);
+    assert_eq!(manager.transport_preference(), TransportPreference::IROH_ONLY);
     assert!(!manager.transport_preference().allows_tcp());
     assert!(manager.transport_preference().allows_iroh());
 }
@@ -47,10 +47,10 @@ async fn test_network_manager_hybrid_mode() {
     let manager = NetworkManager::with_transport_preference(
         addr,
         100,
-        TransportPreference::Hybrid,
+        TransportPreference::hybrid(),
     );
     
-    assert_eq!(manager.transport_preference(), TransportPreference::Hybrid);
+    assert_eq!(manager.transport_preference(), TransportPreference::hybrid());
     assert!(manager.transport_preference().allows_tcp());
     assert!(manager.transport_preference().allows_iroh());
     assert!(manager.transport_preference().prefers_iroh());
@@ -63,7 +63,7 @@ async fn test_network_manager_backward_compatibility() {
     let manager = NetworkManager::new(addr);
     
     // Should default to TCP-only
-    assert_eq!(manager.transport_preference(), TransportPreference::TcpOnly);
+    assert_eq!(manager.transport_preference(), TransportPreference::TCP_ONLY);
     
     // Should have zero peers initially
     assert_eq!(manager.peer_count(), 0);
@@ -71,18 +71,18 @@ async fn test_network_manager_backward_compatibility() {
 
 #[tokio::test]
 async fn test_transport_preference_allows_methods() {
-    let tcp_only = TransportPreference::TcpOnly;
+    let tcp_only = TransportPreference::TCP_ONLY;
     assert!(tcp_only.allows_tcp());
     
     #[cfg(feature = "iroh")]
     {
         assert!(!tcp_only.allows_iroh());
         
-        let iroh_only = TransportPreference::IrohOnly;
+        let iroh_only = TransportPreference::IROH_ONLY;
         assert!(!iroh_only.allows_tcp());
         assert!(iroh_only.allows_iroh());
         
-        let hybrid = TransportPreference::Hybrid;
+        let hybrid = TransportPreference::hybrid();
         assert!(hybrid.allows_tcp());
         assert!(hybrid.allows_iroh());
         assert!(hybrid.prefers_iroh());

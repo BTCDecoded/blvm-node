@@ -103,7 +103,7 @@ async fn test_transport_preference() {
         
         #[cfg(feature = "iroh")]
         {
-            let all = TransportPreference::ALL;
+            let all = TransportPreference::all_transports();
             assert!(all.allows_tcp());
             assert!(all.allows_iroh());
             assert!(all.allows_quinn());

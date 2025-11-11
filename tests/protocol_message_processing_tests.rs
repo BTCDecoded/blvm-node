@@ -39,5 +39,6 @@ async fn test_node_chain_access_creation() {
 
     // Test that it works
     let hash = [0u8; 32];
+    use bllvm_protocol::network::ChainStateAccess;
     assert!(!chain_access.has_object(&hash)); // Empty storage
 }

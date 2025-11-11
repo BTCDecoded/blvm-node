@@ -1,5 +1,5 @@
 #![cfg(feature = "dandelion")]
-use bllvm_consensus::Hash;
+use bllvm_protocol::Hash;
 use bllvm_node::network::relay::RelayManager;
 
 fn hash_from_u8(v: u8) -> Hash {

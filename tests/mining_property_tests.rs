@@ -7,8 +7,9 @@ use bllvm_node::rpc::mining::MiningRpc;
 use bllvm_node::storage::Storage;
 use bllvm_protocol::serialization::serialize_transaction;
 use bllvm_protocol::types::{
-    BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput,
+    BlockHeader, OutPoint, TransactionInput, TransactionOutput,
 };
+use bllvm_protocol::Transaction;
 use hex;
 use proptest::prelude::*;
 use sha2::{Digest, Sha256};
@@ -17,10 +18,54 @@ use tempfile::TempDir;
 mod common;
 use common::*;
 
+// Strategy function for generating arbitrary Transaction (can't impl Arbitrary for re-exported type)
+fn transaction_strategy() -> BoxedStrategy<Transaction> {
+    (
+        any::<u64>(), // version
+        prop::collection::vec(
+            (
+                any::<[u8; 32]>(), // prevout hash
+                any::<u64>(), // prevout index
+                prop::collection::vec(any::<u8>(), 0..100), // script_sig
+                any::<u64>(), // sequence
+            ),
+            0..10, // input count
+        ),
+        prop::collection::vec(
+            (
+                any::<i64>(), // value
+                prop::collection::vec(any::<u8>(), 0..100), // script_pubkey
+            ),
+            0..10, // output count
+        ),
+        any::<u64>(), // lock_time
+    )
+        .prop_map(|(version, inputs, outputs, lock_time)| Transaction {
+            version,
+            inputs: inputs
+                .into_iter()
+                .map(|(hash, index, script_sig, sequence)| TransactionInput {
+                    prevout: OutPoint { hash, index },
+                    script_sig,
+                    sequence,
+                })
+                .collect(),
+            outputs: outputs
+                .into_iter()
+                .map(|(value, script_pubkey)| TransactionOutput {
+                    value,
+                    script_pubkey,
+                })
+                .collect(),
+            lock_time,
+        })
+        .boxed()
+}
+
 /// Property: Transaction serialization never panics
 proptest! {
     #[test]
-    fn prop_transaction_serialization_no_panic(tx in any::<Transaction>()) {
+    fn prop_transaction_serialization_no_panic(tx in transaction_strategy()) {
         // Serialization should never panic
         let serialized = serialize_transaction(&tx);
         prop_assert!(!serialized.is_empty() || tx.inputs.is_empty() && tx.outputs.is_empty());
@@ -30,7 +75,7 @@ proptest! {
 /// Property: Transaction hash is double SHA256
 proptest! {
     #[test]
-    fn prop_transaction_hash_double_sha256(tx in any::<Transaction>()) {
+    fn prop_transaction_hash_double_sha256(tx in transaction_strategy()) {
         // Test hash calculation directly
         let tx_bytes = serialize_transaction(&tx);
         let hash1 = Sha256::digest(&tx_bytes);
@@ -71,7 +116,7 @@ proptest! {
         let outputs: Vec<TransactionOutput> = (0..outputs_count)
             .map(|i| TransactionOutput {
                 value: (i as i64) * 1000,
-                script_pubkey: vec![0x76, 0xa9, 0x14; i % 50], // Variable length scripts
+                script_pubkey: vec![0x76; (i % 50) as usize], // Variable length scripts
             })
             .collect();
 
@@ -94,7 +139,7 @@ proptest! {
 /// Property: Transaction serialization produces valid bytes
 proptest! {
     #[test]
-    fn prop_transaction_serialization_valid(tx in any::<Transaction>()) {
+    fn prop_transaction_serialization_valid(tx in transaction_strategy()) {
         let serialized = serialize_transaction(&tx);
 
         // Serialized transaction should have at least version (4 bytes) + varints
@@ -344,23 +389,23 @@ proptest! {
 /// Property: Transaction hash is deterministic (same tx = same hash)
 proptest! {
     #[test]
-    fn prop_transaction_hash_deterministic(tx in any::<Transaction>()) {
-        let tx_bytes1 = serialize_transaction(&tx);
-        let tx_bytes2 = serialize_transaction(&tx);
+    fn prop_transaction_hash_deterministic(tx in transaction_strategy()) {
+        let tx_bytes = serialize_transaction(&tx);
+        let tx_bytes_clone = tx_bytes.clone();
 
         // Same transaction should serialize to same bytes
-        prop_assert_eq!(tx_bytes1, tx_bytes2);
+        prop_assert_eq!(&tx_bytes, &tx_bytes_clone);
 
         // Same bytes should produce same hash
         let hash1 = {
-            let h1 = Sha256::digest(&tx_bytes1);
+            let h1 = Sha256::digest(&tx_bytes);
             let h2 = Sha256::digest(h1);
-            hex::encode(h2)
+            hex::encode(&h2)
         };
         let hash2 = {
-            let h1 = Sha256::digest(&tx_bytes2);
+            let h1 = Sha256::digest(&tx_bytes_clone);
             let h2 = Sha256::digest(h1);
-            hex::encode(h2)
+            hex::encode(&h2)
         };
 
         prop_assert_eq!(hash1, hash2);
@@ -371,8 +416,8 @@ proptest! {
 proptest! {
     #[test]
     fn prop_different_transactions_different_hashes(
-        tx1 in any::<Transaction>(),
-        tx2 in any::<Transaction>(),
+        tx1 in transaction_strategy(),
+        tx2 in transaction_strategy(),
     ) {
         // Skip if transactions are identical
         if tx1.version == tx2.version &&

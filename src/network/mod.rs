@@ -1251,7 +1251,8 @@ impl NetworkManager {
                                                     if node_id_bytes.len() == 32 {
                                                         use iroh_net::NodeId;
                                                         let mut node_id_array = [0u8; 32];
-                                                        node_id_array.copy_from_slice(&node_id_bytes[..32]);
+                                                        node_id_array
+                                                            .copy_from_slice(&node_id_bytes[..32]);
                                                         if let Ok(node_id) =
                                                             NodeId::from_bytes(&node_id_array)
                                                         {
@@ -1887,7 +1888,10 @@ impl NetworkManager {
                 #[cfg(feature = "iroh")]
                 crate::network::transport::TransportAddr::Iroh(_) => {
                     let addr_clone = addr.clone();
-                    if let Err(e) = self.send_to_peer_by_transport(addr_clone, wire_msg.clone()).await {
+                    if let Err(e) = self
+                        .send_to_peer_by_transport(addr_clone, wire_msg.clone())
+                        .await
+                    {
                         warn!("Failed to ping peer {}: {}", addr, e);
                     }
                 }

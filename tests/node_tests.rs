@@ -31,10 +31,10 @@ async fn test_node_creation() {
 
 #[tokio::test]
 async fn test_sync_coordinator() {
-    let sync = sync::SyncCoordinator::new(sync::BlockProvider::new());
+    let sync = sync::SyncCoordinator::new();
 
-    // Test initial state
-    assert_eq!(sync.state(), &sync::SyncState::Initial);
+    // Test initial state - SyncCoordinator doesn't expose state() directly
+    // We can test progress and is_synced instead
     assert_eq!(sync.progress(), 0.0);
     assert!(!sync.is_synced());
 
@@ -51,7 +51,7 @@ async fn test_mempool_manager() {
     assert!(mempool.transaction_hashes().is_empty());
 
     // Test adding transaction (simplified)
-    use bllvm_consensus::Transaction;
+    use bllvm_protocol::Transaction;
     let tx = Transaction {
         version: 1,
         inputs: vec![],
@@ -65,7 +65,9 @@ async fn test_mempool_manager() {
 
 #[tokio::test]
 async fn test_mining_coordinator() {
-    let mut miner = miner::MiningCoordinator::new(miner::MockMempoolProvider::new());
+    use std::sync::Arc;
+    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test initial state
     assert!(!miner.is_mining_enabled());
@@ -109,7 +111,9 @@ async fn test_sync_state_transitions() {
 
 #[tokio::test]
 async fn test_mining_info() {
-    let miner = miner::MiningCoordinator::new(miner::MockMempoolProvider::new());
+    use std::sync::Arc;
+    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let miner = miner::MiningCoordinator::new(mempool, None);
     let info = miner.get_mining_info();
 
     assert!(!info.enabled);
@@ -228,33 +232,32 @@ async fn test_node_startup_shutdown() {
 
 #[tokio::test]
 async fn test_sync_coordinator_operations() {
-    let mut sync = sync::SyncCoordinator::new(sync::BlockProvider::new());
+    let mut sync = sync::SyncCoordinator::new();
 
-    // Test initial state
-    assert_eq!(sync.state(), &sync::SyncState::Initial);
+    // Test initial state - SyncCoordinator doesn't expose state() directly
+    // We can test progress and is_synced instead
     assert_eq!(sync.progress(), 0.0);
     assert!(!sync.is_synced());
 
-    // Test sync state
-    assert_eq!(sync.state(), &sync::SyncState::Initial);
+    // Test sync state - SyncCoordinator doesn't expose state() directly
     assert_eq!(sync.progress(), 0.0);
     assert!(!sync.is_synced());
 }
 
 #[tokio::test]
 async fn test_sync_coordinator_error_handling() {
-    let mut sync = sync::SyncCoordinator::new(sync::BlockProvider::new());
+    let mut sync = sync::SyncCoordinator::new();
 
     // Test error state
     let error_msg = "Connection failed".to_string();
     // Note: set_state method may not exist in current implementation
-    assert_eq!(sync.state(), &sync::SyncState::Initial);
+    // SyncCoordinator doesn't expose state() directly
     assert!(!sync.is_synced());
 }
 
 #[tokio::test]
 async fn test_sync_coordinator_peer_selection() {
-    let mut sync = sync::SyncCoordinator::new(sync::BlockProvider::new());
+    let mut sync = sync::SyncCoordinator::new();
 
     // Test peer selection for sync
     let peers = vec![
@@ -276,7 +279,7 @@ async fn test_sync_coordinator_peer_selection() {
 
 #[tokio::test]
 async fn test_sync_coordinator_stalled_detection() {
-    let mut sync = sync::SyncCoordinator::new(sync::BlockProvider::new());
+    let mut sync = sync::SyncCoordinator::new();
 
     // Test stalled sync detection
     // Test sync state (simplified - actual method may not exist)
@@ -421,7 +424,9 @@ async fn test_mempool_manager_conflict_detection() {
 
 #[tokio::test]
 async fn test_mining_coordinator_operations() {
-    let mut miner = miner::MiningCoordinator::new(miner::MockMempoolProvider::new());
+    use std::sync::Arc;
+    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test initial state
     assert!(!miner.is_mining_enabled());
@@ -442,7 +447,9 @@ async fn test_mining_coordinator_operations() {
 
 #[tokio::test]
 async fn test_mining_coordinator_block_template() {
-    let mut miner = miner::MiningCoordinator::new(miner::MockMempoolProvider::new());
+    use std::sync::Arc;
+    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test block template creation
     // Test create_block_template (simplified - actual method may not exist)
@@ -457,7 +464,9 @@ async fn test_mining_coordinator_block_template() {
 
 #[tokio::test]
 async fn test_mining_coordinator_transaction_selection() {
-    let mut miner = miner::MiningCoordinator::new(miner::MockMempoolProvider::new());
+    use std::sync::Arc;
+    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test transaction selection for mining
     let transactions = vec![
@@ -476,7 +485,9 @@ async fn test_mining_coordinator_transaction_selection() {
 
 #[tokio::test]
 async fn test_mining_coordinator_fee_optimization() {
-    let mut miner = miner::MiningCoordinator::new(miner::MockMempoolProvider::new());
+    use std::sync::Arc;
+    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test fee optimization
     let transactions = vec![
@@ -504,7 +515,9 @@ async fn test_mining_coordinator_fee_optimization() {
 
 #[tokio::test]
 async fn test_mining_coordinator_mining_state() {
-    let mut miner = miner::MiningCoordinator::new(miner::MockMempoolProvider::new());
+    use std::sync::Arc;
+    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test mining state management
     assert!(!miner.is_mining_enabled());
@@ -533,7 +546,7 @@ async fn test_mining_coordinator_mining_state() {
 
 #[tokio::test]
 async fn test_sync_mempool_interaction() {
-    let mut sync = sync::SyncCoordinator::new(sync::BlockProvider::new());
+    let mut sync = sync::SyncCoordinator::new();
     let mut mempool = mempool::MempoolManager::new();
 
     // Test interaction between sync and mempool
@@ -550,7 +563,9 @@ async fn test_sync_mempool_interaction() {
 
 #[tokio::test]
 async fn test_mining_mempool_interaction() {
-    let mut miner = miner::MiningCoordinator::new(miner::MockMempoolProvider::new());
+    use std::sync::Arc;
+    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mut miner = miner::MiningCoordinator::new(mempool, None);
     let mut mempool = mempool::MempoolManager::new();
 
     // Test interaction between mining and mempool

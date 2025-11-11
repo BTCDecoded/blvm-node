@@ -1,6 +1,6 @@
 //! Storage layer tests
 
-use bllvm_consensus::*;
+use bllvm_protocol::*;
 use bllvm_node::storage::*;
 use tempfile::TempDir;
 mod common;
@@ -588,8 +588,9 @@ fn test_transaction_index_metadata() {
 #[tokio::test]
 async fn test_chainstate_work_accumulation() {
     let temp_dir = TempDir::new().unwrap();
-    let db = sled::open(temp_dir.path()).unwrap();
-    let chainstate = ChainState::new(db).unwrap();
+    use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+    let chainstate = ChainState::new(db_arc).unwrap();
 
     // Test work accumulation
     let header1 = TestBlockBuilder::new()
@@ -628,8 +629,9 @@ async fn test_chainstate_persistence() {
 
     // Create first chainstate
     {
-        let db = sled::open(db_path).unwrap();
-        let chainstate = ChainState::new(db).unwrap();
+        use bllvm_node::storage::database::{create_database, DatabaseBackend};
+        let db_arc = std::sync::Arc::from(create_database(db_path, DatabaseBackend::Sled).unwrap());
+        let chainstate = ChainState::new(db_arc).unwrap();
 
         let header = TestBlockBuilder::new()
             .with_version(1)
@@ -646,8 +648,9 @@ async fn test_chainstate_persistence() {
 
     // Reopen and verify persistence
     {
-        let db = sled::open(db_path).unwrap();
-        let chainstate = ChainState::new(db).unwrap();
+        use bllvm_node::storage::database::{create_database, DatabaseBackend};
+        let db_arc = std::sync::Arc::from(create_database(db_path, DatabaseBackend::Sled).unwrap());
+        let chainstate = ChainState::new(db_arc).unwrap();
 
         let chain_info = chainstate.load_chain_info().unwrap();
         assert!(chain_info.is_some());
@@ -659,8 +662,9 @@ async fn test_chainstate_persistence() {
 #[tokio::test]
 async fn test_utxostore_concurrent_operations() {
     let temp_dir = TempDir::new().unwrap();
-    let db = sled::open(temp_dir.path()).unwrap();
-    let utxostore = UtxoStore::new(db).unwrap();
+    use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+    let utxostore = UtxoStore::new(db_arc).unwrap();
 
     // Create multiple UTXOs
     let utxo1 = TestUtxoSetBuilder::new()
@@ -708,8 +712,9 @@ async fn test_utxostore_concurrent_operations() {
 #[tokio::test]
 async fn test_txindex_lookup_paths() {
     let temp_dir = TempDir::new().unwrap();
-    let db = sled::open(temp_dir.path()).unwrap();
-    let txindex = TxIndex::new(db).unwrap();
+    use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+    let txindex = TxIndex::new(db_arc).unwrap();
 
     // Create test transaction
     let tx = TestTransactionBuilder::new()
@@ -722,7 +727,7 @@ async fn test_txindex_lookup_paths() {
         .with_lock_time(0)
         .build();
 
-    let tx_hash = bllvm_consensus::mempool::calculate_tx_id(&tx);
+    let tx_hash = bllvm_protocol::block::calculate_tx_id(&tx);
     let block_hash = random_hash();
     let block_height = 100;
 
@@ -753,13 +758,14 @@ async fn test_txindex_lookup_paths() {
 #[tokio::test]
 async fn test_storage_integration_workflow() {
     let temp_dir = TempDir::new().unwrap();
-    let db = sled::open(temp_dir.path()).unwrap();
+    use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
 
     // Initialize all storage components
-    let blockstore = BlockStore::new(db.clone()).unwrap();
-    let chainstate = ChainState::new(db.clone()).unwrap();
-    let utxostore = UtxoStore::new(db.clone()).unwrap();
-    let txindex = TxIndex::new(db).unwrap();
+    let blockstore = BlockStore::new(db_arc.clone()).unwrap();
+    let chainstate = ChainState::new(db_arc.clone()).unwrap();
+    let utxostore = UtxoStore::new(db_arc.clone()).unwrap();
+    let txindex = TxIndex::new(db_arc).unwrap();
 
     // Create test block
     let block = TestBlockBuilder::new()
@@ -795,7 +801,7 @@ async fn test_storage_integration_workflow() {
 
     // Index transaction
     let tx = valid_transaction();
-    let tx_hash = bllvm_consensus::mempool::calculate_tx_id(&tx);
+    let tx_hash = bllvm_protocol::block::calculate_tx_id(&tx);
     txindex
         .index_transaction(&tx, &block_hash, block_height, 0)
         .unwrap();

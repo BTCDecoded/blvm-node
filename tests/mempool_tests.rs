@@ -53,6 +53,7 @@ async fn test_mempool_get_prioritized_transactions() {
         UTXO {
             value: 10000,
             script_pubkey: vec![0x51],
+            height: 0,
         },
     );
 

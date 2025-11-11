@@ -1,7 +1,7 @@
 //! Basic integration tests for bllvm-node
 
 use bllvm_node::*;
-use bllvm_consensus::*;
+use bllvm_protocol::*;
 use bllvm_protocol::ProtocolVersion;
 
 #[test]

@@ -25,11 +25,12 @@ impl TempDb {
         let temp_dir = TempDir::new()?;
         let db_path = temp_dir.path().join("test.db");
 
-        let db = sled::open(&db_path)?;
-        let utxo_store = UtxoStore::new(db.clone())?;
-        let tx_index = TxIndex::new(db.clone())?;
-        let block_store = BlockStore::new(db.clone())?;
-        let chain_state = ChainState::new(db)?;
+        use bllvm_node::storage::database::{create_database, DatabaseBackend, Database};
+        let db_arc: std::sync::Arc<dyn Database> = std::sync::Arc::from(create_database(&db_path, DatabaseBackend::Sled)?);
+        let utxo_store = UtxoStore::new(db_arc.clone())?;
+        let tx_index = TxIndex::new(db_arc.clone())?;
+        let block_store = BlockStore::new(db_arc.clone())?;
+        let chain_state = ChainState::new(db_arc)?;
 
         Ok(TempDb {
             temp_dir,

@@ -39,7 +39,7 @@ impl QuinnRpcServer {
         // Convert to formats expected by quinn 0.10
         let cert_der = cert.serialize_der()?;
         let key_der = cert.serialize_private_key_der();
-        
+
         // quinn 0.10 uses rustls 0.21 types
         let certs = vec![rustls::Certificate(cert_der)];
         let key = rustls::PrivateKey(key_der);
@@ -76,7 +76,6 @@ impl QuinnRpcServer {
     async fn handle_connection(connection: quinn::Connection) {
         // Accept bidirectional streams from the connection
         while let Ok((mut send, mut recv)) = connection.accept_bi().await {
-
             // Handle each stream in a separate task
             tokio::spawn(async move {
                 // Read full request (QUIC streams can be read like regular streams)

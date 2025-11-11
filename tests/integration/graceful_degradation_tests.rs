@@ -12,7 +12,7 @@ async fn test_tcp_fallback() {
     let network_manager = NetworkManager::with_transport_preference(
         listen_addr,
         10,
-        TransportPreference::ALL,
+        TransportPreference::all_transports(),
     );
     
     network_manager.start(listen_addr).await.unwrap();

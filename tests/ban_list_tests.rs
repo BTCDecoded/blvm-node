@@ -133,4 +133,3 @@ fn test_calculate_ban_list_hash() {
     // Verify hash
     assert!(verify_ban_list_hash(&entries, &hash1));
 }
-

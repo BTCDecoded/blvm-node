@@ -756,7 +756,7 @@ async fn test_getheaders_message() {
 
 #[tokio::test]
 async fn test_headers_message() {
-    use bllvm_consensus::BlockHeader;
+    use bllvm_protocol::BlockHeader;
     use bllvm_node::network::protocol::*;
 
     let header1 = BlockHeader {
@@ -886,14 +886,14 @@ async fn test_persistent_peers() {
     manager.add_persistent_peer(peer1);
     manager.add_persistent_peer(peer2);
 
-    let persistent = manager.get_persistent_peers();
+    let persistent = manager.get_persistent_peers_sync();
     assert_eq!(persistent.len(), 2);
     assert!(persistent.contains(&peer1));
     assert!(persistent.contains(&peer2));
 
     // Test removing persistent peer
     manager.remove_persistent_peer(peer1);
-    let persistent = manager.get_persistent_peers();
+    let persistent = manager.get_persistent_peers_sync();
     assert_eq!(persistent.len(), 1);
     assert!(!persistent.contains(&peer1));
     assert!(persistent.contains(&peer2));
@@ -941,7 +941,7 @@ async fn test_network_stats() {
     let manager = NetworkManager::new(addr);
 
     // Initially stats should be zero
-    let (sent, received) = manager.get_network_stats();
+    let (sent, received) = manager.get_network_stats_legacy();
     assert_eq!(sent, 0);
     assert_eq!(received, 0);
 
@@ -949,7 +949,7 @@ async fn test_network_stats() {
     manager.track_bytes_sent(100);
     manager.track_bytes_received(200);
 
-    let (sent, received) = manager.get_network_stats();
+    let (sent, received) = manager.get_network_stats_legacy();
     assert_eq!(sent, 100);
     assert_eq!(received, 200);
 
@@ -957,7 +957,7 @@ async fn test_network_stats() {
     manager.track_bytes_sent(50);
     manager.track_bytes_received(75);
 
-    let (sent, received) = manager.get_network_stats();
+    let (sent, received) = manager.get_network_stats_legacy();
     assert_eq!(sent, 150);
     assert_eq!(received, 275);
 }

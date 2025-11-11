@@ -51,7 +51,7 @@ async fn test_per_ip_connection_limit() {
     // Test that per-IP limits are enforced
     // This is tested in connect_to_peer, but we need a mock transport
     // For now, verify the structure exists
-    let test_ip = "127.0.0.1".parse().unwrap();
+    let test_ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
 
     // Connection limits are enforced in connect_to_peer
     // Integration test needed for full verification

@@ -37,9 +37,18 @@ async fn quic_rpc_getblockchaininfo_smoke() {
     send.write_all(request.as_bytes()).await.expect("write");
     send.finish().await.expect("finish");
 
-    // Read response
+    // Read response (quinn 0.10: read() returns Result<Option<usize>, ReadError>)
     let mut response_bytes = Vec::new();
-    recv.read_to_end(&mut response_bytes).await.expect("read");
+    let mut temp_buf = [0u8; 4096];
+    loop {
+        match recv.read(&mut temp_buf).await {
+            Ok(Some(0)) | Ok(None) => break,
+            Ok(Some(n)) => response_bytes.extend_from_slice(&temp_buf[..n]),
+            Err(e) => {
+                panic!("Error reading from QUIC stream: {}", e);
+            }
+        }
+    }
 
     let response_str = String::from_utf8(response_bytes).expect("utf8");
     let v: serde_json::Value = serde_json::from_str(&response_str).expect("json");

@@ -36,6 +36,7 @@ fn test_node_chain_access_creation() {
 
     // Verify it works
     let hash = [0u8; 32];
+    use bllvm_protocol::network::ChainStateAccess;
     let has_object = chain_access.has_object(&hash);
     assert!(!has_object); // Empty storage, so should be false
 }
