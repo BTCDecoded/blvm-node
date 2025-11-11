@@ -67,7 +67,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {}", e)))?
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
     }
 
     async fn get_block_header(&self, hash: &Hash) -> Result<Option<BlockHeader>, ModuleError> {
@@ -82,7 +82,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {}", e)))?
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
     }
 
     async fn get_transaction(&self, hash: &Hash) -> Result<Option<Transaction>, ModuleError> {
@@ -97,7 +97,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {}", e)))?
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
     }
 
     async fn has_transaction(&self, hash: &Hash) -> Result<bool, ModuleError> {
@@ -115,7 +115,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {}", e)))?
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
     }
 
     async fn get_block_height(&self) -> Result<u64, ModuleError> {
@@ -135,7 +135,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {}", e)))?
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
     }
 
     async fn get_chain_tip(&self) -> Result<Hash, ModuleError> {
@@ -155,7 +155,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {}", e)))?
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
     }
 
     async fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
@@ -172,7 +172,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {}", e)))?
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
     }
 
     async fn subscribe_events(

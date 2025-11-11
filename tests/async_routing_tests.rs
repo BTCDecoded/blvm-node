@@ -86,6 +86,9 @@ async fn test_timestamp_cleanup() {
     // Register a request
     let (request_id, _rx) = manager.register_request(peer_addr);
 
+    // Wait at least 1 second to ensure the request is older than 0 seconds
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
     // Cleanup requests older than 0 seconds (should remove all)
     let cleaned = manager.cleanup_expired_requests(0);
     assert_eq!(cleaned, 1);
