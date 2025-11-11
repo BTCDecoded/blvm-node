@@ -158,3 +158,4 @@ async fn test_request_priority() {
     let pending = manager.get_pending_requests_for_peer(peer_addr);
     assert_eq!(pending.len(), 3);
 }
+

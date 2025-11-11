@@ -36,12 +36,15 @@ impl QuinnRpcServer {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .map_err(|e| anyhow::anyhow!("Failed to generate certificate: {}", e))?;
 
-        let cert_der = rustls::pki_types::CertificateDer::from(cert.serialize_der()?);
-        let key_der = rustls::pki_types::PrivateKeyDer::from(
-            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()),
-        );
+        // Convert to formats expected by quinn 0.10
+        let cert_der = cert.serialize_der()?;
+        let key_der = cert.serialize_private_key_der();
+        
+        // quinn 0.10 uses rustls 0.21 types
+        let certs = vec![rustls::Certificate(cert_der)];
+        let key = rustls::PrivateKey(key_der);
 
-        let server_config = quinn::ServerConfig::with_single_cert(vec![cert_der], key_der)?;
+        let server_config = quinn::ServerConfig::with_single_cert(certs, key)?;
         let endpoint = quinn::Endpoint::server(server_config, self.addr)?;
 
         info!("QUIC RPC server listening on {}", self.addr);
@@ -72,28 +75,25 @@ impl QuinnRpcServer {
     #[cfg(feature = "quinn")]
     async fn handle_connection(connection: quinn::Connection) {
         // Accept bidirectional streams from the connection
-        while let Ok(Some(stream)) = connection.accept_bi().await {
-            let (mut send, mut recv) = stream;
+        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
 
             // Handle each stream in a separate task
             tokio::spawn(async move {
                 // Read full request (QUIC streams can be read like regular streams)
+                // quinn 0.10: read_to_end takes a limit parameter, so we use read() in a loop
                 let mut buffer = Vec::new();
-                match recv.read_to_end(&mut buffer).await {
-                    Ok(_) => {
-                        if buffer.is_empty() {
-                            debug!("Empty QUIC RPC request");
+                let mut temp_buf = [0u8; 4096];
+                loop {
+                    match recv.read(&mut temp_buf).await {
+                        Ok(Some(0)) | Ok(None) => break,
+                        Ok(Some(n)) => buffer.extend_from_slice(&temp_buf[..n]),
+                        Err(e) => {
+                            warn!("Error reading from QUIC stream: {}", e);
                             let _ = send.finish().await;
                             return;
                         }
                     }
-                    Err(e) => {
-                        warn!("Error reading from QUIC stream: {}", e);
-                        let _ = send.finish().await;
-                        return;
-                    }
                 }
-
                 let request = match String::from_utf8(buffer) {
                     Ok(req) if !req.is_empty() => req,
                     Ok(_) => {

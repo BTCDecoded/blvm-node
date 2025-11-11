@@ -90,9 +90,12 @@ sysinfo = { version = "0.30", optional = true }
 # Iroh networking (optional feature)
 iroh-net = { version = "0.12", optional = true }
 # Quinn QUIC transport (optional feature - can be used standalone or via Iroh)
-quinn = { version = "0.11", optional = true }
+# Note: Version 0.10 matches iroh-net 0.12's quinn dependency
+quinn = { version = "0.10", optional = true }
 rcgen = { version = "0.11", optional = true }
-rustls = { version = "0.23", optional = true }
+# rustls version is determined by quinn 0.10 (uses rustls 0.21)
+# Only specify if quinn feature is not enabled
+rustls = { version = "0.21", optional = true }
 
 [features]
 default = ["sysinfo", "redb", "nix", "libc", "utxo-commitments", "production"]

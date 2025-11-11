@@ -144,9 +144,9 @@ impl From<TransportPreferenceConfig> for TransportPreference {
             #[cfg(feature = "iroh")]
             TransportPreferenceConfig::IrohOnly => TransportPreference::IROH_ONLY,
             #[cfg(feature = "iroh")]
-            TransportPreferenceConfig::Hybrid => TransportPreference::HYBRID,
+            TransportPreferenceConfig::Hybrid => TransportPreference::hybrid(),
             #[cfg(all(feature = "quinn", feature = "iroh"))]
-            TransportPreferenceConfig::All => TransportPreference::ALL,
+            TransportPreferenceConfig::All => TransportPreference::all_transports(),
         }
     }
 }

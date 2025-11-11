@@ -1075,6 +1075,7 @@ impl NetworkManager {
                                         use crate::network::transport::TransportAddr;
 
                                         let quinn_addr = TransportAddr::Quinn(socket_addr);
+                                        let quinn_addr_clone = quinn_addr.clone();
                                         let peer = peer::Peer::from_transport_connection(
                                             conn,
                                             socket_addr,
@@ -1086,7 +1087,7 @@ impl NetworkManager {
                                         match peer_manager_clone.lock() {
                                             Ok(mut pm) => {
                                                 if let Err(e) =
-                                                    pm.add_peer(quinn_addr.clone(), peer)
+                                                    pm.add_peer(quinn_addr_clone.clone(), peer)
                                                 {
                                                     warn!(
                                                         "Failed to add Quinn peer {}: {}",
@@ -1094,7 +1095,7 @@ impl NetworkManager {
                                                     );
                                                     let _ = peer_tx_clone.send(
                                                         NetworkMessage::PeerDisconnected(
-                                                            quinn_addr.clone(),
+                                                            quinn_addr_clone.clone(),
                                                         ),
                                                     );
                                                     return;
@@ -1108,7 +1109,7 @@ impl NetworkManager {
                                                 warn!("Failed to lock peer manager for Quinn peer {}: {}", socket_addr, e);
                                                 let _ = peer_tx_clone.send(
                                                     NetworkMessage::PeerDisconnected(
-                                                        quinn_addr.clone(),
+                                                        quinn_addr_clone.clone(),
                                                     ),
                                                 );
                                                 return;
@@ -1249,8 +1250,10 @@ impl NetworkManager {
                                                 {
                                                     if node_id_bytes.len() == 32 {
                                                         use iroh_net::NodeId;
+                                                        let mut node_id_array = [0u8; 32];
+                                                        node_id_array.copy_from_slice(&node_id_bytes[..32]);
                                                         if let Ok(node_id) =
-                                                            NodeId::from_bytes(node_id_bytes)
+                                                            NodeId::from_bytes(&node_id_array)
                                                         {
                                                             let address_db_clone =
                                                                 address_database_clone.clone();
@@ -1826,15 +1829,16 @@ impl NetworkManager {
             crate::network::transport::TransportType::Quinn => {
                 if let Some(ref quinn) = self.quinn_transport {
                     let quinn_addr = TransportAddr::Quinn(addr);
+                    let quinn_addr_clone = quinn_addr.clone();
                     let conn = quinn.connect(quinn_addr).await?;
                     Ok((
                         peer::Peer::from_transport_connection(
                             conn,
                             addr,
-                            quinn_addr.clone(),
+                            quinn_addr_clone.clone(),
                             self.peer_tx.clone(),
                         ),
-                        quinn_addr,
+                        quinn_addr_clone,
                     ))
                 } else {
                     Err(anyhow::anyhow!("Quinn transport not available"))
@@ -1882,7 +1886,8 @@ impl NetworkManager {
                 }
                 #[cfg(feature = "iroh")]
                 crate::network::transport::TransportAddr::Iroh(_) => {
-                    if let Err(e) = self.send_to_peer_by_transport(addr, wire_msg.clone()).await {
+                    let addr_clone = addr.clone();
+                    if let Err(e) = self.send_to_peer_by_transport(addr_clone, wire_msg.clone()).await {
                         warn!("Failed to ping peer {}: {}", addr, e);
                     }
                 }

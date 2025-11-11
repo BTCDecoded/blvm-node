@@ -3,7 +3,7 @@
 //! Handles block mining, template generation, and mining coordination.
 
 use anyhow::Result;
-use bllvm_protocol::{Block, BlockHeader, Transaction};
+use bllvm_protocol::{Block, BlockHeader, OutPoint, Transaction, TransactionInput};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
@@ -395,7 +395,7 @@ impl MiningCoordinator {
     }
 
     /// Generate block template
-    async fn generate_block_template(&mut self) -> Result<Block> {
+    pub async fn generate_block_template(&mut self) -> Result<Block> {
         debug!("Generating block template");
 
         // Get chain tip from storage for prev_block_hash and difficulty

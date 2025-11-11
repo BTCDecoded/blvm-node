@@ -167,6 +167,8 @@ impl RpcManager {
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
             mining_rpc: mining::MiningRpc::new(),
+            metrics: None,
+            profiler: None,
             control_rpc: control::ControlRpc::new(),
             storage: None,
             mempool: None,

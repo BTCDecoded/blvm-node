@@ -117,3 +117,4 @@ pub fn verify_ban_list_hash(entries: &[BanEntry], expected_hash: &[u8; 32]) -> b
     let calculated = calculate_ban_list_hash(entries);
     calculated == *expected_hash
 }
+

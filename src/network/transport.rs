@@ -249,9 +249,13 @@ impl TransportPreference {
 
     #[cfg(feature = "iroh")]
     /// Hybrid mode (TCP + Iroh) - backward compatibility
-    pub const HYBRID: Self = Self::TCP | Self::IROH;
+    pub fn hybrid() -> Self {
+        Self::TCP | Self::IROH
+    }
 
     #[cfg(all(feature = "iroh", feature = "quinn"))]
     /// All transports enabled (TCP + Iroh + Quinn)
-    pub const ALL: Self = Self::TCP | Self::IROH | Self::QUINN;
+    pub fn all_transports() -> Self {
+        Self::TCP | Self::IROH | Self::QUINN
+    }
 }

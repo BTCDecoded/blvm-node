@@ -480,34 +480,10 @@ impl MiningRpc {
         // Use consensus layer sigop counting
         #[cfg(feature = "sigop")]
         {
-            use bllvm_consensus::types::Transaction as ConsensusTx;
-            // Convert protocol transaction to consensus transaction format
-            let consensus_tx = ConsensusTx {
-                version: tx.version,
-                inputs: tx
-                    .inputs
-                    .iter()
-                    .map(|inp| bllvm_protocol::TransactionInput {
-                        prevout: bllvm_protocol::OutPoint {
-                            hash: inp.prevout.hash,
-                            index: inp.prevout.index,
-                        },
-                        script_sig: inp.script_sig.clone(),
-                        sequence: inp.sequence,
-                    })
-                    .collect(),
-                outputs: tx
-                    .outputs
-                    .iter()
-                    .map(|out| bllvm_protocol::TransactionOutput {
-                        value: out.value,
-                        script_pubkey: out.script_pubkey.clone(),
-                    })
-                    .collect(),
-                lock_time: tx.lock_time,
-            };
+            // Transaction types are the same between bllvm_protocol and bllvm_consensus
+            // (bllvm_protocol re-exports them), so we can use tx directly
             use bllvm_protocol::sigop::get_legacy_sigop_count;
-            get_legacy_sigop_count(&consensus_tx)
+            get_legacy_sigop_count(tx)
         }
         #[cfg(not(feature = "sigop"))]
         {

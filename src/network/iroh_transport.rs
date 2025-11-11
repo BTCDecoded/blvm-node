@@ -133,6 +133,7 @@ impl Transport for IrohTransport {
             peer_node_id: node_id,
             peer_addr: TransportAddr::Iroh(peer_addr_bytes),
             connected: true,
+            active_streams: std::collections::HashMap::new(),
         })
     }
 }
@@ -196,7 +197,7 @@ impl TransportListener for IrohListener {
 /// Iroh connection implementation
 #[cfg(feature = "iroh")]
 pub struct IrohConnection {
-    conn: quinn::connection::Connection,
+    conn: quinn::Connection,
     peer_node_id: iroh_net::NodeId,
     peer_addr: TransportAddr,
     connected: bool,
@@ -221,7 +222,7 @@ impl TransportConnection for IrohConnection {
 
         // Write data
         stream.write_all(data).await?;
-        stream.finish()?;
+        stream.finish().await?;
 
         Ok(())
     }
@@ -231,7 +232,7 @@ impl TransportConnection for IrohConnection {
     /// Opens a dedicated QUIC stream for the channel, enabling parallel operations.
     /// Streams are not reused (they're closed after sending) to avoid complexity.
     /// For true stream reuse, would need async HashMap with proper locking.
-    async fn send_on_channel(&mut self, channel_id: u32, data: &[u8]) -> Result<()> {
+    async fn send_on_channel(&mut self, channel_id: Option<u32>, data: &[u8]) -> Result<()> {
         if !self.connected {
             return Err(anyhow::anyhow!("Connection closed"));
         }
@@ -249,7 +250,7 @@ impl TransportConnection for IrohConnection {
 
         // Write data
         stream.write_all(data).await?;
-        stream.finish()?;
+        stream.finish().await?;
 
         Ok(())
     }
