@@ -478,7 +478,7 @@ impl StratumV2Pool {
     /// Extract merkle path from a specific transaction index to root
     fn extract_merkle_path(&self, block: &Block, tx_index: usize) -> Vec<Hash> {
         use crate::storage::hashing::double_sha256;
-        use bllvm_protocol::mempool::calculate_tx_id;
+        use bllvm_protocol::block::calculate_tx_id;
 
         if block.transactions.is_empty() || tx_index >= block.transactions.len() {
             return vec![];

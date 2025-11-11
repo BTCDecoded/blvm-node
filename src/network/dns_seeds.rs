@@ -111,7 +111,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_socket_addr_to_network_address() {
-        let socket = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), 8333);
+        let socket = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            8333,
+        );
         let addr = socket_addr_to_network_address(socket);
         assert_eq!(addr.port, 8333);
         // Check IPv4-mapped format

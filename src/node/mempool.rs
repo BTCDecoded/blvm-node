@@ -116,7 +116,7 @@ impl MempoolManager {
         }
 
         // Add transaction to mempool (store full transaction)
-        use bllvm_protocol::mempool::calculate_tx_id;
+        use bllvm_protocol::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
         self.transactions.insert(tx_hash, tx.clone());
         self.mempool.insert(tx_hash);

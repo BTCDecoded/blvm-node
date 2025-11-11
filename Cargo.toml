@@ -102,6 +102,8 @@ utxo-commitments = ["bllvm-protocol/utxo-commitments"]
 stratum-v2 = []
 # Block filtering (BIP158)
 bip158 = []
+# Signature operations counting
+sigop = []
 # System information for memory stats
 sysinfo = ["dep:sysinfo"]
 # Storage backends

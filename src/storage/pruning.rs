@@ -615,8 +615,6 @@ impl PruningManager {
         commitment_store: &CommitmentStore,
         utxostore: &UtxoStore,
     ) -> Result<()> {
-        
-        
         #[cfg(feature = "utxo-commitments")]
         use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 

@@ -91,7 +91,7 @@ impl MempoolRpc {
 
         if let Some(ref mempool) = self.mempool {
             let transactions = mempool.get_transactions();
-            use bllvm_protocol::mempool::calculate_tx_id;
+            use bllvm_protocol::block::calculate_tx_id;
             use bllvm_protocol::serialization::transaction::serialize_transaction;
 
             if verbose {
@@ -328,7 +328,7 @@ impl MempoolRpc {
                 }
 
                 // Find transactions that spend these outputs
-                use bllvm_protocol::mempool::calculate_tx_id;
+                use bllvm_protocol::block::calculate_tx_id;
                 let transactions = mempool.get_transactions();
                 for descendant_tx in transactions {
                     let descendant_hash = calculate_tx_id(&descendant_tx);
@@ -498,7 +498,7 @@ impl MempoolRpc {
 
         if let Some(tx) = mempool.get_transaction(tx_hash) {
             // Find transactions that this transaction depends on (spends their outputs)
-            use bllvm_protocol::mempool::calculate_tx_id;
+            use bllvm_protocol::block::calculate_tx_id;
             for input in &tx.inputs {
                 // Find transaction that created this output by checking all transactions
                 let transactions = mempool.get_transactions();
@@ -534,7 +534,7 @@ impl MempoolRpc {
             }
 
             // Find transactions that spend these outputs
-            use bllvm_protocol::mempool::calculate_tx_id;
+            use bllvm_protocol::block::calculate_tx_id;
             let transactions = mempool.get_transactions();
             for descendant_tx in transactions {
                 let descendant_hash = calculate_tx_id(&descendant_tx);

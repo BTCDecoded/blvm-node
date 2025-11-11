@@ -117,7 +117,6 @@ pub async fn handle_get_filtered_block(
     filter_service: Option<&crate::network::filter_service::BlockFilterService>,
 ) -> Result<FilteredBlockMessage> {
     let request_id = message.request_id; // Store for response
-    
 
     // Get block from storage
     let (block, block_height) = if let Some(ref storage) = storage {

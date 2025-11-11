@@ -948,7 +948,7 @@ impl NetworkManager {
                             let peer_manager_for_peer = Arc::clone(&peer_manager_clone);
                             tokio::spawn(async move {
                                 // Create peer from transport connection
-                                
+
                                 use crate::network::transport::TransportAddr;
 
                                 let peer = peer::Peer::from_transport_connection(
@@ -1679,9 +1679,6 @@ impl NetworkManager {
     /// 2. Falls back to TCP if preferred transport fails
     /// 3. Returns error only if all transports fail
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
-        
-        
-
         // Check DoS protection: connection rate limiting (for outgoing connections too)
         let ip = addr.ip();
         if !self.dos_protection.check_connection(ip).await {
@@ -1804,7 +1801,6 @@ impl NetworkManager {
         transport_type: &crate::network::transport::TransportType,
         addr: SocketAddr,
     ) -> Result<(peer::Peer, TransportAddr)> {
-        
         use crate::network::transport::TransportAddr;
 
         match transport_type {
@@ -2680,8 +2676,6 @@ impl NetworkManager {
 
     /// Handle Addr message - store addresses and optionally relay
     async fn handle_addr(&self, peer_addr: SocketAddr, msg: AddrMessage) -> Result<()> {
-        
-
         // Get peer services from peer state
         let peer_services = {
             let peer_states = self.peer_states.lock().unwrap();

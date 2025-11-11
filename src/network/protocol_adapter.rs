@@ -54,7 +54,6 @@ impl ProtocolAdapter {
     ///
     /// Format: [magic:4][command:12][length:4][checksum:4][payload:var]
     fn serialize_bitcoin_wire_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
-        
         use sha2::{Digest, Sha256};
 
         // Convert consensus-proof message to protocol message
@@ -152,7 +151,6 @@ impl ProtocolAdapter {
             PongMessage as ProtoPongMessage, ProtocolMessage,
             VersionMessage as ProtoVersionMessage,
         };
-        
 
         match msg {
             ConsensusNetworkMessage::Version(v) => {
@@ -236,8 +234,6 @@ impl ProtocolAdapter {
 
     /// Get command string for a message type
     fn message_to_command(msg: &ConsensusNetworkMessage) -> &'static str {
-        
-
         match msg {
             ConsensusNetworkMessage::Version(_) => "version",
             ConsensusNetworkMessage::VerAck => "verack",

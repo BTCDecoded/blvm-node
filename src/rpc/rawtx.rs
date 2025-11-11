@@ -76,7 +76,7 @@ impl RawTxRpc {
                 RpcError::invalid_params(format!("Failed to parse transaction: {}", e))
             })?;
 
-            use bllvm_protocol::mempool::calculate_tx_id;
+            use bllvm_protocol::block::calculate_tx_id;
             let txid = calculate_tx_id(&tx);
 
             // Check if already in mempool
@@ -185,7 +185,7 @@ impl RawTxRpc {
         let tx = deserialize_transaction(&tx_bytes)
             .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {}", e)))?;
 
-        use bllvm_protocol::mempool::calculate_tx_id;
+        use bllvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(&tx);
         let txid_hex = hex::encode(txid);
 
@@ -255,7 +255,7 @@ impl RawTxRpc {
         let tx = deserialize_transaction(&tx_bytes)
             .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {}", e)))?;
 
-        use bllvm_protocol::mempool::calculate_tx_id;
+        use bllvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(&tx);
         let txid_hex = hex::encode(txid);
         let size = tx_bytes.len();
@@ -319,7 +319,7 @@ impl RawTxRpc {
                 let tx_hex = hex::encode(serialize_transaction(&tx));
 
                 if verbose {
-                    use bllvm_protocol::mempool::calculate_tx_id;
+                    use bllvm_protocol::block::calculate_tx_id;
                     let calculated_txid = calculate_tx_id(&tx);
                     Ok(json!({
                         "txid": hex::encode(calculated_txid),
@@ -446,7 +446,7 @@ impl RawTxRpc {
                     if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(h) {
                         if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
                             for tx in &block.transactions {
-                                use bllvm_protocol::mempool::calculate_tx_id;
+                                use bllvm_protocol::block::calculate_tx_id;
                                 let txid = calculate_tx_id(tx);
                                 if txid == outpoint.hash {
                                     tx_height = Some(h);
@@ -497,7 +497,7 @@ impl RawTxRpc {
         tx_indices: &[usize],
     ) -> Result<Vec<[u8; 32]>, RpcError> {
         use crate::storage::hashing::double_sha256;
-        use bllvm_protocol::mempool::calculate_tx_id;
+        use bllvm_protocol::block::calculate_tx_id;
 
         if transactions.is_empty() {
             return Err(RpcError::internal_error(
@@ -506,8 +506,7 @@ impl RawTxRpc {
         }
 
         // Calculate all transaction hashes
-        let tx_hashes: Vec<[u8; 32]> =
-            transactions.iter().map(|tx| calculate_tx_id(tx)).collect();
+        let tx_hashes: Vec<[u8; 32]> = transactions.iter().map(|tx| calculate_tx_id(tx)).collect();
 
         let mut proof = Vec::new();
         let mut current_level = tx_hashes.clone();
@@ -603,7 +602,7 @@ impl RawTxRpc {
                     if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(h) {
                         if let Ok(Some(b)) = storage.blocks().get_block(&block_hash) {
                             // Check if block contains any of the requested txids
-                            use bllvm_protocol::mempool::calculate_tx_id;
+                            use bllvm_protocol::block::calculate_tx_id;
                             for tx in &b.transactions {
                                 let txid = calculate_tx_id(tx);
                                 let txid_hex = hex::encode(txid);
@@ -625,7 +624,7 @@ impl RawTxRpc {
 
             if let Some(block) = block {
                 // Find transaction indices
-                use bllvm_protocol::mempool::calculate_tx_id;
+                use bllvm_protocol::block::calculate_tx_id;
                 let mut tx_indices = Vec::new();
                 for (idx, tx) in block.transactions.iter().enumerate() {
                     let txid = calculate_tx_id(tx);
@@ -728,7 +727,7 @@ impl RawTxRpc {
                 let matches = calculated_root == block.header.merkle_root;
 
                 // Extract transaction IDs from proof (simplified - full implementation would decode txids)
-                use bllvm_protocol::mempool::calculate_tx_id;
+                use bllvm_protocol::block::calculate_tx_id;
                 let txids: Vec<String> = block
                     .transactions
                     .iter()
