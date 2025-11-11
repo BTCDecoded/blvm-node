@@ -628,12 +628,12 @@ mod tests {
     #[cfg(feature = "iroh")]
     #[test]
     fn test_add_iroh_address() {
-        use iroh_net::NodeId;
+        use iroh_net::{key::SecretKey, NodeId};
         let mut db = AddressDatabase::new(100);
 
-        // Create a test NodeId (32 bytes)
-        let node_id_bytes = [0u8; 32];
-        let node_id = NodeId::from_bytes(&node_id_bytes).unwrap();
+        // Generate a valid Ed25519 key for testing
+        let secret_key = SecretKey::generate();
+        let node_id = secret_key.public();
 
         db.add_iroh_address(node_id, 1);
         assert_eq!(db.total_count(), 1);
@@ -646,13 +646,14 @@ mod tests {
     #[cfg(feature = "iroh")]
     #[test]
     fn test_get_fresh_iroh_addresses() {
-        use iroh_net::NodeId;
+        use iroh_net::{key::SecretKey, NodeId};
         let mut db = AddressDatabase::new(100);
 
-        let node_id1_bytes = [1u8; 32];
-        let node_id2_bytes = [2u8; 32];
-        let node_id1 = NodeId::from_bytes(&node_id1_bytes).unwrap();
-        let node_id2 = NodeId::from_bytes(&node_id2_bytes).unwrap();
+        // Generate valid Ed25519 keys for testing
+        let secret_key1 = SecretKey::generate();
+        let secret_key2 = SecretKey::generate();
+        let node_id1 = secret_key1.public();
+        let node_id2 = secret_key2.public();
 
         db.add_iroh_address(node_id1, 1);
         db.add_iroh_address(node_id2, 1);
