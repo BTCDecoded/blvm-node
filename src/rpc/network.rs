@@ -476,7 +476,7 @@ impl NetworkRpc {
 
             // Check if node is in persistent peer list
             let persistent_peers = network.get_persistent_peers().await;
-            let is_added = persistent_peers.contains(&addr);
+            let _is_added = persistent_peers.contains(&addr);
 
             // Get connection status
             let peer_count = network.peer_count();

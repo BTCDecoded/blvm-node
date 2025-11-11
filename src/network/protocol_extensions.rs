@@ -42,8 +42,8 @@ pub async fn handle_get_utxo_set(
     let utxo_set = storage.utxos().get_all_utxos()?;
     let utxo_count = utxo_set.len() as u64;
 
-    // Calculate total supply
-    let total_supply: u64 = utxo_set.values().map(|utxo| utxo.value as u64).sum();
+    // Calculate total supply (for future use)
+    let _total_supply: u64 = utxo_set.values().map(|utxo| utxo.value as u64).sum();
 
     // Build Merkle tree from UTXO set
     #[cfg(feature = "utxo-commitments")]
@@ -244,7 +244,7 @@ pub async fn handle_get_filtered_block(
 
     // Generate BIP158 filter if requested and service available
     let bip158_filter = if message.include_bip158_filter {
-        filter_service.and_then(|fs| {
+        filter_service.and_then(|_fs| {
             // Try to get filter from service
             // Note: This would require BlockFilterService to have a get_filter method
             // For now, return None as placeholder

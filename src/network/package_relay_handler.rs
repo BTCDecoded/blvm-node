@@ -79,7 +79,7 @@ pub fn handle_pkgtxn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bllvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+    use bllvm_protocol::TransactionOutput;
 
     fn minimal_tx() -> Transaction {
         Transaction {

@@ -55,7 +55,7 @@ pub async fn handle_payment(
     // Look up original PaymentRequest
     let original_request = if let Some(store) = payment_store {
         let store = store.lock().unwrap();
-        let key = format!("{}_{}", hex::encode(&payment_msg.payment_id), "");
+        let _key = format!("{}_{}", hex::encode(&payment_msg.payment_id), "");
         // Find matching request (simplified - would use proper lookup)
         store.values().next().cloned()
     } else {

@@ -419,7 +419,6 @@ impl MockBlockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bllvm_protocol::types::BlockHeader;
 
     #[test]
     fn test_sync_coordinator_new() {

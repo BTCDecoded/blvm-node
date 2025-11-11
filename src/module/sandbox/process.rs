@@ -182,8 +182,8 @@ impl ProcessSandbox {
                         // Field 14 (index 13): utime - CPU time spent in user mode (clock ticks)
                         // Field 15 (index 14): stime - CPU time spent in kernel mode (clock ticks)
                         // Field 23 (index 22): rss - Resident Set Size (pages)
-                        let utime: u64 = fields.get(13).and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let stime: u64 = fields.get(14).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let _utime: u64 = fields.get(13).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let _stime: u64 = fields.get(14).and_then(|s| s.parse().ok()).unwrap_or(0);
                         let rss_pages: u64 =
                             fields.get(22).and_then(|s| s.parse().ok()).unwrap_or(0);
 

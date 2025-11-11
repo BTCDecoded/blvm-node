@@ -895,8 +895,11 @@ impl NetworkManager {
                             // Extract SocketAddr for notification
                             let socket_addr = match addr {
                                 TransportAddr::Tcp(addr) => addr,
-                                _ => {
-                                    error!("Invalid transport address for TCP");
+                                #[cfg(feature = "quinn")]
+                                TransportAddr::Quinn(addr) => addr,
+                                #[cfg(feature = "iroh")]
+                                TransportAddr::Iroh(_) => {
+                                    error!("Iroh transport not supported for TCP notifications");
                                     continue;
                                 }
                             };
@@ -1954,7 +1957,7 @@ impl NetworkManager {
                         // Could trigger automatic mitigation here (e.g., increase rate limits, ban aggressive IPs)
                     }
                     // Reset counter to prevent false positives
-                    message_count = 0;
+                    let _ = message_count; // Counter reset (intentionally unused for now)
                 }
 
                 self.dos_protection
@@ -2483,11 +2486,12 @@ impl NetworkManager {
         &self,
         txs: &[bllvm_protocol::Transaction],
     ) -> Result<()> {
-        if let Some(ref mempool_manager) = self.mempool_manager {
+        if let Some(ref _mempool_manager) = self.mempool_manager {
             // Use MempoolManager's add_transaction method
             // Note: add_transaction requires &mut, so we need to handle this carefully
             // For now, we'll use a channel or async approach
             // This is a limitation of the current design - MempoolManager should use interior mutability
+            // TODO: Implement mempool submission when interior mutability is added
             for tx in txs {
                 // In a real implementation, we'd send this to a mempool processing channel
                 // For now, we validate and accept using consensus layer
@@ -3091,7 +3095,7 @@ impl NetworkManager {
             let ban_list = self.ban_list.lock().unwrap();
             ban_list.len()
         };
-        let resource_metrics = self.dos_protection.get_metrics().await;
+        let _resource_metrics = self.dos_protection.get_metrics().await; // TODO: Include in metrics
 
         crate::node::metrics::NetworkMetrics {
             peer_count: active_connections,

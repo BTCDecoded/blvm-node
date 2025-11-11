@@ -339,7 +339,7 @@ impl BlockchainRpc {
                         .unwrap_or(0);
 
                     // Calculate mediantime from recent headers at this height
-                    let mediantime = if let Some(height) = block_height {
+                    let mediantime = if let Some(_height) = block_height {
                         if let Ok(recent_headers) = storage.blocks().get_recent_headers(11) {
                             Self::calculate_median_time(&recent_headers)
                         } else {

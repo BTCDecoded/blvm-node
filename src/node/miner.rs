@@ -659,7 +659,7 @@ impl MempoolProvider for MockMempoolProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bllvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+    use bllvm_protocol::TransactionOutput;
 
     #[test]
     fn test_transaction_selector_creation() {
