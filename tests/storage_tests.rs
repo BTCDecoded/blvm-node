@@ -530,7 +530,8 @@ fn test_chain_state_reorg_handling() {
 
     // Verify reorg was handled
     let current_height = chainstate.get_height().unwrap().unwrap();
-    assert!(current_height >= 0);
+    // current_height is u64, so >= 0 is always true - just verify it's a valid value
+    let _ = current_height;
 }
 
 // ===== TRANSACTION INDEX COMPREHENSIVE TESTS =====

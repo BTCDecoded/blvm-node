@@ -193,7 +193,8 @@ async fn test_node_component_initialization() {
     assert!(protocol.supports_feature("fast_mining"));
 
     let storage = node.storage();
-    assert!(storage.blocks().block_count().unwrap() >= 0);
+    // block_count returns u64, so >= 0 is always true - just verify it doesn't panic
+    let _ = storage.blocks().block_count().unwrap();
 
     let network = node.network();
     assert_eq!(network.peer_count(), 0);
@@ -605,7 +606,8 @@ async fn test_full_node_coordination() {
 
     // All components should be properly initialized
     assert!(protocol.supports_feature("fast_mining"));
-    assert!(storage.blocks().block_count().unwrap() >= 0);
+    // block_count returns u64, so >= 0 is always true - just verify it doesn't panic
+    let _ = storage.blocks().block_count().unwrap();
     assert_eq!(network.peer_count(), 0);
     // Test blockchain RPC (simplified - actual method may not exist)
     // assert!(rpc.blockchain().is_some());
