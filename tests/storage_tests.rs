@@ -391,7 +391,7 @@ fn test_utxo_store_size_queries() {
         let utxo = UTXO {
             value: (1_0000_0000 * (i + 1)) as i64,
             script_pubkey: p2pkh_script(random_hash20()),
-            height: i as u64,
+            height: i,
         };
 
         utxostore.add_utxo(&outpoint, &utxo).unwrap();

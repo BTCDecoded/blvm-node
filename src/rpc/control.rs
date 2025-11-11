@@ -215,7 +215,7 @@ impl ControlRpc {
                 "getrpcinfo" => "Returns details about the RPC server.\n\nResult:\n{\n  \"active_commands\" (array) All active commands\n  \"logpath\" (string) The complete file path to the debug log\n}\n\nExamples:\n> bitcoin-cli getrpcinfo",
                 "help" => "List all commands, or get help for a specified command.\n\nArguments:\n1. \"command\"     (string, optional) The command to get help on\n\nResult:\n\"text\"     (string) The help text\n\nExamples:\n> bitcoin-cli help\n> bitcoin-cli help getblock",
                 "logging" => "Gets and sets the logging configuration.\n\nArguments:\n1. \"include\" (array of strings, optional) A list of categories to add debug logging\n2. \"exclude\" (array of strings, optional) A list of categories to remove debug logging\n\nResult:\n{ (json object)\n  \"active\" (boolean) Whether debug logging is active\n}\n\nExamples:\n> bitcoin-cli logging [\"all\"]\n> bitcoin-cli logging [\"http\"] [\"net\"]",
-                _ => return Err(RpcError::invalid_params(format!("Unknown command: {}", command))),
+                _ => return Err(RpcError::invalid_params(format!("Unknown command: {command}"))),
             };
             Ok(json!(help_text.to_string()))
         } else {

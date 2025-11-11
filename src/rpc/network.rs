@@ -198,7 +198,7 @@ impl NetworkRpc {
         // Parse node address
         let addr: SocketAddr = node
             .parse()
-            .map_err(|_| RpcError::invalid_params(format!("Invalid node address: {}", node)))?;
+            .map_err(|_| RpcError::invalid_params(format!("Invalid node address: {node}")))?;
 
         if let Some(ref mut network) = self.network_manager.as_ref() {
             match command {
@@ -252,7 +252,7 @@ impl NetworkRpc {
 
         let addr: SocketAddr = address
             .parse()
-            .map_err(|_| RpcError::invalid_params(format!("Invalid address: {}", address)))?;
+            .map_err(|_| RpcError::invalid_params(format!("Invalid address: {address}")))?;
 
         if let Some(ref network) = self.network_manager {
             // Send disconnect message to network manager
@@ -377,7 +377,7 @@ impl NetworkRpc {
         // Parse address/subnet
         let addr: SocketAddr = subnet
             .parse()
-            .map_err(|_| RpcError::invalid_params(format!("Invalid address/subnet: {}", subnet)))?;
+            .map_err(|_| RpcError::invalid_params(format!("Invalid address/subnet: {subnet}")))?;
 
         // Parse bantime (seconds) - 0 = permanent
         let bantime = params.get(2).and_then(|p| p.as_u64()).unwrap_or(86400); // Default 24 hours
@@ -472,7 +472,7 @@ impl NetworkRpc {
             // Parse node address
             let addr: SocketAddr = node
                 .parse()
-                .map_err(|e| RpcError::invalid_params(format!("Invalid node address: {}", e)))?;
+                .map_err(|e| RpcError::invalid_params(format!("Invalid node address: {e}")))?;
 
             // Check if node is in persistent peer list
             let persistent_peers = network.get_persistent_peers().await;
@@ -572,7 +572,7 @@ impl NetworkRpc {
 
         if let Some(ref network) = self.network_manager {
             network.set_network_active(state).await.map_err(|e| {
-                RpcError::internal_error(format!("Failed to set network active: {}", e))
+                RpcError::internal_error(format!("Failed to set network active: {e}"))
             })?;
             Ok(json!(state))
         } else {

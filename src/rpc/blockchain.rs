@@ -637,13 +637,13 @@ impl BlockchainRpc {
                             }
                         }
                     } else {
-                        errors.push(format!("Block at height {} not found in storage", height));
+                        errors.push(format!("Block at height {height} not found in storage"));
                         if check_level >= 4 {
                             break;
                         }
                     }
                 } else {
-                    errors.push(format!("Block hash at height {} not found", height));
+                    errors.push(format!("Block hash at height {height} not found"));
                     if check_level >= 4 {
                         break;
                     }

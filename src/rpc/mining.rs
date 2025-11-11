@@ -57,7 +57,7 @@ impl MiningRpc {
             storage
                 .chain()
                 .get_height()
-                .map_err(|e| RpcError::internal_error(format!("Failed to get height: {}", e)))?
+                .map_err(|e| RpcError::internal_error(format!("Failed to get height: {e}")))?
                 .unwrap_or(0)
         } else {
             0
@@ -247,7 +247,7 @@ impl MiningRpc {
             storage
                 .chain()
                 .get_height()
-                .map_err(|e| RpcError::internal_error(format!("Failed to get height: {}", e)))
+                .map_err(|e| RpcError::internal_error(format!("Failed to get height: {e}")))
         } else {
             Ok(None)
         }
@@ -258,7 +258,7 @@ impl MiningRpc {
             storage
                 .chain()
                 .get_tip_header()
-                .map_err(|e| RpcError::internal_error(format!("Failed to get tip header: {}", e)))
+                .map_err(|e| RpcError::internal_error(format!("Failed to get tip header: {e}")))
         } else {
             Ok(None)
         }
@@ -271,7 +271,7 @@ impl MiningRpc {
             if let Some(tip) = storage
                 .chain()
                 .get_tip_header()
-                .map_err(|e| RpcError::internal_error(format!("Failed to get tip: {}", e)))?
+                .map_err(|e| RpcError::internal_error(format!("Failed to get tip: {e}")))?
             {
                 Ok(vec![tip])
             } else {
@@ -387,7 +387,7 @@ impl MiningRpc {
             storage
                 .utxos()
                 .get_all_utxos()
-                .map_err(|e| RpcError::internal_error(format!("Failed to get UTXO set: {}", e)))
+                .map_err(|e| RpcError::internal_error(format!("Failed to get UTXO set: {e}")))
         } else {
             Ok(UtxoSet::new())
         }
@@ -564,11 +564,11 @@ impl MiningRpc {
 
         // Decode hex
         let block_bytes = hex::decode(hex_data)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid hex data: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Invalid hex data: {e}")))?;
 
         // Deserialize block
         let (block, _witnesses) = deserialize_block_with_witnesses(&block_bytes)
-            .map_err(|e| RpcError::invalid_params(format!("Failed to deserialize block: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Failed to deserialize block: {e}")))?;
 
         // Get current chain state
         let height = self
@@ -593,7 +593,7 @@ impl MiningRpc {
                 "Invalid block: {}",
                 reason
             ))),
-            Err(e) => Err(RpcError::internal_error(format!("Validation error: {}", e))),
+            Err(e) => Err(RpcError::internal_error(format!("Validation error: {e}"))),
         }
     }
 
@@ -691,7 +691,7 @@ impl MiningRpc {
             .ok_or_else(|| RpcError::invalid_params("Fee delta required".to_string()))?;
 
         let hash_bytes = hex::decode(txid)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid transaction ID: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Invalid transaction ID: {e}")))?;
         if hash_bytes.len() != 32 {
             return Err(RpcError::invalid_params(
                 "Transaction ID must be 32 bytes".to_string(),

@@ -118,7 +118,7 @@ impl RpcError {
     pub fn method_not_found(method: &str) -> Self {
         Self::new(
             RpcErrorCode::MethodNotFound,
-            format!("Method not found: {}", method),
+            format!("Method not found: {method}"),
         )
     }
 
@@ -136,7 +136,7 @@ impl RpcError {
     pub fn block_not_found(hash: &str) -> Self {
         Self::new(
             RpcErrorCode::BlockNotFound,
-            format!("Block not found: {}", hash),
+            format!("Block not found: {hash}"),
         )
     }
 
@@ -144,7 +144,7 @@ impl RpcError {
     pub fn tx_not_found(txid: &str) -> Self {
         Self::new(
             RpcErrorCode::TxNotFound,
-            format!("Transaction not found: {}", txid),
+            format!("Transaction not found: {txid}"),
         )
     }
 
@@ -157,7 +157,7 @@ impl RpcError {
     pub fn tx_already_in_mempool(txid: &str) -> Self {
         Self::new(
             RpcErrorCode::TxAlreadyInMempool,
-            format!("Transaction already in mempool: {}", txid),
+            format!("Transaction already in mempool: {txid}"),
         )
     }
 
@@ -208,7 +208,7 @@ impl From<anyhow::Error> for RpcError {
 /// Convert consensus error to RPC error
 impl From<bllvm_protocol::error::ConsensusError> for RpcError {
     fn from(err: bllvm_protocol::error::ConsensusError) -> Self {
-        RpcError::tx_rejected(format!("Consensus error: {}", err))
+        RpcError::tx_rejected(format!("Consensus error: {err}"))
     }
 }
 

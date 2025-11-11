@@ -66,14 +66,14 @@ impl RawTxRpc {
             .ok_or_else(|| RpcError::invalid_params("Missing hexstring parameter"))?;
 
         let tx_bytes = hex::decode(hex_string)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
         if let (Some(ref storage), Some(ref mempool)) =
             (self.storage.as_ref(), self.mempool.as_ref())
         {
             use bllvm_protocol::serialization::transaction::deserialize_transaction;
             let tx = deserialize_transaction(&tx_bytes).map_err(|e| {
-                RpcError::invalid_params(format!("Failed to parse transaction: {}", e))
+                RpcError::invalid_params(format!("Failed to parse transaction: {e}"))
             })?;
 
             use bllvm_protocol::block::calculate_tx_id;
@@ -122,7 +122,7 @@ impl RawTxRpc {
 
                     // Transaction structure is valid, now check inputs against UTXO set
                     let utxo_set = storage.utxos().get_all_utxos().map_err(|e| {
-                        RpcError::internal_error(format!("Failed to get UTXO set: {}", e))
+                        RpcError::internal_error(format!("Failed to get UTXO set: {e}"))
                     })?;
 
                     // Check if all inputs exist in UTXO set
@@ -179,7 +179,7 @@ impl RawTxRpc {
 
         // Decode hex string
         let tx_bytes = hex::decode(hex_string)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
         use bllvm_protocol::serialization::transaction::deserialize_transaction;
         let tx = deserialize_transaction(&tx_bytes)
@@ -201,7 +201,7 @@ impl RawTxRpc {
         let reject_reason = if !allowed {
             match validation_result {
                 Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => Some(reason),
-                Err(e) => Some(format!("Validation error: {}", e)),
+                Err(e) => Some(format!("Validation error: {e}")),
                 _ => None,
             }
         } else {
@@ -249,7 +249,7 @@ impl RawTxRpc {
             .ok_or_else(|| RpcError::invalid_params("Missing hexstring parameter"))?;
 
         let tx_bytes = hex::decode(hex_string)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
         use bllvm_protocol::serialization::transaction::deserialize_transaction;
         let tx = deserialize_transaction(&tx_bytes)
@@ -306,7 +306,7 @@ impl RawTxRpc {
         let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
         let txid_bytes = hex::decode(txid)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {e}")))?;
         if txid_bytes.len() != 32 {
             return Err(RpcError::invalid_params("Invalid txid length"));
         }
@@ -396,7 +396,7 @@ impl RawTxRpc {
         let include_mempool = params.get(2).and_then(|p| p.as_bool()).unwrap_or(true);
 
         let txid_bytes = hex::decode(txid)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {e}")))?;
         if txid_bytes.len() != 32 {
             return Err(RpcError::invalid_params("Invalid txid length"));
         }
@@ -587,7 +587,7 @@ impl RawTxRpc {
             if let Some(blockhash_str) = blockhash_opt {
                 // Use specified blockhash
                 let blockhash_bytes = hex::decode(blockhash_str)
-                    .map_err(|e| RpcError::invalid_params(format!("Invalid blockhash: {}", e)))?;
+                    .map_err(|e| RpcError::invalid_params(format!("Invalid blockhash: {e}")))?;
                 if blockhash_bytes.len() != 32 {
                     return Err(RpcError::invalid_params("Invalid blockhash length"));
                 }
@@ -646,7 +646,7 @@ impl RawTxRpc {
                 // Build merkle proof
                 let proof_hashes = Self::build_merkle_proof(&block.transactions, &tx_indices)
                     .map_err(|e| {
-                        RpcError::internal_error(format!("Failed to build merkle proof: {}", e))
+                        RpcError::internal_error(format!("Failed to build merkle proof: {e}"))
                     })?;
 
                 // Serialize proof (simplified - Bitcoin Core uses a more complex format)
@@ -686,7 +686,7 @@ impl RawTxRpc {
         if let Some(ref storage) = self.storage {
             // Decode proof
             let proof_bytes = hex::decode(proof_hex)
-                .map_err(|e| RpcError::invalid_params(format!("Invalid proof hex: {}", e)))?;
+                .map_err(|e| RpcError::invalid_params(format!("Invalid proof hex: {e}")))?;
 
             if proof_bytes.is_empty() {
                 return Err(RpcError::invalid_params("Empty proof"));
@@ -719,7 +719,7 @@ impl RawTxRpc {
                 // Calculate merkle root from block
                 use bllvm_protocol::mining::calculate_merkle_root;
                 let calculated_root = calculate_merkle_root(&block.transactions).map_err(|e| {
-                    RpcError::internal_error(format!("Failed to calculate merkle root: {}", e))
+                    RpcError::internal_error(format!("Failed to calculate merkle root: {e}"))
                 })?;
 
                 // Verify proof by reconstructing root (simplified - would need txids from proof)

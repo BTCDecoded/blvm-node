@@ -222,7 +222,7 @@ impl RpcServer {
             Err(e) => {
                 return Ok(Self::http_error_response(
                     StatusCode::BAD_REQUEST,
-                    &format!("Invalid UTF-8 in request body: {}", e),
+                    &format!("Invalid UTF-8 in request body: {e}"),
                 ));
             }
         };
@@ -296,7 +296,7 @@ impl RpcServer {
         let request: Value = match serde_json::from_str(request) {
             Ok(req) => req,
             Err(e) => {
-                let err = errors::RpcError::parse_error(format!("Invalid JSON: {}", e));
+                let err = errors::RpcError::parse_error(format!("Invalid JSON: {e}"));
                 return err.to_json(None);
             }
         };
@@ -841,7 +841,11 @@ mod tests {
 
             assert_eq!(response["jsonrpc"], "2.0");
             // Result may be an object, string, or null (if method failed)
-            assert!(response["result"].is_object() || response["result"].is_string() || response["result"].is_null());
+            assert!(
+                response["result"].is_object()
+                    || response["result"].is_string()
+                    || response["result"].is_null()
+            );
             assert_eq!(response["id"], 1);
         }
     }
@@ -876,7 +880,11 @@ mod tests {
 
             assert_eq!(response["jsonrpc"], "2.0");
             // Result may be an object, string, or null (if method failed due to missing dependencies)
-            assert!(response["result"].is_object() || response["result"].is_string() || response["result"].is_null());
+            assert!(
+                response["result"].is_object()
+                    || response["result"].is_string()
+                    || response["result"].is_null()
+            );
             assert_eq!(response["id"], 1);
         }
     }
