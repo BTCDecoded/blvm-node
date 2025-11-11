@@ -445,7 +445,7 @@ impl ModuleIpcServer {
             }
             RequestPayload::SubscribeEvents { event_types } => {
                 // Register module subscriptions with event manager
-                if let Some(event_mgr) = &self.event_manager {
+                if let Some(_event_mgr) = &self.event_manager {
                     // Get module ID from connection (would need to pass it through)
                     // For now, we'll handle this in handle_message where we have connection
                     // This will be implemented properly when we integrate event manager
