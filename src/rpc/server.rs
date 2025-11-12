@@ -302,7 +302,8 @@ impl RpcServer {
 
         let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
-        let params = request.get("params").cloned().unwrap_or_else(|| json!([]));
+        static EMPTY_PARAMS: Value = json!([]);
+        let params = request.get("params").unwrap_or(&EMPTY_PARAMS);
         let id = request.get("id");
 
         let result = server.call_method(method, params).await;
@@ -314,7 +315,13 @@ impl RpcServer {
                     Some(id_val) => serde_json::to_string(id_val).unwrap_or_else(|_| "null".to_string()),
                     None => "null".to_string(),
                 };
-                format!(r#"{{"jsonrpc":"2.0","result":{},"id":{}}}"#, response_str, id_str)
+                let mut result = String::with_capacity(response_str.len() + id_str.len() + 20);
+                result.push_str(r#"{"jsonrpc":"2.0","result":"#);
+                result.push_str(&response_str);
+                result.push_str(r#","id":"#);
+                result.push_str(&id_str);
+                result.push('}');
+                result
             }
             Err(e) => {
                 serde_json::to_string(&e.to_json(id.cloned())).unwrap_or_else(|_| "{}".to_string())
@@ -323,7 +330,7 @@ impl RpcServer {
     }
 
     /// Call a specific RPC method
-    async fn call_method(&self, method: &str, params: Value) -> Result<Value, errors::RpcError> {
+    async fn call_method(&self, method: &str, params: &Value) -> Result<Value, errors::RpcError> {
         match method {
             // Blockchain methods
             "getblockchaininfo" => self

@@ -158,11 +158,41 @@ impl BlockchainRpc {
         });
 
         if let Some(ref storage) = self.storage {
+            use std::time::{Duration, Instant};
+            
+            thread_local! {
+                static CACHED_TIP_HASH_HEX: std::cell::RefCell<(Option<String>, [u8; 32], Instant, Option<u64>)> = 
+                    std::cell::RefCell::new((None, [0u8; 32], Instant::now(), None));
+            }
             
             let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
             let height = storage.chain().get_height()?.unwrap_or(0);
             let block_count = storage.blocks().block_count().unwrap_or(0);
-            let best_hash_hex = hex::encode(best_hash);
+            
+            let best_hash_hex = {
+                let should_refresh = CACHED_TIP_HASH_HEX.with(|c| {
+                    let cache = c.borrow();
+                    cache.0.is_none()
+                        || cache.1 != best_hash
+                        || cache.2.elapsed() >= Duration::from_secs(1)
+                        || cache.3 != Some(height)
+                });
+                
+                if should_refresh {
+                    let hex_str = hex::encode(best_hash);
+                    CACHED_TIP_HASH_HEX.with(|c| {
+                        let mut cache = c.borrow_mut();
+                        *cache = (Some(hex_str.clone()), best_hash, Instant::now(), Some(height));
+                    });
+                    CACHED_TIP_HASH_HEX.with(|c| {
+                        c.borrow().0.as_ref().unwrap().clone()
+                    })
+                } else {
+                    CACHED_TIP_HASH_HEX.with(|c| {
+                        c.borrow().0.as_ref().unwrap().clone()
+                    })
+                }
+            };
 
             // Calculate difficulty from tip header (single lookup)
             let difficulty = if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
@@ -443,17 +473,42 @@ impl BlockchainRpc {
         debug!("RPC: getbestblockhash");
 
         if let Some(ref storage) = self.storage {
+            use std::time::{Duration, Instant};
+            
+            thread_local! {
+                static CACHED_TIP_HASH_HEX: std::cell::RefCell<(Option<String>, [u8; 32], Instant, Option<u64>)> = 
+                    std::cell::RefCell::new((None, [0u8; 32], Instant::now(), None));
+            }
+            
+            let current_height = storage.chain().get_height()?.unwrap_or(0);
+            
             if let Ok(Some(hash)) = storage.chain().get_tip_hash() {
-                Ok(Value::String(hex::encode(hash)))
+                let should_refresh = CACHED_TIP_HASH_HEX.with(|c| {
+                    let cache = c.borrow();
+                    cache.0.is_none()
+                        || cache.1 != hash
+                        || cache.2.elapsed() >= Duration::from_secs(1)
+                        || cache.3 != Some(current_height)
+                });
+                
+                if should_refresh {
+                    let hex_str = hex::encode(hash);
+                    CACHED_TIP_HASH_HEX.with(|c| {
+                        let mut cache = c.borrow_mut();
+                        *cache = (Some(hex_str.clone()), hash, Instant::now(), Some(current_height));
+                    });
+                    Ok(Value::String(hex_str))
+                } else {
+                    CACHED_TIP_HASH_HEX.with(|c| {
+                        let cache = c.borrow();
+                        Ok(Value::String(cache.0.as_ref().unwrap().clone()))
+                    })
+                }
             } else {
-                Ok(json!(
-                    "0000000000000000000000000000000000000000000000000000000000000000"
-                ))
+                Ok(Value::String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string()))
             }
         } else {
-            Ok(json!(
-                "0000000000000000000000000000000000000000000000000000000000000000"
-            ))
+            Ok(Value::String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string()))
         }
     }
 
@@ -535,8 +590,11 @@ impl BlockchainRpc {
         debug!("RPC: gettxoutsetinfo");
 
         if let Some(ref storage) = self.storage {
-            let height = storage.chain().get_height()?.unwrap_or(0);
-            let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
+            let (height, best_hash) = {
+                let h = storage.chain().get_height()?.unwrap_or(0);
+                let hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
+                (h, hash)
+            };
             
             
             if let Ok(Some(stats)) = storage.chain().get_latest_utxo_stats() {
@@ -739,9 +797,11 @@ impl BlockchainRpc {
         debug!("RPC: getchaintips");
 
         if let Some(ref storage) = self.storage {
-            
-            let tip_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
-            let tip_height = storage.chain().get_height()?.unwrap_or(0);
+            let (tip_hash, tip_height) = {
+                let hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
+                let height = storage.chain().get_height()?.unwrap_or(0);
+                (hash, height)
+            };
             
             // Get all chain tips (including forks)
             let mut tips = Vec::new();
