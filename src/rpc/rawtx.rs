@@ -484,7 +484,8 @@ impl RawTxRpc {
                     "coinbase": false
                 }))
             } else {
-                Ok(json!(null))
+                
+                Ok(Value::Null)
             }
         } else {
             Ok(json!(null))
@@ -717,7 +718,7 @@ impl RawTxRpc {
 
             if let Ok(Some(block)) = storage.blocks().get_block(&blockhash_array) {
                 // Calculate merkle root from block
-                // OPTIMIZED: Extract hashes without cloning transactions
+                
                 // Use cached_hash if available, otherwise compute (but don't clone vector)
                 use bllvm_protocol::mining::compute_merkle_root_from_hashes;
                 let hashes: Vec<_> = block.transactions.iter().map(|tx| {

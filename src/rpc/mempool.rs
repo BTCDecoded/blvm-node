@@ -41,11 +41,13 @@ impl MempoolRpc {
     ///
     /// Params: []
     pub async fn getmempoolinfo(&self, _params: &Value) -> RpcResult<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getmempoolinfo");
 
         if let Some(ref mempool) = self.mempool {
             let size = mempool.size();
-            // OPTIMIZED: Estimate bytes from size instead of serializing all transactions
+            
             // This is much faster for large mempools (approximate: avg tx size ~250 bytes)
             let bytes = if size == 0 {
                 0
@@ -86,6 +88,8 @@ impl MempoolRpc {
     ///
     /// Params: [verbose (optional, default: false)]
     pub async fn getrawmempool(&self, params: &Value) -> RpcResult<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getrawmempool");
 
         let verbose = params.get(0).and_then(|p| p.as_bool()).unwrap_or(false);
@@ -197,7 +201,8 @@ impl MempoolRpc {
                     e
                 )));
             }
-            Ok(json!(null))
+            
+            Ok(Value::Null)
         } else {
             Err(crate::rpc::errors::RpcError::internal_error(
                 "Mempool not initialized".to_string(),

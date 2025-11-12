@@ -5,7 +5,7 @@
 use crate::storage::Storage;
 use anyhow::Result;
 use bllvm_protocol::BlockHeader;
-use serde_json::{json, Value};
+use serde_json::{json, Number, Value};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -140,6 +140,8 @@ impl BlockchainRpc {
     ///
     /// Includes softfork information based on feature flags from protocol-engine
     pub async fn get_blockchain_info(&self) -> Result<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getblockchaininfo");
 
         let softforks = json!({
@@ -156,7 +158,7 @@ impl BlockchainRpc {
         });
 
         if let Some(ref storage) = self.storage {
-            // OPTIMIZED: Fetch tip_hash once and reuse (was called twice before)
+            
             let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
             let height = storage.chain().get_height()?.unwrap_or(0);
             let block_count = storage.blocks().block_count().unwrap_or(0);
@@ -176,7 +178,7 @@ impl BlockchainRpc {
                 0
             };
 
-            // OPTIMIZED: Use cached chainwork with best_hash (reuse, don't fetch again)
+            
             let chainwork = storage.chain()
                 .get_chainwork(&best_hash)?
                 .unwrap_or_else(|| {
@@ -329,7 +331,7 @@ impl BlockchainRpc {
 
             if let Ok(Some(header)) = storage.blocks().get_header(&hash_array) {
                 if verbose {
-                    // OPTIMIZED: Use O(1) hash-to-height lookup instead of O(n) linear search
+                    
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
                     let tip_height = storage.chain().get_height()?.unwrap_or(0);
 
@@ -351,7 +353,7 @@ impl BlockchainRpc {
                     // Calculate difficulty
                     let difficulty = Self::calculate_difficulty(header.bits);
 
-                    // OPTIMIZED: Get transaction count from metadata instead of loading full block
+                    
                     let n_tx = storage.blocks()
                         .get_block_metadata(&hash_array)?
                         .map(|m| m.n_tx as usize)
@@ -367,7 +369,7 @@ impl BlockchainRpc {
                             .map(|hash| hex::encode(hash))
                     });
 
-                    // OPTIMIZED: Use cached chainwork instead of recalculating from genesis
+                    
                     let chainwork = if let Some(_height) = block_height {
                         // O(1) lookup instead of O(n) calculation!
                         storage.chain()
@@ -402,7 +404,7 @@ impl BlockchainRpc {
                 } else {
                     use bllvm_protocol::serialization::serialize_block_header;
                     let header_bytes = serialize_block_header(&header);
-                    Ok(json!(hex::encode(header_bytes)))
+                    Ok(Value::String(hex::encode(header_bytes)))
                 }
             } else {
                 Err(anyhow::anyhow!("Block not found"))
@@ -436,11 +438,13 @@ impl BlockchainRpc {
     ///
     /// Params: []
     pub async fn get_best_block_hash(&self) -> Result<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getbestblockhash");
 
         if let Some(ref storage) = self.storage {
             if let Ok(Some(hash)) = storage.chain().get_tip_hash() {
-                Ok(json!(hex::encode(hash)))
+                Ok(Value::String(hex::encode(hash)))
             } else {
                 Ok(json!(
                     "0000000000000000000000000000000000000000000000000000000000000000"
@@ -457,27 +461,32 @@ impl BlockchainRpc {
     ///
     /// Params: []
     pub async fn get_block_count(&self) -> Result<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getblockcount");
 
         if let Some(ref storage) = self.storage {
             let height = storage.chain().get_height()?.unwrap_or(0);
-            Ok(json!(height))
+            
+            Ok(Value::Number(Number::from(height)))
         } else {
-            Ok(json!(0))
+            
+            Ok(Value::Number(Number::from(0)))
         }
     }
 
     /// Get current difficulty
     ///
     /// Params: []
-    /// OPTIMIZED: Caches difficulty value to avoid repeated storage lookups
     pub async fn get_difficulty(&self) -> Result<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getdifficulty");
 
         use std::time::{Duration, Instant};
 
         if let Some(ref storage) = self.storage {
-            // OPTIMIZED: Cache difficulty value (thread-local, 1s TTL, invalidate on height change)
+            
             thread_local! {
                 static CACHED_DIFFICULTY: std::cell::RefCell<(Option<f64>, Instant, Option<u64>)> = 
                     std::cell::RefCell::new((None, Instant::now(), None));
@@ -503,26 +512,25 @@ impl BlockchainRpc {
                         *cache = (Some(difficulty), Instant::now(), Some(current_height));
                     });
                     
-                    Ok(json!(difficulty))
+                    Ok(Value::Number(Number::from_f64(difficulty).unwrap_or_else(|| Number::from(1))))
                 } else {
-                    Ok(json!(1.0))
+                    Ok(Value::Number(Number::from_f64(1.0).unwrap()))
                 }
             } else {
                 // Return cached value
                 CACHED_DIFFICULTY.with(|c| {
                     let cache = c.borrow();
-                    Ok(json!(cache.0.unwrap_or(1.0)))
+                    Ok(Value::Number(Number::from_f64(cache.0.unwrap_or(1.0)).unwrap_or_else(|| Number::from(1))))
                 })
             }
         } else {
-            Ok(json!(1.0))
+            Ok(Value::Number(Number::from_f64(1.0).unwrap()))
         }
     }
 
     /// Get UTXO set information
     ///
     /// Params: []
-    /// OPTIMIZED: Uses cached UTXO statistics when available to avoid loading entire UTXO set
     pub async fn get_txoutset_info(&self) -> Result<Value> {
         debug!("RPC: gettxoutsetinfo");
 
@@ -530,7 +538,7 @@ impl BlockchainRpc {
             let height = storage.chain().get_height()?.unwrap_or(0);
             let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
             
-            // OPTIMIZED: Try to use cached UTXO stats first (O(1) lookup)
+            
             if let Ok(Some(stats)) = storage.chain().get_latest_utxo_stats() {
                 // Use cached stats - much faster than loading entire UTXO set!
                 Ok(json!({
@@ -672,7 +680,7 @@ impl BlockchainRpc {
                         // Check level 2: Verify merkle root
                         if check_level >= 2 {
                             use bllvm_protocol::mining::compute_merkle_root_from_hashes;
-                            // OPTIMIZED: Extract hashes without cloning transactions
+                            
                             // Use cached_hash if available, otherwise compute (but don't clone vector)
                             let hashes: Vec<_> = block.transactions.iter().map(|tx| {
                                 tx.cached_hash.unwrap_or_else(|| {
@@ -706,7 +714,8 @@ impl BlockchainRpc {
             }
 
             if errors.is_empty() {
-                Ok(json!(true))
+                
+                Ok(Value::Bool(true))
             } else {
                 Ok(json!({
                     "valid": false,
@@ -725,10 +734,12 @@ impl BlockchainRpc {
     /// Returns information about all known chain tips.
     /// Params: [] (no parameters)
     pub async fn get_chain_tips(&self) -> Result<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getchaintips");
 
         if let Some(ref storage) = self.storage {
-            // OPTIMIZED: Fetch tip_hash once and reuse (was called twice before)
+            
             let tip_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
             
@@ -772,6 +783,8 @@ impl BlockchainRpc {
     ///
     /// Params: ["nblocks"] (optional, default: 1 month of blocks)
     pub async fn get_chain_tx_stats(&self, params: &Value) -> Result<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getchaintxstats");
 
         let nblocks = params.get(0).and_then(|p| p.as_u64()).unwrap_or(144); // Default: 1 day (144 blocks at 10 min/block)
@@ -797,14 +810,14 @@ impl BlockchainRpc {
                 0
             };
 
-            // OPTIMIZED: Get timestamps and transaction counts
+            
             // Use headers instead of full blocks (much faster - headers are ~80 bytes vs MB for blocks)
             let mut timestamps = Vec::new();
             let mut tx_counts = Vec::new();
 
             for height in start_height..=tip_height {
                 if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
-                    // OPTIMIZED: Use header instead of full block (much smaller)
+                    
                     if let Ok(Some(header)) = storage.blocks().get_header(&hash) {
                         timestamps.push(header.timestamp);
                         
@@ -1140,7 +1153,8 @@ impl BlockchainRpc {
                 }
             }
 
-            Ok(json!(null))
+            
+            Ok(Value::Null)
         } else {
             // Graceful degradation: return informative error instead of failing silently
             Err(anyhow::anyhow!(
@@ -1175,7 +1189,8 @@ impl BlockchainRpc {
             // If this block is now valid, it may be reconsidered for chain inclusion
             // The node will handle this on next block processing
 
-            Ok(json!(null))
+            
+            Ok(Value::Null)
         } else {
             // Graceful degradation: return informative error instead of failing silently
             Err(anyhow::anyhow!(

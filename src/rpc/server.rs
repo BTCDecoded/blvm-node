@@ -217,8 +217,8 @@ impl RpcServer {
         }
 
         // Parse JSON body
-        let json_body = match String::from_utf8(body_bytes.to_vec()) {
-            Ok(s) => s,
+        let json_body = match std::str::from_utf8(&body_bytes) {
+            Ok(s) => s.to_string(),
             Err(e) => {
                 return Ok(Self::http_error_response(
                     StatusCode::BAD_REQUEST,
@@ -250,8 +250,7 @@ impl RpcServer {
         }
 
         // Process JSON-RPC request (reuse server instance with cached handlers)
-        let response = Self::process_request_with_server(server, &json_body).await;
-        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+        let response_json = Self::process_request_with_server(server, &json_body).await;
 
         // Build HTTP response
         Ok(Response::builder()
@@ -285,40 +284,40 @@ impl RpcServer {
     /// Public method for use by both HTTP and raw TCP RPC servers
     /// Note: This creates temporary RPC handlers. For better performance,
     /// use process_request_with_server() with a server instance.
-    pub async fn process_request(request: &str) -> Value {
+    pub async fn process_request(request: &str) -> String {
         // Create temporary server instance for backward compatibility
         let server = Arc::new(Self::new("127.0.0.1:0".parse().unwrap()));
         Self::process_request_with_server(server, request).await
     }
 
     /// Process a JSON-RPC request with a server instance (reuses cached handlers)
-    async fn process_request_with_server(server: Arc<Self>, request: &str) -> Value {
+    async fn process_request_with_server(server: Arc<Self>, request: &str) -> String {
         let request: Value = match serde_json::from_str(request) {
             Ok(req) => req,
             Err(e) => {
                 let err = errors::RpcError::parse_error(format!("Invalid JSON: {e}"));
-                return err.to_json(None);
+                return serde_json::to_string(&err.to_json(None)).unwrap_or_else(|_| "{}".to_string());
             }
         };
 
         let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
-        let params = request.get("params").cloned().unwrap_or(json!([]));
-        let id = request.get("id").cloned();
+        let params = request.get("params").cloned().unwrap_or_else(|| json!([]));
+        let id = request.get("id");
 
         let result = server.call_method(method, params).await;
 
         match result {
             Ok(response) => {
-                json!({
-                    "jsonrpc": "2.0",
-                    "result": response,
-                    "id": id
-                })
+                let response_str = serde_json::to_string(&response).unwrap_or_else(|_| "null".to_string());
+                let id_str = match id {
+                    Some(id_val) => serde_json::to_string(id_val).unwrap_or_else(|_| "null".to_string()),
+                    None => "null".to_string(),
+                };
+                format!(r#"{{"jsonrpc":"2.0","result":{},"id":{}}}"#, response_str, id_str)
             }
             Err(e) => {
-                // call_method already returns proper RpcError, just convert to JSON
-                e.to_json(id)
+                serde_json::to_string(&e.to_json(id.cloned())).unwrap_or_else(|_| "{}".to_string())
             }
         }
     }
@@ -594,7 +593,8 @@ mod tests {
     #[tokio::test]
     async fn test_process_request_valid_json() {
         let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
@@ -604,7 +604,8 @@ mod tests {
     #[tokio::test]
     async fn test_process_request_invalid_json() {
         let request = "invalid json";
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32700);
@@ -623,7 +624,8 @@ mod tests {
     #[tokio::test]
     async fn test_process_request_unknown_method() {
         let request = r#"{"jsonrpc":"2.0","method":"unknown_method","params":[],"id":1}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
@@ -637,7 +639,8 @@ mod tests {
     #[tokio::test]
     async fn test_process_request_without_id() {
         let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[]}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
@@ -647,7 +650,8 @@ mod tests {
     #[tokio::test]
     async fn test_process_request_with_params() {
         let request = r#"{"jsonrpc":"2.0","method":"getblock","params":["000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"],"id":1}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
@@ -746,7 +750,8 @@ mod tests {
     #[tokio::test]
     async fn test_json_rpc_2_0_compliance() {
         let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
@@ -756,7 +761,8 @@ mod tests {
     #[tokio::test]
     async fn test_error_response_format() {
         let request = r#"{"jsonrpc":"2.0","method":"unknown_method","params":[],"id":1}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["error"].is_object());
@@ -768,7 +774,8 @@ mod tests {
     #[tokio::test]
     async fn test_parse_error_response() {
         let request = "invalid json";
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32700);
@@ -787,7 +794,8 @@ mod tests {
     #[tokio::test]
     async fn test_method_not_found_response() {
         let request = r#"{"jsonrpc":"2.0","method":"nonexistent","params":[],"id":42}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
@@ -802,7 +810,8 @@ mod tests {
     #[tokio::test]
     async fn test_empty_params_handling() {
         let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","id":1}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert!(response["result"].is_object());
@@ -812,7 +821,8 @@ mod tests {
     #[tokio::test]
     async fn test_missing_method_handling() {
         let request = r#"{"jsonrpc":"2.0","params":[],"id":1}"#;
-        let response = RpcServer::process_request(request).await;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);

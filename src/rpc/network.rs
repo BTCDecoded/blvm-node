@@ -32,6 +32,8 @@ impl NetworkRpc {
 
     /// Get network information
     pub async fn get_network_info(&self) -> RpcResult<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getnetworkinfo");
 
         if let Some(ref network) = self.network_manager {
@@ -101,13 +103,12 @@ impl NetworkRpc {
     }
 
     /// Get peer information
-    /// OPTIMIZED: Uses for_each_peer to iterate HashMap directly, avoiding address cloning and double lookups
     pub async fn get_peer_info(&self) -> RpcResult<Value> {
         debug!("RPC: getpeerinfo");
 
         if let Some(ref network) = self.network_manager {
             let peer_manager = network.peer_manager();
-            // OPTIMIZED: Use for_each_peer to iterate directly without cloning addresses
+            
             // This avoids: 1) cloning all addresses, 2) looking up each peer again
             let mut peers = Vec::new();
             peer_manager.for_each_peer(|addr, peer| {
@@ -155,26 +156,32 @@ impl NetworkRpc {
     ///
     /// Params: []
     pub async fn get_connection_count(&self, _params: &Value) -> RpcResult<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getconnectioncount");
 
         if let Some(ref network) = self.network_manager {
-            Ok(json!(network.peer_count()))
+            
+            Ok(Value::Number(serde_json::Number::from(network.peer_count())))
         } else {
-            Ok(json!(0))
+            
+            Ok(Value::Number(serde_json::Number::from(0)))
         }
     }
 
     /// Ping connected peers
     ///
     /// Params: []
-    /// OPTIMIZED: Returns immediately without any async work (matches Core behavior)
     pub async fn ping(&self, _params: &Value) -> RpcResult<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: ping");
 
-        // OPTIMIZED: Just return immediately - no spawn, no clone, no async work
+        
         // Core's ping RPC just sets a flag, actual ping happens in network thread
         // Network manager should handle ping in background task if needed
-        Ok(json!(null))
+        
+        Ok(Value::Null)
     }
 
     /// Add a node to connect to
@@ -201,12 +208,12 @@ impl NetworkRpc {
                 "add" => {
                     network.add_persistent_peer(addr);
                     debug!("Added node {} to persistent peer list", addr);
-                    Ok(json!(null))
+                    Ok(Value::Null)
                 }
                 "remove" => {
                     network.remove_persistent_peer(addr);
                     debug!("Removed node {} from persistent peer list", addr);
-                    Ok(json!(null))
+                    Ok(Value::Null)
                 }
                 "onetry" => {
                     // Try to connect to node once
@@ -217,7 +224,7 @@ impl NetworkRpc {
                         )));
                     }
                     debug!("Connected to node {} (onetry)", addr);
-                    Ok(json!(null))
+                    Ok(Value::Null)
                 }
                 _ => Err(RpcError::invalid_params(format!(
                     "Invalid command: {}. Must be 'add', 'remove', or 'onetry'",
@@ -226,7 +233,7 @@ impl NetworkRpc {
             }
         } else {
             match command {
-                "add" | "remove" | "onetry" => Ok(json!(null)),
+                "add" | "remove" | "onetry" => Ok(Value::Null),
                 _ => Err(RpcError::invalid_params(format!(
                     "Invalid command: {}. Must be 'add', 'remove', or 'onetry'",
                     command
@@ -266,13 +273,15 @@ impl NetworkRpc {
                 debug!("Peer {} not found", addr);
             }
         }
-        Ok(json!(null))
+        Ok(Value::Null)
     }
 
     /// Get network totals (bytes sent/received)
     ///
     /// Params: []
     pub async fn get_net_totals(&self, _params: &Value) -> RpcResult<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getnettotals");
 
         if let Some(ref network) = self.network_manager {
@@ -354,7 +363,7 @@ impl NetworkRpc {
             debug!("Cleared all bans");
         }
 
-        Ok(json!(null))
+        Ok(Value::Null)
     }
 
     /// Ban a node
@@ -400,12 +409,12 @@ impl NetworkRpc {
                 "add" => {
                     network.ban_peer(addr, unban_timestamp);
                     debug!("Banned peer {} until {}", addr, unban_timestamp);
-                    Ok(json!(null))
+                    Ok(Value::Null)
                 }
                 "remove" => {
                     network.unban_peer(addr);
                     debug!("Unbanned peer {}", addr);
-                    Ok(json!(null))
+                    Ok(Value::Null)
                 }
                 _ => Err(RpcError::invalid_params(format!(
                     "Invalid command: {}. Must be 'add' or 'remove'",

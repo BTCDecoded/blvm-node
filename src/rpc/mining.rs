@@ -49,13 +49,14 @@ impl MiningRpc {
     }
 
     /// Get mining information
-    /// OPTIMIZED: Caches full response for 1 second to avoid redundant storage lookups
     pub async fn get_mining_info(&self) -> RpcResult<Value> {
+        
+        #[cfg(debug_assertions)]
         debug!("RPC: getmininginfo");
 
         use std::time::{Duration, Instant};
         
-        // OPTIMIZED: Cache full mining info response (refresh every 1 second)
+        
         // This avoids multiple storage lookups for height, tip_header, chain_info
         thread_local! {
             static CACHED_MINING_INFO: std::cell::RefCell<(Option<Value>, Instant, Option<u64>)> = {
@@ -109,7 +110,7 @@ impl MiningRpc {
                 1.0 // Graceful fallback if no storage
             };
 
-            // OPTIMIZED: Use cached network hashrate if available, otherwise calculate
+            
             let networkhashps = if let Some(ref storage) = self.storage {
                 // Try cached hashrate first (O(1) lookup)
                 if let Ok(Some(cached_hashrate)) = storage.chain().get_network_hashrate() {
@@ -634,7 +635,7 @@ impl MiningRpc {
                 // Block is valid - in production would submit to block processor
                 // For now, just return success
                 debug!("Block submitted successfully");
-                Ok(json!(null))
+                Ok(Value::Null)
             }
             Ok((ValidationResult::Invalid(reason), _)) => Err(RpcError::invalid_params(format!(
                 "Invalid block: {}",

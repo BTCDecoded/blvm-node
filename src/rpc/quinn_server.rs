@@ -110,9 +110,7 @@ impl QuinnRpcServer {
                 debug!("QUIC RPC request: {}", request);
 
                 // Process JSON-RPC request (reuse existing logic)
-                let response = server::RpcServer::process_request(&request).await;
-                let response_json =
-                    serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+                let response_json = server::RpcServer::process_request(&request).await;
 
                 // Send response
                 if let Err(e) = send.write_all(response_json.as_bytes()).await {
