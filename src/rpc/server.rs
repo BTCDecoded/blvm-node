@@ -854,7 +854,8 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
                 method
             );
-            let response = RpcServer::process_request(&request).await;
+            let response_str = RpcServer::process_request(&request).await;
+            let response: Value = serde_json::from_str(&response_str).unwrap();
 
             assert_eq!(response["jsonrpc"], "2.0");
             // Result may be an object, string, or null (if method failed)
@@ -876,7 +877,8 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
                 method
             );
-            let response = RpcServer::process_request(&request).await;
+            let response_str = RpcServer::process_request(&request).await;
+            let response: Value = serde_json::from_str(&response_str).unwrap();
 
             assert_eq!(response["jsonrpc"], "2.0");
             assert!(response["result"].is_object() || response["result"].is_array());

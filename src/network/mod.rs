@@ -1165,7 +1165,9 @@ impl NetworkManager {
                                                 if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
                                                     if node_id_bytes.len() == 32 {
                                                         use iroh_net::NodeId;
-                                                        if let Ok(node_id) = NodeId::from_bytes(node_id_bytes) {
+                                                        let mut node_id_array = [0u8; 32];
+                                                        node_id_array.copy_from_slice(node_id_bytes);
+                                                        if let Ok(node_id) = NodeId::from_bytes(&node_id_array) {
                                                             let address_db_clone = address_database_clone.clone();
                                                             tokio::spawn(async move {
                                                                 let mut db = address_db_clone.lock().unwrap();
@@ -1678,15 +1680,16 @@ impl NetworkManager {
             crate::network::transport::TransportType::Quinn => {
                 if let Some(ref quinn) = self.quinn_transport {
                     let quinn_addr = TransportAddr::Quinn(addr);
-                    let conn = quinn.connect(quinn_addr).await?;
+                    let quinn_addr_clone = quinn_addr.clone();
+                    let conn = quinn.connect(quinn_addr_clone.clone()).await?;
                     Ok((
                         peer::Peer::from_transport_connection(
                             conn,
                             addr,
-                            quinn_addr.clone(),
+                            quinn_addr_clone.clone(),
                             self.peer_tx.clone(),
                         ),
-                        quinn_addr,
+                        quinn_addr_clone,
                     ))
                 } else {
                     Err(anyhow::anyhow!("Quinn transport not available"))
@@ -1718,7 +1721,8 @@ impl NetworkManager {
         let peer_addrs = self.peer_manager.lock().unwrap().peer_addresses();
         for addr in peer_addrs {
             // Convert TransportAddr to SocketAddr for send_to_peer, or use send_to_peer_by_transport
-            match addr {
+            let addr_clone = addr.clone();
+            match addr_clone {
                 crate::network::transport::TransportAddr::Tcp(sock) => {
                     if let Err(e) = self.send_to_peer(sock, wire_msg.clone()).await {
                         warn!("Failed to ping peer {}: {}", sock, e);
@@ -1726,14 +1730,14 @@ impl NetworkManager {
                 }
                 #[cfg(feature = "quinn")]
                 crate::network::transport::TransportAddr::Quinn(sock) => {
-                    if let Err(e) = self.send_to_peer_by_transport(addr, wire_msg.clone()).await {
+                    if let Err(e) = self.send_to_peer_by_transport(addr_clone.clone(), wire_msg.clone()).await {
                         warn!("Failed to ping peer {}: {}", sock, e);
                     }
                 }
                 #[cfg(feature = "iroh")]
                 crate::network::transport::TransportAddr::Iroh(_) => {
-                    if let Err(e) = self.send_to_peer_by_transport(addr, wire_msg.clone()).await {
-                        warn!("Failed to ping peer {}: {}", addr, e);
+                    if let Err(e) = self.send_to_peer_by_transport(addr_clone.clone(), wire_msg.clone()).await {
+                        warn!("Failed to ping peer {}: {}", addr_clone, e);
                     }
                 }
             }
@@ -3040,7 +3044,8 @@ mod tests {
         assert_eq!(manager.peer_count(), 0);
 
         // Test removing non-existent peer
-        let removed_peer = manager.remove_peer(addr);
+        let transport_addr = TransportAddr::Tcp(addr);
+        let removed_peer = manager.remove_peer(&transport_addr);
         assert!(removed_peer.is_none());
         assert_eq!(manager.peer_count(), 0);
     }
@@ -3054,7 +3059,8 @@ mod tests {
         assert_eq!(manager.peer_count(), 0);
 
         // Test getting non-existent peer
-        let retrieved_peer = manager.get_peer(addr);
+        let transport_addr = TransportAddr::Tcp(addr);
+        let retrieved_peer = manager.get_peer(&transport_addr);
         assert!(retrieved_peer.is_none());
     }
 
@@ -3163,10 +3169,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_message_peer_connected() {
-        let message = NetworkMessage::PeerConnected("127.0.0.1:8080".parse().unwrap());
+        let socket_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let transport_addr = TransportAddr::Tcp(socket_addr);
+        let message = NetworkMessage::PeerConnected(transport_addr.clone());
         match message {
             NetworkMessage::PeerConnected(addr) => {
-                assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+                assert_eq!(addr, transport_addr);
             }
             _ => panic!("Expected PeerConnected message"),
         }
@@ -3174,10 +3182,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_message_peer_disconnected() {
-        let message = NetworkMessage::PeerDisconnected("127.0.0.1:8080".parse().unwrap());
+        let socket_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let transport_addr = TransportAddr::Tcp(socket_addr);
+        let message = NetworkMessage::PeerDisconnected(transport_addr.clone());
         match message {
             NetworkMessage::PeerDisconnected(addr) => {
-                assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+                assert_eq!(addr, transport_addr);
             }
             _ => panic!("Expected PeerDisconnected message"),
         }
@@ -3262,10 +3272,8 @@ mod tests {
         let peer_manager = manager.peer_manager();
         assert_eq!(peer_manager.peer_count(), 0);
 
-        // Test mutable access
-        let mut manager = manager;
-        let peer_manager_mut = manager.peer_manager_mut();
-        assert_eq!(peer_manager_mut.peer_count(), 0);
+        // Test peer count access
+        assert_eq!(manager.peer_count(), 0);
     }
 
     #[tokio::test]
