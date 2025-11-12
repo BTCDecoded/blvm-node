@@ -101,6 +101,13 @@ impl MempoolRpc {
 
             if verbose {
                 let mut result = serde_json::Map::new();
+                
+                let utxo_set = if let (Some(ref mempool), Some(ref storage)) = (self.mempool.as_ref(), self.storage.as_ref()) {
+                    Some(storage.utxos().get_all_utxos().unwrap_or_default())
+                } else {
+                    None
+                };
+                
                 for tx in transactions {
                     let txid = calculate_tx_id(&tx);
                     let txid_hex = hex::encode(txid);
@@ -109,9 +116,8 @@ impl MempoolRpc {
 
                     result.insert(txid_hex, json!({
                         "size": size,
-                        "fee": if let (Some(ref mempool), Some(ref storage)) = (self.mempool.as_ref(), self.storage.as_ref()) {
-                            let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                            let fee_satoshis = mempool.calculate_transaction_fee(&tx, &utxo_set);
+                        "fee": if let (Some(ref mempool), Some(ref utxo_set)) = (self.mempool.as_ref(), utxo_set.as_ref()) {
+                            let fee_satoshis = mempool.calculate_transaction_fee(&tx, utxo_set);
                             fee_satoshis as f64 / 100_000_000.0
                         } else {
                             0.00001000

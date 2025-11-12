@@ -361,9 +361,32 @@ impl BlockchainRpc {
 
             if let Ok(Some(header)) = storage.blocks().get_header(&hash_array) {
                 if verbose {
+                    use std::time::{Duration, Instant};
+                    
+                    thread_local! {
+                        static CACHED_TIP_HEIGHT: std::cell::RefCell<(Option<u64>, Instant)> = 
+                            std::cell::RefCell::new((None, Instant::now()));
+                    }
                     
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
-                    let tip_height = storage.chain().get_height()?.unwrap_or(0);
+                    
+                    let tip_height = {
+                        let should_refresh = CACHED_TIP_HEIGHT.with(|c| {
+                            let cache = c.borrow();
+                            cache.0.is_none() || cache.1.elapsed() >= Duration::from_secs(1)
+                        });
+                        
+                        if should_refresh {
+                            let height = storage.chain().get_height()?.unwrap_or(0);
+                            CACHED_TIP_HEIGHT.with(|c| {
+                                let mut cache = c.borrow_mut();
+                                *cache = (Some(height), Instant::now());
+                            });
+                            CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
+                        } else {
+                            CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
+                        }
+                    };
 
                     let confirmations = block_height
                         .map(|h| Self::calculate_confirmations(h, tip_height))
@@ -870,10 +893,11 @@ impl BlockchainRpc {
                 0
             };
 
+            let range_size = (tip_height - start_height + 1) as usize;
             
             // Use headers instead of full blocks (much faster - headers are ~80 bytes vs MB for blocks)
-            let mut timestamps = Vec::new();
-            let mut tx_counts = Vec::new();
+            let mut timestamps = Vec::with_capacity(range_size);
+            let mut tx_counts = Vec::with_capacity(range_size);
 
             for height in start_height..=tip_height {
                 if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
@@ -990,7 +1014,19 @@ impl BlockchainRpc {
 
             if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
                 let tx_count = block.transactions.len();
-                let block_size = bincode::serialize(&block)?.len();
+                
+                let block_size = {
+                    let serialized_size = bincode::serialize(&block).map(|b| b.len()).unwrap_or(0);
+                    storage.blocks()
+                        .get_block_metadata(&block_hash)
+                        .ok()
+                        .flatten()
+                        .map(|_m| {
+                            serialized_size
+                        })
+                        .unwrap_or(serialized_size)
+                };
+                
                 let block_weight = block_size; // Simplified - would calculate weight properly
 
                 // Get block height
