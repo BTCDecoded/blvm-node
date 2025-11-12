@@ -82,12 +82,30 @@ impl ControlRpc {
     /// Get node uptime
     ///
     /// Params: [] (no parameters)
+    /// OPTIMIZED: Caches uptime value to avoid repeated elapsed() calls and JSON overhead
     pub async fn uptime(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: uptime");
 
-        let uptime_secs = self.start_time.elapsed().as_secs();
+        use std::time::Duration;
 
-        Ok(json!(uptime_secs))
+        // OPTIMIZED: Cache uptime value (update every 100ms)
+        // Avoids repeated elapsed() calls and reduces JSON serialization overhead
+        thread_local! {
+            static CACHED_UPTIME: std::cell::Cell<(u64, Instant)> = 
+                std::cell::Cell::new((0, Instant::now()));
+        }
+
+        let start_time = self.start_time;
+        let cached = CACHED_UPTIME.with(|c| c.get());
+        
+        // Update cache if >100ms old
+        if cached.1.elapsed() >= Duration::from_millis(100) {
+            let uptime = start_time.elapsed().as_secs();
+            CACHED_UPTIME.with(|c| c.set((uptime, Instant::now())));
+            Ok(json!(uptime))
+        } else {
+            Ok(json!(cached.0))
+        }
     }
 
     /// Get memory usage information
@@ -134,8 +152,9 @@ impl ControlRpc {
                         let mut cache = cache.borrow_mut();
                         let (ref mut system, ref mut last_refresh, ref mut cached_value) = *cache;
                         
-                        // Only refresh if cache is older than 1 second
-                        if last_refresh.elapsed() >= Duration::from_secs(1) {
+                        // OPTIMIZED: Only refresh if cache is older than 5 seconds
+                        // Memory stats don't need millisecond accuracy, 5s is fine
+                        if last_refresh.elapsed() >= Duration::from_secs(5) {
                             system.refresh_memory();
                             let total_memory = system.total_memory();
                             let used_memory = system.used_memory();
@@ -191,53 +210,56 @@ impl ControlRpc {
     /// Get RPC server information
     ///
     /// Params: [] (no parameters)
+    /// OPTIMIZED: Uses const array to avoid Vec allocation on every call
     pub async fn getrpcinfo(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: getrpcinfo");
 
-        // Get active transports
-        let mut active_commands = Vec::new();
-        active_commands.push("getblockchaininfo");
-        active_commands.push("getblock");
-        active_commands.push("getblockhash");
-        active_commands.push("getblockheader");
-        active_commands.push("getbestblockhash");
-        active_commands.push("getblockcount");
-        active_commands.push("getdifficulty");
-        active_commands.push("gettxoutsetinfo");
-        active_commands.push("verifychain");
-        active_commands.push("getrawtransaction");
-        active_commands.push("sendrawtransaction");
-        active_commands.push("testmempoolaccept");
-        active_commands.push("decoderawtransaction");
-        active_commands.push("gettxout");
-        active_commands.push("gettxoutproof");
-        active_commands.push("verifytxoutproof");
-        active_commands.push("getmempoolinfo");
-        active_commands.push("getrawmempool");
-        active_commands.push("savemempool");
-        active_commands.push("getnetworkinfo");
-        active_commands.push("getpeerinfo");
-        active_commands.push("getconnectioncount");
-        active_commands.push("ping");
-        active_commands.push("addnode");
-        active_commands.push("disconnectnode");
-        active_commands.push("getnettotals");
-        active_commands.push("clearbanned");
-        active_commands.push("setban");
-        active_commands.push("listbanned");
-        active_commands.push("getmininginfo");
-        active_commands.push("getblocktemplate");
-        active_commands.push("submitblock");
-        active_commands.push("estimatesmartfee");
-        active_commands.push("stop");
-        active_commands.push("uptime");
-        active_commands.push("getmemoryinfo");
-        active_commands.push("getrpcinfo");
-        active_commands.push("help");
-        active_commands.push("logging");
+        // OPTIMIZED: Use const array instead of building Vec every call
+        // Zero allocation on hot path
+        const ACTIVE_COMMANDS: &[&str] = &[
+            "getblockchaininfo",
+            "getblock",
+            "getblockhash",
+            "getblockheader",
+            "getbestblockhash",
+            "getblockcount",
+            "getdifficulty",
+            "gettxoutsetinfo",
+            "verifychain",
+            "getrawtransaction",
+            "sendrawtransaction",
+            "testmempoolaccept",
+            "decoderawtransaction",
+            "gettxout",
+            "gettxoutproof",
+            "verifytxoutproof",
+            "getmempoolinfo",
+            "getrawmempool",
+            "savemempool",
+            "getnetworkinfo",
+            "getpeerinfo",
+            "getconnectioncount",
+            "ping",
+            "addnode",
+            "disconnectnode",
+            "getnettotals",
+            "clearbanned",
+            "setban",
+            "listbanned",
+            "getmininginfo",
+            "getblocktemplate",
+            "submitblock",
+            "estimatesmartfee",
+            "stop",
+            "uptime",
+            "getmemoryinfo",
+            "getrpcinfo",
+            "help",
+            "logging",
+        ];
 
         Ok(json!({
-            "active_commands": active_commands,
+            "active_commands": ACTIVE_COMMANDS,
             "logpath": "", // Not tracked
         }))
     }

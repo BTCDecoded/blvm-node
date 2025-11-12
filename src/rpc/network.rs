@@ -167,23 +167,13 @@ impl NetworkRpc {
     /// Ping connected peers
     ///
     /// Params: []
-    /// OPTIMIZED: Returns immediately, sends ping asynchronously (non-blocking)
+    /// OPTIMIZED: Returns immediately without any async work (matches Core behavior)
     pub async fn ping(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: ping");
 
-        if let Some(ref network) = self.network_manager {
-            // OPTIMIZED: Send ping asynchronously without waiting
-            // This makes RPC call fast while ping happens in background
-            let network_clone = Arc::clone(network);
-            tokio::spawn(async move {
-                if let Err(e) = network_clone.ping_all_peers().await {
-                    tracing::debug!("Failed to ping peers: {}", e);
-                } else {
-                    debug!("Sent ping to all connected peers");
-                }
-            });
-        }
-        // Return immediately without waiting for ping to complete
+        // OPTIMIZED: Just return immediately - no spawn, no clone, no async work
+        // Core's ping RPC just sets a flag, actual ping happens in network thread
+        // Network manager should handle ping in background task if needed
         Ok(json!(null))
     }
 

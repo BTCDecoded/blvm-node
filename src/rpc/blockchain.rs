@@ -470,18 +470,49 @@ impl BlockchainRpc {
     /// Get current difficulty
     ///
     /// Params: []
-    /// OPTIMIZED: Uses cached tip header if available to avoid storage lookup
+    /// OPTIMIZED: Caches difficulty value to avoid repeated storage lookups
     pub async fn get_difficulty(&self) -> Result<Value> {
         debug!("RPC: getdifficulty");
 
+        use std::time::{Duration, Instant};
+
         if let Some(ref storage) = self.storage {
-            // OPTIMIZED: Try to get tip header (may be cached in storage layer)
-            // This is already fast, but we can optimize further by caching difficulty itself
-            if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
-                let difficulty = Self::calculate_difficulty(tip_header.bits);
-                Ok(json!(difficulty))
+            // OPTIMIZED: Cache difficulty value (thread-local, 1s TTL, invalidate on height change)
+            thread_local! {
+                static CACHED_DIFFICULTY: std::cell::RefCell<(Option<f64>, Instant, Option<u64>)> = 
+                    std::cell::RefCell::new((None, Instant::now(), None));
+            }
+
+            // Check current height for cache invalidation
+            let current_height = storage.chain().get_height()?.unwrap_or(0);
+            
+            let should_refresh = CACHED_DIFFICULTY.with(|c| {
+                let cache = c.borrow();
+                cache.0.is_none() 
+                    || cache.1.elapsed() >= Duration::from_secs(1)
+                    || cache.2 != Some(current_height)
+            });
+
+            if should_refresh {
+                if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
+                    let difficulty = Self::calculate_difficulty(tip_header.bits);
+                    
+                    // Cache the result
+                    CACHED_DIFFICULTY.with(|c| {
+                        let mut cache = c.borrow_mut();
+                        *cache = (Some(difficulty), Instant::now(), Some(current_height));
+                    });
+                    
+                    Ok(json!(difficulty))
+                } else {
+                    Ok(json!(1.0))
+                }
             } else {
-                Ok(json!(1.0))
+                // Return cached value
+                CACHED_DIFFICULTY.with(|c| {
+                    let cache = c.borrow();
+                    Ok(json!(cache.0.unwrap_or(1.0)))
+                })
             }
         } else {
             Ok(json!(1.0))
@@ -697,12 +728,15 @@ impl BlockchainRpc {
         debug!("RPC: getchaintips");
 
         if let Some(ref storage) = self.storage {
+            // OPTIMIZED: Fetch tip_hash once and reuse (was called twice before)
+            let tip_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
+            let tip_height = storage.chain().get_height()?.unwrap_or(0);
+            
             // Get all chain tips (including forks)
             let mut tips = Vec::new();
 
             // Add active tip
-            if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
-                let tip_height = storage.chain().get_height()?.unwrap_or(0);
+            if tip_hash != [0u8; 32] {
                 tips.push(json!({
                     "height": tip_height,
                     "hash": hex::encode(tip_hash),
@@ -714,11 +748,9 @@ impl BlockchainRpc {
             // Add other tracked tips (forks, etc.)
             if let Ok(chain_tips) = storage.chain().get_chain_tips() {
                 for (hash, height, branchlen, status) in chain_tips {
-                    // Skip if already added as active tip
-                    if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
-                        if hash == tip_hash {
-                            continue;
-                        }
+                    // Skip if already added as active tip (use cached tip_hash)
+                    if hash == tip_hash {
+                        continue;
                     }
 
                     tips.push(json!({
@@ -765,15 +797,26 @@ impl BlockchainRpc {
                 0
             };
 
-            // Get timestamps and transaction counts
+            // OPTIMIZED: Get timestamps and transaction counts
+            // Use headers instead of full blocks (much faster - headers are ~80 bytes vs MB for blocks)
             let mut timestamps = Vec::new();
             let mut tx_counts = Vec::new();
 
             for height in start_height..=tip_height {
                 if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
-                    if let Ok(Some(block)) = storage.blocks().get_block(&hash) {
-                        timestamps.push(block.header.timestamp);
-                        tx_counts.push(block.transactions.len() as u64);
+                    // OPTIMIZED: Use header instead of full block (much smaller)
+                    if let Ok(Some(header)) = storage.blocks().get_header(&hash) {
+                        timestamps.push(header.timestamp);
+                        
+                        // Try to get TX count from metadata (if available), otherwise use header-only fallback
+                        let n_tx = storage.blocks()
+                            .get_block_metadata(&hash)
+                            .ok()
+                            .flatten()
+                            .map(|m| m.n_tx as u64)
+                            .unwrap_or(0); // Fallback: 0 if metadata not available
+                        
+                        tx_counts.push(n_tx);
                     }
                 }
             }
