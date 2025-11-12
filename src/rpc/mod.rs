@@ -13,6 +13,8 @@ pub mod network;
 pub mod rawtx;
 pub mod server;
 pub mod types;
+#[cfg(kani)]
+pub mod rpc_proofs;
 
 #[cfg(feature = "quinn")]
 pub mod quinn_server;

@@ -7,6 +7,8 @@ pub mod block_processor;
 pub mod event_publisher;
 pub mod health;
 pub mod mempool;
+#[cfg(kani)]
+pub mod mempool_proofs;
 pub mod metrics;
 pub mod miner;
 pub mod performance;

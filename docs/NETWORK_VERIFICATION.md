@@ -8,6 +8,8 @@ This document describes the formal verification of Bitcoin P2P protocol message 
 
 **Phase 1: Core Messages** - ✅ **COMPLETE** (8 proofs)
 
+**Phase 2: Consensus-Critical Messages** - ✅ **COMPLETE** (8 proofs)
+
 ### Verified Properties
 
 1. **Message Header Parsing** ✅
@@ -29,6 +31,12 @@ This document describes the formal verification of Bitcoin P2P protocol message 
    - VerAck message: `parse(serialize(msg)) == msg`
    - Ping message: `parse(serialize(msg)) == msg`
    - Pong message: `parse(serialize(msg)) == msg`
+   - Transaction message: `parse(serialize(msg)) == msg`
+   - Block message: `parse(serialize(msg)) == msg`
+   - Headers message: `parse(serialize(msg)) == msg`
+   - Inv message: `parse(serialize(msg)) == msg`
+   - GetData message: `parse(serialize(msg)) == msg`
+   - GetHeaders message: `parse(serialize(msg)) == msg`
 
 ## Proofs Implemented
 
@@ -41,6 +49,17 @@ This document describes the formal verification of Bitcoin P2P protocol message 
 5. `verify_verack_message_roundtrip()` - VerAck message round-trip
 6. `verify_ping_message_roundtrip()` - Ping message round-trip
 7. `verify_pong_message_roundtrip()` - Pong message round-trip
+
+### Phase 2: Consensus-Critical Messages (8 proofs)
+
+1. `verify_tx_message_roundtrip()` - Transaction message round-trip
+2. `verify_inv_message_roundtrip()` - Inventory message round-trip
+3. `verify_getdata_message_roundtrip()` - GetData message round-trip
+4. `verify_headers_message_roundtrip()` - Headers message round-trip
+5. `verify_getheaders_message_roundtrip()` - GetHeaders message round-trip
+6. `verify_block_message_roundtrip()` - Block message round-trip
+7. `verify_inventory_item_roundtrip()` - Inventory item parsing correctness
+8. `verify_bounded_message_parsing()` - Bounded verification for large messages
 
 ## Running Verification
 
@@ -109,13 +128,6 @@ These bounds are **proof-time only** and don't affect runtime code.
 ```
 
 ## Future Work
-
-### Phase 2: Consensus-Critical Messages (Planned)
-
-- Block message round-trip
-- Transaction message round-trip
-- Headers message round-trip
-- Inv/GetData message round-trip
 
 ### Phase 3: Extended Features (Planned)
 

@@ -11,14 +11,14 @@ use tracing::{debug, info};
 /// Mempool manager
 pub struct MempoolManager {
     /// Transaction mempool - stores full transactions by hash
-    transactions: HashMap<Hash, Transaction>,
+    pub(crate) transactions: HashMap<Hash, Transaction>,
     /// Legacy mempool (HashSet of hashes) for compatibility
     #[allow(dead_code)]
     mempool: Mempool,
     #[allow(dead_code)]
     utxo_set: UtxoSet,
     /// Track spent outputs to detect conflicts
-    spent_outputs: HashSet<OutPoint>,
+    pub(crate) spent_outputs: HashSet<OutPoint>,
 }
 
 impl MempoolManager {

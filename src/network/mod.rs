@@ -19,6 +19,8 @@ pub mod protocol_adapter;
 pub mod protocol_extensions;
 #[cfg(kani)]
 pub mod kani_helpers;
+#[cfg(kani)]
+pub mod state_machine_proofs;
 pub mod relay;
 pub mod tcp_transport;
 pub mod transport;

@@ -194,7 +194,7 @@ pub struct PongMessage {
 }
 
 /// Get headers message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetHeadersMessage {
     pub version: i32,
     pub block_locator_hashes: Vec<Hash>,
@@ -202,7 +202,7 @@ pub struct GetHeadersMessage {
 }
 
 /// Headers message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeadersMessage {
     pub headers: Vec<BlockHeader>,
 }
@@ -216,7 +216,7 @@ pub struct GetBlocksMessage {
 }
 
 /// Block message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockMessage {
     pub block: Block,
     /// Witness data for each transaction in the block (one Witness per transaction)
@@ -226,26 +226,26 @@ pub struct BlockMessage {
 }
 
 /// Get data message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetDataMessage {
     pub inventory: Vec<InventoryItem>,
 }
 
 /// Inventory item
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryItem {
     pub inv_type: u32,
     pub hash: Hash,
 }
 
 /// Inventory message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvMessage {
     pub inventory: Vec<InventoryItem>,
 }
 
 /// Transaction message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxMessage {
     pub transaction: Transaction,
 }
@@ -254,7 +254,7 @@ pub struct TxMessage {
 use crate::network::compact_blocks::CompactBlock;
 
 /// SendCmpct message - Negotiate compact block relay support
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendCmpctMessage {
     /// Compact block version (1 or 2)
     pub version: u64,
@@ -281,13 +281,13 @@ impl SendCmpctMessage {
 }
 
 /// CompactBlock message - Compact block data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactBlockMessage {
     pub compact_block: CompactBlock,
 }
 
 /// GetBlockTxn message - Request missing transactions from compact block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetBlockTxnMessage {
     /// Block hash for the compact block
     pub block_hash: Hash,
@@ -296,7 +296,7 @@ pub struct GetBlockTxnMessage {
 }
 
 /// BlockTxn message - Response with requested transactions
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockTxnMessage {
     /// Block hash for the compact block
     pub block_hash: Hash,
@@ -407,7 +407,7 @@ pub struct Bip158FilterData {
 // Block Filtering (BIP157) messages
 
 /// getcfilters message - Request filters for block range
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetCfiltersMessage {
     /// Filter type (0 = Basic)
     pub filter_type: u8,
@@ -418,7 +418,7 @@ pub struct GetCfiltersMessage {
 }
 
 /// cfilter message - Compact block filter response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CfilterMessage {
     /// Filter type (0 = Basic)
     pub filter_type: u8,
@@ -543,7 +543,7 @@ pub struct PaymentACKMessage {
 // Package Relay (BIP 331) messages
 
 /// sendpkgtxn message - Request to send package of transactions
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendPkgTxnMessage {
     /// Package ID (combined hash of all transactions)
     #[serde(with = "serde_bytes")]
@@ -553,7 +553,7 @@ pub struct SendPkgTxnMessage {
 }
 
 /// pkgtxn message - Package of transactions
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PkgTxnMessage {
     /// Package ID (echo from SendPkgTxn)
     #[serde(with = "serde_bytes")]

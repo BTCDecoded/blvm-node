@@ -33,7 +33,7 @@ use std::hash::Hasher;
 pub type ShortTxId = [u8; 6];
 
 /// Compact block representation
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompactBlock {
     /// Block header
     pub header: BlockHeader,
