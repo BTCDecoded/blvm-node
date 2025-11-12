@@ -8,6 +8,21 @@ use bllvm_protocol::BlockHeader;
 use serde_json::{json, Number, Value};
 use std::sync::Arc;
 use tracing::{debug, warn};
+use crate::rpc::errors::RpcError;
+
+const ZERO_HASH_STR: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Helper function to decode a 32-byte hash from hex string
+fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
+    let hash_bytes = hex::decode(hex)
+        .map_err(|e| RpcError::invalid_params(format!("Invalid hash: {}", e)))?;
+    if hash_bytes.len() != 32 {
+        return Err(RpcError::invalid_params("Invalid hash length"));
+    }
+    let mut hash_array = [0u8; 32];
+    hash_array.copy_from_slice(&hash_bytes);
+    Ok(hash_array)
+}
 
 /// Blockchain RPC methods
 #[derive(Clone)]
@@ -351,13 +366,7 @@ impl BlockchainRpc {
         debug!("RPC: getblockheader {} verbose={}", hash, verbose);
 
         if let Some(ref storage) = self.storage {
-            let hash_bytes =
-                hex::decode(hash).map_err(|e| anyhow::anyhow!("Invalid hash: {}", e))?;
-            if hash_bytes.len() != 32 {
-                return Err(anyhow::anyhow!("Invalid hash length"));
-            }
-            let mut hash_array = [0u8; 32];
-            hash_array.copy_from_slice(&hash_bytes);
+            let hash_array = decode_hash32(hash)?;
 
             if let Ok(Some(header)) = storage.blocks().get_header(&hash_array) {
                 if verbose {
@@ -429,12 +438,10 @@ impl BlockchainRpc {
                             .get_chainwork(&hash_array)?
                             .map(|cw| Self::format_chainwork(cw))
                             .unwrap_or_else(|| {
-                                "0000000000000000000000000000000000000000000000000000000000000000"
-                                    .to_string()
+                                ZERO_HASH_STR.to_string()
                             })
                     } else {
-                        "0000000000000000000000000000000000000000000000000000000000000000"
-                            .to_string()
+                        ZERO_HASH_STR.to_string()
                     };
 
                     Ok(json!({
@@ -528,10 +535,10 @@ impl BlockchainRpc {
                     })
                 }
             } else {
-                Ok(Value::String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string()))
+                Ok(Value::String(ZERO_HASH_STR.to_string()))
             }
         } else {
-            Ok(Value::String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string()))
+            Ok(Value::String(ZERO_HASH_STR.to_string()))
         }
     }
 
@@ -656,11 +663,11 @@ impl BlockchainRpc {
         } else {
             Ok(json!({
                 "height": 0,
-                "bestblock": "0000000000000000000000000000000000000000000000000000000000000000",
+                "bestblock": ZERO_HASH_STR,
                 "transactions": 0,
                 "txouts": 0,
                 "bogosize": 0,
-                "hash_serialized_2": "0000000000000000000000000000000000000000000000000000000000000000",
+                "hash_serialized_2": ZERO_HASH_STR,
                 "disk_size": 0,
                 "total_amount": 0.0
             }))
@@ -827,7 +834,8 @@ impl BlockchainRpc {
             };
             
             // Get all chain tips (including forks)
-            let mut tips = Vec::new();
+            // Usually 1-2 tips, but pre-allocate for potential forks
+            let mut tips = Vec::with_capacity(4);
 
             // Add active tip
             if tip_hash != [0u8; 32] {
@@ -975,13 +983,12 @@ impl BlockchainRpc {
 
         let hash_or_height: Option<String> = params
             .get(0)
-            .and_then(|p| p.as_str())
-            .map(|s| s.to_string())
+            .and_then(|p| p.as_u64().map(|h| h.to_string()))
             .or_else(|| {
                 params
                     .get(0)
-                    .and_then(|p| p.as_u64())
-                    .map(|h| h.to_string())
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string())
             });
         let hash_or_height = hash_or_height.as_deref();
 
@@ -1229,13 +1236,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Block hash parameter required"))?;
 
-        let hash_bytes =
-            hex::decode(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
-        if hash_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Block hash must be 32 bytes"));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
+        let hash = decode_hash32(blockhash)
+            .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
             // Mark block as invalid
@@ -1270,13 +1272,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Block hash parameter required"))?;
 
-        let hash_bytes =
-            hex::decode(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
-        if hash_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Block hash must be 32 bytes"));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
+        let hash = decode_hash32(blockhash)
+            .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
             // Remove from invalid blocks set
@@ -1352,13 +1349,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_u64())
             .map(|t| tokio::time::Duration::from_secs(t));
 
-        let hash_bytes =
-            hex::decode(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
-        if hash_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Block hash must be 32 bytes"));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
+        let hash = decode_hash32(blockhash)
+            .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         // Note: This requires async notification infrastructure
         // For now, check if block exists immediately
@@ -1444,13 +1436,8 @@ impl BlockchainRpc {
             return Err(anyhow::anyhow!("Only filter type 0 (Basic) is supported"));
         }
 
-        let hash_bytes =
-            hex::decode(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
-        if hash_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Block hash must be 32 bytes"));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
+        let hash = decode_hash32(blockhash)
+            .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
             // Get block from storage

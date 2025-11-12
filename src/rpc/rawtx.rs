@@ -260,15 +260,10 @@ impl RawTxRpc {
         let txid_hex = hex::encode(txid);
         let size = tx_bytes.len();
 
-        Ok(json!({
-            "txid": txid_hex.clone(),
-            "hash": txid_hex,
-            "version": tx.version,
-            "size": size,
-            "vsize": size,
-            "weight": size * 4, // Simplified
-            "locktime": tx.lock_time,
-            "vin": tx.inputs.iter().map(|input| json!({
+        // Pre-allocate and build vin
+        let mut vin = Vec::with_capacity(tx.inputs.len());
+        for input in &tx.inputs {
+            vin.push(json!({
                 "txid": hex::encode(input.prevout.hash),
                 "vout": input.prevout.index,
                 "scriptSig": {
@@ -276,8 +271,13 @@ impl RawTxRpc {
                     "hex": hex::encode(&input.script_sig)
                 },
                 "sequence": input.sequence
-            })).collect::<Vec<_>>(),
-            "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
+            }));
+        }
+
+        // Pre-allocate and build vout
+        let mut vout = Vec::with_capacity(tx.outputs.len());
+        for (i, output) in tx.outputs.iter().enumerate() {
+            vout.push(json!({
                 "value": output.value as f64 / 100_000_000.0,
                 "n": i,
                 "scriptPubKey": {
@@ -287,7 +287,19 @@ impl RawTxRpc {
                     "type": "pubkeyhash",
                     "addresses": []
                 }
-            })).collect::<Vec<_>>(),
+            }));
+        }
+
+        Ok(json!({
+            "txid": txid_hex.clone(),
+            "hash": txid_hex,
+            "version": tx.version,
+            "size": size,
+            "vsize": size,
+            "weight": size * 4, // Simplified
+            "locktime": tx.lock_time,
+            "vin": vin,
+            "vout": vout,
             "hex": hex_string
         }))
     }

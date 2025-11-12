@@ -36,38 +36,51 @@ impl NetworkRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getnetworkinfo");
 
+        use std::sync::OnceLock;
+        
+        static CACHED_NETWORK_INFO: OnceLock<Value> = OnceLock::new();
+        
         if let Some(ref network) = self.network_manager {
             let peer_count = network.peer_count();
-            Ok(json!({
-                "version": 70015,
-                "subversion": "/reference-node:0.1.0/",
-                "protocolversion": 70015,
-                "localservices": "0000000000000001",
-                "localrelay": true,
-                "timeoffset": 0,
-                "networkactive": true,
-                "connections": peer_count,
-                "networks": [
-                    {
-                        "name": "ipv4",
-                        "limited": false,
-                        "reachable": true,
-                        "proxy": "",
-                        "proxy_randomize_credentials": false
-                    },
-                    {
-                        "name": "ipv6",
-                        "limited": false,
-                        "reachable": true,
-                        "proxy": "",
-                        "proxy_randomize_credentials": false
-                    }
-                ],
-                "relayfee": 0.00001000,
-                "incrementalfee": 0.00001000,
-                "localaddresses": [],
-                "warnings": ""
-            }))
+            
+            // Build static template once
+            let base_info = CACHED_NETWORK_INFO.get_or_init(|| {
+                json!({
+                    "version": 70015,
+                    "subversion": "/reference-node:0.1.0/",
+                    "protocolversion": 70015,
+                    "localservices": "0000000000000001",
+                    "localrelay": true,
+                    "timeoffset": 0,
+                    "networkactive": true,
+                    "connections": 0,
+                    "networks": [
+                        {
+                            "name": "ipv4",
+                            "limited": false,
+                            "reachable": true,
+                            "proxy": "",
+                            "proxy_randomize_credentials": false
+                        },
+                        {
+                            "name": "ipv6",
+                            "limited": false,
+                            "reachable": true,
+                            "proxy": "",
+                            "proxy_randomize_credentials": false
+                        }
+                    ],
+                    "relayfee": 0.00001000,
+                    "incrementalfee": 0.00001000,
+                    "localaddresses": [],
+                    "warnings": ""
+                })
+            });
+            
+            // Clone and update only the dynamic field
+            let mut result = base_info.clone();
+            result["connections"] = json!(peer_count);
+            Ok(result)
         } else {
             Ok(json!({
                 "version": 70015,
