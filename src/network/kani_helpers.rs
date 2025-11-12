@@ -15,19 +15,19 @@
 pub mod proof_limits {
     /// Maximum message size for proof tractability
     pub const MAX_MESSAGE_SIZE_FOR_PROOF: usize = 1000;
-    
+
     /// Maximum payload size for proof tractability
-    pub const MAX_PAYLOAD_SIZE_FOR_PROOF: usize = 1000 - 24;  // Minus header (24 bytes)
-    
+    pub const MAX_PAYLOAD_SIZE_FOR_PROOF: usize = 1000 - 24; // Minus header (24 bytes)
+
     /// Maximum addresses in Addr message
     pub const MAX_ADDR_COUNT_FOR_PROOF: usize = 10;
-    
+
     /// Maximum inventory items
     pub const MAX_INV_COUNT_FOR_PROOF: usize = 10;
-    
+
     /// Maximum user agent length
     pub const MAX_USER_AGENT_LEN_FOR_PROOF: usize = 256;
-    
+
     /// Maximum headers in Headers message
     pub const MAX_HEADERS_COUNT_FOR_PROOF: usize = 10;
 }
@@ -39,13 +39,13 @@ pub mod proof_limits {
 pub mod unwind_bounds {
     /// Message header parsing (fixed size, no loops)
     pub const HEADER_PARSING: u32 = 3;
-    
+
     /// Simple message parsing (1-2 loops)
     pub const SIMPLE_MESSAGE: u32 = 5;
-    
+
     /// Complex message parsing (with arrays, 3+ loops)
     pub const COMPLEX_MESSAGE: u32 = 10;
-    
+
     /// Checksum calculation (SHA256 operations)
     pub const CHECKSUM: u32 = 3;
 }
@@ -56,8 +56,11 @@ pub mod unwind_bounds {
 #[macro_export]
 macro_rules! assume_version_message_bounds {
     ($msg:expr) => {
-        kani::assume($msg.user_agent.len() <= $crate::network::kani_helpers::proof_limits::MAX_USER_AGENT_LEN_FOR_PROOF);
-        kani::assume($msg.version >= 70001);  // Minimum valid version
+        kani::assume(
+            $msg.user_agent.len()
+                <= $crate::network::kani_helpers::proof_limits::MAX_USER_AGENT_LEN_FOR_PROOF,
+        );
+        kani::assume($msg.version >= 70001); // Minimum valid version
     };
 }
 
@@ -67,7 +70,10 @@ macro_rules! assume_version_message_bounds {
 #[macro_export]
 macro_rules! assume_addr_message_bounds {
     ($msg:expr) => {
-        kani::assume($msg.addresses.len() <= $crate::network::kani_helpers::proof_limits::MAX_ADDR_COUNT_FOR_PROOF);
+        kani::assume(
+            $msg.addresses.len()
+                <= $crate::network::kani_helpers::proof_limits::MAX_ADDR_COUNT_FOR_PROOF,
+        );
     };
 }
 
@@ -78,8 +84,8 @@ macro_rules! assume_addr_message_bounds {
 macro_rules! assume_block_message_bounds {
     ($msg:expr) => {
         use bllvm_consensus::kani_helpers::assume_block_bounds;
-        assume_block_bounds!($msg.block, 2, 2);  // Bound block (max 2 txs, 2 inputs/outputs each)
-        kani::assume($msg.witnesses.len() <= 10);  // Bound witnesses
+        assume_block_bounds!($msg.block, 2, 2); // Bound block (max 2 txs, 2 inputs/outputs each)
+        kani::assume($msg.witnesses.len() <= 10); // Bound witnesses
     };
 }
 
@@ -100,7 +106,10 @@ macro_rules! assume_tx_message_bounds {
 #[macro_export]
 macro_rules! assume_headers_message_bounds {
     ($msg:expr) => {
-        kani::assume($msg.headers.len() <= $crate::network::kani_helpers::proof_limits::MAX_HEADERS_COUNT_FOR_PROOF);
+        kani::assume(
+            $msg.headers.len()
+                <= $crate::network::kani_helpers::proof_limits::MAX_HEADERS_COUNT_FOR_PROOF,
+        );
     };
 }
 
@@ -110,7 +119,9 @@ macro_rules! assume_headers_message_bounds {
 #[macro_export]
 macro_rules! assume_inv_message_bounds {
     ($msg:expr) => {
-        kani::assume($msg.inventory.len() <= $crate::network::kani_helpers::proof_limits::MAX_INV_COUNT_FOR_PROOF);
+        kani::assume(
+            $msg.inventory.len()
+                <= $crate::network::kani_helpers::proof_limits::MAX_INV_COUNT_FOR_PROOF,
+        );
     };
 }
-

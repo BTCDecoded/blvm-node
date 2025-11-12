@@ -32,14 +32,14 @@ mod kani_proofs {
     fn verify_double_sha256_determinism() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash1 = hashing::double_sha256(&data);
         let hash2 = hashing::double_sha256(&data);
-        
+
         // Determinism property
         assert_eq!(hash1, hash2, "Double SHA256 must be deterministic");
     }
-    
+
     /// Verify double SHA256 output length
     ///
     /// Mathematical Specification:
@@ -49,13 +49,13 @@ mod kani_proofs {
     fn verify_double_sha256_length() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash = hashing::double_sha256(&data);
-        
+
         // Length property
         assert_eq!(hash.len(), 32, "Double SHA256 must produce 32-byte hash");
     }
-    
+
     /// Verify double SHA256 differs from single SHA256
     ///
     /// Mathematical Specification:
@@ -65,14 +65,17 @@ mod kani_proofs {
     fn verify_double_sha256_differs_from_single() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let double_hash = hashing::double_sha256(&data);
         let single_hash = hashing::sha256(&data);
-        
+
         // They should be different (double SHA256 is not the same as single SHA256)
-        assert_ne!(double_hash, single_hash, "Double SHA256 must differ from single SHA256");
+        assert_ne!(
+            double_hash, single_hash,
+            "Double SHA256 must differ from single SHA256"
+        );
     }
-    
+
     /// Verify SHA256 determinism
     ///
     /// Mathematical Specification:
@@ -82,14 +85,14 @@ mod kani_proofs {
     fn verify_sha256_determinism() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash1 = hashing::sha256(&data);
         let hash2 = hashing::sha256(&data);
-        
+
         // Determinism property
         assert_eq!(hash1, hash2, "SHA256 must be deterministic");
     }
-    
+
     /// Verify SHA256 output length
     ///
     /// Mathematical Specification:
@@ -99,13 +102,13 @@ mod kani_proofs {
     fn verify_sha256_length() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash = hashing::sha256(&data);
-        
+
         // Length property
         assert_eq!(hash.len(), 32, "SHA256 must produce 32-byte hash");
     }
-    
+
     /// Verify hash160 output length
     ///
     /// Mathematical Specification:
@@ -115,13 +118,13 @@ mod kani_proofs {
     fn verify_hash160_length() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash = hashing::hash160(&data);
-        
+
         // Length property
         assert_eq!(hash.len(), 20, "Hash160 must produce 20-byte hash");
     }
-    
+
     /// Verify hash160 determinism
     ///
     /// Mathematical Specification:
@@ -131,14 +134,14 @@ mod kani_proofs {
     fn verify_hash160_determinism() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash1 = hashing::hash160(&data);
         let hash2 = hashing::hash160(&data);
-        
+
         // Determinism property
         assert_eq!(hash1, hash2, "Hash160 must be deterministic");
     }
-    
+
     /// Verify hash160 composition
     ///
     /// Mathematical Specification:
@@ -148,16 +151,19 @@ mod kani_proofs {
     fn verify_hash160_composition() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash160_result = hashing::hash160(&data);
-        
+
         // Verify composition: hash160 = ripemd160(sha256(data))
         let sha256_hash = hashing::sha256(&data);
         let ripemd160_hash = hashing::ripemd160(&sha256_hash);
-        
-        assert_eq!(hash160_result, ripemd160_hash, "Hash160 must equal RIPEMD160(SHA256(data))");
+
+        assert_eq!(
+            hash160_result, ripemd160_hash,
+            "Hash160 must equal RIPEMD160(SHA256(data))"
+        );
     }
-    
+
     /// Verify RIPEMD160 output length
     ///
     /// Mathematical Specification:
@@ -167,13 +173,13 @@ mod kani_proofs {
     fn verify_ripemd160_length() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash = hashing::ripemd160(&data);
-        
+
         // Length property
         assert_eq!(hash.len(), 20, "RIPEMD160 must produce 20-byte hash");
     }
-    
+
     /// Verify RIPEMD160 determinism
     ///
     /// Mathematical Specification:
@@ -183,12 +189,11 @@ mod kani_proofs {
     fn verify_ripemd160_determinism() {
         let data = kani::any::<Vec<u8>>();
         kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
-        
+
         let hash1 = hashing::ripemd160(&data);
         let hash2 = hashing::ripemd160(&data);
-        
+
         // Determinism property
         assert_eq!(hash1, hash2, "RIPEMD160 must be deterministic");
     }
 }
-

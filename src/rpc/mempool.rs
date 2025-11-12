@@ -41,13 +41,12 @@ impl MempoolRpc {
     ///
     /// Params: []
     pub async fn getmempoolinfo(&self, _params: &Value) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getmempoolinfo");
 
         if let Some(ref mempool) = self.mempool {
             let size = mempool.size();
-            
+
             // This is much faster for large mempools (approximate: avg tx size ~250 bytes)
             let bytes = if size == 0 {
                 0
@@ -88,7 +87,6 @@ impl MempoolRpc {
     ///
     /// Params: [verbose (optional, default: false)]
     pub async fn getrawmempool(&self, params: &Value) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getrawmempool");
 
@@ -207,7 +205,7 @@ impl MempoolRpc {
                     e
                 )));
             }
-            
+
             Ok(Value::Null)
         } else {
             Err(crate::rpc::errors::RpcError::internal_error(

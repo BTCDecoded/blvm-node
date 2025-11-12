@@ -32,7 +32,6 @@ impl NetworkRpc {
 
     /// Get network information
     pub async fn get_network_info(&self) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getnetworkinfo");
 
@@ -121,7 +120,7 @@ impl NetworkRpc {
 
         if let Some(ref network) = self.network_manager {
             let peer_manager = network.peer_manager();
-            
+
             // This avoids: 1) cloning all addresses, 2) looking up each peer again
             let mut peers = Vec::new();
             peer_manager.for_each_peer(|addr, peer| {
@@ -169,15 +168,14 @@ impl NetworkRpc {
     ///
     /// Params: []
     pub async fn get_connection_count(&self, _params: &Value) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getconnectioncount");
 
         if let Some(ref network) = self.network_manager {
-            
-            Ok(Value::Number(serde_json::Number::from(network.peer_count())))
+            Ok(Value::Number(serde_json::Number::from(
+                network.peer_count(),
+            )))
         } else {
-            
             Ok(Value::Number(serde_json::Number::from(0)))
         }
     }
@@ -186,14 +184,12 @@ impl NetworkRpc {
     ///
     /// Params: []
     pub async fn ping(&self, _params: &Value) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: ping");
 
-        
         // Core's ping RPC just sets a flag, actual ping happens in network thread
         // Network manager should handle ping in background task if needed
-        
+
         Ok(Value::Null)
     }
 
@@ -293,7 +289,6 @@ impl NetworkRpc {
     ///
     /// Params: []
     pub async fn get_net_totals(&self, _params: &Value) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getnettotals");
 

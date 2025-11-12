@@ -10,18 +10,18 @@ pub mod chain_access;
 pub mod dns_seeds;
 pub mod dos_protection;
 pub mod inventory;
+#[cfg(kani)]
+pub mod kani_helpers;
 pub mod message_bridge;
 pub mod peer;
 pub mod protocol;
-#[cfg(kani)]
-pub mod protocol_proofs;
 pub mod protocol_adapter;
 pub mod protocol_extensions;
 #[cfg(kani)]
-pub mod kani_helpers;
+pub mod protocol_proofs;
+pub mod relay;
 #[cfg(kani)]
 pub mod state_machine_proofs;
-pub mod relay;
 pub mod tcp_transport;
 pub mod transport;
 

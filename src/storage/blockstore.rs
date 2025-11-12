@@ -22,11 +22,11 @@ pub struct BlockStore {
     db: Arc<dyn Database>,
     blocks: Arc<dyn Tree>,
     headers: Arc<dyn Tree>,
-    height_index: Arc<dyn Tree>,      // height → hash
-    hash_to_height: Arc<dyn Tree>,   // hash → height (reverse index for O(1) lookup)
+    height_index: Arc<dyn Tree>,   // height → hash
+    hash_to_height: Arc<dyn Tree>, // hash → height (reverse index for O(1) lookup)
     witnesses: Arc<dyn Tree>,
     recent_headers: Arc<dyn Tree>, // For median time-past: stores last 11+ headers by height
-    block_metadata: Arc<dyn Tree>,  // hash → BlockMetadata (for fast TX count lookup)
+    block_metadata: Arc<dyn Tree>, // hash → BlockMetadata (for fast TX count lookup)
 }
 
 impl BlockStore {
@@ -66,7 +66,8 @@ impl BlockStore {
             n_tx: block.transactions.len() as u32,
         };
         let metadata_data = bincode::serialize(&metadata)?;
-        self.block_metadata.insert(block_hash.as_slice(), &metadata_data)?;
+        self.block_metadata
+            .insert(block_hash.as_slice(), &metadata_data)?;
 
         // Store header for median time-past calculation
         // We'll need height passed separately, so this will be called after store_height

@@ -11,10 +11,10 @@ pub mod mempool;
 pub mod mining;
 pub mod network;
 pub mod rawtx;
-pub mod server;
-pub mod types;
 #[cfg(kani)]
 pub mod rpc_proofs;
+pub mod server;
+pub mod types;
 
 #[cfg(feature = "quinn")]
 pub mod quinn_server;

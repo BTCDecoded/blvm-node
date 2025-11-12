@@ -61,7 +61,11 @@ pub mod kani_mocks {
 
     impl Tree for MockTreeWrapper {
         fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.inner.data.lock().unwrap().insert(key.to_vec(), value.to_vec());
+            self.inner
+                .data
+                .lock()
+                .unwrap()
+                .insert(key.to_vec(), value.to_vec());
             Ok(())
         }
 
@@ -101,7 +105,7 @@ pub mod kani_mocks {
 pub mod proof_limits {
     /// Maximum UTXOs in a set for proof tractability
     pub const MAX_UTXO_COUNT_FOR_PROOF: usize = 10;
-    
+
     /// Maximum outpoint index value
     pub const MAX_OUTPOINT_INDEX: u32 = 1000;
 }
@@ -110,14 +114,13 @@ pub mod proof_limits {
 pub mod unwind_bounds {
     /// Simple UTXO operations (single lookup/insert)
     pub const SIMPLE_UTXO: u32 = 3;
-    
+
     /// Complex UTXO operations (iterations, bulk operations)
     pub const COMPLEX_UTXO: u32 = 10;
-    
+
     /// UTXO set operations (full set iteration)
     pub const UTXO_SET: u32 = 15;
 }
 
 #[cfg(kani)]
 pub use kani_mocks::MockDatabase;
-

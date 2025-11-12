@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub struct UTXOStats {
     pub height: u64,
     pub txouts: u64,
-    pub total_amount: u128,  // Total in satoshis
+    pub total_amount: u128, // Total in satoshis
     pub hash_serialized_2: [u8; 32],
     pub transactions: u64,
 }
@@ -53,8 +53,8 @@ pub struct ChainState {
     #[allow(dead_code)]
     db: Arc<dyn Database>,
     chain_info: Arc<dyn Tree>,
-    work_cache: Arc<dyn Tree>,        // work per block (individual block work)
-    chainwork_cache: Arc<dyn Tree>,  // cumulative chainwork per block (for fast RPC lookups)
+    work_cache: Arc<dyn Tree>, // work per block (individual block work)
+    chainwork_cache: Arc<dyn Tree>, // cumulative chainwork per block (for fast RPC lookups)
     utxo_stats_cache: Arc<dyn Tree>, // UTXO set statistics per block (for fast gettxoutsetinfo)
     network_hashrate_cache: Arc<dyn Tree>, // Network hashrate cache (for fast getmininginfo)
     invalid_blocks: Arc<dyn Tree>,
@@ -120,26 +120,26 @@ impl ChainState {
     /// For display purposes, normalized to genesis difficulty = 1.0
     fn calculate_difficulty(bits: u64) -> f64 {
         const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
-        
+
         // Expand target from compact format
         let exponent = (bits >> 24) as u8;
         let mantissa = bits & 0x00ffffff;
-        
+
         if mantissa == 0 {
             return 1.0;
         }
-        
+
         // Calculate target: target = mantissa * 2^(8*(exponent-3))
         let target = if exponent <= 3 {
             mantissa >> (8 * (3 - exponent))
         } else {
             mantissa << (8 * (exponent - 3))
         };
-        
+
         if target == 0 {
             return 1.0;
         }
-        
+
         // Difficulty = MAX_TARGET / target
         MAX_TARGET as f64 / target as f64
     }
@@ -151,11 +151,11 @@ impl ChainState {
         // Expand target from compact format
         let exponent = (bits >> 24) as u8;
         let mantissa = bits & 0x00ffffff;
-        
+
         if mantissa == 0 {
             return 0;
         }
-        
+
         // Calculate target: target = mantissa * 2^(8*(exponent-3))
         // For simplicity, use a simplified calculation
         let target = if exponent <= 3 {
@@ -163,13 +163,13 @@ impl ChainState {
         } else {
             mantissa << (8 * (exponent - 3))
         };
-        
+
         // Work = MAX_TARGET / (target + 1)
         // Use u64::MAX as approximation for MAX_TARGET
-        if target == 0 || target >= u64::MAX {
+        if target == 0 || target == u64::MAX {
             return 1; // Minimum work
         }
-        
+
         // Prevent division by zero
         u64::MAX / (target + 1).max(1)
     }
@@ -181,7 +181,7 @@ impl ChainState {
             // Calculate work for this block
             let block_work = Self::calculate_work_from_bits(tip_header.bits);
             self.store_work(tip_hash, block_work)?;
-            
+
             // Calculate cumulative chainwork: chainwork[new] = chainwork[prev] + work[new]
             let prev_chainwork = if height > 0 {
                 // Get previous block hash
@@ -194,10 +194,10 @@ impl ChainState {
                 // Genesis block: chainwork = work
                 0
             };
-            
+
             let new_chainwork = prev_chainwork + block_work as u128;
             self.store_chainwork(tip_hash, new_chainwork)?;
-            
+
             info.tip_hash = *tip_hash;
             info.tip_header = tip_header.clone();
             info.height = height;
@@ -205,7 +205,7 @@ impl ChainState {
         }
         Ok(())
     }
-    
+
     /// Get previous block hash from header
     fn get_prev_block_hash(&self, header: &BlockHeader) -> Result<Option<Hash>> {
         Ok(Some(header.prev_block_hash))
@@ -361,8 +361,7 @@ impl ChainState {
             if let Some(data) = self.network_hashrate_cache.get(&key)? {
                 if data.len() >= 8 {
                     let bytes = [
-                        data[0], data[1], data[2], data[3],
-                        data[4], data[5], data[6], data[7],
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                     ];
                     return Ok(Some(f64::from_be_bytes(bytes)));
                 }
@@ -373,8 +372,7 @@ impl ChainState {
                 if let Some(data) = self.network_hashrate_cache.get(&key)? {
                     if data.len() >= 8 {
                         let bytes = [
-                            data[0], data[1], data[2], data[3],
-                            data[4], data[5], data[6], data[7],
+                            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                         ];
                         return Ok(Some(f64::from_be_bytes(bytes)));
                     }

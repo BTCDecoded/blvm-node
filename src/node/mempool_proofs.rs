@@ -74,26 +74,26 @@ mod kani_proofs {
     #[kani::unwind(unwind_bounds::COMPLEX_MEMPOOL)]
     fn verify_double_spend_detection() {
         let mut mempool = MempoolManager::new();
-        
+
         // Create two transactions that spend the same input
         let shared_outpoint = OutPoint {
             hash: kani::any(),
             index: 0,
         };
-        
+
         let input_count = kani::any::<usize>();
         kani::assume(input_count >= 1 && input_count <= proof_limits::MAX_INPUTS_PER_TX);
         let output_count = kani::any::<usize>();
         kani::assume(output_count >= 1 && output_count <= proof_limits::MAX_OUTPUTS_PER_TX);
-        
+
         // Create tx1 with shared input
         let mut tx1 = create_bounded_transaction(input_count, output_count);
         tx1.inputs[0].prevout = shared_outpoint.clone();
-        
+
         // Create tx2 with same shared input
         let mut tx2 = create_bounded_transaction(input_count, output_count);
         tx2.inputs[0].prevout = shared_outpoint.clone();
-        
+
         // Simulate adding first transaction by manually updating spent_outputs
         // This verifies the conflict detection logic without async complexity
         use bllvm_protocol::block::calculate_tx_id;
@@ -102,15 +102,18 @@ mod kani_proofs {
         for input in &tx1.inputs {
             mempool.spent_outputs.insert(input.prevout.clone());
         }
-        
+
         // Verify conflict detection: tx2 should be rejected because shared_outpoint is already spent
-        let has_conflict = tx2.inputs.iter().any(|input| mempool.spent_outputs.contains(&input.prevout));
+        let has_conflict = tx2
+            .inputs
+            .iter()
+            .any(|input| mempool.spent_outputs.contains(&input.prevout));
         assert!(has_conflict, "Conflicting transaction should be detected");
-        
+
         // Verify spent output tracking
         assert!(mempool.spent_outputs.contains(&shared_outpoint));
     }
-    
+
     /// Verify conflict prevention
     ///
     /// Mathematical Specification:
@@ -119,41 +122,48 @@ mod kani_proofs {
     #[kani::unwind(unwind_bounds::COMPLEX_MEMPOOL)]
     fn verify_conflict_prevention() {
         let mut mempool = MempoolManager::new();
-        
+
         // Create transaction
         let input_count = kani::any::<usize>();
         kani::assume(input_count >= 1 && input_count <= proof_limits::MAX_INPUTS_PER_TX);
         let output_count = kani::any::<usize>();
         kani::assume(output_count >= 1 && output_count <= proof_limits::MAX_OUTPUTS_PER_TX);
-        
+
         let tx = create_bounded_transaction(input_count, output_count);
-        
+
         // Simulate adding transaction by manually updating state
         // This verifies the conflict prevention logic without async complexity
         use bllvm_protocol::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
         mempool.transactions.insert(tx_hash, tx.clone());
-        
+
         // Verify all inputs are tracked as spent
         for input in &tx.inputs {
             mempool.spent_outputs.insert(input.prevout.clone());
             assert!(mempool.spent_outputs.contains(&input.prevout));
         }
-        
+
         // Verify conflict detection would reject conflicting transaction
         let conflicting_tx = create_bounded_transaction(input_count, output_count);
         let has_conflict = conflicting_tx.inputs.iter().any(|input| {
-            tx.inputs.iter().any(|tx_input| tx_input.prevout == input.prevout)
+            tx.inputs
+                .iter()
+                .any(|tx_input| tx_input.prevout == input.prevout)
         });
-        
+
         if has_conflict {
             // If there's a conflict, verify it would be detected
-            let would_be_rejected = conflicting_tx.inputs.iter()
+            let would_be_rejected = conflicting_tx
+                .inputs
+                .iter()
                 .any(|input| mempool.spent_outputs.contains(&input.prevout));
-            assert!(would_be_rejected, "Conflicting transaction should be rejected");
+            assert!(
+                would_be_rejected,
+                "Conflicting transaction should be rejected"
+            );
         }
     }
-    
+
     /// Verify spent output tracking
     ///
     /// Mathematical Specification:
@@ -162,62 +172,62 @@ mod kani_proofs {
     #[kani::unwind(unwind_bounds::SIMPLE_MEMPOOL)]
     fn verify_spent_output_tracking() {
         let mut mempool = MempoolManager::new();
-        
+
         let input_count = kani::any::<usize>();
         kani::assume(input_count >= 1 && input_count <= proof_limits::MAX_INPUTS_PER_TX);
         let output_count = kani::any::<usize>();
         kani::assume(output_count >= 1 && output_count <= proof_limits::MAX_OUTPUTS_PER_TX);
-        
+
         let tx = create_bounded_transaction(input_count, output_count);
-        
+
         // Initially, inputs should not be tracked as spent
         for input in &tx.inputs {
             assert!(!mempool.spent_outputs.contains(&input.prevout));
         }
-        
+
         // Simulate adding transaction by manually updating state
         // This verifies the spent output tracking logic
         use bllvm_protocol::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
         mempool.transactions.insert(tx_hash, tx.clone());
-        
+
         // Add all inputs to spent_outputs (as add_transaction does)
         for input in &tx.inputs {
             mempool.spent_outputs.insert(input.prevout.clone());
         }
-        
+
         // All inputs should now be tracked as spent
         for input in &tx.inputs {
             assert!(mempool.spent_outputs.contains(&input.prevout));
         }
     }
-    
+
     /// Verify fee calculation correctness
     ///
     /// Mathematical Specification:
-    /// ∀ tx, utxo_set: calculate_transaction_fee(tx, utxo_set) = 
+    /// ∀ tx, utxo_set: calculate_transaction_fee(tx, utxo_set) =
     ///   sum(utxo.value for utxo ∈ inputs) - sum(output.value for output ∈ tx.outputs)
     #[kani::proof]
     #[kani::unwind(unwind_bounds::COMPLEX_MEMPOOL)]
     fn verify_fee_calculation() {
         let mempool = MempoolManager::new();
-        
+
         let input_count = kani::any::<usize>();
         kani::assume(input_count >= 1 && input_count <= proof_limits::MAX_INPUTS_PER_TX);
         let output_count = kani::any::<usize>();
         kani::assume(output_count >= 1 && output_count <= proof_limits::MAX_OUTPUTS_PER_TX);
-        
+
         let tx = create_bounded_transaction(input_count, output_count);
-        
+
         // Create UTXO set with values for inputs
         let mut utxo_set: UtxoSet = HashMap::new();
         let mut expected_input_total = 0u64;
-        
+
         for (i, input) in tx.inputs.iter().enumerate() {
             let input_value = kani::any::<u64>();
             kani::assume(input_value <= 21_000_000_000_000u64); // Max Bitcoin supply
             expected_input_total += input_value;
-            
+
             utxo_set.insert(
                 input.prevout.clone(),
                 bllvm_protocol::UTXO {
@@ -227,7 +237,7 @@ mod kani_proofs {
                 },
             );
         }
-        
+
         // Calculate expected fee
         let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
         let expected_fee = if expected_input_total > output_total {
@@ -235,14 +245,14 @@ mod kani_proofs {
         } else {
             0
         };
-        
+
         // Calculate actual fee
         let actual_fee = mempool.calculate_transaction_fee(&tx, &utxo_set);
-        
+
         // Verify fee calculation
         assert_eq!(actual_fee, expected_fee);
     }
-    
+
     /// Verify prioritization correctness
     ///
     /// Mathematical Specification:
@@ -251,14 +261,14 @@ mod kani_proofs {
     #[kani::unwind(unwind_bounds::COMPLEX_MEMPOOL)]
     fn verify_prioritization_correctness() {
         let mut mempool = MempoolManager::new();
-        
+
         // Create UTXO set
         let mut utxo_set: UtxoSet = HashMap::new();
-        
+
         // Create two transactions with different fee rates
         let tx1 = create_bounded_transaction(1, 1);
         let tx2 = create_bounded_transaction(1, 1);
-        
+
         // Set up UTXOs for both transactions
         for tx in &[&tx1, &tx2] {
             for input in &tx.inputs {
@@ -272,19 +282,19 @@ mod kani_proofs {
                 );
             }
         }
-        
+
         // Set output values to create different fee rates
         // tx1: higher fee (smaller output)
         // tx2: lower fee (larger output)
         // Note: We can't directly modify outputs, so we'll verify the prioritization logic
-        
+
         // Simulate adding both transactions by manually updating state
         use bllvm_protocol::block::calculate_tx_id;
         let tx1_hash = calculate_tx_id(&tx1);
         let tx2_hash = calculate_tx_id(&tx2);
         mempool.transactions.insert(tx1_hash, tx1.clone());
         mempool.transactions.insert(tx2_hash, tx2.clone());
-        
+
         // Add inputs to spent_outputs
         for input in &tx1.inputs {
             mempool.spent_outputs.insert(input.prevout.clone());
@@ -292,25 +302,28 @@ mod kani_proofs {
         for input in &tx2.inputs {
             mempool.spent_outputs.insert(input.prevout.clone());
         }
-        
+
         // Get prioritized transactions
         let prioritized = mempool.get_prioritized_transactions(10, &utxo_set);
-        
+
         // Verify transactions are sorted by fee rate (descending)
         if prioritized.len() >= 2 {
             let fee1 = mempool.calculate_transaction_fee(&prioritized[0], &utxo_set);
             let fee2 = mempool.calculate_transaction_fee(&prioritized[1], &utxo_set);
             let size1 = mempool.estimate_transaction_size(&prioritized[0]);
             let size2 = mempool.estimate_transaction_size(&prioritized[1]);
-            
+
             if size1 > 0 && size2 > 0 {
                 let fee_rate1 = fee1 * 1000 / size1 as u64;
                 let fee_rate2 = fee2 * 1000 / size2 as u64;
-                assert!(fee_rate1 >= fee_rate2, "Transactions must be sorted by fee rate (descending)");
+                assert!(
+                    fee_rate1 >= fee_rate2,
+                    "Transactions must be sorted by fee rate (descending)"
+                );
             }
         }
     }
-    
+
     /// Verify non-negative fees
     ///
     /// Mathematical Specification:
@@ -319,20 +332,20 @@ mod kani_proofs {
     #[kani::unwind(unwind_bounds::SIMPLE_MEMPOOL)]
     fn verify_non_negative_fees() {
         let mempool = MempoolManager::new();
-        
+
         let input_count = kani::any::<usize>();
         kani::assume(input_count >= 1 && input_count <= proof_limits::MAX_INPUTS_PER_TX);
         let output_count = kani::any::<usize>();
         kani::assume(output_count >= 1 && output_count <= proof_limits::MAX_OUTPUTS_PER_TX);
-        
+
         let tx = create_bounded_transaction(input_count, output_count);
-        
+
         // Create UTXO set
         let mut utxo_set: UtxoSet = HashMap::new();
         for input in &tx.inputs {
             let input_value = kani::any::<u64>();
             kani::assume(input_value <= 21_000_000_000_000u64);
-            
+
             utxo_set.insert(
                 input.prevout.clone(),
                 bllvm_protocol::UTXO {
@@ -342,12 +355,11 @@ mod kani_proofs {
                 },
             );
         }
-        
+
         // Calculate fee
         let fee = mempool.calculate_transaction_fee(&tx, &utxo_set);
-        
+
         // Fee should always be non-negative
         assert!(fee >= 0);
     }
 }
-

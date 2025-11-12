@@ -492,7 +492,6 @@ impl MiningCoordinator {
                 ],
             }],
             lock_time: 0,
-            cached_hash: None,
         })
     }
 

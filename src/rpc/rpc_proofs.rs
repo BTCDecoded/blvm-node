@@ -35,21 +35,21 @@ mod kani_proofs {
     #[kani::unwind(unwind_bounds::SIMPLE_RPC)]
     fn verify_request_size_limit() {
         let request_size = kani::any::<usize>();
-        
+
         // Simulate size check (matching server.rs logic)
         let rejected = request_size > MAX_REQUEST_SIZE;
-        
+
         // Property: oversized requests are rejected
         if request_size > MAX_REQUEST_SIZE {
             assert!(rejected, "Oversized requests must be rejected");
         }
-        
+
         // Property: valid-sized requests are not rejected
         if request_size <= MAX_REQUEST_SIZE {
             assert!(!rejected, "Valid-sized requests must not be rejected");
         }
     }
-    
+
     /// Verify request size limit is positive
     ///
     /// Mathematical Specification:
@@ -59,9 +59,12 @@ mod kani_proofs {
     fn verify_request_size_limit_positive() {
         // Property: MAX_REQUEST_SIZE must be positive
         assert!(MAX_REQUEST_SIZE > 0, "Request size limit must be positive");
-        assert!(MAX_REQUEST_SIZE < usize::MAX, "Request size limit must be less than max usize");
+        assert!(
+            MAX_REQUEST_SIZE < usize::MAX,
+            "Request size limit must be less than max usize"
+        );
     }
-    
+
     /// Verify parameter count bounds
     ///
     /// Mathematical Specification:
@@ -71,11 +74,14 @@ mod kani_proofs {
     fn verify_parameter_count_bounds() {
         let param_count = kani::any::<usize>();
         kani::assume(param_count <= proof_limits::MAX_PARAM_COUNT_FOR_PROOF);
-        
+
         // Property: bounded parameter count is valid
-        assert!(param_count <= proof_limits::MAX_PARAM_COUNT_FOR_PROOF, "Parameter count within bounds");
+        assert!(
+            param_count <= proof_limits::MAX_PARAM_COUNT_FOR_PROOF,
+            "Parameter count within bounds"
+        );
     }
-    
+
     /// Verify string length bounds
     ///
     /// Mathematical Specification:
@@ -85,11 +91,14 @@ mod kani_proofs {
     fn verify_string_length_bounds() {
         let string_length = kani::any::<usize>();
         kani::assume(string_length <= proof_limits::MAX_STRING_LENGTH_FOR_PROOF);
-        
+
         // Property: bounded string length is valid
-        assert!(string_length <= proof_limits::MAX_STRING_LENGTH_FOR_PROOF, "String length within bounds");
+        assert!(
+            string_length <= proof_limits::MAX_STRING_LENGTH_FOR_PROOF,
+            "String length within bounds"
+        );
     }
-    
+
     /// Verify hex string length is even (for valid hex)
     ///
     /// Mathematical Specification:
@@ -99,7 +108,7 @@ mod kani_proofs {
     fn verify_hex_string_length_even() {
         let hex_string_length = kani::any::<usize>();
         kani::assume(hex_string_length <= proof_limits::MAX_STRING_LENGTH_FOR_PROOF);
-        
+
         // Property: valid hex strings have even length (each byte = 2 hex chars)
         // Note: This is a property of hex encoding, not a validation check
         // But we verify that if we're checking hex validity, length must be even
@@ -108,10 +117,13 @@ mod kani_proofs {
             // In real validation, this would be rejected
         } else {
             // Even length hex strings can be valid (if all chars are hex digits)
-            assert!(hex_string_length % 2 == 0, "Valid hex strings have even length");
+            assert!(
+                hex_string_length % 2 == 0,
+                "Valid hex strings have even length"
+            );
         }
     }
-    
+
     /// Verify numeric parameter bounds
     ///
     /// Mathematical Specification:
@@ -122,15 +134,17 @@ mod kani_proofs {
         let min_value = kani::any::<i64>();
         let max_value = kani::any::<i64>();
         kani::assume(min_value <= max_value);
-        
+
         let param_value = kani::any::<i64>();
-        
+
         // Property: parameter within bounds is valid
         let in_bounds = param_value >= min_value && param_value <= max_value;
-        
+
         if in_bounds {
-            assert!(param_value >= min_value && param_value <= max_value, "Parameter within bounds");
+            assert!(
+                param_value >= min_value && param_value <= max_value,
+                "Parameter within bounds"
+            );
         }
     }
 }
-
