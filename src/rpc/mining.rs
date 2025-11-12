@@ -49,84 +49,131 @@ impl MiningRpc {
     }
 
     /// Get mining information
+    /// OPTIMIZED: Caches full response for 1 second to avoid redundant storage lookups
     pub async fn get_mining_info(&self) -> RpcResult<Value> {
         debug!("RPC: getmininginfo");
 
-        // Get current block height from storage
-        let blocks = if let Some(ref storage) = self.storage {
-            storage
-                .chain()
-                .get_height()
-                .map_err(|e| RpcError::internal_error(format!("Failed to get height: {e}")))?
-                .unwrap_or(0)
+        use std::time::{Duration, Instant};
+        
+        // OPTIMIZED: Cache full mining info response (refresh every 1 second)
+        // This avoids multiple storage lookups for height, tip_header, chain_info
+        thread_local! {
+            static CACHED_MINING_INFO: std::cell::RefCell<(Option<Value>, Instant, Option<u64>)> = {
+                std::cell::RefCell::new((None, Instant::now(), None))
+            };
+        }
+
+        // Check if we should refresh (cache miss, expired, or chain advanced)
+        let current_height = if let Some(ref storage) = self.storage {
+            storage.chain().get_height().ok().flatten().unwrap_or(0)
         } else {
             0
         };
 
-        // Get mempool size
-        let pooledtx = if let Some(ref mempool) = self.mempool {
-            mempool.size()
-        } else {
-            0
-        };
+        let should_refresh = CACHED_MINING_INFO.with(|cache| {
+            let cache = cache.borrow();
+            cache.0.is_none() 
+                || cache.1.elapsed() >= Duration::from_secs(1)
+                || cache.2 != Some(current_height)
+        });
 
-        // Get difficulty from latest block's bits field (graceful degradation)
-        let difficulty = if let Some(ref storage) = self.storage {
-            if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
-                Self::calculate_difficulty(tip_header.bits)
+        if should_refresh {
+            // Get current block height from storage
+            let blocks = if let Some(ref storage) = self.storage {
+                storage
+                    .chain()
+                    .get_height()
+                    .map_err(|e| RpcError::internal_error(format!("Failed to get height: {e}")))?
+                    .unwrap_or(0)
             } else {
-                tracing::debug!("No chain tip available, using default difficulty");
-                1.0 // Graceful fallback if no tip
-            }
-        } else {
-            tracing::debug!("Storage not available, using default difficulty");
-            1.0 // Graceful fallback if no storage
-        };
+                0
+            };
 
-        // Calculate network hashrate from recent block timestamps (graceful degradation)
-        let networkhashps = if let Some(ref storage) = self.storage {
-            self.calculate_network_hashrate(storage)
-                .unwrap_or_else(|e| {
-                    tracing::debug!("Failed to calculate network hashrate: {}, using 0.0", e);
-                    0.0
-                })
-        } else {
-            tracing::debug!("Storage not available, network hashrate unavailable");
-            0.0
-        };
+            // Get mempool size
+            let pooledtx = if let Some(ref mempool) = self.mempool {
+                mempool.size()
+            } else {
+                0
+            };
 
-        // Get current block template info (if available)
-        let currentblocksize = 0;
-        let currentblockweight = 0;
-        let currentblocktx = 0;
+            // Get difficulty from latest block's bits field (graceful degradation)
+            let difficulty = if let Some(ref storage) = self.storage {
+                if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
+                    Self::calculate_difficulty(tip_header.bits)
+                } else {
+                    tracing::debug!("No chain tip available, using default difficulty");
+                    1.0 // Graceful fallback if no tip
+                }
+            } else {
+                tracing::debug!("Storage not available, using default difficulty");
+                1.0 // Graceful fallback if no storage
+            };
 
-        // Determine chain name from storage chain params
-        let chain = if let Some(ref storage) = self.storage {
-            if let Ok(Some(info)) = storage.chain().load_chain_info() {
-                match info.chain_params.network.as_str() {
-                    "mainnet" => "main",
-                    "testnet" => "test",
-                    "regtest" => "regtest",
-                    _ => "main",
+            // OPTIMIZED: Use cached network hashrate if available, otherwise calculate
+            let networkhashps = if let Some(ref storage) = self.storage {
+                // Try cached hashrate first (O(1) lookup)
+                if let Ok(Some(cached_hashrate)) = storage.chain().get_network_hashrate() {
+                    cached_hashrate
+                } else {
+                    // Fallback: Calculate network hashrate (expensive - loads up to 144 blocks)
+                    self.calculate_network_hashrate(storage)
+                        .unwrap_or_else(|e| {
+                            tracing::debug!("Failed to calculate network hashrate: {e}, using 0.0");
+                            0.0
+                        })
+                }
+            } else {
+                tracing::debug!("Storage not available, network hashrate unavailable");
+                0.0
+            };
+
+            // Get current block template info (if available)
+            let currentblocksize = 0;
+            let currentblockweight = 0;
+            let currentblocktx = 0;
+
+            // Determine chain name from storage chain params
+            let chain = if let Some(ref storage) = self.storage {
+                if let Ok(Some(info)) = storage.chain().load_chain_info() {
+                    match info.chain_params.network.as_str() {
+                        "mainnet" => "main",
+                        "testnet" => "test",
+                        "regtest" => "regtest",
+                        _ => "main",
+                    }
+                } else {
+                    "main" // Default
                 }
             } else {
                 "main" // Default
-            }
-        } else {
-            "main" // Default
-        };
+            };
 
-        Ok(json!({
-            "blocks": blocks,
-            "currentblocksize": currentblocksize,
-            "currentblockweight": currentblockweight,
-            "currentblocktx": currentblocktx,
-            "difficulty": difficulty,
-            "networkhashps": networkhashps,
-            "pooledtx": pooledtx,
-            "chain": chain,
-            "warnings": ""
-        }))
+            let value = json!({
+                "blocks": blocks,
+                "currentblocksize": currentblocksize,
+                "currentblockweight": currentblockweight,
+                "currentblocktx": currentblocktx,
+                "difficulty": difficulty,
+                "networkhashps": networkhashps,
+                "pooledtx": pooledtx,
+                "chain": chain,
+                "warnings": ""
+            });
+
+            // Cache the result
+            CACHED_MINING_INFO.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                *cache = (Some(value.clone()), Instant::now(), Some(current_height));
+            });
+
+            Ok(value)
+        } else {
+            // Return cached value
+            CACHED_MINING_INFO.with(|cache| {
+                let cache = cache.borrow();
+                Ok(cache.0.as_ref().unwrap().clone())
+            })
+        }
     }
 
     /// Get block template

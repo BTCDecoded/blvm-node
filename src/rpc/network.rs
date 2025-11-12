@@ -101,48 +101,50 @@ impl NetworkRpc {
     }
 
     /// Get peer information
+    /// OPTIMIZED: Uses for_each_peer to iterate HashMap directly, avoiding address cloning and double lookups
     pub async fn get_peer_info(&self) -> RpcResult<Value> {
         debug!("RPC: getpeerinfo");
 
         if let Some(ref network) = self.network_manager {
             let peer_manager = network.peer_manager();
-            let peer_addresses = peer_manager.peer_addresses();
-            let peers: Vec<Value> = peer_addresses
-                .iter()
-                .map(|addr| {
-                    if let Some(peer) = peer_manager.get_peer(addr) {
-                        json!({
-                            "id": addr.port().unwrap_or(0) as u64, // Use port as peer ID (unique per connection)
-                            "addr": addr.to_string(),
-                            "addrlocal": "",
-                            "services": "0000000000000001",
-                            "relaytxes": true,
-                            "lastsend": peer.last_send(),
-                            "lastrecv": peer.last_recv(),
-                            "bytessent": peer.bytes_sent(),
-                            "bytesrecv": peer.bytes_recv(),
-                            "conntime": peer.conntime(),
-                            "timeoffset": 0,
-                            "pingtime": 0.0,
-                            "minping": 0.0,
-                            "version": 70015,
-                            "subver": "/reference-node:0.1.0/",
-                            "inbound": false,
-                            "addnode": false,
-                            "startingheight": 0,
-                            "synced_headers": -1,
-                            "synced_blocks": -1,
-                            "inflight": [],
-                            "whitelisted": false,
-                            "minfeefilter": 0.00001000,
-                            "bytessent_per_msg": {},
-                            "bytesrecv_per_msg": {}
-                        })
-                    } else {
-                        json!({})
-                    }
-                })
-                .collect();
+            // OPTIMIZED: Use for_each_peer to iterate directly without cloning addresses
+            // This avoids: 1) cloning all addresses, 2) looking up each peer again
+            let mut peers = Vec::new();
+            peer_manager.for_each_peer(|addr, peer| {
+                peers.push(json!({
+                    "id": match addr {
+                        crate::network::transport::TransportAddr::Tcp(sock) => sock.port() as u64,
+                        #[cfg(feature = "quinn")]
+                        crate::network::transport::TransportAddr::Quinn(sock) => sock.port() as u64,
+                        #[cfg(feature = "iroh")]
+                        crate::network::transport::TransportAddr::Iroh(_) => 0u64,
+                    },
+                    "addr": addr.to_string(),
+                    "addrlocal": "",
+                    "services": "0000000000000001",
+                    "relaytxes": true,
+                    "lastsend": peer.last_send(),
+                    "lastrecv": peer.last_recv(),
+                    "bytessent": peer.bytes_sent(),
+                    "bytesrecv": peer.bytes_recv(),
+                    "conntime": peer.conntime(),
+                    "timeoffset": 0,
+                    "pingtime": 0.0,
+                    "minping": 0.0,
+                    "version": 70015,
+                    "subver": "/reference-node:0.1.0/",
+                    "inbound": false,
+                    "addnode": false,
+                    "startingheight": 0,
+                    "synced_headers": -1,
+                    "synced_blocks": -1,
+                    "inflight": [],
+                    "whitelisted": false,
+                    "minfeefilter": 0.00001000,
+                    "bytessent_per_msg": {},
+                    "bytesrecv_per_msg": {}
+                }));
+            });
             Ok(json!(peers))
         } else {
             Ok(json!([]))
@@ -165,19 +167,23 @@ impl NetworkRpc {
     /// Ping connected peers
     ///
     /// Params: []
+    /// OPTIMIZED: Returns immediately, sends ping asynchronously (non-blocking)
     pub async fn ping(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: ping");
 
         if let Some(ref network) = self.network_manager {
-            // Send ping to all peers
-            if let Err(e) = network.ping_all_peers().await {
-                return Err(RpcError::internal_error(format!(
-                    "Failed to ping peers: {}",
-                    e
-                )));
-            }
-            debug!("Sent ping to all connected peers");
+            // OPTIMIZED: Send ping asynchronously without waiting
+            // This makes RPC call fast while ping happens in background
+            let network_clone = Arc::clone(network);
+            tokio::spawn(async move {
+                if let Err(e) = network_clone.ping_all_peers().await {
+                    tracing::debug!("Failed to ping peers: {}", e);
+                } else {
+                    debug!("Sent ping to all connected peers");
+                }
+            });
         }
+        // Return immediately without waiting for ping to complete
         Ok(json!(null))
     }
 

@@ -128,6 +128,17 @@ impl PeerManager {
         self.peers.keys().cloned().collect()
     }
 
+    /// Iterate over all peers with a closure
+    /// More efficient than get_all_peers() when you don't need to clone peers
+    pub fn for_each_peer<F>(&self, mut f: F)
+    where
+        F: FnMut(&TransportAddr, &peer::Peer),
+    {
+        for (addr, peer) in self.peers.iter() {
+            f(addr, peer);
+        }
+    }
+
     /// Get peer addresses as SocketAddr (for backward compatibility)
     /// Only returns SocketAddr for TCP/Quinn peers, skips Iroh peers
     pub fn peer_socket_addresses(&self) -> Vec<SocketAddr> {

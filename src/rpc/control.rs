@@ -23,6 +23,9 @@ pub struct ControlRpc {
     shutdown_tx: Option<mpsc::UnboundedSender<()>>,
     /// Node shutdown callback (optional)
     node_shutdown: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    /// Cached memory info (refreshed periodically, not every call)
+    #[cfg(feature = "sysinfo")]
+    cached_memory_info: Option<(Instant, Value)>,
 }
 
 impl ControlRpc {
@@ -32,6 +35,8 @@ impl ControlRpc {
             start_time: Instant::now(),
             shutdown_tx: None,
             node_shutdown: None,
+            #[cfg(feature = "sysinfo")]
+            cached_memory_info: None,
         }
     }
 
@@ -44,6 +49,8 @@ impl ControlRpc {
             start_time: Instant::now(),
             shutdown_tx: Some(shutdown_tx),
             node_shutdown,
+            #[cfg(feature = "sysinfo")]
+            cached_memory_info: None,
         }
     }
 
@@ -97,24 +104,59 @@ impl ControlRpc {
                 #[cfg(feature = "sysinfo")]
                 {
                     use sysinfo::System;
+                    use std::sync::Mutex;
+                    use std::time::Duration;
 
-                    let mut system = System::new();
-                    system.refresh_memory();
+                    // OPTIMIZED: Cache System object and memory info (refresh every 1 second)
+                    // Use thread_local for better performance (no mutex contention)
+                    thread_local! {
+                        static CACHED_SYSTEM: std::cell::RefCell<(System, Instant, Value)> = {
+                            let mut system = System::new();
+                            system.refresh_memory();
+                            let total_memory = system.total_memory();
+                            let used_memory = system.used_memory();
+                            let free_memory = system.free_memory();
+                            let available_memory = system.available_memory();
+                            let value = json!({
+                                "locked": {
+                                    "used": used_memory,
+                                    "free": free_memory,
+                                    "total": total_memory,
+                                    "available": available_memory,
+                                    "locked": 0,
+                                }
+                            });
+                            std::cell::RefCell::new((system, Instant::now(), value))
+                        };
+                    }
 
-                    let total_memory = system.total_memory();
-                    let used_memory = system.used_memory();
-                    let free_memory = system.free_memory();
-                    let available_memory = system.available_memory();
-
-                    Ok(json!({
-                        "locked": {
-                            "used": used_memory,
-                            "free": free_memory,
-                            "total": total_memory,
-                            "available": available_memory,
-                            "locked": 0, // Not tracked separately
+                    CACHED_SYSTEM.with(|cache| {
+                        let mut cache = cache.borrow_mut();
+                        let (ref mut system, ref mut last_refresh, ref mut cached_value) = *cache;
+                        
+                        // Only refresh if cache is older than 1 second
+                        if last_refresh.elapsed() >= Duration::from_secs(1) {
+                            system.refresh_memory();
+                            let total_memory = system.total_memory();
+                            let used_memory = system.used_memory();
+                            let free_memory = system.free_memory();
+                            let available_memory = system.available_memory();
+                            let value = json!({
+                                "locked": {
+                                    "used": used_memory,
+                                    "free": free_memory,
+                                    "total": total_memory,
+                                    "available": available_memory,
+                                    "locked": 0,
+                                }
+                            });
+                            *last_refresh = Instant::now();
+                            *cached_value = value.clone();
+                            Ok(value)
+                        } else {
+                            Ok(cached_value.clone())
                         }
-                    }))
+                    })
                 }
 
                 #[cfg(not(feature = "sysinfo"))]

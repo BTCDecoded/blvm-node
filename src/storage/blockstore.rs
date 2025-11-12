@@ -6,7 +6,15 @@ use crate::storage::database::{Database, Tree};
 use anyhow::Result;
 use bllvm_protocol::segwit::Witness;
 use bllvm_protocol::{Block, BlockHeader, Hash};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Block metadata stored separately from block data for fast RPC lookups
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockMetadata {
+    pub n_tx: u32,
+    // Could add more metadata here: size, weight, etc.
+}
 
 /// Block storage manager
 pub struct BlockStore {
@@ -14,9 +22,11 @@ pub struct BlockStore {
     db: Arc<dyn Database>,
     blocks: Arc<dyn Tree>,
     headers: Arc<dyn Tree>,
-    height_index: Arc<dyn Tree>,
+    height_index: Arc<dyn Tree>,      // height → hash
+    hash_to_height: Arc<dyn Tree>,   // hash → height (reverse index for O(1) lookup)
     witnesses: Arc<dyn Tree>,
     recent_headers: Arc<dyn Tree>, // For median time-past: stores last 11+ headers by height
+    block_metadata: Arc<dyn Tree>,  // hash → BlockMetadata (for fast TX count lookup)
 }
 
 impl BlockStore {
@@ -25,16 +35,20 @@ impl BlockStore {
         let blocks = Arc::from(db.open_tree("blocks")?);
         let headers = Arc::from(db.open_tree("headers")?);
         let height_index = Arc::from(db.open_tree("height_index")?);
+        let hash_to_height = Arc::from(db.open_tree("hash_to_height")?);
         let witnesses = Arc::from(db.open_tree("witnesses")?);
         let recent_headers = Arc::from(db.open_tree("recent_headers")?);
+        let block_metadata = Arc::from(db.open_tree("block_metadata")?);
 
         Ok(Self {
             db,
             blocks,
             headers,
             height_index,
+            hash_to_height,
             witnesses,
             recent_headers,
+            block_metadata,
         })
     }
 
@@ -46,6 +60,13 @@ impl BlockStore {
         self.blocks.insert(block_hash.as_slice(), &block_data)?;
         let header_data = bincode::serialize(&block.header)?;
         self.headers.insert(block_hash.as_slice(), &header_data)?;
+
+        // Store block metadata separately for fast RPC lookups (TX count, etc.)
+        let metadata = BlockMetadata {
+            n_tx: block.transactions.len() as u32,
+        };
+        let metadata_data = bincode::serialize(&metadata)?;
+        self.block_metadata.insert(block_hash.as_slice(), &metadata_data)?;
 
         // Store header for median time-past calculation
         // We'll need height passed separately, so this will be called after store_height
@@ -173,9 +194,13 @@ impl BlockStore {
     }
 
     /// Store block height index
+    /// Maintains both height→hash and hash→height indices for O(1) lookups
     pub fn store_height(&self, height: u64, hash: &Hash) -> Result<()> {
         let height_bytes = height.to_be_bytes();
+        // Store height → hash mapping
         self.height_index.insert(&height_bytes, hash.as_slice())?;
+        // Store hash → height reverse mapping for O(1) lookup
+        self.hash_to_height.insert(hash.as_slice(), &height_bytes)?;
         Ok(())
     }
 
@@ -192,18 +217,25 @@ impl BlockStore {
     }
 
     /// Get block height by hash (reverse lookup)
+    /// Optimized: O(1) lookup using hash_to_height index instead of O(n) iteration
     pub fn get_height_by_hash(&self, hash: &Hash) -> Result<Option<u64>> {
-        // Search through height_index to find matching hash
-        for item in self.height_index.iter() {
-            if let Ok((height_bytes, stored_hash)) = item {
-                if stored_hash.as_slice() == hash.as_slice() {
-                    let mut height_bytes_array = [0u8; 8];
-                    height_bytes_array.copy_from_slice(&height_bytes);
-                    return Ok(Some(u64::from_be_bytes(height_bytes_array)));
-                }
-            }
+        // Use reverse index for O(1) lookup instead of O(n) iteration
+        if let Some(data) = self.hash_to_height.get(hash.as_slice())? {
+            let mut height_bytes_array = [0u8; 8];
+            height_bytes_array.copy_from_slice(&data);
+            return Ok(Some(u64::from_be_bytes(height_bytes_array)));
         }
         Ok(None)
+    }
+
+    /// Get block metadata (TX count, etc.) without loading full block
+    pub fn get_block_metadata(&self, hash: &Hash) -> Result<Option<BlockMetadata>> {
+        if let Some(data) = self.block_metadata.get(hash.as_slice())? {
+            let metadata: BlockMetadata = bincode::deserialize(&data)?;
+            Ok(Some(metadata))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Get all blocks in a height range

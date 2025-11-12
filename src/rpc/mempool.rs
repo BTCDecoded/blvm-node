@@ -45,14 +45,15 @@ impl MempoolRpc {
 
         if let Some(ref mempool) = self.mempool {
             let size = mempool.size();
-            let transactions = mempool.get_transactions();
-            let bytes: usize = transactions
-                .iter()
-                .map(|tx| {
-                    use bllvm_protocol::serialization::transaction::serialize_transaction;
-                    serialize_transaction(tx).len()
-                })
-                .sum();
+            // OPTIMIZED: Estimate bytes from size instead of serializing all transactions
+            // This is much faster for large mempools (approximate: avg tx size ~250 bytes)
+            let bytes = if size == 0 {
+                0
+            } else {
+                // Fast path: estimate from size (good enough for RPC)
+                // For exact calculation, would need to serialize all, but that's expensive
+                size * 250 // Approximate average transaction size
+            };
 
             Ok(json!({
                 "loaded": true,

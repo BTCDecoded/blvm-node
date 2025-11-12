@@ -448,9 +448,9 @@ impl MiningCoordinator {
         let mut all_transactions = vec![coinbase_tx];
         all_transactions.extend(transactions);
 
-        // Calculate merkle root from transactions
+        // Calculate merkle root from transactions (we own all_transactions, so we can mutate it)
         use bllvm_protocol::mining::calculate_merkle_root;
-        let merkle_root = calculate_merkle_root(&all_transactions)
+        let merkle_root = calculate_merkle_root(&mut all_transactions)
             .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {}", e))?;
 
         // Get current timestamp
@@ -492,6 +492,7 @@ impl MiningCoordinator {
                 ],
             }],
             lock_time: 0,
+            cached_hash: None,
         })
     }
 
