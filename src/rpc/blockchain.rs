@@ -767,15 +767,9 @@ impl BlockchainRpc {
 
                         // Check level 2: Verify merkle root
                         if check_level >= 2 {
-                            use bllvm_protocol::mining::compute_merkle_root_from_hashes;
+                            use bllvm_protocol::mining::calculate_merkle_root;
                             
-                            // Use cached_hash if available, otherwise compute (but don't clone vector)
-                            let hashes: Vec<_> = block.transactions.iter().map(|tx| {
-                                tx.cached_hash.unwrap_or_else(|| {
-                                    bllvm_protocol::block::calculate_tx_id(tx)
-                                })
-                            }).collect();
-                            if let Ok(calculated_root) = compute_merkle_root_from_hashes(hashes) {
+                            if let Ok(calculated_root) = calculate_merkle_root(&block.transactions) {
                                 if calculated_root != block.header.merkle_root {
                                     errors.push(format!(
                                         "Block at height {} has incorrect merkle root",

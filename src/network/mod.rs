@@ -49,7 +49,7 @@ pub mod package_relay; // BIP 331 Package Relay
 pub mod package_relay_handler; // BIP 331 handlers
 pub mod txhash; // Non-consensus hashing helpers for relay
 
-use crate::network::protocol::{ProtocolMessage, ProtocolParser};
+use crate::network::protocol::{AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser};
 use anyhow::Result;
 use bllvm_protocol::mempool::Mempool;
 use bllvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
@@ -57,7 +57,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use crate::storage::Storage;
 use crate::node::mempool::MempoolManager;
 
@@ -537,6 +537,7 @@ impl NetworkManager {
         
         info!("Discovering peers from DNS seeds for {}", network);
         let addresses = dns_seeds::resolve_dns_seeds(seeds, port, 100).await;
+        let address_count = addresses.len();
         
         // Add discovered addresses to database
         {
@@ -546,7 +547,7 @@ impl NetworkManager {
             }
         }
         
-        info!("Discovered {} addresses from DNS seeds", addresses.len());
+        info!("Discovered {} addresses from DNS seeds", address_count);
         Ok(())
     }
 
@@ -788,11 +789,9 @@ impl NetworkManager {
         }
 
         // 2. Connect to persistent peers
-        if let Some(ref persistent_peers) = config.persistent_peers {
-            if !persistent_peers.is_empty() {
-                if let Err(e) = self.connect_persistent_peers(persistent_peers).await {
-                    warn!("Failed to connect to some persistent peers: {}", e);
-                }
+        if !config.persistent_peers.is_empty() {
+            if let Err(e) = self.connect_persistent_peers(&config.persistent_peers).await {
+                warn!("Failed to connect to some persistent peers: {}", e);
             }
         }
 
@@ -1385,13 +1384,14 @@ impl NetworkManager {
                     .map(|(addr, _)| *addr)
                     .collect();
                 
-                for addr in expired {
-                    ban_list_guard.remove(&addr);
+                let expired_count = expired.len();
+                for addr in &expired {
+                    ban_list_guard.remove(addr);
                     debug!("Cleaned up expired ban for {}", addr);
                 }
                 
-                if !expired.is_empty() {
-                    info!("Cleaned up {} expired ban(s)", expired.len());
+                if expired_count > 0 {
+                    info!("Cleaned up {} expired ban(s)", expired_count);
                 }
             }
         });
@@ -1528,12 +1528,24 @@ impl NetworkManager {
         // Track bytes sent
         self.track_bytes_sent(message_len as u64);
         
+        // Check if peer exists and get sender channel before dropping lock
+        let sender = {
+            let pm = self.peer_manager.lock().unwrap();
+            if let Some(peer) = pm.get_peer(&addr) {
+                peer.send_tx.clone()
+            } else {
+                return Err(anyhow::anyhow!("Peer not found: {:?}", addr));
+            }
+        };
+        
+        // Send message without holding the lock (unbounded channel, so send won't block)
+        sender.send(message)
+            .map_err(|e| anyhow::anyhow!("Failed to send message to peer: {}", e))?;
+        
+        // Record send after message is sent
         let mut pm = self.peer_manager.lock().unwrap();
         if let Some(peer) = pm.get_peer_mut(&addr) {
-            peer.send_message(message).await?;
             peer.record_send(message_len);
-        } else {
-            return Err(anyhow::anyhow!("Peer not found: {:?}", addr));
         }
         Ok(())
     }
@@ -2771,6 +2783,7 @@ impl NetworkManager {
 
         // Calculate hash
         let ban_list_hash = calculate_ban_list_hash(&ban_entries);
+        let ban_entries_count = ban_entries.len();
 
         // Create response
         let response = BanListMessage {
@@ -2786,7 +2799,7 @@ impl NetworkManager {
         self.send_to_peer(peer_addr, serialized).await?;
 
         debug!("Sent BanList response to {}: {} entries", peer_addr, 
-               if msg.request_full { ban_entries.len() } else { 0 });
+               if msg.request_full { ban_entries_count } else { 0 });
 
         Ok(())
     }

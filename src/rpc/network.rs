@@ -123,41 +123,43 @@ impl NetworkRpc {
 
             // This avoids: 1) cloning all addresses, 2) looking up each peer again
             let mut peers = Vec::new();
-            peer_manager.for_each_peer(|addr, peer| {
-                peers.push(json!({
-                    "id": match addr {
-                        crate::network::transport::TransportAddr::Tcp(sock) => sock.port() as u64,
-                        #[cfg(feature = "quinn")]
-                        crate::network::transport::TransportAddr::Quinn(sock) => sock.port() as u64,
-                        #[cfg(feature = "iroh")]
-                        crate::network::transport::TransportAddr::Iroh(_) => 0u64,
-                    },
-                    "addr": addr.to_string(),
-                    "addrlocal": "",
-                    "services": "0000000000000001",
-                    "relaytxes": true,
-                    "lastsend": peer.last_send(),
-                    "lastrecv": peer.last_recv(),
-                    "bytessent": peer.bytes_sent(),
-                    "bytesrecv": peer.bytes_recv(),
-                    "conntime": peer.conntime(),
-                    "timeoffset": 0,
-                    "pingtime": 0.0,
-                    "minping": 0.0,
-                    "version": 70015,
-                    "subver": "/reference-node:0.1.0/",
-                    "inbound": false,
-                    "addnode": false,
-                    "startingheight": 0,
-                    "synced_headers": -1,
-                    "synced_blocks": -1,
-                    "inflight": [],
-                    "whitelisted": false,
-                    "minfeefilter": 0.00001000,
-                    "bytessent_per_msg": {},
-                    "bytesrecv_per_msg": {}
-                }));
-            });
+            for addr in peer_manager.peer_addresses() {
+                if let Some(peer) = peer_manager.get_peer(&addr) {
+                    peers.push(json!({
+                        "id": match addr {
+                            crate::network::transport::TransportAddr::Tcp(sock) => sock.port() as u64,
+                            #[cfg(feature = "quinn")]
+                            crate::network::transport::TransportAddr::Quinn(sock) => sock.port() as u64,
+                            #[cfg(feature = "iroh")]
+                            crate::network::transport::TransportAddr::Iroh(_) => 0u64,
+                        },
+                        "addr": addr.to_string(),
+                        "addrlocal": "",
+                        "services": "0000000000000001",
+                        "relaytxes": true,
+                        "lastsend": peer.last_send(),
+                        "lastrecv": peer.last_recv(),
+                        "bytessent": peer.bytes_sent(),
+                        "bytesrecv": peer.bytes_recv(),
+                        "conntime": peer.conntime(),
+                        "timeoffset": 0,
+                        "pingtime": 0.0,
+                        "minping": 0.0,
+                        "version": 70015,
+                        "subver": "/reference-node:0.1.0/",
+                        "inbound": false,
+                        "addnode": false,
+                        "startingheight": 0,
+                        "synced_headers": -1,
+                        "synced_blocks": -1,
+                        "inflight": [],
+                        "whitelisted": false,
+                        "minfeefilter": 0.00001000,
+                        "bytessent_per_msg": {},
+                        "bytesrecv_per_msg": {}
+                    }));
+                }
+            }
             Ok(json!(peers))
         } else {
             Ok(json!([]))
