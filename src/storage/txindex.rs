@@ -124,7 +124,7 @@ impl TxIndex {
 
     /// Check if transaction exists
     pub fn has_transaction(&self, tx_hash: &Hash) -> Result<bool> {
-        Ok(self.tx_by_hash.contains_key(tx_hash.as_slice())?)
+        self.tx_by_hash.contains_key(tx_hash.as_slice())
     }
 
     /// Get transaction count

@@ -1,0 +1,240 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: [self-hosted, linux, x64]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Checkout bllvm-protocol dependency
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-protocol
+        path: _temp-protocol-engine
+    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-consensus
+        path: _temp-consensus-proof
+    - name: Move dependencies to parent directory
+      run: |
+        if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+        mv _temp-protocol-engine ../bllvm-protocol
+        mv _temp-consensus-proof ../bllvm-consensus
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.88.0
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    - name: Cache cargo index
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+    - name: Cache cargo build
+      uses: actions/cache@v3
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+    - name: Run tests
+      run: cargo test --verbose --all-features
+    - name: Run tests with coverage
+      run: |
+        cargo install cargo-tarpaulin --version 0.27.0
+        cargo tarpaulin --out xml --output-dir coverage
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: coverage/cobertura.xml
+
+  clippy:
+    name: Clippy
+    runs-on: [self-hosted, linux, x64]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Checkout bllvm-protocol dependency
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-protocol
+        path: _temp-protocol-engine
+    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-consensus
+        path: _temp-consensus-proof
+    - name: Move dependencies to parent directory
+      run: |
+        if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+        mv _temp-protocol-engine ../bllvm-protocol
+        mv _temp-consensus-proof ../bllvm-consensus
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.88.0
+        components: clippy
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    - name: Cache cargo index
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+    - name: Cache cargo build
+      uses: actions/cache@v3
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
+
+  fmt:
+    name: Rustfmt
+    runs-on: [self-hosted, linux, x64]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Checkout bllvm-protocol dependency
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-protocol
+        path: _temp-protocol-engine
+    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-consensus
+        path: _temp-consensus-proof
+    - name: Move dependencies to parent directory
+      run: |
+        if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+        mv _temp-protocol-engine ../bllvm-protocol
+        mv _temp-consensus-proof ../bllvm-consensus
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.88.0
+        components: rustfmt
+    - name: Check formatting
+      run: cargo fmt -- --check
+
+  docs:
+    name: Documentation
+    runs-on: [self-hosted, linux, x64]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.88.0
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    - name: Cache cargo index
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+    - name: Cache cargo build
+      uses: actions/cache@v3
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build docs
+      run: cargo doc --no-deps
+    - name: Check docs
+      run: cargo doc --no-deps --document-private-items
+
+  security:
+    name: Security Audit
+    runs-on: [self-hosted, linux, x64]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.88.0
+    - name: Install cargo-audit
+      run: cargo install cargo-audit --version 0.20.0
+    - name: Run security audit
+      run: cargo audit
+
+  build:
+    name: Build
+    runs-on: [self-hosted, linux, x64]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Checkout bllvm-protocol dependency
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-protocol
+        path: _temp-protocol-engine
+        persist-credentials: false
+    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
+      uses: actions/checkout@v4
+      with:
+        repository: BTCDecoded/bllvm-consensus
+        path: _temp-consensus-proof
+        persist-credentials: false
+    - name: Move dependencies to parent directory
+      run: |
+        if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+        mv _temp-protocol-engine ../bllvm-protocol
+        mv _temp-consensus-proof ../bllvm-consensus
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.88.0
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    - name: Cache cargo index
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+    - name: Restore bllvm-consensus build artifacts
+      uses: actions/cache@v3
+      with:
+        path: ../bllvm-consensus/target
+        key: bllvm-consensus-${{ runner.os }}-target
+        restore-keys: |
+          bllvm-consensus-${{ runner.os }}-target-
+    - name: Restore bllvm-protocol build artifacts
+      uses: actions/cache@v3
+      with:
+        path: ../bllvm-protocol/target
+        key: bllvm-protocol-${{ runner.os }}-target
+        restore-keys: |
+          bllvm-protocol-${{ runner.os }}-target-
+    - name: Cache reference-node build
+      uses: actions/cache@v3
+      with:
+        path: target
+        key: bllvm-node-${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build
+      run: cargo build --release
+    - name: Build tests
+      run: cargo test --no-run --release --all-features
+

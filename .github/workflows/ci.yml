@@ -1,240 +1,507 @@
-name: CI
+name: CI (Enhanced Caching)
 
 on:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
+  release:
+    types: [published]
+  repository_dispatch:
+    types: [build-chain, upstream-changed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  CARGO_INCREMENTAL: '1'
 
 jobs:
+  setup:
+    name: Setup Dependencies and Cache
+    runs-on: [self-hosted, linux, x64]
+    outputs:
+      cache-key: ${{ steps.setup-cache.outputs.cache-key }}
+      consensus-cache-key: ${{ steps.setup-cache.outputs.consensus-cache-key }}
+      protocol-cache-key: ${{ steps.setup-cache.outputs.protocol-cache-key }}
+    steps:
+      - name: Emergency disk space check
+        run: |
+          echo "🔍 DEBUG: Disk space before setup:"
+          df -h
+          if [ $(df / | tail -1 | awk '{print $5}' | sed 's/%//') -gt 80 ]; then
+            echo "⚠️ Disk space >80%, cleaning old caches..."
+            find /tmp/runner-cache -maxdepth 2 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+            echo "🔍 DEBUG: Disk space after cleanup:"
+            df -h
+          fi
+
+      - uses: actions/checkout@v4
+      
+      - name: Checkout bllvm-protocol dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-protocol
+          path: _temp-protocol-engine
+      
+      - name: Checkout bllvm-consensus dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-consensus
+          path: _temp-consensus-proof
+      
+      - name: Move dependencies to parent directory
+        run: |
+          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+          mv _temp-protocol-engine ../bllvm-protocol
+          mv _temp-consensus-proof ../bllvm-consensus
+      
+      - name: Setup local cache system
+        id: setup-cache
+        run: |
+          CACHE_ROOT="/tmp/runner-cache"
+          
+          # Generate cache keys from Cargo.lock hashes
+          DEPS_KEY=$(sha256sum Cargo.lock | cut -d' ' -f1)
+          CONSENSUS_DEPS_KEY=$(sha256sum ../bllvm-consensus/Cargo.lock | cut -d' ' -f1)
+          PROTOCOL_DEPS_KEY=$(sha256sum ../bllvm-protocol/Cargo.lock | cut -d' ' -f1)
+          
+          # Include toolchain version in cache key
+          TOOLCHAIN=$(grep -E '^channel|rust-version' rust-toolchain.toml Cargo.toml 2>/dev/null | head -1 | sha256sum | cut -d' ' -f1 || echo "1.88.0")
+          
+          CACHE_KEY="${DEPS_KEY}-${TOOLCHAIN}"
+          CONSENSUS_CACHE_KEY="${CONSENSUS_DEPS_KEY}-${TOOLCHAIN}"
+          PROTOCOL_CACHE_KEY="${PROTOCOL_DEPS_KEY}-${TOOLCHAIN}"
+          
+          # Set up cache directories
+          CARGO_CACHE_DIR="$CACHE_ROOT/cargo/$CACHE_KEY"
+          TARGET_CACHE_DIR="$CACHE_ROOT/target/$CACHE_KEY"
+          CONSENSUS_TARGET_DIR="$CACHE_ROOT/bllvm-consensus-target/$CONSENSUS_CACHE_KEY"
+          PROTOCOL_TARGET_DIR="$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY"
+          
+          echo "CARGO_CACHE_DIR=$CARGO_CACHE_DIR" >> $GITHUB_ENV
+          echo "TARGET_CACHE_DIR=$TARGET_CACHE_DIR" >> $GITHUB_ENV
+          echo "CONSENSUS_TARGET_DIR=$CONSENSUS_TARGET_DIR" >> $GITHUB_ENV
+          echo "PROTOCOL_TARGET_DIR=$PROTOCOL_TARGET_DIR" >> $GITHUB_ENV
+          
+          echo "cache-key=$CACHE_KEY" >> $GITHUB_OUTPUT
+          echo "consensus-cache-key=$CONSENSUS_CACHE_KEY" >> $GITHUB_OUTPUT
+          echo "protocol-cache-key=$PROTOCOL_CACHE_KEY" >> $GITHUB_OUTPUT
+          
+          mkdir -p "$CARGO_CACHE_DIR"/{registry,git} "$TARGET_CACHE_DIR" "$CONSENSUS_TARGET_DIR" "$PROTOCOL_TARGET_DIR"
+          
+          echo "🔍 DEBUG: Cache setup complete"
+          echo "🔍 DEBUG: Cache keys:"
+          echo "  - Main: ${CACHE_KEY:0:16}..."
+          echo "  - Consensus: ${CONSENSUS_CACHE_KEY:0:16}..."
+          echo "  - Protocol: ${PROTOCOL_CACHE_KEY:0:16}..."
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+
   test:
     name: Test
+    needs: setup
     runs-on: [self-hosted, linux, x64]
     steps:
-    - uses: actions/checkout@v4
-    - name: Checkout bllvm-protocol dependency
-      uses: actions/checkout@v4
-      with:
-        repository: BTCDecoded/bllvm-protocol
-        path: _temp-protocol-engine
-    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
-      uses: actions/checkout@v4
-      with:
-        repository: BTCDecoded/bllvm-consensus
-        path: _temp-consensus-proof
-    - name: Move dependencies to parent directory
-      run: |
-        if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
-        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
-        mv _temp-protocol-engine ../bllvm-protocol
-        mv _temp-consensus-proof ../bllvm-consensus
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: 1.88.0
-    - name: Cache cargo registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo index
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo build
-      uses: actions/cache@v3
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run tests
-      run: cargo test --verbose --all-features
-    - name: Run tests with coverage
-      run: |
-        cargo install cargo-tarpaulin --version 0.27.0
-        cargo tarpaulin --out xml --output-dir coverage
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: coverage/cobertura.xml
+      - uses: actions/checkout@v4
+      
+      - name: Checkout bllvm-protocol dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-protocol
+          path: _temp-protocol-engine
+      
+      - name: Checkout bllvm-consensus dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-consensus
+          path: _temp-consensus-proof
+      
+      - name: Move dependencies to parent directory
+        run: |
+          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+          mv _temp-protocol-engine ../bllvm-protocol
+          mv _temp-consensus-proof ../bllvm-consensus
+      
+      - name: Setup cache environment
+        run: |
+          CACHE_ROOT="/tmp/runner-cache"
+          CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
+          CONSENSUS_CACHE_KEY="${{ needs.setup.outputs.consensus-cache-key }}"
+          PROTOCOL_CACHE_KEY="${{ needs.setup.outputs.protocol-cache-key }}"
+          
+          echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
+          echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
+          echo "CONSENSUS_TARGET_DIR=$CACHE_ROOT/bllvm-consensus-target/$CONSENSUS_CACHE_KEY" >> $GITHUB_ENV
+          echo "PROTOCOL_TARGET_DIR=$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY" >> $GITHUB_ENV
+      
+      - name: Restore Cargo registry cache
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
+            echo "🚀 Restoring Cargo registry from local cache..."
+            mkdir -p "$HOME/.cargo/registry"
+            rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
+            echo "✅ Cargo registry restored (size: $(du -sh $HOME/.cargo/registry 2>/dev/null | cut -f1 || echo 'N/A'))"
+          else
+            echo "💿 No Cargo registry cache found"
+          fi
+      
+      - name: Restore Cargo git cache
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
+            echo "🚀 Restoring Cargo git cache from local cache..."
+            mkdir -p "$HOME/.cargo/git"
+            rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
+            echo "✅ Cargo git cache restored"
+          else
+            echo "💿 No Cargo git cache found"
+          fi
+      
+      - name: Restore bllvm-consensus build artifacts
+        run: |
+          if [ -d "$CONSENSUS_TARGET_DIR" ] && [ "$(ls -A $CONSENSUS_TARGET_DIR 2>/dev/null)" ]; then
+            echo "🚀 Restoring bllvm-consensus target from cache..."
+            mkdir -p ../bllvm-consensus/target
+            rsync -a --delete "$CONSENSUS_TARGET_DIR/" ../bllvm-consensus/target/ || true
+            echo "✅ bllvm-consensus target restored (size: $(du -sh ../bllvm-consensus/target 2>/dev/null | cut -f1 || echo 'N/A'))"
+          else
+            echo "💿 No bllvm-consensus target cache found"
+          fi
+      
+      - name: Restore bllvm-protocol build artifacts
+        run: |
+          if [ -d "$PROTOCOL_TARGET_DIR" ] && [ "$(ls -A $PROTOCOL_TARGET_DIR 2>/dev/null)" ]; then
+            echo "🚀 Restoring bllvm-protocol target from cache..."
+            mkdir -p ../bllvm-protocol/target
+            rsync -a --delete "$PROTOCOL_TARGET_DIR/" ../bllvm-protocol/target/ || true
+            echo "✅ bllvm-protocol target restored (size: $(du -sh ../bllvm-protocol/target 2>/dev/null | cut -f1 || echo 'N/A'))"
+          else
+            echo "💿 No bllvm-protocol target cache found"
+          fi
+      
+      - name: Restore target directory cache
+        run: |
+          if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
+            echo "🚀 Restoring target directory from local cache..."
+            rsync -a --delete "$TARGET_CACHE_DIR/" ./target/ || true
+            echo "✅ Target directory restored (size: $(du -sh ./target 2>/dev/null | cut -f1 || echo 'N/A'))"
+          else
+            echo "💿 No target cache found, will build from scratch"
+          fi
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      
+      - name: Run tests
+        run: cargo test --verbose --all-features
+      
+      - name: Cache Cargo registry
+        if: always()
+        run: |
+          if [ -d "$HOME/.cargo/registry" ] && [ "$CARGO_CACHE_DIR" != "" ]; then
+            echo "💾 Caching Cargo registry..."
+            rsync -a --delete "$HOME/.cargo/registry/" "$CARGO_CACHE_DIR/registry/" || true
+            echo "✅ Cargo registry cached"
+          fi
+      
+      - name: Cache Cargo git
+        if: always()
+        run: |
+          if [ -d "$HOME/.cargo/git" ] && [ "$CARGO_CACHE_DIR" != "" ]; then
+            echo "💾 Caching Cargo git cache..."
+            rsync -a --delete "$HOME/.cargo/git/" "$CARGO_CACHE_DIR/git/" || true
+            echo "✅ Cargo git cache saved"
+          fi
+      
+      - name: Cache bllvm-consensus build artifacts
+        if: always()
+        run: |
+          if [ -d "../bllvm-consensus/target" ] && [ "$CONSENSUS_TARGET_DIR" != "" ]; then
+            echo "💾 Caching bllvm-consensus target..."
+            rsync -a --delete ../bllvm-consensus/target/ "$CONSENSUS_TARGET_DIR/" || true
+            echo "✅ bllvm-consensus target cached"
+          fi
+      
+      - name: Cache bllvm-protocol build artifacts
+        if: always()
+        run: |
+          if [ -d "../bllvm-protocol/target" ] && [ "$PROTOCOL_TARGET_DIR" != "" ]; then
+            echo "💾 Caching bllvm-protocol target..."
+            rsync -a --delete ../bllvm-protocol/target/ "$PROTOCOL_TARGET_DIR/" || true
+            echo "✅ bllvm-protocol target cached"
+          fi
+      
+      - name: Cache target directory
+        if: always()
+        run: |
+          if [ -d "./target" ] && [ "$TARGET_CACHE_DIR" != "" ]; then
+            echo "💾 Caching target directory..."
+            rsync -a --delete ./target/ "$TARGET_CACHE_DIR/" || true
+            echo "✅ Target directory cached"
+          fi
+      
+      - name: Run tests with coverage
+        run: |
+          cargo install cargo-tarpaulin --version 0.27.0
+          cargo tarpaulin --out xml --output-dir coverage
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: coverage/cobertura.xml
+      
+      - name: Cache cleanup management
+        if: always()
+        run: |
+          echo "🧹 Cleaning up old caches..."
+          CACHE_ROOT="/tmp/runner-cache"
+          # Keep last 5 Cargo caches
+          find "$CACHE_ROOT/cargo" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -5 | xargs rm -rf 2>/dev/null || true
+          # Keep last 3 target caches (larger)
+          find "$CACHE_ROOT/target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
+          find "$CACHE_ROOT/bllvm-consensus-target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
+          find "$CACHE_ROOT/bllvm-protocol-target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
+          echo "✅ Cache cleanup completed"
 
   clippy:
     name: Clippy
+    needs: setup
     runs-on: [self-hosted, linux, x64]
     steps:
-    - uses: actions/checkout@v4
-    - name: Checkout bllvm-protocol dependency
-      uses: actions/checkout@v4
-      with:
-        repository: BTCDecoded/bllvm-protocol
-        path: _temp-protocol-engine
-    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
-      uses: actions/checkout@v4
-      with:
-        repository: BTCDecoded/bllvm-consensus
-        path: _temp-consensus-proof
-    - name: Move dependencies to parent directory
-      run: |
-        if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
-        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
-        mv _temp-protocol-engine ../bllvm-protocol
-        mv _temp-consensus-proof ../bllvm-consensus
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: 1.88.0
-        components: clippy
-    - name: Cache cargo registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo index
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo build
-      uses: actions/cache@v3
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run clippy
-      run: cargo clippy -- -D warnings
+      - uses: actions/checkout@v4
+      
+      - name: Checkout bllvm-protocol dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-protocol
+          path: _temp-protocol-engine
+      
+      - name: Checkout bllvm-consensus dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-consensus
+          path: _temp-consensus-proof
+      
+      - name: Move dependencies to parent directory
+        run: |
+          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+          mv _temp-protocol-engine ../bllvm-protocol
+          mv _temp-consensus-proof ../bllvm-consensus
+      
+      - name: Setup cache environment
+        run: |
+          CACHE_ROOT="/tmp/runner-cache"
+          CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
+          echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
+          echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
+      
+      - name: Restore Cargo registry cache
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/registry"
+            rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
+          fi
+      
+      - name: Restore Cargo git cache
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/git"
+            rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
+          fi
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+          components: clippy
+      
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
 
   fmt:
     name: Rustfmt
+    needs: setup
     runs-on: [self-hosted, linux, x64]
     steps:
-    - uses: actions/checkout@v4
-    - name: Checkout bllvm-protocol dependency
-      uses: actions/checkout@v4
-      with:
-        repository: BTCDecoded/bllvm-protocol
-        path: _temp-protocol-engine
-    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
-      uses: actions/checkout@v4
-      with:
-        repository: BTCDecoded/bllvm-consensus
-        path: _temp-consensus-proof
-    - name: Move dependencies to parent directory
-      run: |
-        if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
-        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
-        mv _temp-protocol-engine ../bllvm-protocol
-        mv _temp-consensus-proof ../bllvm-consensus
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: 1.88.0
-        components: rustfmt
-    - name: Check formatting
-      run: cargo fmt -- --check
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+          components: rustfmt
+      
+      - name: Check formatting
+        run: cargo fmt -- --check
 
   docs:
     name: Documentation
+    needs: setup
     runs-on: [self-hosted, linux, x64]
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: 1.88.0
-    - name: Cache cargo registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo index
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo build
-      uses: actions/cache@v3
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-    - name: Build docs
-      run: cargo doc --no-deps
-    - name: Check docs
-      run: cargo doc --no-deps --document-private-items
+      - uses: actions/checkout@v4
+      
+      - name: Setup cache environment
+        run: |
+          CACHE_ROOT="/tmp/runner-cache"
+          CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
+          echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
+      
+      - name: Restore Cargo registry cache
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/registry"
+            rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
+          fi
+      
+      - name: Restore Cargo git cache
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/git"
+            rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
+          fi
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      
+      - name: Build docs
+        run: cargo doc --no-deps
+      
+      - name: Check docs
+        run: cargo doc --no-deps --document-private-items
 
   security:
     name: Security Audit
     runs-on: [self-hosted, linux, x64]
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: 1.88.0
-    - name: Install cargo-audit
-      run: cargo install cargo-audit --version 0.20.0
-    - name: Run security audit
-      run: cargo audit
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.20.0
+      
+      - name: Run security audit
+        run: cargo audit
 
   build:
     name: Build
+    needs: setup
     runs-on: [self-hosted, linux, x64]
     steps:
-    - uses: actions/checkout@v4
-    - name: Checkout bllvm-protocol dependency
-      uses: actions/checkout@v4
-      with:
-        repository: BTCDecoded/bllvm-protocol
-        path: _temp-protocol-engine
-        persist-credentials: false
-    - name: Checkout bllvm-consensus dependency (for bllvm-protocol)
-      uses: actions/checkout@v4
-      with:
-        repository: BTCDecoded/bllvm-consensus
-        path: _temp-consensus-proof
-        persist-credentials: false
-    - name: Move dependencies to parent directory
-      run: |
-        if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
-        if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
-        mv _temp-protocol-engine ../bllvm-protocol
-        mv _temp-consensus-proof ../bllvm-consensus
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: 1.88.0
-    - name: Cache cargo registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo index
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-    - name: Restore bllvm-consensus build artifacts
-      uses: actions/cache@v3
-      with:
-        path: ../bllvm-consensus/target
-        key: bllvm-consensus-${{ runner.os }}-target
-        restore-keys: |
-          bllvm-consensus-${{ runner.os }}-target-
-    - name: Restore bllvm-protocol build artifacts
-      uses: actions/cache@v3
-      with:
-        path: ../bllvm-protocol/target
-        key: bllvm-protocol-${{ runner.os }}-target
-        restore-keys: |
-          bllvm-protocol-${{ runner.os }}-target-
-    - name: Cache reference-node build
-      uses: actions/cache@v3
-      with:
-        path: target
-        key: bllvm-node-${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-    - name: Build
-      run: cargo build --release
-    - name: Build tests
-      run: cargo test --no-run --release --all-features
+      - uses: actions/checkout@v4
+      
+      - name: Checkout bllvm-protocol dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-protocol
+          path: _temp-protocol-engine
+      
+      - name: Checkout bllvm-consensus dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-consensus
+          path: _temp-consensus-proof
+      
+      - name: Move dependencies to parent directory
+        run: |
+          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+          mv _temp-protocol-engine ../bllvm-protocol
+          mv _temp-consensus-proof ../bllvm-consensus
+      
+      - name: Setup cache environment
+        run: |
+          CACHE_ROOT="/tmp/runner-cache"
+          CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
+          CONSENSUS_CACHE_KEY="${{ needs.setup.outputs.consensus-cache-key }}"
+          PROTOCOL_CACHE_KEY="${{ needs.setup.outputs.protocol-cache-key }}"
+          
+          echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
+          echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
+          echo "CONSENSUS_TARGET_DIR=$CACHE_ROOT/bllvm-consensus-target/$CONSENSUS_CACHE_KEY" >> $GITHUB_ENV
+          echo "PROTOCOL_TARGET_DIR=$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY" >> $GITHUB_ENV
+      
+      - name: Restore Cargo registry cache
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/registry"
+            rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
+          fi
+      
+      - name: Restore Cargo git cache
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/git"
+            rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
+          fi
+      
+      - name: Restore bllvm-consensus build artifacts
+        run: |
+          if [ -d "$CONSENSUS_TARGET_DIR" ] && [ "$(ls -A $CONSENSUS_TARGET_DIR 2>/dev/null)" ]; then
+            mkdir -p ../bllvm-consensus/target
+            rsync -a --delete "$CONSENSUS_TARGET_DIR/" ../bllvm-consensus/target/ || true
+          fi
+      
+      - name: Restore bllvm-protocol build artifacts
+        run: |
+          if [ -d "$PROTOCOL_TARGET_DIR" ] && [ "$(ls -A $PROTOCOL_TARGET_DIR 2>/dev/null)" ]; then
+            mkdir -p ../bllvm-protocol/target
+            rsync -a --delete "$PROTOCOL_TARGET_DIR/" ../bllvm-protocol/target/ || true
+          fi
+      
+      - name: Restore target directory cache
+        run: |
+          if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
+            rsync -a --delete "$TARGET_CACHE_DIR/" ./target/ || true
+          fi
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      
+      - name: Build
+        run: cargo build --release
+      
+      - name: Build tests
+        run: cargo test --no-run --release --all-features
+      
+      - name: Cache bllvm-consensus build artifacts
+        if: always()
+        run: |
+          if [ -d "../bllvm-consensus/target" ] && [ "$CONSENSUS_TARGET_DIR" != "" ]; then
+            rsync -a --delete ../bllvm-consensus/target/ "$CONSENSUS_TARGET_DIR/" || true
+          fi
+      
+      - name: Cache bllvm-protocol build artifacts
+        if: always()
+        run: |
+          if [ -d "../bllvm-protocol/target" ] && [ "$PROTOCOL_TARGET_DIR" != "" ]; then
+            rsync -a --delete ../bllvm-protocol/target/ "$PROTOCOL_TARGET_DIR/" || true
+          fi
+      
+      - name: Cache target directory
+        if: always()
+        run: |
+          if [ -d "./target" ] && [ "$TARGET_CACHE_DIR" != "" ]; then
+            rsync -a --delete ./target/ "$TARGET_CACHE_DIR/" || true
+          fi
 

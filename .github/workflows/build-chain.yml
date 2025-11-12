@@ -1,0 +1,42 @@
+name: Build Chain Trigger
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  release:
+    types: [published]
+  repository_dispatch:
+    types: [build-chain]
+  workflow_dispatch:
+
+jobs:
+  trigger-downstream:
+    name: Trigger Downstream Builds
+    runs-on: [self-hosted, linux, x64]
+    if: github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'repository_dispatch'
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Determine version/tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          elif [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+            VERSION="${{ github.event.client_payload.version || github.ref_name }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Triggering downstream builds with version: ${VERSION}"
+      
+      - name: Note - bllvm-node is end of chain
+        run: |
+          echo "ℹ️ bllvm-node is the final repository in the build chain"
+          echo "No downstream repositories to trigger"
+

@@ -34,15 +34,17 @@ pub struct ParallelBlockValidator {
     max_parallel_depth: usize,
 }
 
+impl Default for ParallelBlockValidator {
+    /// Default validator (conservative: only validate blocks >100 deep in parallel)
+    fn default() -> Self {
+        Self::new(100)
+    }
+}
+
 impl ParallelBlockValidator {
     /// Create a new parallel block validator
     pub fn new(max_parallel_depth: usize) -> Self {
         Self { max_parallel_depth }
-    }
-
-    /// Default validator (conservative: only validate blocks >100 deep in parallel)
-    pub fn default() -> Self {
-        Self::new(100)
     }
 
     /// Validate a single block (sequential)
