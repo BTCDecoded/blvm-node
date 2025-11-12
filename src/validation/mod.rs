@@ -178,12 +178,6 @@ pub struct BlockValidationResult {
     pub validation_time_ms: u64,
 }
 
-impl Default for ParallelBlockValidator {
-    fn default() -> Self {
-        Self::new(100) // Default: validate blocks >100 deep in parallel
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
