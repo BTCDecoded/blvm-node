@@ -166,7 +166,7 @@ impl ChainState {
 
         // Work = MAX_TARGET / (target + 1)
         // Use u64::MAX as approximation for MAX_TARGET
-        if target == 0 || target >= u64::MAX {
+        if target == 0 || target == u64::MAX {
             return 1; // Minimum work
         }
 
