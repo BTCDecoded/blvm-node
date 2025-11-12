@@ -12,6 +12,9 @@ keywords = ["bitcoin", "node", "blockchain", "cryptocurrency", "p2p"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
 rust-version = "1.82"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -119,6 +122,13 @@ libc = ["dep:libc"]
 production = ["bllvm-protocol/production", "dep:rayon"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF
 dandelion = []
+
+# Formal verification (Kani model checking) - verification only, not in release builds
+verify = ["kani-verifier"]
+
+[dependencies.kani-verifier]
+version = "=0.41.0"
+optional = true
 
 [dev-dependencies]
 tempfile = "=3.8.1"

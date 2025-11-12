@@ -125,7 +125,7 @@ pub enum ProtocolMessage {
 }
 
 /// Version message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionMessage {
     pub version: i32,
     pub services: u64,
@@ -182,13 +182,13 @@ pub struct NetworkAddress {
 }
 
 /// Ping message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PingMessage {
     pub nonce: u64,
 }
 
 /// Pong message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PongMessage {
     pub nonce: u64,
 }
@@ -783,7 +783,10 @@ impl ProtocolParser {
     }
 
     /// Calculate message checksum
-    fn calculate_checksum(payload: &[u8]) -> [u8; 4] {
+    ///
+    /// Computes double SHA256 of payload and returns first 4 bytes.
+    /// Made public for formal verification purposes.
+    pub fn calculate_checksum(payload: &[u8]) -> [u8; 4] {
         use sha2::{Digest, Sha256};
 
         let hash1 = Sha256::digest(payload);

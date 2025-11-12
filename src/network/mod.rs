@@ -13,8 +13,12 @@ pub mod inventory;
 pub mod message_bridge;
 pub mod peer;
 pub mod protocol;
+#[cfg(kani)]
+pub mod protocol_proofs;
 pub mod protocol_adapter;
 pub mod protocol_extensions;
+#[cfg(kani)]
+pub mod kani_helpers;
 pub mod relay;
 pub mod tcp_transport;
 pub mod transport;
