@@ -83,30 +83,27 @@ impl ControlRpc {
     ///
     /// Params: [] (no parameters)
     pub async fn uptime(&self, _params: &Value) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: uptime");
 
         use std::time::Duration;
 
-        
         // Avoids repeated elapsed() calls and reduces JSON serialization overhead
         thread_local! {
-            static CACHED_UPTIME: std::cell::Cell<(u64, Instant)> = 
+            static CACHED_UPTIME: std::cell::Cell<(u64, Instant)> =
                 std::cell::Cell::new((0, Instant::now()));
         }
 
         let start_time = self.start_time;
         let cached = CACHED_UPTIME.with(|c| c.get());
-        
+
         // Update cache if >100ms old
         if cached.1.elapsed() >= Duration::from_millis(100) {
             let uptime = start_time.elapsed().as_secs();
             CACHED_UPTIME.with(|c| c.set((uptime, Instant::now())));
-            
+
             Ok(Value::Number(Number::from(uptime)))
         } else {
-            
             Ok(Value::Number(Number::from(cached.0)))
         }
     }
@@ -115,7 +112,6 @@ impl ControlRpc {
     ///
     /// Params: ["mode"] (optional, "stats" or "mallocinfo", default: "stats")
     pub async fn getmemoryinfo(&self, params: &Value) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getmemoryinfo");
 
@@ -126,11 +122,10 @@ impl ControlRpc {
                 // Get system memory information
                 #[cfg(feature = "sysinfo")]
                 {
-                    use sysinfo::System;
                     use std::sync::Mutex;
                     use std::time::Duration;
+                    use sysinfo::System;
 
-                    
                     // Use thread_local for better performance (no mutex contention)
                     thread_local! {
                         static CACHED_SYSTEM: std::cell::RefCell<(System, Instant, Value)> = {
@@ -156,8 +151,7 @@ impl ControlRpc {
                     CACHED_SYSTEM.with(|cache| {
                         let mut cache = cache.borrow_mut();
                         let (ref mut system, ref mut last_refresh, ref mut cached_value) = *cache;
-                        
-                        
+
                         // Memory stats don't need millisecond accuracy, 5s is fine
                         if last_refresh.elapsed() >= Duration::from_secs(5) {
                             system.refresh_memory();
@@ -216,11 +210,9 @@ impl ControlRpc {
     ///
     /// Params: [] (no parameters)
     pub async fn getrpcinfo(&self, _params: &Value) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getrpcinfo");
 
-        
         // Zero allocation on hot path
         const ACTIVE_COMMANDS: &[&str] = &[
             "getblockchaininfo",
@@ -264,15 +256,16 @@ impl ControlRpc {
             "logging",
         ];
 
-        
         use std::sync::OnceLock;
         static RPC_INFO_VALUE: OnceLock<Value> = OnceLock::new();
-        Ok(RPC_INFO_VALUE.get_or_init(|| {
-            json!({
-                "active_commands": ACTIVE_COMMANDS,
-                "logpath": ""
+        Ok(RPC_INFO_VALUE
+            .get_or_init(|| {
+                json!({
+                    "active_commands": ACTIVE_COMMANDS,
+                    "logpath": ""
+                })
             })
-        }).clone())
+            .clone())
     }
 
     /// List available RPC methods

@@ -391,12 +391,13 @@ impl Node {
 
                         // Get block hash for cache updates
                         let blocks_arc = self.storage.blocks();
-                        let block_hash = if let Ok(Some(hash)) = blocks_arc.get_hash_by_height(current_height) {
-                            hash
-                        } else {
-                            warn!("Failed to get block hash for height {}", current_height);
-                            [0u8; 32]
-                        };
+                        let block_hash =
+                            if let Ok(Some(hash)) = blocks_arc.get_hash_by_height(current_height) {
+                                hash
+                            } else {
+                                warn!("Failed to get block hash for height {}", current_height);
+                                [0u8; 32]
+                            };
 
                         // Update chain tip (for chainwork, etc.)
                         if let Ok(Some(block)) = blocks_arc.get_block(&block_hash) {
@@ -409,7 +410,8 @@ impl Node {
                             }
 
                             // Update UTXO stats cache (for fast gettxoutsetinfo RPC)
-                            let transaction_count = self.storage.transaction_count().unwrap_or(0) as u64;
+                            let transaction_count =
+                                self.storage.transaction_count().unwrap_or(0) as u64;
                             if let Err(e) = self.storage.chain().update_utxo_stats_cache(
                                 &block_hash,
                                 current_height,
@@ -420,10 +422,11 @@ impl Node {
                             }
 
                             // Update network hashrate cache (for fast getmininginfo RPC)
-                            if let Err(e) = self.storage.chain().calculate_and_cache_network_hashrate(
-                                current_height,
-                                &*blocks_arc,
-                            ) {
+                            if let Err(e) = self
+                                .storage
+                                .chain()
+                                .calculate_and_cache_network_hashrate(current_height, &*blocks_arc)
+                            {
                                 warn!("Failed to update network hashrate cache: {}", e);
                             }
                         }

@@ -484,7 +484,6 @@ impl RawTxRpc {
                     "coinbase": false
                 }))
             } else {
-                
                 Ok(Value::Null)
             }
         } else {
@@ -718,15 +717,8 @@ impl RawTxRpc {
 
             if let Ok(Some(block)) = storage.blocks().get_block(&blockhash_array) {
                 // Calculate merkle root from block
-                
-                // Use cached_hash if available, otherwise compute (but don't clone vector)
-                use bllvm_protocol::mining::compute_merkle_root_from_hashes;
-                let hashes: Vec<_> = block.transactions.iter().map(|tx| {
-                    tx.cached_hash.unwrap_or_else(|| {
-                        bllvm_protocol::block::calculate_tx_id(tx)
-                    })
-                }).collect();
-                let calculated_root = compute_merkle_root_from_hashes(hashes).map_err(|e| {
+                use bllvm_protocol::mining::calculate_merkle_root;
+                let calculated_root = calculate_merkle_root(&block.transactions).map_err(|e| {
                     RpcError::internal_error(format!("Failed to calculate merkle root: {e}"))
                 })?;
 

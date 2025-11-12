@@ -50,13 +50,11 @@ impl MiningRpc {
 
     /// Get mining information
     pub async fn get_mining_info(&self) -> RpcResult<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getmininginfo");
 
         use std::time::{Duration, Instant};
-        
-        
+
         // This avoids multiple storage lookups for height, tip_header, chain_info
         thread_local! {
             static CACHED_MINING_INFO: std::cell::RefCell<(Option<Value>, Instant, Option<u64>)> = {
@@ -73,7 +71,7 @@ impl MiningRpc {
 
         let should_refresh = CACHED_MINING_INFO.with(|cache| {
             let cache = cache.borrow();
-            cache.0.is_none() 
+            cache.0.is_none()
                 || cache.1.elapsed() >= Duration::from_secs(1)
                 || cache.2 != Some(current_height)
         });
@@ -110,7 +108,6 @@ impl MiningRpc {
                 1.0 // Graceful fallback if no storage
             };
 
-            
             let networkhashps = if let Some(ref storage) = self.storage {
                 // Try cached hashrate first (O(1) lookup)
                 if let Ok(Some(cached_hashrate)) = storage.chain().get_network_hashrate() {

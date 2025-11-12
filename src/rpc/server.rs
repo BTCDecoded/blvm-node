@@ -296,32 +296,32 @@ impl RpcServer {
             Ok(req) => req,
             Err(e) => {
                 let err = errors::RpcError::parse_error(format!("Invalid JSON: {e}"));
-                return serde_json::to_string(&err.to_json(None)).unwrap_or_else(|_| "{}".to_string());
+                return serde_json::to_string(&err.to_json(None))
+                    .unwrap_or_else(|_| "{}".to_string());
             }
         };
 
         let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
-        static EMPTY_PARAMS: Value = json!([]);
-        let params = request.get("params").unwrap_or(&EMPTY_PARAMS);
+        let params = request.get("params").cloned().unwrap_or_else(|| json!([]));
         let id = request.get("id");
 
         let result = server.call_method(method, params).await;
 
         match result {
             Ok(response) => {
-                let response_str = serde_json::to_string(&response).unwrap_or_else(|_| "null".to_string());
+                let response_str =
+                    serde_json::to_string(&response).unwrap_or_else(|_| "null".to_string());
                 let id_str = match id {
-                    Some(id_val) => serde_json::to_string(id_val).unwrap_or_else(|_| "null".to_string()),
+                    Some(id_val) => {
+                        serde_json::to_string(id_val).unwrap_or_else(|_| "null".to_string())
+                    }
                     None => "null".to_string(),
                 };
-                let mut result = String::with_capacity(response_str.len() + id_str.len() + 20);
-                result.push_str(r#"{"jsonrpc":"2.0","result":"#);
-                result.push_str(&response_str);
-                result.push_str(r#","id":"#);
-                result.push_str(&id_str);
-                result.push('}');
-                result
+                format!(
+                    r#"{{"jsonrpc":"2.0","result":{},"id":{}}}"#,
+                    response_str, id_str
+                )
             }
             Err(e) => {
                 serde_json::to_string(&e.to_json(id.cloned())).unwrap_or_else(|_| "{}".to_string())
@@ -330,7 +330,7 @@ impl RpcServer {
     }
 
     /// Call a specific RPC method
-    async fn call_method(&self, method: &str, params: &Value) -> Result<Value, errors::RpcError> {
+    async fn call_method(&self, method: &str, params: Value) -> Result<Value, errors::RpcError> {
         match method {
             // Blockchain methods
             "getblockchaininfo" => self

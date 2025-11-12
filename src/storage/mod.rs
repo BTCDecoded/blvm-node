@@ -5,21 +5,21 @@
 
 pub mod blockstore;
 pub mod chainstate;
+#[cfg(kani)]
+pub mod chainstate_proofs;
 #[cfg(feature = "utxo-commitments")]
 pub mod commitment_store;
+#[cfg(kani)]
+pub mod cryptographic_proofs;
 pub mod database;
+pub mod hashing;
 #[cfg(kani)]
 pub mod kani_helpers;
-pub mod hashing;
 pub mod pruning;
 pub mod txindex;
 pub mod utxostore;
 #[cfg(kani)]
 pub mod utxostore_proofs;
-#[cfg(kani)]
-pub mod chainstate_proofs;
-#[cfg(kani)]
-pub mod cryptographic_proofs;
 
 use crate::config::PruningConfig;
 use anyhow::Result;
