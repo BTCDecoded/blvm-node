@@ -1030,6 +1030,7 @@ impl NetworkManager {
                                         use crate::network::transport::TransportAddr;
                                         
                                         let quinn_addr = TransportAddr::Quinn(socket_addr);
+                                        let quinn_addr_clone = quinn_addr.clone();
                                         let peer = peer::Peer::from_transport_connection(
                                             conn,
                                             socket_addr,
@@ -1040,9 +1041,9 @@ impl NetworkManager {
                                         // Add peer to manager (with graceful error handling)
                                         match peer_manager_clone.lock() {
                                             Ok(mut pm) => {
-                                                if let Err(e) = pm.add_peer(quinn_addr.clone(), peer) {
+                                                if let Err(e) = pm.add_peer(quinn_addr_clone.clone(), peer) {
                                                     warn!("Failed to add Quinn peer {}: {}", socket_addr, e);
-                                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(quinn_addr.clone()));
+                                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(quinn_addr_clone.clone()));
                                                     return;
                                                 }
                                                 info!("Successfully added Quinn peer {}", socket_addr);
