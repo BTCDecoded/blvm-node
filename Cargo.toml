@@ -56,6 +56,8 @@ siphasher = "=0.3"
 
 # Random number generation for Dandelion++
 rand = "=0.8.5"
+# For iroh SecretKey generation in tests (avoids RNG version conflicts)
+getrandom = "0.2"
 
 # Address encoding (BIP173/350/351)
 bech32 = "=0.9"

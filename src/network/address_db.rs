@@ -629,12 +629,13 @@ mod tests {
     #[test]
     fn test_add_iroh_address() {
         use iroh::{SecretKey, PublicKey};
-        use rand::rngs::OsRng;
+        use getrandom::getrandom;
         let mut db = AddressDatabase::new(100);
 
-        // Generate a valid Ed25519 key for testing
-        let mut rng = OsRng;
-        let secret_key = SecretKey::generate(&mut rng);
+        // Generate a valid Ed25519 key for testing using getrandom to avoid RNG version conflicts
+        let mut bytes = [0u8; 32];
+        getrandom(&mut bytes).unwrap();
+        let secret_key = SecretKey::from_bytes(&bytes);
         let public_key = secret_key.public();
 
         db.add_iroh_address(public_key, 1);
@@ -649,13 +650,16 @@ mod tests {
     #[test]
     fn test_get_fresh_iroh_addresses() {
         use iroh::{SecretKey, PublicKey};
-        use rand::rngs::OsRng;
+        use getrandom::getrandom;
         let mut db = AddressDatabase::new(100);
 
-        // Generate valid Ed25519 keys for testing
-        let mut rng = OsRng;
-        let secret_key1 = SecretKey::generate(&mut rng);
-        let secret_key2 = SecretKey::generate(&mut rng);
+        // Generate valid Ed25519 keys for testing using getrandom to avoid RNG version conflicts
+        let mut bytes1 = [0u8; 32];
+        let mut bytes2 = [0u8; 32];
+        getrandom(&mut bytes1).unwrap();
+        getrandom(&mut bytes2).unwrap();
+        let secret_key1 = SecretKey::from_bytes(&bytes1);
+        let secret_key2 = SecretKey::from_bytes(&bytes2);
         let public_key1 = secret_key1.public();
         let public_key2 = secret_key2.public();
 
