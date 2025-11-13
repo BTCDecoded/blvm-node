@@ -629,11 +629,11 @@ mod tests {
     #[test]
     fn test_add_iroh_address() {
         use iroh::{SecretKey, PublicKey};
-        use rand::thread_rng;
+        use rand::rngs::OsRng;
         let mut db = AddressDatabase::new(100);
 
         // Generate a valid Ed25519 key for testing
-        let mut rng = thread_rng();
+        let mut rng = OsRng;
         let secret_key = SecretKey::generate(&mut rng);
         let public_key = secret_key.public();
 
@@ -649,11 +649,11 @@ mod tests {
     #[test]
     fn test_get_fresh_iroh_addresses() {
         use iroh::{SecretKey, PublicKey};
-        use rand::thread_rng;
+        use rand::rngs::OsRng;
         let mut db = AddressDatabase::new(100);
 
         // Generate valid Ed25519 keys for testing
-        let mut rng = thread_rng();
+        let mut rng = OsRng;
         let secret_key1 = SecretKey::generate(&mut rng);
         let secret_key2 = SecretKey::generate(&mut rng);
         let public_key1 = secret_key1.public();

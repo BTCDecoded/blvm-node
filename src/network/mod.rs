@@ -1050,7 +1050,7 @@ impl NetworkManager {
                                             }
                                             Err(e) => {
                                                 warn!("Failed to lock peer manager for Quinn peer {}: {}", socket_addr, e);
-                                                let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(quinn_addr.clone()));
+                                                let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(quinn_addr_clone.clone()));
                                                 return;
                                             }
                                         }
