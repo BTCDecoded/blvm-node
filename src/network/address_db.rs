@@ -11,7 +11,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "iroh")]
-use iroh_net::NodeId;
+use iroh::PublicKey;
 
 /// Get current Unix timestamp in seconds
 ///
@@ -68,9 +68,9 @@ impl AddressEntry {
 pub struct AddressDatabase {
     /// Map from SocketAddr to AddressEntry (for TCP/Quinn)
     addresses: HashMap<SocketAddr, AddressEntry>,
-    /// Map from Iroh NodeId to AddressEntry (for Iroh peers)
+    /// Map from Iroh PublicKey to AddressEntry (for Iroh peers)
     #[cfg(feature = "iroh")]
-    iroh_addresses: HashMap<NodeId, AddressEntry>,
+    iroh_addresses: HashMap<PublicKey, AddressEntry>,
     /// Maximum number of addresses to store (total across both maps)
     max_addresses: usize,
     /// Address expiration time in seconds (default: 24 hours)
@@ -224,10 +224,10 @@ impl AddressDatabase {
             .collect()
     }
 
-    /// Add an Iroh NodeId to the database
+    /// Add an Iroh PublicKey to the database
     #[cfg(feature = "iroh")]
-    pub fn add_iroh_address(&mut self, node_id: NodeId, services: u64) {
-        match self.iroh_addresses.get_mut(&node_id) {
+    pub fn add_iroh_address(&mut self, public_key: PublicKey, services: u64) {
+        match self.iroh_addresses.get_mut(&public_key) {
             Some(entry) => {
                 entry.update_seen();
                 entry.services |= services;
@@ -243,20 +243,20 @@ impl AddressDatabase {
                     port: 0,
                 };
                 self.iroh_addresses
-                    .insert(node_id, AddressEntry::new(placeholder_addr, services));
+                    .insert(public_key, AddressEntry::new(placeholder_addr, services));
             }
         }
     }
 
-    /// Get fresh Iroh NodeIds
+    /// Get fresh Iroh PublicKeys
     #[cfg(feature = "iroh")]
-    pub fn get_fresh_iroh_addresses(&self, count: usize) -> Vec<NodeId> {
+    pub fn get_fresh_iroh_addresses(&self, count: usize) -> Vec<PublicKey> {
         // Collect entries with their node IDs, avoiding repeated map lookups
         let mut fresh: Vec<_> = self
             .iroh_addresses
             .iter()
             .filter(|(_, entry)| entry.is_fresh(self.expiration_seconds))
-            .map(|(node_id, entry)| (entry.last_seen, *node_id))
+            .map(|(public_key, entry)| (entry.last_seen, *public_key))
             .collect();
 
         // Sort by last_seen in descending order (most recent first)
@@ -265,7 +265,7 @@ impl AddressDatabase {
         // Extract node IDs and take requested count
         fresh
             .into_iter()
-            .map(|(_, node_id)| node_id)
+            .map(|(_, public_key)| public_key)
             .take(count)
             .collect()
     }
@@ -320,13 +320,13 @@ impl AddressDatabase {
         #[cfg(feature = "iroh")]
         {
             // Find oldest Iroh entry
-            let mut oldest_iroh: Option<(NodeId, u64)> = None;
-            if let Some((node_id, entry)) = self
+            let mut oldest_iroh: Option<(PublicKey, u64)> = None;
+            if let Some((public_key, entry)) = self
                 .iroh_addresses
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_seen)
             {
-                oldest_iroh = Some((*node_id, entry.last_seen));
+                oldest_iroh = Some((*public_key, entry.last_seen));
             }
 
             // Evict the oldest entry across both maps
@@ -628,35 +628,35 @@ mod tests {
     #[cfg(feature = "iroh")]
     #[test]
     fn test_add_iroh_address() {
-        use iroh_net::{key::SecretKey, NodeId};
+        use iroh::{SecretKey, PublicKey};
         let mut db = AddressDatabase::new(100);
 
         // Generate a valid Ed25519 key for testing
         let secret_key = SecretKey::generate();
-        let node_id = secret_key.public();
+        let public_key = secret_key.public();
 
-        db.add_iroh_address(node_id, 1);
+        db.add_iroh_address(public_key, 1);
         assert_eq!(db.total_count(), 1);
 
         // Add same address again (should update, not duplicate)
-        db.add_iroh_address(node_id, 2);
+        db.add_iroh_address(public_key, 2);
         assert_eq!(db.total_count(), 1);
     }
 
     #[cfg(feature = "iroh")]
     #[test]
     fn test_get_fresh_iroh_addresses() {
-        use iroh_net::{key::SecretKey, NodeId};
+        use iroh::{SecretKey, PublicKey};
         let mut db = AddressDatabase::new(100);
 
         // Generate valid Ed25519 keys for testing
         let secret_key1 = SecretKey::generate();
         let secret_key2 = SecretKey::generate();
-        let node_id1 = secret_key1.public();
-        let node_id2 = secret_key2.public();
+        let public_key1 = secret_key1.public();
+        let public_key2 = secret_key2.public();
 
-        db.add_iroh_address(node_id1, 1);
-        db.add_iroh_address(node_id2, 1);
+        db.add_iroh_address(public_key1, 1);
+        db.add_iroh_address(public_key2, 1);
 
         let fresh = db.get_fresh_iroh_addresses(10);
         assert_eq!(fresh.len(), 2);
@@ -665,7 +665,7 @@ mod tests {
     #[cfg(feature = "iroh")]
     #[test]
     fn test_total_count_includes_iroh() {
-        use iroh_net::NodeId;
+        use iroh::PublicKey;
         let mut db = AddressDatabase::new(100);
 
         // Add SocketAddr address
@@ -674,9 +674,9 @@ mod tests {
         assert_eq!(db.total_count(), 1);
 
         // Add Iroh address
-        let node_id_bytes = [0u8; 32];
-        let node_id = NodeId::from_bytes(&node_id_bytes).unwrap();
-        db.add_iroh_address(node_id, 1);
+        let key_bytes = [0u8; 32];
+        let public_key = PublicKey::from_bytes(&key_bytes).unwrap();
+        db.add_iroh_address(public_key, 1);
         assert_eq!(db.total_count(), 2);
     }
 }

@@ -29,21 +29,21 @@ sled = { version = "=0.34.7", optional = true }
 redb = { version = "1.4", optional = true }
 
 # Networking layer - EXACT VERSIONS for security
-tokio = { version = "=1.35.1", features = ["full", "rt-multi-thread"] }
-tokio-util = { version = "=0.7.10", features = ["codec", "io"] }
-futures = "=0.3.30"
+tokio = { version = "=1.48.0", features = ["full", "rt-multi-thread"] }  # Updated for iroh 0.95 compatibility (requires ^1.44.1)
+tokio-util = { version = "=0.7.17", features = ["codec", "io"] }  # Updated for iroh 0.95 compatibility (requires ^0.7.14)
+futures = "=0.3.31"  # Updated for iroh 0.95 compatibility (requires ^0.3.31)
 # HTTP server - EXACT VERSIONS for security
 http = "=1.1.0"
 http-body-util = "=0.1.1"
-hyper = { version = "=1.3.1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "=0.1.5", features = ["server", "http1", "tokio"] }
+hyper = { version = "=1.8.0", features = ["server", "http1", "http2"] }  # Updated for iroh 0.95 compatibility (hyper-util 0.1.18 requires ^1.8.0)
+hyper-util = { version = "=0.1.18", features = ["server", "http1", "tokio"] }  # Updated for iroh 0.95 compatibility (requires ^0.1.11)
 
 # Serialization - EXACT VERSIONS for security
-serde = { version = "=1.0.193", features = ["derive"] }
+serde = { version = "=1.0.228", features = ["derive"] }  # Updated for iroh 0.95 compatibility (requires ^1.0.219)
 serde_json = "=1.0.108"
-serde_bytes = "=0.11.14"  # For byte array serialization in protocol messages
+serde_bytes = "=0.11.19"  # Updated for iroh 0.95 compatibility (requires ^0.11.17)
 bincode = "=1.3.3"
-bytes = "=1.5.0"
+bytes = "=1.10.1"  # Updated for iroh 0.95 compatibility (requires ^1.7)
 uuid = { version = "=1.6.0", features = ["v4"] }
 toml = "=0.8.2"
 
@@ -65,7 +65,7 @@ anyhow = "=1.0.93"
 thiserror = "=1.0.69"
 
 # Logging - EXACT VERSIONS for security
-tracing = "=0.1.40"
+tracing = "=0.1.41"  # Updated for iroh 0.95 compatibility (requires ^0.1.41)
 tracing-subscriber = { version = "=0.3.18", features = ["env-filter"] }
 
 # CLI - EXACT VERSIONS for security
@@ -91,18 +91,28 @@ rayon = { version = "1.8", optional = true }
 sysinfo = { version = "0.30", optional = true }
 
 # Iroh networking (optional feature)
-iroh-net = { version = "0.12", optional = true }
-# Quinn QUIC transport (optional feature - can be used standalone or via Iroh)
-# Note: Version 0.10 matches iroh-net 0.12's quinn dependency
+# Updated to iroh 0.95 to fix security vulnerabilities in iroh-net 0.12
+iroh = { version = "0.95", optional = true }
+# Quinn QUIC transport (optional feature - can be used standalone)
+# Note: quinn_transport.rs uses quinn directly (independent of iroh)
+# iroh 0.95 wraps quinn internally via iroh-quinn, so quinn is not needed for iroh feature
 quinn = { version = "0.10", optional = true }
 rcgen = { version = "0.11", optional = true }
 # rustls version is determined by quinn 0.10 (uses rustls 0.21)
 # Only specify if quinn feature is not enabled
 rustls = { version = "0.21", optional = true }
 
+# Security Note: Migrated from iroh-net 0.12 to iroh 0.95 to fix vulnerabilities:
+# - idna 0.4.0 (RUSTSEC-2024-0421) - FIXED in iroh 0.95
+# - ring 0.16.20 (RUSTSEC-2025-0009) - FIXED in iroh 0.95
+# - rsa 0.9.8 (RUSTSEC-2023-0071) - FIXED in iroh 0.95
+# - paste 1.0.15 (unmaintained) - FIXED in iroh 0.95
+#
+# iroh 0.95 uses actively maintained dependencies and fixes all known security issues.
+
 [features]
 default = ["sysinfo", "redb", "nix", "libc", "utxo-commitments", "production"]
-iroh = ["dep:iroh-net", "dep:quinn"]
+iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
 utxo-commitments = ["bllvm-protocol/utxo-commitments"]
 stratum-v2 = []

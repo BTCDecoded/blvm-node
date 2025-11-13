@@ -11,13 +11,15 @@ use crate::network::transport::{
 #[cfg(feature = "iroh")]
 use anyhow::Result;
 #[cfg(feature = "iroh")]
-// use futures::StreamExt; // Not used
-#[cfg(feature = "iroh")]
 use std::net::SocketAddr;
 #[cfg(feature = "iroh")]
 use tokio::io::AsyncReadExt;
 #[cfg(feature = "iroh")]
 use tracing::{debug, error, info, warn};
+#[cfg(feature = "iroh")]
+use iroh::endpoint::{Endpoint, Connection, SendStream, RecvStream};
+#[cfg(feature = "iroh")]
+use iroh::{PublicKey, EndpointId, EndpointAddr, SecretKey};
 
 /// Iroh transport implementation
 ///
@@ -26,42 +28,33 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "iroh")]
 #[derive(Debug)]
 pub struct IrohTransport {
-    endpoint: iroh_net::magic_endpoint::MagicEndpoint,
-    secret_key: iroh_net::key::SecretKey,
+    endpoint: Endpoint,
 }
 
 #[cfg(feature = "iroh")]
 impl IrohTransport {
     /// Create a new Iroh transport
     pub async fn new() -> Result<Self> {
-        // Generate a new secret key for this node
-        let secret_key = iroh_net::key::SecretKey::generate();
-
-        // Create magic endpoint - this handles QUIC connections with NAT traversal
-        let endpoint = iroh_net::magic_endpoint::MagicEndpoint::builder()
-            .secret_key(secret_key.clone())
-            .bind(0) // Bind to any available UDP port
-            .await?;
+        // Create endpoint - this handles QUIC connections with NAT traversal
+        // Endpoint::bind() automatically generates a secret key
+        let endpoint = Endpoint::bind().await?;
 
         info!(
-            "Iroh transport initialized with node ID: {}",
-            endpoint.node_id()
+            "Iroh transport initialized with endpoint ID: {}",
+            endpoint.id()
         );
 
-        Ok(Self {
-            endpoint,
-            secret_key,
-        })
+        Ok(Self { endpoint })
     }
 
-    /// Get the node ID (public key) for this transport
-    pub fn node_id(&self) -> iroh_net::NodeId {
-        self.endpoint.node_id()
+    /// Get the endpoint ID (public key) for this transport
+    pub fn node_id(&self) -> EndpointId {
+        self.endpoint.id()
     }
 
     /// Get the secret key (for persistence if needed)
-    pub fn secret_key(&self) -> &iroh_net::key::SecretKey {
-        &self.secret_key
+    pub fn secret_key(&self) -> &SecretKey {
+        self.endpoint.secret_key()
     }
 }
 
@@ -79,11 +72,11 @@ impl Transport for IrohTransport {
         // Iroh uses QUIC which listens on UDP, not TCP
         // The endpoint is already bound in new()
         // We use the endpoint's accept method for incoming connections
-        // Note: accept() returns a future, we'll poll it in accept() method
-        let (local_addr, _) = self
-            .endpoint
-            .local_addr()
-            .map_err(|e| anyhow::anyhow!("Failed to get local address: {}", e))?;
+        let bound_sockets = self.endpoint.bound_sockets();
+        let local_addr = bound_sockets
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("No bound sockets available"))?;
         Ok(IrohListener {
             endpoint: self.endpoint.clone(),
             local_addr,
@@ -91,19 +84,19 @@ impl Transport for IrohTransport {
     }
 
     async fn connect(&self, addr: TransportAddr) -> Result<Self::Connection> {
-        let node_id = match addr {
+        let public_key = match addr {
             TransportAddr::Iroh(key) => {
-                // Convert public key bytes to Iroh NodeId
-                // NodeId is 32 bytes (public key)
+                // Convert public key bytes to Iroh PublicKey
+                // PublicKey is 32 bytes
                 if key.len() != 32 {
                     return Err(anyhow::anyhow!(
                         "Invalid Iroh public key length: expected 32 bytes, got {}",
                         key.len()
                     ));
                 }
-                let mut node_id_bytes = [0u8; 32];
-                node_id_bytes.copy_from_slice(&key[..32]);
-                iroh_net::NodeId::from_bytes(&node_id_bytes)
+                let mut key_bytes = [0u8; 32];
+                key_bytes.copy_from_slice(&key[..32]);
+                PublicKey::from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Invalid Iroh public key: {}", e))?
             }
             _ => {
@@ -113,24 +106,21 @@ impl Transport for IrohTransport {
             }
         };
 
-        // Create node address with ALPN protocol identifier for Bitcoin P2P
-        let node_addr = iroh_net::NodeAddr::from_parts(
-            node_id,
-            None,   // No DERP URL
-            vec![], // No direct addresses, use magic endpoint for connection
-        );
+        // Create endpoint address - can convert directly from PublicKey
+        let endpoint_addr: EndpointAddr = public_key.into();
 
-        // Dial peer using magic endpoint
+        // Dial peer using endpoint
         // ALPN identifier for Bitcoin protocol over Iroh
         let alpn = b"bitcoin/1.0";
-        let conn = self.endpoint.connect(node_addr, alpn).await?;
+        let conn = self.endpoint.connect(endpoint_addr, alpn).await?;
 
-        // Store node_id separately since quinn::Connection doesn't expose it
-        let peer_addr_bytes = node_id.as_bytes().to_vec();
+        // Get peer's public key from connection
+        let peer_id = conn.remote_id();
+        let peer_addr_bytes = peer_id.as_bytes().to_vec();
 
         Ok(IrohConnection {
             conn,
-            peer_node_id: node_id,
+            peer_node_id: peer_id,
             peer_addr: TransportAddr::Iroh(peer_addr_bytes),
             connected: true,
             active_streams: std::collections::HashMap::new(),
@@ -141,7 +131,7 @@ impl Transport for IrohTransport {
 /// Iroh listener implementation
 #[cfg(feature = "iroh")]
 pub struct IrohListener {
-    endpoint: iroh_net::magic_endpoint::MagicEndpoint,
+    endpoint: Endpoint,
     local_addr: SocketAddr,
 }
 
@@ -152,30 +142,26 @@ impl TransportListener for IrohListener {
 
     async fn accept(&mut self) -> Result<(Self::Connection, TransportAddr)> {
         // Accept incoming Iroh connection
-        // accept() returns a future that yields Option<Accept>
+        // accept() returns Accept<'_> which yields Option<Incoming>
         let accept_future = self.endpoint.accept();
-        let accept = accept_future
+        let incoming = accept_future
             .await
             .ok_or_else(|| anyhow::anyhow!("Accept stream ended"))?;
 
-        // Accept yields a future that becomes Connection when awaited
-        let conn = accept.await?;
+        // Accept the incoming connection - returns Accepting future
+        let accepting = incoming.accept()?;
+        
+        // Await connection establishment
+        let conn = accepting.await?;
 
-        // Extract peer node_id from connection
-        // Note: Iroh's Accept type doesn't directly expose peer node_id.
-        // The peer's node_id is authenticated via QUIC/TLS handshake, but extraction
-        // from quinn::Connection requires accessing internal connection state which isn't
-        // publicly exposed.
-        //
-        // Standard approach: Protocol-level node_id exchange in first message.
-        // This matches Bitcoin P2P protocol where peers exchange identity via Version message.
-        // The node_id will be available once the peer sends its version message.
-        //
-        // For now, use placeholder that will be updated when first protocol message is received.
-        let peer_node_id = self.endpoint.node_id(); // Placeholder until protocol exchange
+        // Get peer's endpoint ID from connection
+        let peer_id = conn.remote_id();
+
+        // Extract peer node_id from connection (can also use conn.remote_id() after connection)
+        let peer_node_id = peer_id; // Already have it from connecting.id()
         let peer_addr = TransportAddr::Iroh(peer_node_id.as_bytes().to_vec());
 
-        debug!("Iroh connection accepted - peer node_id will be extracted from protocol handshake");
+        debug!("Iroh connection accepted - peer endpoint ID: {}", peer_node_id);
 
         Ok((
             IrohConnection {
@@ -197,12 +183,12 @@ impl TransportListener for IrohListener {
 /// Iroh connection implementation
 #[cfg(feature = "iroh")]
 pub struct IrohConnection {
-    conn: quinn::Connection,
-    peer_node_id: iroh_net::NodeId,
+    conn: Connection,
+    peer_node_id: EndpointId,
     peer_addr: TransportAddr,
     connected: bool,
     /// Active streams per channel (for QUIC stream multiplexing)
-    active_streams: std::collections::HashMap<u32, quinn::SendStream>,
+    active_streams: std::collections::HashMap<u32, SendStream>,
 }
 
 #[cfg(feature = "iroh")]
@@ -222,7 +208,7 @@ impl TransportConnection for IrohConnection {
 
         // Write data
         stream.write_all(data).await?;
-        stream.finish().await?;
+        stream.finish()?;
 
         Ok(())
     }
@@ -250,7 +236,7 @@ impl TransportConnection for IrohConnection {
 
         // Write data
         stream.write_all(data).await?;
-        stream.finish().await?;
+        stream.finish()?;
 
         Ok(())
     }

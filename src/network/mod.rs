@@ -1164,14 +1164,14 @@ impl NetworkManager {
                                                 // Store Iroh NodeId in address database
                                                 if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
                                                     if node_id_bytes.len() == 32 {
-                                                        use iroh_net::NodeId;
-                                                        let mut node_id_array = [0u8; 32];
-                                                        node_id_array.copy_from_slice(node_id_bytes);
-                                                        if let Ok(node_id) = NodeId::from_bytes(&node_id_array) {
+                                                        use iroh::PublicKey;
+                                                        let mut key_array = [0u8; 32];
+                                                        key_array.copy_from_slice(node_id_bytes);
+                                                        if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
                                                             let address_db_clone = address_database_clone.clone();
                                                             tokio::spawn(async move {
                                                                 let mut db = address_db_clone.lock().unwrap();
-                                                                db.add_iroh_address(node_id, 0); // Services will be updated on version exchange
+                                                                db.add_iroh_address(public_key, 0); // Services will be updated on version exchange
                                                             });
                                                         }
                                                     }
