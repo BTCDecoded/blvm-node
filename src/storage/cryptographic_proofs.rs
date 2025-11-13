@@ -197,3 +197,4 @@ mod kani_proofs {
         assert_eq!(hash1, hash2, "RIPEMD160 must be deterministic");
     }
 }
+
