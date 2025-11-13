@@ -1,10 +1,11 @@
 use bllvm_node::rpc::server::RpcServer;
-use serde_json::json;
+use serde_json::Value;
 
 #[tokio::test]
 async fn getblockchaininfo_softforks_contains_expected_keys() {
     let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
-    let response = RpcServer::process_request(request).await;
+    let response_str = RpcServer::process_request(request).await;
+    let response: Value = serde_json::from_str(&response_str).unwrap();
     let result = &response["result"];
     assert!(result.is_object());
 
@@ -18,7 +19,8 @@ async fn getblockchaininfo_softforks_contains_expected_keys() {
 #[tokio::test]
 async fn getblocktemplate_rules_include_feature_flags() {
     let request = r#"{"jsonrpc":"2.0","method":"getblocktemplate","params":[],"id":2}"#;
-    let response = RpcServer::process_request(request).await;
+    let response_str = RpcServer::process_request(request).await;
+    let response: Value = serde_json::from_str(&response_str).unwrap();
     let result = &response["result"];
     assert!(result.is_object());
 
