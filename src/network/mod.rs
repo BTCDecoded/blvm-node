@@ -3264,16 +3264,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_network_manager_peer_manager_access() {
+    #[test]
+    fn test_network_manager_peer_manager_access() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let manager = NetworkManager::new(addr);
 
-        // Test immutable access
-        let peer_manager = manager.peer_manager();
-        assert_eq!(peer_manager.peer_count(), 0);
+        // Test immutable access - drop the guard immediately to avoid holding lock
+        {
+            let peer_manager = manager.peer_manager();
+            assert_eq!(peer_manager.peer_count(), 0);
+        } // Guard dropped here
 
-        // Test peer count access
+        // Test peer count access (this also locks the mutex, but guard is dropped immediately)
         assert_eq!(manager.peer_count(), 0);
     }
 
