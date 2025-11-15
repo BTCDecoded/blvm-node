@@ -3233,7 +3233,9 @@ mod tests {
     #[tokio::test]
     async fn test_handle_incoming_wire_tcp_enqueues_pkgtxn() {
         use crate::network::protocol::{PkgTxnMessage, ProtocolMessage, ProtocolParser};
-        let addr: std::net::SocketAddr = "127.0.0.1:8333".parse().unwrap();
+        use tokio::time::{timeout, Duration};
+        // Use a unique port to avoid conflicts with other tests
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
         let manager = NetworkManager::new(addr);
 
         // Build a pkgtxn message with one trivial tx
@@ -3250,9 +3252,12 @@ mod tests {
         };
         let wire = ProtocolParser::serialize_message(&ProtocolMessage::PkgTxn(msg)).unwrap();
 
-        // Call handle_incoming_wire_tcp directly (no nested runtime - we're already in async context)
+        // Call handle_incoming_wire_tcp with a timeout to prevent hanging
         // This should enqueue the message to peer_tx channel
-        manager.handle_incoming_wire_tcp(addr, wire).await.unwrap();
+        match timeout(Duration::from_secs(5), manager.handle_incoming_wire_tcp(addr, wire)).await {
+            Ok(result) => result.unwrap(),
+            Err(_) => panic!("test_handle_incoming_wire_tcp_enqueues_pkgtxn timed out after 5 seconds"),
+        }
 
         // Note: We can't directly access peer_rx to verify the message was sent
         // because it's private. The function completing successfully indicates
