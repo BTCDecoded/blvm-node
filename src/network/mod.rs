@@ -1526,10 +1526,9 @@ impl NetworkManager {
     }
     
     /// Send a message to a specific peer (by TransportAddr - supports all transports)
+    /// Returns Ok even if peer doesn't exist (graceful no-op)
     pub async fn send_to_peer_by_transport(&self, addr: TransportAddr, message: Vec<u8>) -> Result<()> {
         let message_len = message.len();
-        // Track bytes sent
-        self.track_bytes_sent(message_len as u64);
         
         // Check if peer exists and get sender channel before dropping lock
         let sender = {
@@ -1537,9 +1536,13 @@ impl NetworkManager {
             if let Some(peer) = pm.get_peer(&addr) {
                 peer.send_tx.clone()
             } else {
-                return Err(anyhow::anyhow!("Peer not found: {:?}", addr));
+                // Peer doesn't exist - return Ok (graceful no-op)
+                return Ok(());
             }
         };
+        
+        // Track bytes sent only if peer exists
+        self.track_bytes_sent(message_len as u64);
         
         // Send message without holding the lock (unbounded channel, so send won't block)
         sender.send(message)
