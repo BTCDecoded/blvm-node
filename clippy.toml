@@ -1,0 +1,21 @@
+# Clippy configuration for bllvm-node
+# See: https://rust-lang.github.io/rust-clippy/master/index.html
+
+# Allow breaking changes in exported API (we're pre-1.0)
+avoid-breaking-exported-api = false
+
+# Cognitive complexity threshold
+cognitive-complexity-threshold = 30
+
+# Too many arguments threshold
+too-many-arguments-threshold = 7
+
+# Type complexity threshold
+type-complexity-threshold = 300
+
+# Allow some patterns that are common in async code
+disallowed-methods = []
+
+# Allow some patterns that are common in network code
+disallowed-types = []
+

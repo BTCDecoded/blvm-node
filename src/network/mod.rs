@@ -236,7 +236,7 @@ impl PeerRateLimiter {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should always be after UNIX_EPOCH")
             .as_secs();
         Self {
             tokens: burst_limit,
@@ -262,7 +262,7 @@ impl PeerRateLimiter {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should always be after UNIX_EPOCH")
             .as_secs();
         
         if now > self.last_refill {

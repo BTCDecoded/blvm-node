@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// User signaling message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,10 +37,13 @@ pub enum SignalType {
 }
 
 /// User signaling manager
+#[derive(ZeroizeOnDrop)]
 pub struct UserSignalingManager {
     /// Node's public key (for identification)
     node_public_key: Vec<u8>,
     /// Node's private key (for signing)
+    /// Note: This is zeroized on drop for security
+    #[zeroize(on_drop)]
     node_private_key: Vec<u8>,
     /// Known signals (change_id -> signal)
     signals: HashMap<String, UserSignal>,

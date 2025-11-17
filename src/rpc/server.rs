@@ -258,7 +258,13 @@ impl RpcServer {
             .header("Content-Type", "application/json")
             .header("Content-Length", response_json.len())
             .body(Full::new(Bytes::from(response_json)))
-            .unwrap())
+            .map_err(|e| {
+                error!("Failed to build HTTP response: {}", e);
+                hyper::Error::from(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to build response: {}", e),
+                ))
+            })?)
     }
 
     /// Create HTTP error response
@@ -276,7 +282,14 @@ impl RpcServer {
             .header("Content-Type", "application/json")
             .header("Content-Length", body_json.len())
             .body(Full::new(Bytes::from(body_json)))
-            .unwrap()
+            .unwrap_or_else(|e| {
+                // Fallback response if builder fails (should never happen)
+                error!("Failed to build error response: {}", e);
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Full::new(Bytes::from("{\"error\":\"Internal server error\"}")))
+                    .expect("Fallback response should always succeed")
+            })
     }
 
     /// Process a JSON-RPC request
@@ -286,7 +299,11 @@ impl RpcServer {
     /// use process_request_with_server() with a server instance.
     pub async fn process_request(request: &str) -> String {
         // Create temporary server instance for backward compatibility
-        let server = Arc::new(Self::new("127.0.0.1:0".parse().unwrap()));
+        // Using 127.0.0.1:0 is safe - it's just a placeholder address for testing
+        let addr: SocketAddr = "127.0.0.1:0"
+            .parse()
+            .expect("127.0.0.1:0 should always parse as valid SocketAddr");
+        let server = Arc::new(Self::new(addr));
         Self::process_request_with_server(server, request).await
     }
 

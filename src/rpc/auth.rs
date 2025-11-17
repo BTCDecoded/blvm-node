@@ -64,7 +64,7 @@ impl RpcRateLimiter {
     pub fn new(burst_limit: u32, rate: u32) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should always be after UNIX_EPOCH")
             .as_secs();
         Self {
             tokens: burst_limit,
@@ -78,7 +78,7 @@ impl RpcRateLimiter {
     pub fn check_and_consume(&mut self) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should always be after UNIX_EPOCH")
             .as_secs();
 
         // Refill tokens based on elapsed time

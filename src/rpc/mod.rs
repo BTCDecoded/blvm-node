@@ -15,6 +15,7 @@ pub mod rawtx;
 pub mod rpc_proofs;
 pub mod server;
 pub mod types;
+pub mod validation;
 
 #[cfg(feature = "quinn")]
 pub mod quinn_server;

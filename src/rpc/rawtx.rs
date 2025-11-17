@@ -60,12 +60,16 @@ impl RawTxRpc {
     pub async fn sendrawtransaction(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: sendrawtransaction");
 
-        let hex_string = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Missing hexstring parameter"))?;
+        // Validate hex string parameter with length limits
+        use crate::rpc::validation::validate_hex_string_param;
+        let hex_string = validate_hex_string_param(
+            params,
+            0,
+            "hexstring",
+            Some(crate::rpc::validation::MAX_HEX_STRING_LENGTH),
+        )?;
 
-        let tx_bytes = hex::decode(hex_string)
+        let tx_bytes = hex::decode(&hex_string)
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
         if let (Some(ref storage), Some(ref mempool)) =
@@ -243,12 +247,16 @@ impl RawTxRpc {
     pub async fn decoderawtransaction(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: decoderawtransaction");
 
-        let hex_string = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Missing hexstring parameter"))?;
+        // Validate hex string parameter with length limits
+        use crate::rpc::validation::validate_hex_string_param;
+        let hex_string = validate_hex_string_param(
+            params,
+            0,
+            "hexstring",
+            Some(crate::rpc::validation::MAX_HEX_STRING_LENGTH),
+        )?;
 
-        let tx_bytes = hex::decode(hex_string)
+        let tx_bytes = hex::decode(&hex_string)
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
         use bllvm_protocol::serialization::transaction::deserialize_transaction;

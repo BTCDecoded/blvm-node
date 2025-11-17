@@ -602,13 +602,17 @@ impl MiningRpc {
     pub async fn submit_block(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: submitblock");
 
-        let hex_data = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Missing hexdata parameter"))?;
+        // Validate hex string parameter with length limits (blocks can be up to ~4MB)
+        use crate::rpc::validation::validate_hex_string_param;
+        let hex_data = validate_hex_string_param(
+            params,
+            0,
+            "hexdata",
+            Some(8_000_000), // ~4MB block max
+        )?;
 
         // Decode hex
-        let block_bytes = hex::decode(hex_data)
+        let block_bytes = hex::decode(&hex_data)
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex data: {e}")))?;
 
         // Deserialize block
