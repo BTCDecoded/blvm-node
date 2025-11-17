@@ -172,14 +172,5 @@ lto = "thin"
 codegen-units = 16
 
 # Benchmark targets
-[[bench]]
-name = "compact_blocks"
-harness = false
-
-[[bench]]
-name = "storage_operations"
-harness = false
-
-[[bench]]
-name = "transport_comparison"
-harness = false
+# Benchmarks have been moved to bllvm-bench crate
+# See: https://github.com/BTCDecoded/bllvm-bench
