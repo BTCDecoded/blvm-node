@@ -378,10 +378,11 @@ impl Node {
         let config = self.config.as_ref().unwrap_or(&default_config);
 
         // Get target peer count from config
+        let default_timing = crate::config::NetworkTimingConfig::default();
         let timing_config = config
             .network_timing
             .as_ref()
-            .unwrap_or(&crate::config::NetworkTimingConfig::default());
+            .unwrap_or(&default_timing);
         let target_peer_count = timing_config.target_peer_count;
 
         // Initialize peer connections

@@ -56,7 +56,7 @@ use bllvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 use crate::storage::Storage;
 use crate::node::mempool::MempoolManager;
@@ -328,7 +328,8 @@ pub struct NetworkManager {
     /// Mempool manager for transaction access
     mempool_manager: Option<Arc<MempoolManager>>,
     /// Peer state storage (per-connection state)
-    peer_states: Arc<Mutex<HashMap<SocketAddr, bllvm_protocol::network::PeerState>>>,
+    /// Read-heavy: many reads to check peer state, fewer writes when updating state
+    peer_states: Arc<RwLock<HashMap<SocketAddr, bllvm_protocol::network::PeerState>>>,
     /// Persistent peer list (peers to connect to on startup)
     persistent_peers: Arc<Mutex<HashSet<SocketAddr>>>,
     /// Eclipse attack prevention: track peer diversity
@@ -338,7 +339,8 @@ pub struct NetworkManager {
     /// Network active state (true = enabled, false = disabled)
     network_active: Arc<Mutex<bool>>,
     /// Ban list (banned peers with unban timestamp)
-    ban_list: Arc<Mutex<HashMap<SocketAddr, u64>>>, // addr -> unban timestamp
+    /// Read-heavy: many reads to check if peer is banned, fewer writes when banning/unbanning
+    ban_list: Arc<RwLock<HashMap<SocketAddr, u64>>>, // addr -> unban timestamp
     /// Per-IP connection count (to prevent Sybil attacks)
     connections_per_ip: Arc<Mutex<HashMap<std::net::IpAddr, usize>>>,
     /// Per-peer message rate limiting (token bucket)
@@ -360,7 +362,8 @@ pub struct NetworkManager {
     /// Ban list sharing configuration
     ban_list_sharing_config: Option<crate::config::BanListSharingConfig>,
     /// Address database for peer discovery
-    address_database: Arc<Mutex<address_db::AddressDatabase>>,
+    /// Read-heavy: many reads to query addresses, fewer writes when adding addresses
+    address_database: Arc<RwLock<address_db::AddressDatabase>>,
     /// Last time we sent addr message (Unix timestamp)
     last_addr_sent: Arc<Mutex<u64>>,
     /// Enable self-advertisement (send own address to peers)
@@ -450,7 +453,7 @@ impl NetworkManager {
             .and_then(|c| c.address_database.as_ref())
             .unwrap_or(&addr_db_config_default);
         
-        let address_database = Arc::new(Mutex::new(
+        let address_database = Arc::new(RwLock::new(
             address_db::AddressDatabase::with_expiration(
                 addr_db_config.max_addresses,
                 addr_db_config.expiration_seconds,
@@ -482,10 +485,10 @@ impl NetworkManager {
             protocol_engine: None,
             storage: None,
             mempool_manager: None,
-            peer_states: Arc::new(Mutex::new(HashMap::new())),
+            peer_states: Arc::new(RwLock::new(HashMap::new())),
             persistent_peers: Arc::new(Mutex::new(HashSet::new())),
             network_active: Arc::new(Mutex::new(true)),
-            ban_list: Arc::new(Mutex::new(HashMap::new())),
+            ban_list: Arc::new(RwLock::new(HashMap::new())),
             connections_per_ip: Arc::new(Mutex::new(HashMap::new())),
             peer_message_rates: Arc::new(Mutex::new(HashMap::new())),
             bytes_sent: Arc::new(Mutex::new(0)),
@@ -563,7 +566,7 @@ impl NetworkManager {
         
         // Add discovered addresses to database
         {
-            let mut db = self.address_database.lock().await;
+            let mut db = self.address_database.write().await;
             for addr in addresses {
                 db.add_address(addr, 0); // Services will be updated on connection
             }
@@ -637,7 +640,7 @@ impl NetworkManager {
         
         // Get fresh Iroh NodeIds from database
         let node_ids = {
-            let db = self.address_database.lock().await;
+            let db = self.address_database.read().await;
             db.get_fresh_iroh_addresses(needed * 2) // Get 2x needed for retries
         };
         
@@ -718,14 +721,14 @@ impl NetworkManager {
         info!("Need {} more peers (current: {}, target: {})", needed, current_count, target_count);
 
         // Get fresh addresses from database
-        let ban_list = self.ban_list.lock().await.clone();
+        let ban_list = self.ban_list.read().await.clone();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
 
         let addresses: Vec<_> = {
-            let db = self.address_database.lock().await;
+            let db = self.address_database.read().await;
             let fresh = db.get_fresh_addresses(needed * 3); // Get 3x needed for retries
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
@@ -737,7 +740,7 @@ impl NetworkManager {
 
         // Convert addresses to SocketAddrs first
         let sockets: Vec<SocketAddr> = {
-            let db = self.address_database.lock().await;
+            let db = self.address_database.read().await;
             addresses.iter()
                 .take(needed * 2)
                 .map(|addr| db.network_addr_to_socket(addr))
@@ -924,7 +927,7 @@ impl NetworkManager {
                                         .unwrap()
                                         .as_secs()
                                         + ban_duration;
-                                    let mut ban_list_guard = ban_list.lock().await;
+                                    let mut ban_list_guard = ban_list.write().await;
                                     ban_list_guard.insert(socket_addr, unban_timestamp);
                                 }
                                 
@@ -960,22 +963,15 @@ impl NetworkManager {
                                     peer_tx_clone.clone(),
                                 );
                                 
-                                // Add peer to manager (with graceful error handling)
-                                match peer_manager_for_peer.lock() {
-                                    Ok(mut pm) => {
-                                        if let Err(e) = pm.add_peer(transport_addr.clone(), peer) {
-                                            warn!("Failed to add peer {}: {}", socket_addr, e);
-                                            let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr.clone()));
-                                            return;
-                                        }
-                                        info!("Successfully added peer {} (transport: {:?})", socket_addr, transport_addr);
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to lock peer manager for {}: {}", socket_addr, e);
-                                        let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr.clone()));
-                                        return;
-                                    }
+                                // Add peer to manager (async-safe)
+                                let mut pm = peer_manager_for_peer.lock().await;
+                                if let Err(e) = pm.add_peer(transport_addr.clone(), peer) {
+                                    warn!("Failed to add peer {}: {}", socket_addr, e);
+                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr.clone()));
+                                    return;
                                 }
+                                info!("Successfully added peer {} (transport: {:?})", socket_addr, transport_addr);
+                                drop(pm); // Explicitly drop lock before continuing
                                 
                                 // Connection will be cleaned up automatically when read/write tasks exit
                                 // Peer removal happens in process_messages when PeerDisconnected is received
@@ -1028,7 +1024,7 @@ impl NetworkManager {
                                                 .unwrap()
                                                 .as_secs()
                                                 + ban_duration;
-                                            let mut ban_list_guard = ban_list.lock().await;
+                                            let mut ban_list_guard = ban_list.write().await;
                                             ban_list_guard.insert(socket_addr, unban_timestamp);
                                         }
                                         drop(conn);
@@ -1066,22 +1062,15 @@ impl NetworkManager {
                                             peer_tx_clone.clone(),
                                         );
                                         
-                                        // Add peer to manager (with graceful error handling)
-                                        match peer_manager_clone.lock() {
-                                            Ok(mut pm) => {
-                                                if let Err(e) = pm.add_peer(quinn_addr_clone.clone(), peer) {
-                                                    warn!("Failed to add Quinn peer {}: {}", socket_addr, e);
-                                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(quinn_addr_clone.clone()));
-                                                    return;
-                                                }
-                                                info!("Successfully added Quinn peer {}", socket_addr);
-                                            }
-                                            Err(e) => {
-                                                warn!("Failed to lock peer manager for Quinn peer {}: {}", socket_addr, e);
-                                                let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(quinn_addr_clone.clone()));
-                                                return;
-                                            }
+                                        // Add peer to manager (async-safe)
+                                        let mut pm = peer_manager_clone.lock().await;
+                                        if let Err(e) = pm.add_peer(quinn_addr_clone.clone(), peer) {
+                                            warn!("Failed to add Quinn peer {}: {}", socket_addr, e);
+                                            let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(quinn_addr_clone.clone()));
+                                            return;
                                         }
+                                        info!("Successfully added Quinn peer {}", socket_addr);
+                                        drop(pm); // Explicitly drop lock before continuing
                                     });
                                 }
                                 Err(e) => {
@@ -1179,41 +1168,34 @@ impl NetworkManager {
                                             peer_tx_clone.clone(),
                                         );
                                         
-                                        // Add peer to manager (with graceful error handling)
-                                        match peer_manager_clone.lock() {
-                                            Ok(mut pm) => {
-                                                if let Err(e) = pm.add_peer(iroh_addr_clone.clone(), peer) {
-                                                    warn!("Failed to add Iroh peer: {}", e);
-                                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(iroh_addr_clone.clone()));
-                                                    return;
+                                        // Add peer to manager (async-safe)
+                                        let mut pm = peer_manager_clone.lock().await;
+                                        if let Err(e) = pm.add_peer(iroh_addr_clone.clone(), peer) {
+                                            warn!("Failed to add Iroh peer: {}", e);
+                                            let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(iroh_addr_clone.clone()));
+                                            return;
+                                        }
+                                        drop(pm); // Drop peer_manager lock before locking socket_to_transport
+                                        // Store mapping from placeholder SocketAddr to TransportAddr for Iroh lookups
+                                        socket_to_transport_clone.lock().await.insert(placeholder_socket, iroh_addr_clone.clone());
+                                        
+                                        // Store Iroh NodeId in address database
+                                        if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
+                                            if node_id_bytes.len() == 32 {
+                                                use iroh::PublicKey;
+                                                let mut key_array = [0u8; 32];
+                                                key_array.copy_from_slice(node_id_bytes);
+                                                if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
+                                                    let address_db_clone = address_database_clone.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut db = address_db_clone.lock().await;
+                                                        db.add_iroh_address(public_key, 0); // Services will be updated on version exchange
+                                                    });
                                                 }
-                                                // Store mapping from placeholder SocketAddr to TransportAddr for Iroh lookups
-                                                socket_to_transport_clone.lock().await.insert(placeholder_socket, iroh_addr_clone.clone());
-                                                
-                                                // Store Iroh NodeId in address database
-                                                if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
-                                                    if node_id_bytes.len() == 32 {
-                                                        use iroh::PublicKey;
-                                                        let mut key_array = [0u8; 32];
-                                                        key_array.copy_from_slice(node_id_bytes);
-                                                        if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
-                                                            let address_db_clone = address_database_clone.clone();
-                                                            tokio::spawn(async move {
-                                                                let mut db = address_db_clone.lock().await;
-                                                                db.add_iroh_address(public_key, 0); // Services will be updated on version exchange
-                                                            });
-                                                        }
-                                                    }
-                                                }
-                                                
-                                                info!("Successfully added Iroh peer (transport: {:?})", iroh_addr_clone);
-                                            }
-                                            Err(e) => {
-                                                warn!("Failed to lock peer manager for Iroh peer: {}", e);
-                                                let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(iroh_addr_clone.clone()));
-                                                return;
                                             }
                                         }
+                                        
+                                        info!("Successfully added Iroh peer (transport: {:?})", iroh_addr_clone);
                                     });
                                 }
                                 Err(e) => {
@@ -1438,7 +1420,7 @@ impl NetworkManager {
                     .unwrap()
                     .as_secs();
                 
-                let mut ban_list_guard = ban_list.lock().await;
+                let mut ban_list_guard = ban_list.write().await;
                 let expired: Vec<SocketAddr> = ban_list_guard
                     .iter()
                     .filter(|(_, &unban_timestamp)| {
@@ -1498,20 +1480,13 @@ impl NetworkManager {
         // Get peer addresses first, then drop lock before async operations
         let peer_addrs = {
             let pm = self.peer_manager.lock().await;
-            pm.peer_addresses().clone()
+            pm.peer_addresses()
         };
         
+        // Send to each peer using transport address (avoids needing to clone Peer)
         for addr in peer_addrs {
-            // Re-acquire lock for each peer to minimize lock duration
-            let peer_opt = {
-                let pm = self.peer_manager.lock().await;
-                pm.get_peer(&addr).cloned()
-            };
-            
-            if let Some(peer) = peer_opt {
-                if let Err(e) = peer.send_message(message.clone()).await {
-                    warn!("Failed to send message to peer {:?}: {}", addr, e);
-                }
+            if let Err(e) = self.send_to_peer_by_transport(addr, message.clone()).await {
+                warn!("Failed to broadcast message to peer {:?}: {}", addr, e);
             }
         }
         Ok(())
@@ -1602,7 +1577,12 @@ impl NetworkManager {
             let pm = self.peer_manager.lock().await;
             pm.find_transport_addr_by_socket(addr)
                 .or_else(|| {
-                    self.socket_to_transport.lock().await.get(&addr).cloned()
+                    // Check socket_to_transport mapping (synchronous access needed)
+                    // Note: This is a fallback, so we use try_lock to avoid blocking
+                    // If we can't get the lock immediately, return None
+                    self.socket_to_transport.try_lock()
+                        .ok()
+                        .and_then(|map| map.get(&addr).cloned())
                 })
         };
         
@@ -1630,8 +1610,8 @@ impl NetworkManager {
             }
         };
         
-        // Track bytes sent only if peer exists
-        self.track_bytes_sent(message_len as u64);
+        // Track bytes sent only if peer exists (async-safe)
+        self.track_bytes_sent(message_len as u64).await;
         
         // Send message without holding the lock (unbounded channel, so send won't block)
         sender.send(message)
@@ -1670,7 +1650,7 @@ impl NetworkManager {
                     .unwrap()
                     .as_secs()
                     + ban_duration;
-                let mut ban_list = self.ban_list.lock().await;
+                let mut ban_list = self.ban_list.write().await;
                 ban_list.insert(addr, unban_timestamp);
                 return Err(anyhow::anyhow!("IP {} is banned due to connection rate violations", ip));
             }
@@ -1812,7 +1792,10 @@ impl NetworkManager {
         let ping_msg = ProtocolMessage::Ping(PingMessage { nonce });
         let wire_msg = ProtocolParser::serialize_message(&ping_msg)?;
         
-        let peer_addrs = self.peer_manager.lock().await.peer_addresses();
+        let peer_addrs = {
+            let pm = self.peer_manager.lock().await;
+            pm.peer_addresses()
+        };
         for addr in peer_addrs {
             // Convert TransportAddr to SocketAddr for send_to_peer, or use send_to_peer_by_transport
             let addr_clone = addr.clone();
@@ -2149,8 +2132,8 @@ impl NetworkManager {
     /// 4. Calls bllvm_protocol::network::process_network_message()
     /// 5. Converts NetworkResponse back to wire format and enqueues for sending
     pub async fn handle_incoming_wire_tcp(&self, peer_addr: SocketAddr, data: Vec<u8>) -> Result<()> {
-        // Track bytes received
-        self.track_bytes_received(data.len() as u64);
+        // Track bytes received (async-safe)
+        self.track_bytes_received(data.len() as u64).await;
         
         // Check if peer is banned
         if self.is_banned(peer_addr) {
@@ -2220,11 +2203,6 @@ impl NetworkManager {
             use crate::network::protocol_adapter::ProtocolAdapter;
             let protocol_msg = ProtocolAdapter::protocol_to_consensus_message(&parsed)?;
             
-            // Get or create PeerState
-            let mut peer_states = self.peer_states.lock().await;
-            let peer_state = peer_states.entry(peer_addr)
-                .or_insert_with(|| bllvm_protocol::network::PeerState::new());
-            
             // Create NodeChainAccess
             use crate::network::chain_access::NodeChainAccess;
             let chain_access = NodeChainAccess::new(
@@ -2240,16 +2218,26 @@ impl NetworkManager {
                 .map_err(|e| anyhow::anyhow!("Failed to get height: {}", e))?
                 .unwrap_or(0);
             
-            // Process message with protocol layer
-            use bllvm_protocol::network::{process_network_message, ChainStateAccess};
-            match process_network_message(
-                protocol_engine,
-                &protocol_msg,
-                peer_state,
-                Some(&chain_access as &dyn ChainStateAccess),
-                Some(&utxo_set),
-                Some(height),
-            ) {
+            // Process message with protocol layer - lock peer_states only during synchronous processing
+            let response = {
+                let mut peer_states = self.peer_states.write().await;
+                let peer_state = peer_states.entry(peer_addr)
+                    .or_insert_with(|| bllvm_protocol::network::PeerState::new());
+                
+                // Process message (synchronous, no await points)
+                use bllvm_protocol::network::{process_network_message, ChainStateAccess};
+                process_network_message(
+                    protocol_engine,
+                    &protocol_msg,
+                    peer_state, // &mut PeerState
+                    Some(&chain_access as &dyn ChainStateAccess),
+                    Some(&utxo_set),
+                    Some(height),
+                )
+            }; // Lock dropped here before async operations
+            
+            // Now handle response without holding the lock
+            match response {
                 Ok(response) => {
                     // Convert response to wire format and send via transport layer
                     use crate::network::message_bridge::MessageBridge;
@@ -2586,7 +2574,7 @@ impl NetworkManager {
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let mut ban_list = self.ban_list.lock().await;
+                let mut ban_list = self.ban_list.write().await;
                 if unban_timestamp == 0 {
                     // Permanent ban (use max timestamp)
                     ban_list.insert(addr, u64::MAX);
@@ -2602,7 +2590,7 @@ impl NetworkManager {
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let mut ban_list = self.ban_list.lock().await;
+                let mut ban_list = self.ban_list.write().await;
                 ban_list.remove(&addr);
             })
         })
@@ -2613,7 +2601,7 @@ impl NetworkManager {
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let mut ban_list = self.ban_list.lock().await;
+                let mut ban_list = self.ban_list.write().await;
                 ban_list.clear();
             })
         })
@@ -2624,14 +2612,14 @@ impl NetworkManager {
         use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
         
         // Get fresh addresses from database (up to 2500, Bitcoin Core limit)
-        let ban_list = self.ban_list.lock().await.clone();
+        let ban_list = self.ban_list.read().await.clone();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
         
         let addresses = {
-            let mut db = self.address_database.lock().await;
+            let mut db = self.address_database.write().await;
             let fresh = db.get_fresh_addresses(2500);
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
@@ -2652,7 +2640,7 @@ impl NetworkManager {
         
         // Get peer services from peer state
         let peer_services = {
-            let peer_states = self.peer_states.lock().await;
+            let peer_states = self.peer_states.read().await;
             peer_states
                 .get(&peer_addr)
                 .map(|state| state.services)
@@ -2661,7 +2649,7 @@ impl NetworkManager {
         
         // Store addresses in database
         {
-            let mut db = self.address_database.lock().await;
+            let mut db = self.address_database.write().await;
             for addr in &msg.addresses {
                 db.add_address(addr.clone(), peer_services);
             }
@@ -2698,14 +2686,14 @@ impl NetworkManager {
         }
         
         // Filter addresses (exclude local, banned, already connected)
-        let ban_list = self.ban_list.lock().await.clone();
+        let ban_list = self.ban_list.read().await.clone();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
         
         let filtered = {
-            let db = self.address_database.lock().await;
+            let db = self.address_database.read().await;
             db.filter_addresses(addresses.to_vec(), &ban_list, &connected_peers)
         };
         
@@ -2795,7 +2783,7 @@ impl NetworkManager {
         
         // Also store our own address in database
         {
-            let mut db = self.address_database.lock().await;
+            let mut db = self.address_database.write().await;
             db.add_address(our_addr, services);
         }
         
@@ -2807,7 +2795,7 @@ impl NetworkManager {
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let ban_list = self.ban_list.lock().await;
+                let ban_list = self.ban_list.read().await;
                 ban_list.iter().map(|(addr, timestamp)| (*addr, *timestamp)).collect()
             })
         })
@@ -2842,7 +2830,7 @@ impl NetworkManager {
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let ban_list = self.ban_list.lock().await;
+                let ban_list = self.ban_list.read().await;
                 if let Some(&unban_timestamp) = ban_list.get(&addr) {
                     if unban_timestamp == u64::MAX {
                         return true; // Permanent ban
@@ -2867,26 +2855,16 @@ impl NetworkManager {
         })
     }
 
-    /// Track bytes sent
-    pub fn track_bytes_sent(&self, bytes: u64) {
-        // Use block_in_place to avoid blocking async runtime
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut sent = self.bytes_sent.lock().await;
-                *sent += bytes;
-            })
-        })
+    /// Track bytes sent (async-safe)
+    pub async fn track_bytes_sent(&self, bytes: u64) {
+        let mut sent = self.bytes_sent.lock().await;
+        *sent += bytes;
     }
 
-    /// Track bytes received
-    pub fn track_bytes_received(&self, bytes: u64) {
-        // Use block_in_place to avoid blocking async runtime
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut received = self.bytes_received.lock().await;
-                *received += bytes;
-            })
-        })
+    /// Track bytes received (async-safe)
+    pub async fn track_bytes_received(&self, bytes: u64) {
+        let mut received = self.bytes_received.lock().await;
+        *received += bytes;
     }
 
     /// Handle GetBanList message - respond with ban list or hash
@@ -2903,7 +2881,7 @@ impl NetworkManager {
                peer_addr, msg.request_full, msg.min_ban_duration);
 
         // Get current ban list
-        let ban_list = self.ban_list.lock().await;
+        let ban_list = self.ban_list.read().await;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3000,7 +2978,7 @@ impl NetworkManager {
         }
 
         // Validate and merge ban entries
-        let mut ban_list = self.ban_list.lock().await;
+        let mut ban_list = self.ban_list.write().await;
         let mut merged_count = 0;
 
         for entry in &msg.ban_entries {
@@ -3060,10 +3038,10 @@ impl NetworkManager {
             pm.peer_count()
         };
         let banned_peers_count = {
-            let ban_list = self.ban_list.lock().await;
+            let ban_list = self.ban_list.read().await;
             ban_list.len()
         };
-        let resource_metrics = self.dos_protection.get_metrics().await;
+        let _resource_metrics = self.dos_protection.get_metrics().await;
         
         crate::node::metrics::NetworkMetrics {
             peer_count: active_connections,
@@ -3167,6 +3145,7 @@ impl NetworkManager {
 
 #[cfg(test)]
 mod tests {
+    mod concurrency_stress_tests;
     use super::*;
 
     #[tokio::test]
@@ -3400,8 +3379,8 @@ mod tests {
     }
 
     // NOTE: test_handle_incoming_wire_tcp_enqueues_pkgtxn was removed because it hangs
-    // when run with other tests due to std::sync::Mutex blocking the async runtime.
-    // The handle_incoming_wire_tcp function uses std::sync::Mutex (in track_bytes_received
+    // Note: All Mutex usage is now tokio::sync::Mutex with async-safe .await calls.
+    // The handle_incoming_wire_tcp function uses async-safe track_bytes_received
     // and is_banned) which blocks the async runtime when there's contention.
     // Full message routing is tested in integration tests.
 

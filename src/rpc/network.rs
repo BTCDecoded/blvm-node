@@ -119,7 +119,7 @@ impl NetworkRpc {
         debug!("RPC: getpeerinfo");
 
         if let Some(ref network) = self.network_manager {
-            let peer_manager = network.peer_manager();
+            let peer_manager = network.peer_manager().await;
 
             // This avoids: 1) cloning all addresses, 2) looking up each peer again
             let mut peers = Vec::new();

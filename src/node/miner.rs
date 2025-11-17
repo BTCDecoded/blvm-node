@@ -469,7 +469,7 @@ impl MiningCoordinator {
                 bits,
                 nonce: 0,
             },
-            transactions: all_transactions,
+            transactions: all_transactions.into_boxed_slice(),
         };
 
         debug!("Generated block template: height={}, prev_hash={:?}, {} transactions, merkle_root={:?}",
@@ -483,8 +483,8 @@ impl MiningCoordinator {
         // Simplified coinbase transaction
         Ok(Transaction {
             version: 1,
-            inputs: vec![],
-            outputs: vec![bllvm_protocol::TransactionOutput {
+            inputs: bllvm_consensus::tx_inputs![],
+            outputs: bllvm_consensus::tx_outputs![bllvm_protocol::TransactionOutput {
                 value: 5000000000, // 50 BTC
                 script_pubkey: vec![
                     0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
