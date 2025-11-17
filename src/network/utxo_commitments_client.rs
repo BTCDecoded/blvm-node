@@ -149,20 +149,27 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 }
             };
             
-            // Store TransportAddr mapping if Iroh
+            // Store TransportAddr mapping if Iroh - drop RwLock before Mutex lock
             if let Some(transport_addr) = transport_addr_opt {
-                let network = network_manager.read().await;
-                // Store mapping from placeholder SocketAddr to TransportAddr
-                network.socket_to_transport.lock().unwrap().insert(peer_addr, transport_addr);
-                drop(network);
+                let socket_to_transport = {
+                    let network = network_manager.read().await;
+                    // Clone the Arc to avoid holding RwLock while locking Mutex
+                    Arc::clone(&network.socket_to_transport)
+                };
+                // Now lock the Mutex without holding the RwLock
+                socket_to_transport.lock().await.insert(peer_addr, transport_addr);
             }
 
             // Check if peer supports UTXO commitments before sending request
-            let network = network_manager.read().await;
+            // Get peer_states Arc first, then drop RwLock before Mutex lock
+            let peer_states_arc = {
+                let network = network_manager.read().await;
+                Arc::clone(&network.peer_states)
+            };
             
-            // Get peer version to check capabilities
+            // Get peer version to check capabilities - now safe to lock Mutex
             let peer_supports_utxo_commitments = {
-                let peer_states = network.peer_states.lock().unwrap();
+                let peer_states = peer_states_arc.lock().await;
                 if let Some(peer_state) = peer_states.get(&peer_addr) {
                     #[cfg(feature = "utxo-commitments")]
                     {
@@ -251,10 +258,13 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     }
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_seconds)) => {
-                    // Timeout - cleanup request
+                    // Timeout - cleanup request - drop RwLock before Mutex lock
                     {
-                        let network = network_manager.read().await;
-                        let mut pending = network.pending_requests.lock().unwrap();
+                        let pending_requests_arc = {
+                            let network = network_manager.read().await;
+                            Arc::clone(&network.pending_requests)
+                        };
+                        let mut pending = pending_requests_arc.lock().await;
                         pending.remove(&request_id);
                     }
                     Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
@@ -342,12 +352,13 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 }
             };
             
-            // Store TransportAddr mapping if Iroh
+            // Store TransportAddr mapping if Iroh - drop RwLock before Mutex lock
             if let Some(transport_addr) = transport_addr_opt {
-                let network = network_manager.read().await;
-                // Store mapping from placeholder SocketAddr to TransportAddr
-                network.socket_to_transport.lock().unwrap().insert(peer_addr, transport_addr);
-                drop(network);
+                let socket_to_transport = {
+                    let network = network_manager.read().await;
+                    Arc::clone(&network.socket_to_transport)
+                };
+                socket_to_transport.lock().await.insert(peer_addr, transport_addr);
             }
 
             // Register pending request before sending
@@ -439,10 +450,13 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     }
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_seconds)) => {
-                    // Timeout - cleanup request
+                    // Timeout - cleanup request - drop RwLock before Mutex lock
                     {
-                        let network = network_manager.read().await;
-                        let mut pending = network.pending_requests.lock().unwrap();
+                        let pending_requests_arc = {
+                            let network = network_manager.read().await;
+                            Arc::clone(&network.pending_requests)
+                        };
+                        let mut pending = pending_requests_arc.lock().await;
                         pending.remove(&request_id);
                     }
                     Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(

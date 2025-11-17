@@ -11,6 +11,7 @@ use bllvm_protocol::payment::{Bip70Error, PaymentRequest};
 use hex;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+// Note: Using std::sync::Mutex here is fine - locks are not held across await points
 
 /// In-memory payment request store (simplified - would use persistent storage in production)
 type PaymentRequestStore = Arc<Mutex<HashMap<String, PaymentRequest>>>;

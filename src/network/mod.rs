@@ -55,15 +55,15 @@ use bllvm_protocol::mempool::Mempool;
 use bllvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 use crate::storage::Storage;
 use crate::node::mempool::MempoolManager;
 
 use crate::network::tcp_transport::TcpTransport;
 use crate::network::transport::{
-    Transport, TransportAddr, TransportConnection, TransportListener, TransportPreference,
+    Transport, TransportAddr, TransportListener, TransportPreference,
 };
 use std::collections::HashSet;
 
@@ -501,6 +501,7 @@ impl NetworkManager {
             enable_self_advertisement: config
                 .map(|c| c.enable_self_advertisement)
                 .unwrap_or(true),
+            request_timeout_config,
         }
     }
     
@@ -551,17 +552,18 @@ impl NetworkManager {
         
         info!("Discovering peers from DNS seeds for {}", network);
         // Get max addresses from config
+        let timing_config_default = crate::config::NetworkTimingConfig::default();
         let timing_config = config
             .network_timing
             .as_ref()
-            .unwrap_or(&crate::config::NetworkTimingConfig::default());
+            .unwrap_or(&timing_config_default);
         let max_addresses = timing_config.max_addresses_from_dns;
         let addresses = dns_seeds::resolve_dns_seeds(seeds, port, max_addresses).await;
         let address_count = addresses.len();
         
         // Add discovered addresses to database
         {
-            let mut db = self.address_database.lock().unwrap();
+            let mut db = self.address_database.lock().await;
             for addr in addresses {
                 db.add_address(addr, 0); // Services will be updated on connection
             }
@@ -619,7 +621,7 @@ impl NetworkManager {
         
         // Count current Iroh peers
         let current_iroh_count = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             pm.peer_addresses()
                 .iter()
                 .filter(|addr| matches!(addr, TransportAddr::Iroh(_)))
@@ -635,7 +637,7 @@ impl NetworkManager {
         
         // Get fresh Iroh NodeIds from database
         let node_ids = {
-            let db = self.address_database.lock().unwrap();
+            let db = self.address_database.lock().await;
             db.get_fresh_iroh_addresses(needed * 2) // Get 2x needed for retries
         };
         
@@ -674,7 +676,7 @@ impl NetworkManager {
                     
                     // Add peer to manager
                     {
-                        let mut pm = self.peer_manager.lock().unwrap();
+                        let mut pm = self.peer_manager.lock().await;
                         if let Err(e) = pm.add_peer(transport_addr.clone(), peer) {
                             warn!("Failed to add Iroh peer: {}", e);
                             continue;
@@ -683,7 +685,7 @@ impl NetworkManager {
                     
                     // Store mapping for Iroh (if needed)
                     {
-                        let mut socket_to_transport = self.socket_to_transport.lock().unwrap();
+                        let mut socket_to_transport = self.socket_to_transport.lock().await;
                         socket_to_transport.insert(placeholder_socket, transport_addr.clone());
                     }
                     
@@ -716,14 +718,14 @@ impl NetworkManager {
         info!("Need {} more peers (current: {}, target: {})", needed, current_count, target_count);
 
         // Get fresh addresses from database
-        let ban_list = self.ban_list.lock().unwrap().clone();
+        let ban_list = self.ban_list.lock().await.clone();
         let connected_peers: Vec<SocketAddr> = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
 
         let addresses: Vec<_> = {
-            let mut db = self.address_database.lock().unwrap();
+            let db = self.address_database.lock().await;
             let fresh = db.get_fresh_addresses(needed * 3); // Get 3x needed for retries
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
@@ -735,7 +737,7 @@ impl NetworkManager {
 
         // Convert addresses to SocketAddrs first
         let sockets: Vec<SocketAddr> = {
-            let db = self.address_database.lock().unwrap();
+            let db = self.address_database.lock().await;
             addresses.iter()
                 .take(needed * 2)
                 .map(|addr| db.network_addr_to_socket(addr))
@@ -825,10 +827,11 @@ impl NetworkManager {
 
         // 4. Connect to peers from address database to reach target count
         // Wait a bit for persistent peers to connect first
+        let timing_config_default = crate::config::NetworkTimingConfig::default();
         let timing_config = config
             .network_timing
             .as_ref()
-            .unwrap_or(&crate::config::NetworkTimingConfig::default());
+            .unwrap_or(&timing_config_default);
         let delay_seconds = timing_config.peer_connection_delay_seconds;
         tokio::time::sleep(tokio::time::Duration::from_secs(delay_seconds)).await;
         
@@ -921,7 +924,7 @@ impl NetworkManager {
                                         .unwrap()
                                         .as_secs()
                                         + ban_duration;
-                                    let mut ban_list_guard = ban_list.lock().unwrap();
+                                    let mut ban_list_guard = ban_list.lock().await;
                                     ban_list_guard.insert(socket_addr, unban_timestamp);
                                 }
                                 
@@ -932,7 +935,7 @@ impl NetworkManager {
 
                             // Check active connection limit
                             let current_connections = {
-                                let pm = peer_manager_clone.lock().unwrap();
+                                let pm = peer_manager_clone.lock().await;
                                 pm.peer_count()
                             };
                             if !dos_protection.check_active_connections(current_connections).await {
@@ -950,9 +953,6 @@ impl NetworkManager {
                             let peer_manager_for_peer = Arc::clone(&peer_manager_clone);
                             tokio::spawn(async move {
                                 // Create peer from transport connection
-                                use crate::network::peer::Peer;
-                                use crate::network::transport::TransportAddr;
-                                
                                 let peer = peer::Peer::from_transport_connection(
                                     conn,
                                     socket_addr,
@@ -1028,7 +1028,7 @@ impl NetworkManager {
                                                 .unwrap()
                                                 .as_secs()
                                                 + ban_duration;
-                                            let mut ban_list_guard = ban_list.lock().unwrap();
+                                            let mut ban_list_guard = ban_list.lock().await;
                                             ban_list_guard.insert(socket_addr, unban_timestamp);
                                         }
                                         drop(conn);
@@ -1037,7 +1037,7 @@ impl NetworkManager {
 
                                     // Check active connection limit
                                     let current_connections = {
-                                        let pm = peer_manager.lock().unwrap();
+                                        let pm = peer_manager.lock().await;
                                         pm.peer_count()
                                     };
                                     if !dos_protection.check_active_connections(current_connections).await {
@@ -1132,7 +1132,7 @@ impl NetworkManager {
 
                                     // Check active connection limit (Iroh doesn't have IP, so skip rate limiting)
                                     let current_connections = {
-                                        let pm = peer_manager.lock().unwrap();
+                                        let pm = peer_manager.lock().await;
                                         pm.peer_count()
                                     };
                                     if !dos_protection.check_active_connections(current_connections).await {
@@ -1188,7 +1188,7 @@ impl NetworkManager {
                                                     return;
                                                 }
                                                 // Store mapping from placeholder SocketAddr to TransportAddr for Iroh lookups
-                                                socket_to_transport_clone.lock().unwrap().insert(placeholder_socket, iroh_addr_clone.clone());
+                                                socket_to_transport_clone.lock().await.insert(placeholder_socket, iroh_addr_clone.clone());
                                                 
                                                 // Store Iroh NodeId in address database
                                                 if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
@@ -1199,7 +1199,7 @@ impl NetworkManager {
                                                         if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
                                                             let address_db_clone = address_database_clone.clone();
                                                             tokio::spawn(async move {
-                                                                let mut db = address_db_clone.lock().unwrap();
+                                                                let mut db = address_db_clone.lock().await;
                                                                 db.add_iroh_address(public_key, 0); // Services will be updated on version exchange
                                                             });
                                                         }
@@ -1249,10 +1249,15 @@ impl NetworkManager {
     
     /// Generate a new request ID for async request-response patterns
     pub fn generate_request_id(&self) -> u64 {
-        let mut counter = self.request_id_counter.lock().unwrap();
-        let id = *counter;
-        *counter = counter.wrapping_add(1);
-        id
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut counter = self.request_id_counter.lock().await;
+                let id = *counter;
+                *counter = counter.wrapping_add(1);
+                id
+            })
+        })
     }
     
     /// Register a pending request and return the response receiver
@@ -1282,34 +1287,54 @@ impl NetworkManager {
             retry_count: 0,
         };
         
-        self.pending_requests.lock().unwrap().insert(request_id, pending_req);
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.pending_requests.lock().await.insert(request_id, pending_req);
+            })
+        });
         (request_id, rx)
     }
     
     /// Complete a pending request by sending the response
     pub fn complete_request(&self, request_id: u64, response: Vec<u8>) -> bool {
-        let mut pending = self.pending_requests.lock().unwrap();
-        if let Some(pending_req) = pending.remove(&request_id) {
-            let _ = pending_req.sender.send(response);
-            true
-        } else {
-            false
-        }
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut pending = self.pending_requests.lock().await;
+                if let Some(pending_req) = pending.remove(&request_id) {
+                    let _ = pending_req.sender.send(response);
+                    true
+                } else {
+                    false
+                }
+            })
+        })
     }
     
     /// Cancel a pending request
     pub fn cancel_request(&self, request_id: u64) -> bool {
-        let mut pending = self.pending_requests.lock().unwrap();
-        pending.remove(&request_id).is_some()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut pending = self.pending_requests.lock().await;
+                pending.remove(&request_id).is_some()
+            })
+        })
     }
     
     /// Get pending requests for a specific peer
     pub fn get_pending_requests_for_peer(&self, peer_addr: SocketAddr) -> Vec<u64> {
-        let pending = self.pending_requests.lock().unwrap();
-        pending.iter()
-            .filter(|(_, req)| req.peer_addr == peer_addr)
-            .map(|(id, _)| *id)
-            .collect()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let pending = self.pending_requests.lock().await;
+                pending.iter()
+                    .filter(|(_, req)| req.peer_addr == peer_addr)
+                    .map(|(id, _)| *id)
+                    .collect()
+            })
+        })
     }
     
     /// Clean up expired requests (older than max_age_seconds)
@@ -1320,17 +1345,22 @@ impl NetworkManager {
             .unwrap()
             .as_secs();
         
-        let mut pending = self.pending_requests.lock().unwrap();
-        let expired: Vec<u64> = pending.iter()
-            .filter(|(_, req)| now.saturating_sub(req.timestamp) > max_age_seconds)
-            .map(|(id, _)| *id)
-            .collect();
-        
-        for id in &expired {
-            pending.remove(id);
-        }
-        
-        expired.len()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut pending = self.pending_requests.lock().await;
+                let expired: Vec<u64> = pending.iter()
+                    .filter(|(_, req)| now.saturating_sub(req.timestamp) > max_age_seconds)
+                    .map(|(id, _)| *id)
+                    .collect();
+                
+                for id in &expired {
+                    pending.remove(id);
+                }
+                
+                expired.len()
+            })
+        })
     }
     
     /// Start periodic task to clean up expired pending requests
@@ -1352,7 +1382,7 @@ impl NetworkManager {
                     .unwrap()
                     .as_secs();
                 
-                let mut pending = pending_requests.lock().unwrap();
+                let mut pending = pending_requests.lock().await;
                 let initial_count = pending.len();
                 pending.retain(|_, req| {
                     now.saturating_sub(req.timestamp) < max_age
@@ -1408,7 +1438,7 @@ impl NetworkManager {
                     .unwrap()
                     .as_secs();
                 
-                let mut ban_list_guard = ban_list.lock().unwrap();
+                let mut ban_list_guard = ban_list.lock().await;
                 let expired: Vec<SocketAddr> = ban_list_guard
                     .iter()
                     .filter(|(_, &unban_timestamp)| {
@@ -1432,24 +1462,53 @@ impl NetworkManager {
 
     /// Get the number of connected peers
     pub fn peer_count(&self) -> usize {
-        self.peer_manager.lock().unwrap().peer_count()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let pm = self.peer_manager.lock().await;
+                pm.peer_count()
+            })
+        })
     }
 
     /// Get all peer addresses (as SocketAddr for backward compatibility)
     pub fn peer_addresses(&self) -> Vec<SocketAddr> {
-        self.peer_manager.lock().unwrap().peer_socket_addresses()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let pm = self.peer_manager.lock().await;
+                pm.peer_socket_addresses()
+            })
+        })
     }
     
     /// Get all peer addresses (as TransportAddr)
     pub fn peer_transport_addresses(&self) -> Vec<TransportAddr> {
-        self.peer_manager.lock().unwrap().peer_addresses()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let pm = self.peer_manager.lock().await;
+                pm.peer_addresses()
+            })
+        })
     }
 
     /// Broadcast a message to all peers
     pub async fn broadcast(&self, message: Vec<u8>) -> Result<()> {
-        let peer_addrs = self.peer_manager.lock().unwrap().peer_addresses();
+        // Get peer addresses first, then drop lock before async operations
+        let peer_addrs = {
+            let pm = self.peer_manager.lock().await;
+            pm.peer_addresses().clone()
+        };
+        
         for addr in peer_addrs {
-            if let Some(peer) = self.peer_manager.lock().unwrap().get_peer(&addr) {
+            // Re-acquire lock for each peer to minimize lock duration
+            let peer_opt = {
+                let pm = self.peer_manager.lock().await;
+                pm.get_peer(&addr).cloned()
+            };
+            
+            if let Some(peer) = peer_opt {
                 if let Err(e) = peer.send_message(message.clone()).await {
                     warn!("Failed to send message to peer {:?}: {}", addr, e);
                 }
@@ -1461,11 +1520,11 @@ impl NetworkManager {
     /// Broadcast to reliable peers first, then others
     /// Uses peer quality to prioritize reliable peers for critical messages
     pub async fn broadcast_with_quality_priority(&self, message: Vec<u8>) -> Result<()> {
-        let pm = self.peer_manager.lock().unwrap();
-        
-        // Get reliable peers first
-        let reliable_peers = pm.select_reliable_peers();
-        drop(pm);
+        // Get reliable peers first, then drop lock before async operations
+        let reliable_peers = {
+            let pm = self.peer_manager.lock().await;
+            pm.select_reliable_peers()
+        };
         
         // Send to reliable peers first
         for addr in &reliable_peers {
@@ -1475,7 +1534,7 @@ impl NetworkManager {
         }
         
         // Then send to remaining peers
-        let pm = self.peer_manager.lock().unwrap();
+        let pm = self.peer_manager.lock().await;
         let all_peers = pm.peer_addresses();
         let remaining_peers: Vec<_> = all_peers.iter()
             .filter(|addr| !reliable_peers.contains(addr))
@@ -1494,7 +1553,7 @@ impl NetworkManager {
     /// Send to best peer (highest quality score)
     /// Returns the peer address used, or error if no peers available
     pub async fn send_to_best_peer(&self, message: Vec<u8>) -> Result<TransportAddr> {
-        let pm = self.peer_manager.lock().unwrap();
+        let pm = self.peer_manager.lock().await;
         let best_peers = pm.select_best_peers(1);
         drop(pm);
         
@@ -1509,7 +1568,7 @@ impl NetworkManager {
     /// Send to reliable peer only (for critical operations)
     /// Returns error if no reliable peers available
     pub async fn send_to_reliable_peer(&self, message: Vec<u8>) -> Result<TransportAddr> {
-        let pm = self.peer_manager.lock().unwrap();
+        let pm = self.peer_manager.lock().await;
         let reliable_peers = pm.select_reliable_peers();
         drop(pm);
         
@@ -1518,7 +1577,7 @@ impl NetworkManager {
         }
         
         // Select best reliable peer
-        let pm = self.peer_manager.lock().unwrap();
+        let pm = self.peer_manager.lock().await;
         let best_reliable = reliable_peers.iter()
             .max_by(|a, b| {
                 let score_a = pm.get_peer(a).map(|p| p.quality_score()).unwrap_or(0.0);
@@ -1540,10 +1599,10 @@ impl NetworkManager {
     pub async fn send_to_peer(&self, addr: SocketAddr, message: Vec<u8>) -> Result<()> {
         // Try to find transport address (TCP, Quinn, or Iroh mapping)
         let transport_addr = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             pm.find_transport_addr_by_socket(addr)
                 .or_else(|| {
-                    self.socket_to_transport.lock().unwrap().get(&addr).cloned()
+                    self.socket_to_transport.lock().await.get(&addr).cloned()
                 })
         };
         
@@ -1562,7 +1621,7 @@ impl NetworkManager {
         
         // Check if peer exists and get sender channel before dropping lock
         let sender = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             if let Some(peer) = pm.get_peer(&addr) {
                 peer.send_tx.clone()
             } else {
@@ -1579,7 +1638,7 @@ impl NetworkManager {
             .map_err(|e| anyhow::anyhow!("Failed to send message to peer: {}", e))?;
         
         // Record send after message is sent
-        let mut pm = self.peer_manager.lock().unwrap();
+        let mut pm = self.peer_manager.lock().await;
         if let Some(peer) = pm.get_peer_mut(&addr) {
             peer.record_send(message_len);
         }
@@ -1611,7 +1670,7 @@ impl NetworkManager {
                     .unwrap()
                     .as_secs()
                     + ban_duration;
-                let mut ban_list = self.ban_list.lock().unwrap();
+                let mut ban_list = self.ban_list.lock().await;
                 ban_list.insert(addr, unban_timestamp);
                 return Err(anyhow::anyhow!("IP {} is banned due to connection rate violations", ip));
             }
@@ -1637,7 +1696,7 @@ impl NetworkManager {
                 Ok((peer, transport_addr)) => {
                     // Successfully connected
                     {
-                        let mut pm = self.peer_manager.lock().unwrap();
+                        let mut pm = self.peer_manager.lock().await;
                         pm.add_peer(transport_addr.clone(), peer)?;
                     }
                     
@@ -1753,7 +1812,7 @@ impl NetworkManager {
         let ping_msg = ProtocolMessage::Ping(PingMessage { nonce });
         let wire_msg = ProtocolParser::serialize_message(&ping_msg)?;
         
-        let peer_addrs = self.peer_manager.lock().unwrap().peer_addresses();
+        let peer_addrs = self.peer_manager.lock().await.peer_addresses();
         for addr in peer_addrs {
             // Convert TransportAddr to SocketAddr for send_to_peer, or use send_to_peer_by_transport
             let addr_clone = addr.clone();
@@ -1822,10 +1881,10 @@ impl NetworkManager {
                 || now.duration_since(last_metrics_update).unwrap().as_secs() >= 10;
             
             if should_update {
-                let pm = self.peer_manager.lock().unwrap();
+                let pm = self.peer_manager.lock().await;
                 let active_connections = pm.peer_count();
-                let bytes_received = *self.bytes_received.lock().unwrap();
-                let bytes_sent = *self.bytes_sent.lock().unwrap();
+                let bytes_received = *self.bytes_received.lock().await;
+                let bytes_sent = *self.bytes_sent.lock().await;
                 
                 // Approximate queue size (messages processed since last check)
                 let queue_size = message_count as usize;
@@ -1859,7 +1918,7 @@ impl NetworkManager {
                 }
                 NetworkMessage::PeerDisconnected(addr) => {
                     info!("Peer disconnected: {:?}", addr);
-                    let mut pm = self.peer_manager.lock().unwrap();
+                    let mut pm = self.peer_manager.lock().await;
                     // Remove peer directly using TransportAddr
                     pm.remove_peer(&addr);
                     
@@ -1871,7 +1930,7 @@ impl NetworkManager {
                         #[cfg(feature = "iroh")]
                         TransportAddr::Iroh(_) => None,
                     } {
-                        let mut ip_connections = self.connections_per_ip.lock().unwrap();
+                        let mut ip_connections = self.connections_per_ip.lock().await;
                         if let Some(count) = ip_connections.get_mut(&ip) {
                             *count = count.saturating_sub(1);
                             if *count == 0 {
@@ -1882,7 +1941,7 @@ impl NetworkManager {
                     
                     // Clean up rate limiter (use SocketAddr for TCP/Quinn, or a key for Iroh)
                     {
-                        let mut rates = self.peer_message_rates.lock().unwrap();
+                        let mut rates = self.peer_message_rates.lock().await;
                         // For rate limiter, we need a key - use SocketAddr for TCP/Quinn
                         // For Iroh, we could use a hash of the key, but for now just skip
                         if let Some(sock_addr) = match &addr {
@@ -2014,15 +2073,11 @@ impl NetworkManager {
                 }
                 // Raw messages from peer connections
                 NetworkMessage::RawMessageReceived(data, peer_addr) => {
-                    // Update peer receive stats
+                    // Update peer receive stats - drop lock before async operations
                     {
-                        let mut pm = self.peer_manager.lock().unwrap();
+                        let mut pm = self.peer_manager.lock().await;
                         // Try to find peer by SocketAddr (TCP or Quinn, or Iroh mapping)
-                        let transport_addr = pm.find_transport_addr_by_socket(peer_addr)
-                            .or_else(|| {
-                                // Check Iroh mapping
-                                self.socket_to_transport.lock().unwrap().get(&peer_addr).cloned()
-                            });
+                        let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
                         if let Some(transport_addr) = transport_addr {
                             if let Some(peer) = pm.get_peer_mut(&transport_addr) {
                                 peer.record_receive(data.len());
@@ -2030,20 +2085,28 @@ impl NetworkManager {
                         }
                     }
                     
-                    // Check rate limiting before processing
-                    let mut rates = self.peer_message_rates.lock().unwrap();
-                    let rate_limiter = rates.entry(peer_addr).or_insert_with(|| {
-                        // Default: 100 burst, 10 messages/second
-                        PeerRateLimiter::new(100, 10)
-                    });
+                    // Check Iroh mapping separately to avoid nested locks
+                    let transport_addr_opt = {
+                        let socket_map = self.socket_to_transport.lock().await;
+                        socket_map.get(&peer_addr).cloned()
+                    };
                     
-                    if !rate_limiter.check_and_consume() {
+                    // Check rate limiting before processing - drop lock before async
+                    let should_process = {
+                        let mut rates = self.peer_message_rates.lock().await;
+                        let rate_limiter = rates.entry(peer_addr).or_insert_with(|| {
+                            // Default: 100 burst, 10 messages/second
+                            PeerRateLimiter::new(100, 10)
+                        });
+                        rate_limiter.check_and_consume()
+                    };
+                    
+                    if !should_process {
                         warn!("Rate limit exceeded for peer {}, dropping message", peer_addr);
                         // Optionally ban peer after repeated rate limit violations
                         // For now, just drop the message
                         continue;
                     }
-                    drop(rates);
                     
                     // Check if this is a response to a pending request (UTXOSet or FilteredBlock)
                     // Extract request_id from message and route to correct pending request
@@ -2056,7 +2119,7 @@ impl NetworkManager {
                         
                         if let Some(request_id) = request_id_opt {
                             // Route to pending request by request_id
-                            let mut pending = self.pending_requests.lock().unwrap();
+                            let mut pending = self.pending_requests.lock().await;
                             if let Some(pending_req) = pending.remove(&request_id) {
                                 drop(pending); // Release lock before sending
                                 let _ = pending_req.sender.send(data.clone());
@@ -2158,7 +2221,7 @@ impl NetworkManager {
             let protocol_msg = ProtocolAdapter::protocol_to_consensus_message(&parsed)?;
             
             // Get or create PeerState
-            let mut peer_states = self.peer_states.lock().unwrap();
+            let mut peer_states = self.peer_states.lock().await;
             let peer_state = peer_states.entry(peer_addr)
                 .or_insert_with(|| bllvm_protocol::network::PeerState::new());
             
@@ -2351,7 +2414,7 @@ impl NetworkManager {
         &self,
         txs: &[bllvm_protocol::Transaction],
     ) -> Result<()> {
-        if let Some(ref mempool_manager) = self.mempool_manager {
+        if let Some(ref _mempool_manager) = self.mempool_manager {
             // Use MempoolManager's add_transaction method
             // Note: add_transaction requires &mut, so we need to handle this carefully
             // For now, we'll use a channel or async approach
@@ -2359,28 +2422,28 @@ impl NetworkManager {
             for tx in txs {
                 // In a real implementation, we'd send this to a mempool processing channel
                 // For now, we validate and accept using consensus layer
-                let mut utxo_lock = self
+                let utxo_lock = self
                     .utxo_set
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("UTXO lock poisoned"))?;
+                    .await;
                 let mempool_lock = self
                     .mempool
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("Mempool lock poisoned"))?;
+                    .await;
                 let _ = self
                     .consensus
                     .accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0);
             }
         } else {
             // Fallback to legacy mempool
-            let mut utxo_lock = self
+            let utxo_lock = self
                 .utxo_set
                 .lock()
-                .map_err(|_| anyhow::anyhow!("UTXO lock poisoned"))?;
+                .await;
             let mempool_lock = self
                 .mempool
                 .lock()
-                .map_err(|_| anyhow::anyhow!("Mempool lock poisoned"))?;
+                .await;
             for tx in txs {
                 let _ = self
                     .consensus
@@ -2422,17 +2485,24 @@ impl NetworkManager {
     }
 
     /// Get peer manager reference (locked)
-    pub fn peer_manager(&self) -> std::sync::MutexGuard<'_, PeerManager> {
-        self.peer_manager.lock().unwrap()
+    /// 
+    /// Note: This is now async and uses tokio::sync::Mutex to avoid deadlocks
+    pub async fn peer_manager(&self) -> tokio::sync::MutexGuard<'_, PeerManager> {
+        self.peer_manager.lock().await
     }
 
     /// Check eclipse prevention for an IP address
     /// Returns true if connection is allowed, false if it would violate eclipse prevention
     pub fn check_eclipse_prevention(&self, ip: std::net::IpAddr) -> bool {
         let prefix = self.get_ip_prefix(ip);
-        let mut diversity = self.peer_diversity.lock().unwrap();
-        let count = diversity.get(&prefix).copied().unwrap_or(0);
-        count < 3 // Allow max 3 connections from same IP prefix
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let diversity = self.peer_diversity.lock().await;
+                let count = diversity.get(&prefix).copied().unwrap_or(0);
+                count < 3 // Allow max 3 connections from same IP prefix
+            })
+        })
     }
 
     /// Get IP prefix (first 3 octets) for eclipse prevention
@@ -2452,15 +2522,20 @@ impl NetworkManager {
     /// Remove peer diversity tracking for an IP address
     pub fn remove_peer_diversity(&self, ip: std::net::IpAddr) {
         let prefix = self.get_ip_prefix(ip);
-        let mut diversity = self.peer_diversity.lock().unwrap();
-        if let Some(count) = diversity.get_mut(&prefix) {
-            if *count > 0 {
-                *count -= 1;
-            }
-            if *count == 0 {
-                diversity.remove(&prefix);
-            }
-        }
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut diversity = self.peer_diversity.lock().await;
+                if let Some(count) = diversity.get_mut(&prefix) {
+                    if *count > 0 {
+                        *count -= 1;
+                    }
+                    if *count == 0 {
+                        diversity.remove(&prefix);
+                    }
+                }
+            })
+        })
     }
 
     /// Get filter service reference
@@ -2470,48 +2545,78 @@ impl NetworkManager {
 
     /// Add a persistent peer (will be connected to on startup)
     pub fn add_persistent_peer(&self, addr: SocketAddr) {
-        let mut peers = self.persistent_peers.lock().unwrap();
-        peers.insert(addr);
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut peers = self.persistent_peers.lock().await;
+                peers.insert(addr);
+            })
+        })
     }
 
     /// Remove a persistent peer
     pub fn remove_persistent_peer(&self, addr: SocketAddr) {
-        let mut peers = self.persistent_peers.lock().unwrap();
-        peers.remove(&addr);
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut peers = self.persistent_peers.lock().await;
+                peers.remove(&addr);
+            })
+        })
     }
 
     /// Get list of persistent peers (async version for RPC)
     pub async fn get_persistent_peers(&self) -> HashSet<SocketAddr> {
-        self.persistent_peers.lock().unwrap().clone()
+        self.persistent_peers.lock().await.clone()
     }
 
     /// Get list of persistent peers (sync version)
     pub fn get_persistent_peers_sync(&self) -> Vec<SocketAddr> {
-        let peers = self.persistent_peers.lock().unwrap();
-        peers.iter().cloned().collect()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let peers = self.persistent_peers.lock().await;
+                peers.iter().cloned().collect()
+            })
+        })
     }
 
     /// Ban a peer (with optional unban timestamp, 0 = permanent)
     pub fn ban_peer(&self, addr: SocketAddr, unban_timestamp: u64) {
-        let mut ban_list = self.ban_list.lock().unwrap();
-        if unban_timestamp == 0 {
-            // Permanent ban (use max timestamp)
-            ban_list.insert(addr, u64::MAX);
-        } else {
-            ban_list.insert(addr, unban_timestamp);
-        }
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ban_list = self.ban_list.lock().await;
+                if unban_timestamp == 0 {
+                    // Permanent ban (use max timestamp)
+                    ban_list.insert(addr, u64::MAX);
+                } else {
+                    ban_list.insert(addr, unban_timestamp);
+                }
+            })
+        })
     }
 
     /// Unban a peer
     pub fn unban_peer(&self, addr: SocketAddr) {
-        let mut ban_list = self.ban_list.lock().unwrap();
-        ban_list.remove(&addr);
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ban_list = self.ban_list.lock().await;
+                ban_list.remove(&addr);
+            })
+        })
     }
 
     /// Clear all bans
     pub fn clear_bans(&self) {
-        let mut ban_list = self.ban_list.lock().unwrap();
-        ban_list.clear();
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut ban_list = self.ban_list.lock().await;
+                ban_list.clear();
+            })
+        })
     }
 
     /// Handle GetAddr request - return known addresses
@@ -2519,14 +2624,14 @@ impl NetworkManager {
         use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
         
         // Get fresh addresses from database (up to 2500, Bitcoin Core limit)
-        let ban_list = self.ban_list.lock().unwrap().clone();
+        let ban_list = self.ban_list.lock().await.clone();
         let connected_peers: Vec<SocketAddr> = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
         
         let addresses = {
-            let mut db = self.address_database.lock().unwrap();
+            let mut db = self.address_database.lock().await;
             let fresh = db.get_fresh_addresses(2500);
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
@@ -2547,7 +2652,7 @@ impl NetworkManager {
         
         // Get peer services from peer state
         let peer_services = {
-            let peer_states = self.peer_states.lock().unwrap();
+            let peer_states = self.peer_states.lock().await;
             peer_states
                 .get(&peer_addr)
                 .map(|state| state.services)
@@ -2556,7 +2661,7 @@ impl NetworkManager {
         
         // Store addresses in database
         {
-            let mut db = self.address_database.lock().unwrap();
+            let mut db = self.address_database.lock().await;
             for addr in &msg.addresses {
                 db.add_address(addr.clone(), peer_services);
             }
@@ -2585,7 +2690,7 @@ impl NetworkManager {
         let min_interval = 2 * 60 * 60 + 24 * 60; // 2.4 hours in seconds
         
         {
-            let last_sent = *self.last_addr_sent.lock().unwrap();
+            let last_sent = *self.last_addr_sent.lock().await;
             if now.saturating_sub(last_sent) < min_interval {
                 // Too soon, skip relay
                 return Ok(());
@@ -2593,14 +2698,14 @@ impl NetworkManager {
         }
         
         // Filter addresses (exclude local, banned, already connected)
-        let ban_list = self.ban_list.lock().unwrap().clone();
+        let ban_list = self.ban_list.lock().await.clone();
         let connected_peers: Vec<SocketAddr> = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
         
         let filtered = {
-            let db = self.address_database.lock().unwrap();
+            let db = self.address_database.lock().await;
             db.filter_addresses(addresses.to_vec(), &ban_list, &connected_peers)
         };
         
@@ -2620,7 +2725,7 @@ impl NetworkManager {
         
         // Send to all peers except sender
         let peer_addrs: Vec<SocketAddr> = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
                 .into_iter()
                 .filter(|addr| *addr != sender_addr)
@@ -2634,7 +2739,7 @@ impl NetworkManager {
         }
         
         // Update last sent time
-        *self.last_addr_sent.lock().unwrap() = now;
+        *self.last_addr_sent.lock().await = now;
         
         Ok(())
     }
@@ -2678,7 +2783,7 @@ impl NetworkManager {
         
         // Send to all connected peers
         let peer_addrs: Vec<SocketAddr> = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
         
@@ -2690,7 +2795,7 @@ impl NetworkManager {
         
         // Also store our own address in database
         {
-            let mut db = self.address_database.lock().unwrap();
+            let mut db = self.address_database.lock().await;
             db.add_address(our_addr, services);
         }
         
@@ -2699,19 +2804,24 @@ impl NetworkManager {
 
     /// Get list of banned peers
     pub fn get_banned_peers(&self) -> Vec<(SocketAddr, u64)> {
-        let ban_list = self.ban_list.lock().unwrap();
-        ban_list.iter().map(|(addr, timestamp)| (*addr, *timestamp)).collect()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let ban_list = self.ban_list.lock().await;
+                ban_list.iter().map(|(addr, timestamp)| (*addr, *timestamp)).collect()
+            })
+        })
     }
 
     /// Get peer addresses (async version for RPC)
     pub async fn get_peer_addresses(&self) -> Vec<TransportAddr> {
-        let pm = self.peer_manager.lock().unwrap();
+        let pm = self.peer_manager.lock().await;
         pm.peer_addresses()
     }
 
     /// Set network active state
     pub async fn set_network_active(&self, active: bool) -> Result<()> {
-        let mut state = self.network_active.lock().unwrap();
+        let mut state = self.network_active.lock().await;
         *state = active;
         info!("Network active state set to: {}", active);
         Ok(())
@@ -2719,44 +2829,64 @@ impl NetworkManager {
 
     /// Get network active state
     pub fn is_network_active(&self) -> bool {
-        *self.network_active.lock().unwrap()
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                *self.network_active.lock().await
+            })
+        })
     }
 
     /// Check if a peer is banned
     pub fn is_banned(&self, addr: SocketAddr) -> bool {
-        let ban_list = self.ban_list.lock().unwrap();
-        if let Some(&unban_timestamp) = ban_list.get(&addr) {
-            if unban_timestamp == u64::MAX {
-                return true; // Permanent ban
-            }
-            // Check if ban has expired
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            if now < unban_timestamp {
-                return true; // Still banned
-            } else {
-                // Ban expired, remove it
-                drop(ban_list);
-                self.unban_peer(addr);
-                return false;
-            }
-        }
-        false
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let ban_list = self.ban_list.lock().await;
+                if let Some(&unban_timestamp) = ban_list.get(&addr) {
+                    if unban_timestamp == u64::MAX {
+                        return true; // Permanent ban
+                    }
+                    // Check if ban has expired
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    if now < unban_timestamp {
+                        return true; // Still banned
+                    } else {
+                        // Ban expired, remove it
+                        drop(ban_list);
+                        self.unban_peer(addr);
+                        return false;
+                    }
+                }
+                false
+            })
+        })
     }
 
     /// Track bytes sent
     pub fn track_bytes_sent(&self, bytes: u64) {
-        let mut sent = self.bytes_sent.lock().unwrap();
-        *sent += bytes;
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut sent = self.bytes_sent.lock().await;
+                *sent += bytes;
+            })
+        })
     }
 
     /// Track bytes received
     pub fn track_bytes_received(&self, bytes: u64) {
-        let mut received = self.bytes_received.lock().unwrap();
-        *received += bytes;
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut received = self.bytes_received.lock().await;
+                *received += bytes;
+            })
+        })
     }
 
     /// Handle GetBanList message - respond with ban list or hash
@@ -2773,7 +2903,7 @@ impl NetworkManager {
                peer_addr, msg.request_full, msg.min_ban_duration);
 
         // Get current ban list
-        let ban_list = self.ban_list.lock().unwrap();
+        let ban_list = self.ban_list.lock().await;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2870,7 +3000,7 @@ impl NetworkManager {
         }
 
         // Validate and merge ban entries
-        let mut ban_list = self.ban_list.lock().unwrap();
+        let mut ban_list = self.ban_list.lock().await;
         let mut merged_count = 0;
 
         for entry in &msg.ban_entries {
@@ -2923,14 +3053,14 @@ impl NetworkManager {
 
     /// Get network statistics
     pub async fn get_network_stats(&self) -> crate::node::metrics::NetworkMetrics {
-        let sent = *self.bytes_sent.lock().unwrap();
-        let received = *self.bytes_received.lock().unwrap();
+        let sent = *self.bytes_sent.lock().await;
+        let received = *self.bytes_received.lock().await;
         let active_connections = {
-            let pm = self.peer_manager.lock().unwrap();
+            let pm = self.peer_manager.lock().await;
             pm.peer_count()
         };
         let banned_peers_count = {
-            let ban_list = self.ban_list.lock().unwrap();
+            let ban_list = self.ban_list.lock().await;
             ban_list.len()
         };
         let resource_metrics = self.dos_protection.get_metrics().await;
@@ -2957,9 +3087,14 @@ impl NetworkManager {
 
     /// Get network statistics (legacy method for backward compatibility)
     pub fn get_network_stats_legacy(&self) -> (u64, u64) {
-        let sent = *self.bytes_sent.lock().unwrap();
-        let received = *self.bytes_received.lock().unwrap();
-        (sent, received)
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let sent = *self.bytes_sent.lock().await;
+                let received = *self.bytes_received.lock().await;
+                (sent, received)
+            })
+        })
     }
 
     /// Create version message with service flags
