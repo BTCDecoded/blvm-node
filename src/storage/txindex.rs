@@ -133,18 +133,56 @@ impl TxIndex {
     }
 
     /// Get transactions by block height range
+    /// Efficiently queries transactions across multiple blocks using height index
     pub fn get_transactions_by_height_range(
         &self,
-        _start_height: u64,
-        _end_height: u64,
+        start_height: u64,
+        end_height: u64,
+        blockstore: &crate::storage::blockstore::BlockStore,
     ) -> Result<Vec<Transaction>> {
-        let transactions = Vec::new();
+        let mut transactions = Vec::new();
 
-        // This is a simplified implementation
-        // In a real implementation, we'd need to track block hashes by height
-        // For now, we'll just return empty results
+        // Iterate through height range
+        for height in start_height..=end_height {
+            // Get block hash for this height
+            if let Ok(Some(block_hash)) = blockstore.get_hash_by_height(height) {
+                // Get all transactions in this block
+                if let Ok(block_txs) = self.get_block_transactions(&block_hash) {
+                    transactions.extend(block_txs);
+                }
+            }
+        }
 
         Ok(transactions)
+    }
+
+    /// Get transactions by address (script pubkey)
+    /// Requires address index to be built (future enhancement)
+    pub fn get_transactions_by_address(
+        &self,
+        _script_pubkey: &[u8],
+    ) -> Result<Vec<Transaction>> {
+        // TODO: Implement address index for efficient address-based queries
+        // This would require:
+        // 1. Index: script_pubkey → Vec<tx_hash>
+        // 2. Index: script_pubkey → Vec<(tx_hash, output_index)>
+        // For now, return empty (address indexing is expensive and optional)
+        Ok(Vec::new())
+    }
+
+    /// Get transactions by output value range
+    /// Useful for querying large transactions or filtering by value
+    pub fn get_transactions_by_value_range(
+        &self,
+        _min_value: u64,
+        _max_value: u64,
+    ) -> Result<Vec<Transaction>> {
+        // TODO: Implement value index for efficient value-based queries
+        // This would require:
+        // 1. Index: value_range → Vec<tx_hash>
+        // 2. Index: output_value → Vec<(tx_hash, output_index)>
+        // For now, return empty (value indexing is expensive and optional)
+        Ok(Vec::new())
     }
 
     /// Remove transaction from index

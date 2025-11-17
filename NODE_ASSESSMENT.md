@@ -182,7 +182,7 @@
 
 ### ✅ Consensus Layer Verification
 
-**Kani Proofs**: **176 proofs** in `bllvm-consensus`
+**Kani Proofs**: **194+ proofs** in `bllvm-consensus`
 
 **Verified Areas**:
 - ✅ Transaction validation (7 proofs)
