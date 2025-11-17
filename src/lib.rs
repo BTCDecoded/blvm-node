@@ -27,6 +27,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod bip21;
 pub mod config;
+#[cfg(feature = "governance")]
+pub mod governance;
 pub mod module;
 pub mod network;
 pub mod node;
