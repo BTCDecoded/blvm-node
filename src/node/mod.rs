@@ -77,6 +77,8 @@ impl Node {
         let storage = Storage::new(data_dir)?;
         let storage_arc = Arc::new(storage);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
+        
+        // Create network manager (config will be applied later if available)
         let network = NetworkManager::new(network_addr).with_dependencies(
             Arc::clone(&protocol_arc),
             Arc::clone(&storage_arc),
@@ -120,6 +122,28 @@ impl Node {
 
     /// Set node configuration
     pub fn with_config(mut self, config: NodeConfig) -> Self {
+        // Apply network configuration if available
+        let max_peers = config.max_peers.unwrap_or(100);
+        let transport_preference = config.get_transport_preference();
+        
+        // Recreate network manager with config
+        let network_addr = self.network_addr;
+        let protocol_arc = self.protocol.clone();
+        let storage_arc = Arc::new(self.storage.clone());
+        let mempool_manager_arc = Arc::clone(&self.mempool_manager);
+        
+        let network = NetworkManager::with_config(
+            network_addr,
+            max_peers,
+            transport_preference,
+            Some(&config),
+        ).with_dependencies(
+            protocol_arc,
+            storage_arc,
+            mempool_manager_arc,
+        );
+        
+        self.network = network;
         self.config = Some(config);
         self
     }
@@ -132,10 +156,16 @@ impl Node {
                 return Ok(self);
             }
 
-            let module_manager = ModuleManager::new(
+            // Get module resource limits config
+            let module_resource_limits = self
+                .config
+                .as_ref()
+                .and_then(|c| c.module_resource_limits.as_ref());
+            let module_manager = ModuleManager::with_config(
                 &module_config.modules_dir,
                 &module_config.data_dir,
                 &module_config.socket_dir,
+                module_resource_limits,
             );
             self.module_manager = Some(module_manager);
             info!(
@@ -340,15 +370,19 @@ impl Node {
         // Get port from network address
         let port = self.network_addr.port();
 
-        // Default target peer count (Bitcoin Core uses 8-125, we'll use 8 as default)
-        let target_peer_count = 8;
-
         // Use config if available, otherwise use defaults
         let default_config = NodeConfig {
             listen_addr: Some(self.network_addr),
             ..Default::default()
         };
         let config = self.config.as_ref().unwrap_or(&default_config);
+
+        // Get target peer count from config
+        let timing_config = config
+            .network_timing
+            .as_ref()
+            .unwrap_or(&crate::config::NetworkTimingConfig::default());
+        let target_peer_count = timing_config.target_peer_count;
 
         // Initialize peer connections
         if let Err(e) = self

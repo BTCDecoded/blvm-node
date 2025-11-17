@@ -64,6 +64,24 @@ impl SandboxConfig {
             strict_mode: true,
         }
     }
+
+    /// Create a new sandbox config with resource limits from ModuleResourceLimitsConfig
+    pub fn with_resource_limits<P: AsRef<Path>>(
+        data_dir: P,
+        config: &crate::config::ModuleResourceLimitsConfig,
+    ) -> Self {
+        let resource_limits = ResourceLimits {
+            max_cpu_percent: Some(config.default_max_cpu_percent),
+            max_memory_bytes: Some(config.default_max_memory_bytes),
+            max_file_descriptors: Some(config.default_max_file_descriptors),
+            max_child_processes: Some(config.default_max_child_processes),
+        };
+        Self {
+            allowed_data_dir: data_dir.as_ref().to_path_buf(),
+            resource_limits,
+            strict_mode: false,
+        }
+    }
 }
 
 /// Process sandbox manager

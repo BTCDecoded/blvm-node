@@ -365,6 +365,8 @@ pub struct NetworkManager {
     last_addr_sent: Arc<Mutex<u64>>,
     /// Enable self-advertisement (send own address to peers)
     enable_self_advertisement: bool,
+    /// Request timeout configuration
+    request_timeout_config: Arc<crate::config::RequestTimeoutConfig>,
 }
 
 /// Pending request metadata
@@ -413,80 +415,63 @@ pub enum NetworkMessage {
 impl NetworkManager {
     /// Create a new network manager with default TCP-only transport
     pub fn new(_listen_addr: SocketAddr) -> Self {
-        let (peer_tx, peer_rx) = mpsc::unbounded_channel();
-
-        Self {
-            peer_manager: Arc::new(Mutex::new(PeerManager::new(100))), // Default max peers
-            peer_diversity: Arc::new(Mutex::new(HashMap::new())),
-            tcp_transport: TcpTransport::new(),
-            #[cfg(feature = "quinn")]
-            quinn_transport: None,
-            #[cfg(feature = "iroh")]
-            iroh_transport: None,
-            transport_preference: TransportPreference::TCP_ONLY,
-            peer_tx,
-            peer_rx,
-            filter_service: crate::network::filter_service::BlockFilterService::new(),
-            consensus: ConsensusProof::new(),
-            utxo_set: Arc::new(Mutex::new(UtxoSet::new())),
-            mempool: Arc::new(Mutex::new(Mempool::new())),
-            protocol_engine: None,
-            storage: None,
-            mempool_manager: None,
-            peer_states: Arc::new(Mutex::new(HashMap::new())),
-            persistent_peers: Arc::new(Mutex::new(HashSet::new())),
-            network_active: Arc::new(Mutex::new(true)),
-            ban_list: Arc::new(Mutex::new(HashMap::new())),
-            connections_per_ip: Arc::new(Mutex::new(HashMap::new())),
-            peer_message_rates: Arc::new(Mutex::new(HashMap::new())),
-            bytes_sent: Arc::new(Mutex::new(0)),
-            bytes_received: Arc::new(Mutex::new(0)),
-            socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
-            request_id_counter: Arc::new(Mutex::new(0)),
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            dos_protection: Arc::new(dos_protection::DosProtectionManager::default()),
-            pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
-            ban_list_sharing_config: None,
-            address_database: Arc::new(Mutex::new(address_db::AddressDatabase::new(10000))),
-            last_addr_sent: Arc::new(Mutex::new(0)),
-            enable_self_advertisement: true, // Default: advertise ourselves
-        }
-    }
-    
-    /// Set dependencies for protocol message processing
-    pub fn with_dependencies(
-        mut self,
-        protocol_engine: Arc<BitcoinProtocolEngine>,
-        storage: Arc<Storage>,
-        mempool_manager: Arc<MempoolManager>,
-    ) -> Self {
-        self.protocol_engine = Some(protocol_engine);
-        self.storage = Some(storage);
-        self.mempool_manager = Some(mempool_manager);
-        self
+        Self::with_config(_listen_addr, 100, TransportPreference::TCP_ONLY, None)
     }
 
-    /// Create a new network manager with custom configuration
-    pub fn with_config(listen_addr: SocketAddr, max_peers: usize) -> Self {
-        Self::with_transport_preference(listen_addr, max_peers, TransportPreference::TCP_ONLY)
-    }
-
-    /// Create a new network manager with transport preference
-    pub fn with_transport_preference(
+    /// Create a new network manager with configuration
+    pub fn with_config(
         _listen_addr: SocketAddr,
         max_peers: usize,
         preference: TransportPreference,
+        config: Option<&crate::config::NodeConfig>,
     ) -> Self {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
+
+        // Use config for DoS protection
+        let dos_config_default = crate::config::DosProtectionConfig::default();
+        let dos_config = config
+            .and_then(|c| c.dos_protection.as_ref())
+            .unwrap_or(&dos_config_default);
+        
+        let dos_protection = Arc::new(
+            dos_protection::DosProtectionManager::with_ban_settings(
+                dos_config.max_connections_per_window,
+                dos_config.window_seconds,
+                dos_config.max_message_queue_size,
+                dos_config.max_active_connections,
+                dos_config.auto_ban_threshold,
+                dos_config.ban_duration_seconds,
+            )
+        );
+        
+        // Use config for address database
+        let addr_db_config_default = crate::config::AddressDatabaseConfig::default();
+        let addr_db_config = config
+            .and_then(|c| c.address_database.as_ref())
+            .unwrap_or(&addr_db_config_default);
+        
+        let address_database = Arc::new(Mutex::new(
+            address_db::AddressDatabase::with_expiration(
+                addr_db_config.max_addresses,
+                addr_db_config.expiration_seconds,
+            )
+        ));
+
+        // Use config for request timeouts
+        let timeout_config_default = crate::config::RequestTimeoutConfig::default();
+        let timeout_config = config
+            .and_then(|c| c.request_timeouts.as_ref())
+            .unwrap_or(&timeout_config_default);
+        let request_timeout_config = Arc::new(timeout_config.clone());
 
         Self {
             peer_manager: Arc::new(Mutex::new(PeerManager::new(max_peers))),
             peer_diversity: Arc::new(Mutex::new(HashMap::new())),
             tcp_transport: TcpTransport::new(),
             #[cfg(feature = "quinn")]
-            quinn_transport: None, // Will be initialized on start if needed
+            quinn_transport: None,
             #[cfg(feature = "iroh")]
-            iroh_transport: None, // Will be initialized on start if needed
+            iroh_transport: None,
             transport_preference: preference,
             peer_tx,
             peer_rx,
@@ -508,13 +493,37 @@ impl NetworkManager {
             socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
             request_id_counter: Arc::new(Mutex::new(0)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            dos_protection: Arc::new(dos_protection::DosProtectionManager::default()),
+            dos_protection,
             pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
-            ban_list_sharing_config: None,
-            address_database: Arc::new(Mutex::new(address_db::AddressDatabase::new(10000))),
+            ban_list_sharing_config: config.and_then(|c| c.ban_list_sharing.clone()),
+            address_database,
             last_addr_sent: Arc::new(Mutex::new(0)),
-            enable_self_advertisement: true, // Default: advertise ourselves
+            enable_self_advertisement: config
+                .map(|c| c.enable_self_advertisement)
+                .unwrap_or(true),
         }
+    }
+    
+    /// Set dependencies for protocol message processing
+    pub fn with_dependencies(
+        mut self,
+        protocol_engine: Arc<BitcoinProtocolEngine>,
+        storage: Arc<Storage>,
+        mempool_manager: Arc<MempoolManager>,
+    ) -> Self {
+        self.protocol_engine = Some(protocol_engine);
+        self.storage = Some(storage);
+        self.mempool_manager = Some(mempool_manager);
+        self
+    }
+
+    /// Create a new network manager with transport preference
+    pub fn with_transport_preference(
+        listen_addr: SocketAddr,
+        max_peers: usize,
+        preference: TransportPreference,
+    ) -> Self {
+        Self::with_config(listen_addr, max_peers, preference, None)
     }
 
     /// Get transport preference
@@ -523,7 +532,12 @@ impl NetworkManager {
     }
 
     /// Discover peers from DNS seeds and add to address database
-    pub async fn discover_peers_from_dns(&self, network: &str, port: u16) -> Result<()> {
+    pub async fn discover_peers_from_dns(
+        &self,
+        network: &str,
+        port: u16,
+        config: &crate::config::NodeConfig,
+    ) -> Result<()> {
         use crate::network::dns_seeds;
         
         let seeds = match network {
@@ -536,7 +550,13 @@ impl NetworkManager {
         };
         
         info!("Discovering peers from DNS seeds for {}", network);
-        let addresses = dns_seeds::resolve_dns_seeds(seeds, port, 100).await;
+        // Get max addresses from config
+        let timing_config = config
+            .network_timing
+            .as_ref()
+            .unwrap_or(&crate::config::NetworkTimingConfig::default());
+        let max_addresses = timing_config.max_addresses_from_dns;
+        let addresses = dns_seeds::resolve_dns_seeds(seeds, port, max_addresses).await;
         let address_count = addresses.len();
         
         // Add discovered addresses to database
@@ -783,7 +803,7 @@ impl NetworkManager {
                 }
             };
         if should_discover_dns {
-            if let Err(e) = self.discover_peers_from_dns(network, port).await {
+            if let Err(e) = self.discover_peers_from_dns(network, port, config).await {
                 warn!("DNS seed discovery failed: {}", e);
             }
         }
@@ -805,7 +825,12 @@ impl NetworkManager {
 
         // 4. Connect to peers from address database to reach target count
         // Wait a bit for persistent peers to connect first
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        let timing_config = config
+            .network_timing
+            .as_ref()
+            .unwrap_or(&crate::config::NetworkTimingConfig::default());
+        let delay_seconds = timing_config.peer_connection_delay_seconds;
+        tokio::time::sleep(tokio::time::Duration::from_secs(delay_seconds)).await;
         
         if let Err(e) = self.connect_peers_from_database(target_peer_count).await {
             warn!("Failed to connect peers from database: {}", e);
@@ -889,12 +914,13 @@ impl NetworkManager {
                                 // Check if we should auto-ban
                                 if dos_protection.should_auto_ban(ip).await {
                                     warn!("Auto-banning IP {} for repeated connection rate violations", ip);
-                                    // Auto-ban the IP (ban for 1 hour)
+                                    // Auto-ban the IP using configured ban duration
+                                    let ban_duration = dos_protection.ban_duration_seconds();
                                     let unban_timestamp = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap()
                                         .as_secs()
-                                        + 3600;
+                                        + ban_duration;
                                     let mut ban_list_guard = ban_list.lock().unwrap();
                                     ban_list_guard.insert(socket_addr, unban_timestamp);
                                 }
@@ -995,11 +1021,13 @@ impl NetworkManager {
                                         
                                         if dos_protection.should_auto_ban(ip).await {
                                             warn!("Auto-banning IP {} for repeated connection rate violations", ip);
+                                            // Auto-ban the IP using configured ban duration
+                                            let ban_duration = dos_protection.ban_duration_seconds();
                                             let unban_timestamp = std::time::SystemTime::now()
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .unwrap()
                                                 .as_secs()
-                                                + 3600;
+                                                + ban_duration;
                                             let mut ban_list_guard = ban_list.lock().unwrap();
                                             ban_list_guard.insert(socket_addr, unban_timestamp);
                                         }
@@ -1308,28 +1336,30 @@ impl NetworkManager {
     /// Start periodic task to clean up expired pending requests
     fn start_request_cleanup_task(&self) {
         let pending_requests = Arc::clone(&self.pending_requests);
+        let timeout_config = Arc::clone(&self.request_timeout_config);
         
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            let cleanup_interval = timeout_config.request_cleanup_interval_seconds;
+            let max_age = timeout_config.pending_request_max_age_seconds;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(cleanup_interval));
             loop {
                 interval.tick().await;
                 
-                // Clean up old pending requests (older than 5 minutes)
+                // Clean up old pending requests
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
-                let timeout_seconds = 300; // 5 minutes
                 
                 let mut pending = pending_requests.lock().unwrap();
                 let initial_count = pending.len();
                 pending.retain(|_, req| {
-                    now.saturating_sub(req.timestamp) < timeout_seconds
+                    now.saturating_sub(req.timestamp) < max_age
                 });
                 let removed = initial_count - pending.len();
                 if removed > 0 {
-                    debug!("Cleaned up {} stale pending requests (older than {}s)", removed, timeout_seconds);
+                    debug!("Cleaned up {} stale pending requests (older than {}s)", removed, max_age);
                 }
                 if !pending.is_empty() {
                     debug!("Pending requests: {}", pending.len());
@@ -1574,12 +1604,13 @@ impl NetworkManager {
             // Check if we should auto-ban
             if self.dos_protection.should_auto_ban(ip).await {
                 warn!("Auto-banning IP {} for repeated connection rate violations", ip);
-                // Ban the IP
+                // Ban the IP using configured ban duration
+                let ban_duration = self.dos_protection.ban_duration_seconds();
                 let unban_timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs()
-                    + 3600; // Ban for 1 hour
+                    + ban_duration;
                 let mut ban_list = self.ban_list.lock().unwrap();
                 ban_list.insert(addr, unban_timestamp);
                 return Err(anyhow::anyhow!("IP {} is banned due to connection rate violations", ip));

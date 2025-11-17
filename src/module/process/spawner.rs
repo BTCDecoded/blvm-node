@@ -26,15 +26,32 @@ pub struct ModuleProcessSpawner {
     filesystem_sandbox: Option<FileSystemSandbox>,
     /// Network sandbox for network isolation
     network_sandbox: NetworkSandbox,
+    /// Module resource limits configuration
+    resource_limits_config: Option<crate::config::ModuleResourceLimitsConfig>,
 }
 
 impl ModuleProcessSpawner {
     /// Create a new module process spawner
     pub fn new<P: AsRef<Path>>(modules_dir: P, data_dir: P, socket_dir: P) -> Self {
+        Self::with_config(modules_dir, data_dir, socket_dir, None)
+    }
+
+    /// Create a new module process spawner with resource limits configuration
+    pub fn with_config<P: AsRef<Path>>(
+        modules_dir: P,
+        data_dir: P,
+        socket_dir: P,
+        resource_limits_config: Option<&crate::config::ModuleResourceLimitsConfig>,
+    ) -> Self {
         let data_dir_path = data_dir.as_ref().to_path_buf();
 
-        // Initialize sandboxes
-        let sandbox_config = SandboxConfig::new(&data_dir_path);
+        // Get resource limits from config or use defaults
+        let limits_config = resource_limits_config
+            .cloned()
+            .unwrap_or_else(|| crate::config::ModuleResourceLimitsConfig::default());
+
+        // Initialize sandboxes with config
+        let sandbox_config = SandboxConfig::with_resource_limits(&data_dir_path, &limits_config);
         let process_sandbox = Some(ProcessSandbox::new(sandbox_config));
         let filesystem_sandbox = Some(FileSystemSandbox::new(&data_dir_path));
         let network_sandbox = NetworkSandbox::new(); // No network access by default
@@ -46,6 +63,7 @@ impl ModuleProcessSpawner {
             process_sandbox,
             filesystem_sandbox,
             network_sandbox,
+            resource_limits_config: Some(limits_config),
         }
     }
 
@@ -123,12 +141,22 @@ impl ModuleProcessSpawner {
             }
         }
 
-        // Wait a moment for process to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait a moment for process to start (from config)
+        let startup_wait = self
+            .resource_limits_config
+            .as_ref()
+            .map(|c| c.module_startup_wait_millis)
+            .unwrap_or(100);
+        tokio::time::sleep(Duration::from_millis(startup_wait)).await;
 
-        // Wait for socket to be created (with timeout)
+        // Wait for socket to be created (with timeout from config)
+        let socket_timeout = self
+            .resource_limits_config
+            .as_ref()
+            .map(|c| c.module_socket_timeout_seconds)
+            .unwrap_or(5);
         let socket_ready =
-            timeout(Duration::from_secs(5), self.wait_for_socket(&socket_path)).await;
+            timeout(Duration::from_secs(socket_timeout), self.wait_for_socket(&socket_path)).await;
         match socket_ready {
             Ok(Ok(_)) => {
                 info!("Module {} socket ready", module_name);
@@ -159,14 +187,23 @@ impl ModuleProcessSpawner {
 
     /// Wait for socket file to be created
     async fn wait_for_socket(&self, socket_path: &Path) -> Result<(), ModuleError> {
-        let mut attempts = 0;
-        let max_attempts = 50; // 5 seconds total (50 * 100ms)
+        let check_interval = self
+            .resource_limits_config
+            .as_ref()
+            .map(|c| c.module_socket_check_interval_millis)
+            .unwrap_or(100);
+        let max_attempts = self
+            .resource_limits_config
+            .as_ref()
+            .map(|c| c.module_socket_max_attempts)
+            .unwrap_or(50);
 
+        let mut attempts = 0;
         while attempts < max_attempts {
             if socket_path.exists() {
                 return Ok(());
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(check_interval)).await;
             attempts += 1;
         }
 

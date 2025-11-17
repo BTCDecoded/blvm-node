@@ -6,7 +6,7 @@ use crate::network::transport::TransportPreference;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-// Note: TOML parsing is optional - can use JSON or manual config instead
+// TOML support for configuration files
 
 /// Module system configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +66,192 @@ impl Default for ModuleConfig {
     }
 }
 
+/// Network timing and connection behavior configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkTimingConfig {
+    /// Target number of peers to connect to (Bitcoin Core uses 8-125)
+    #[serde(default = "default_target_peer_count")]
+    pub target_peer_count: usize,
+
+    /// Wait time before connecting to peers from database (after persistent peers)
+    #[serde(default = "default_peer_connection_delay")]
+    pub peer_connection_delay_seconds: u64,
+
+    /// Minimum interval between addr message broadcasts (prevents spam)
+    #[serde(default = "default_addr_relay_min_interval")]
+    pub addr_relay_min_interval_seconds: u64,
+
+    /// Maximum addresses to include in a single addr message
+    #[serde(default = "default_max_addresses_per_addr_message")]
+    pub max_addresses_per_addr_message: usize,
+
+    /// Maximum addresses to fetch from DNS seeds
+    #[serde(default = "default_max_addresses_from_dns")]
+    pub max_addresses_from_dns: usize,
+}
+
+fn default_target_peer_count() -> usize {
+    8
+}
+
+fn default_peer_connection_delay() -> u64 {
+    2
+}
+
+fn default_addr_relay_min_interval() -> u64 {
+    8640 // 2.4 hours
+}
+
+fn default_max_addresses_per_addr_message() -> usize {
+    1000
+}
+
+fn default_max_addresses_from_dns() -> usize {
+    100
+}
+
+impl Default for NetworkTimingConfig {
+    fn default() -> Self {
+        Self {
+            target_peer_count: 8,
+            peer_connection_delay_seconds: 2,
+            addr_relay_min_interval_seconds: 8640,
+            max_addresses_per_addr_message: 1000,
+            max_addresses_from_dns: 100,
+        }
+    }
+}
+
+/// Request timeout configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestTimeoutConfig {
+    /// Timeout for async request-response patterns (getheaders, getdata, etc.)
+    #[serde(default = "default_async_request_timeout")]
+    pub async_request_timeout_seconds: u64,
+
+    /// Timeout for UTXO commitment requests
+    #[serde(default = "default_utxo_commitment_timeout")]
+    pub utxo_commitment_request_timeout_seconds: u64,
+
+    /// Cleanup interval for expired pending requests
+    #[serde(default = "default_request_cleanup_interval")]
+    pub request_cleanup_interval_seconds: u64,
+
+    /// Maximum age for pending requests before cleanup
+    #[serde(default = "default_pending_request_max_age")]
+    pub pending_request_max_age_seconds: u64,
+}
+
+fn default_async_request_timeout() -> u64 {
+    300 // 5 minutes
+}
+
+fn default_utxo_commitment_timeout() -> u64 {
+    30
+}
+
+fn default_request_cleanup_interval() -> u64 {
+    60
+}
+
+fn default_pending_request_max_age() -> u64 {
+    300 // 5 minutes
+}
+
+impl Default for RequestTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            async_request_timeout_seconds: 300,
+            utxo_commitment_request_timeout_seconds: 30,
+            request_cleanup_interval_seconds: 60,
+            pending_request_max_age_seconds: 300,
+        }
+    }
+}
+
+/// Module resource limits configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleResourceLimitsConfig {
+    /// Default CPU limit for modules (percentage, 0-100)
+    #[serde(default = "default_module_max_cpu_percent")]
+    pub default_max_cpu_percent: u32,
+
+    /// Default memory limit for modules (bytes)
+    #[serde(default = "default_module_max_memory_bytes")]
+    pub default_max_memory_bytes: u64,
+
+    /// Default file descriptor limit
+    #[serde(default = "default_module_max_file_descriptors")]
+    pub default_max_file_descriptors: u32,
+
+    /// Default child process limit
+    #[serde(default = "default_module_max_child_processes")]
+    pub default_max_child_processes: u32,
+
+    /// Module startup wait time (milliseconds)
+    #[serde(default = "default_module_startup_wait_millis")]
+    pub module_startup_wait_millis: u64,
+
+    /// Timeout for module socket to appear (seconds)
+    #[serde(default = "default_module_socket_timeout")]
+    pub module_socket_timeout_seconds: u64,
+
+    /// Interval between socket existence checks (milliseconds)
+    #[serde(default = "default_module_socket_check_interval")]
+    pub module_socket_check_interval_millis: u64,
+
+    /// Maximum attempts to check for socket
+    #[serde(default = "default_module_socket_max_attempts")]
+    pub module_socket_max_attempts: usize,
+}
+
+fn default_module_max_cpu_percent() -> u32 {
+    50
+}
+
+fn default_module_max_memory_bytes() -> u64 {
+    512 * 1024 * 1024 // 512 MB
+}
+
+fn default_module_max_file_descriptors() -> u32 {
+    256
+}
+
+fn default_module_max_child_processes() -> u32 {
+    10
+}
+
+fn default_module_startup_wait_millis() -> u64 {
+    100
+}
+
+fn default_module_socket_timeout() -> u64 {
+    5
+}
+
+fn default_module_socket_check_interval() -> u64 {
+    100
+}
+
+fn default_module_socket_max_attempts() -> usize {
+    50
+}
+
+impl Default for ModuleResourceLimitsConfig {
+    fn default() -> Self {
+        Self {
+            default_max_cpu_percent: 50,
+            default_max_memory_bytes: 512 * 1024 * 1024,
+            default_max_file_descriptors: 256,
+            default_max_child_processes: 10,
+            module_startup_wait_millis: 100,
+            module_socket_timeout_seconds: 5,
+            module_socket_check_interval_millis: 100,
+            module_socket_max_attempts: 50,
+        }
+    }
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -104,6 +290,31 @@ pub struct NodeConfig {
     /// Enable self-advertisement (send own address to peers)
     #[serde(default = "default_true")]
     pub enable_self_advertisement: bool,
+
+    /// DoS protection configuration
+    pub dos_protection: Option<DosProtectionConfig>,
+
+    /// Network relay configuration
+    pub relay: Option<RelayConfig>,
+
+    /// Address database configuration
+    pub address_database: Option<AddressDatabaseConfig>,
+
+    /// Dandelion++ privacy relay configuration
+    #[cfg(feature = "dandelion")]
+    pub dandelion: Option<DandelionConfig>,
+
+    /// Peer rate limiting configuration
+    pub peer_rate_limiting: Option<PeerRateLimitingConfig>,
+
+    /// Network timing and connection behavior
+    pub network_timing: Option<NetworkTimingConfig>,
+
+    /// Request timeout configuration
+    pub request_timeouts: Option<RequestTimeoutConfig>,
+
+    /// Module resource limits configuration
+    pub module_resource_limits: Option<ModuleResourceLimitsConfig>,
 }
 
 /// Transport preference configuration (serializable)
@@ -166,6 +377,15 @@ impl Default for NodeConfig {
             storage: None,
             persistent_peers: Vec::new(),
             enable_self_advertisement: true,
+            dos_protection: None,
+            relay: None,
+            address_database: None,
+            #[cfg(feature = "dandelion")]
+            dandelion: None,
+            peer_rate_limiting: None,
+            network_timing: None,
+            request_timeouts: None,
+            module_resource_limits: None,
         }
     }
 }
@@ -269,6 +489,23 @@ impl Default for RpcAuthConfig {
 }
 
 impl NodeConfig {
+    /// Load configuration from file (supports JSON and TOML)
+    pub fn from_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            // Try TOML
+            let config: NodeConfig = toml::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?;
+            Ok(config)
+        } else {
+            // Default to JSON
+            let config: NodeConfig = serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {}", e))?;
+            Ok(config)
+        }
+    }
+
     /// Load configuration from JSON file
     pub fn from_json_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -276,9 +513,25 @@ impl NodeConfig {
         Ok(config)
     }
 
+    /// Load configuration from TOML file
+    pub fn from_toml_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: NodeConfig = toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?;
+        Ok(config)
+    }
+
     /// Save configuration to JSON file
     pub fn to_json_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Save configuration to TOML file
+    pub fn to_toml_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize TOML config: {}", e))?;
         std::fs::write(path, content)?;
         Ok(())
     }
@@ -732,5 +985,215 @@ impl PruningConfig {
         }
 
         Ok(())
+    }
+}
+
+/// DoS protection configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DosProtectionConfig {
+    /// Maximum connections per IP per time window
+    #[serde(default = "default_dos_max_connections_per_window")]
+    pub max_connections_per_window: usize,
+
+    /// Time window in seconds for connection rate limiting
+    #[serde(default = "default_dos_window_seconds")]
+    pub window_seconds: u64,
+
+    /// Maximum message queue size
+    #[serde(default = "default_dos_max_message_queue_size")]
+    pub max_message_queue_size: usize,
+
+    /// Maximum active connections
+    #[serde(default = "default_dos_max_active_connections")]
+    pub max_active_connections: usize,
+
+    /// Auto-ban threshold (number of violations before auto-ban)
+    #[serde(default = "default_dos_auto_ban_threshold")]
+    pub auto_ban_threshold: usize,
+
+    /// Default ban duration in seconds
+    #[serde(default = "default_dos_ban_duration")]
+    pub ban_duration_seconds: u64,
+}
+
+fn default_dos_max_connections_per_window() -> usize {
+    10
+}
+
+fn default_dos_window_seconds() -> u64 {
+    60
+}
+
+fn default_dos_max_message_queue_size() -> usize {
+    10000
+}
+
+fn default_dos_max_active_connections() -> usize {
+    200
+}
+
+fn default_dos_auto_ban_threshold() -> usize {
+    3
+}
+
+fn default_dos_ban_duration() -> u64 {
+    3600 // 1 hour
+}
+
+impl Default for DosProtectionConfig {
+    fn default() -> Self {
+        Self {
+            max_connections_per_window: 10,
+            window_seconds: 60,
+            max_message_queue_size: 10000,
+            max_active_connections: 200,
+            auto_ban_threshold: 3,
+            ban_duration_seconds: 3600,
+        }
+    }
+}
+
+/// Network relay configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayConfig {
+    /// Maximum age for relayed items (seconds)
+    #[serde(default = "default_relay_max_age")]
+    pub max_relay_age: u64,
+
+    /// Maximum number of items to track
+    #[serde(default = "default_relay_max_tracked_items")]
+    pub max_tracked_items: usize,
+
+    /// Enable block relay
+    #[serde(default = "default_true")]
+    pub enable_block_relay: bool,
+
+    /// Enable transaction relay
+    #[serde(default = "default_true")]
+    pub enable_tx_relay: bool,
+
+    /// Enable Dandelion++ privacy relay
+    #[serde(default = "default_false")]
+    pub enable_dandelion: bool,
+}
+
+fn default_relay_max_age() -> u64 {
+    3600 // 1 hour
+}
+
+fn default_relay_max_tracked_items() -> usize {
+    10000
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            max_relay_age: 3600,
+            max_tracked_items: 10000,
+            enable_block_relay: true,
+            enable_tx_relay: true,
+            enable_dandelion: false,
+        }
+    }
+}
+
+/// Address database configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressDatabaseConfig {
+    /// Maximum number of addresses to store
+    #[serde(default = "default_address_db_max_addresses")]
+    pub max_addresses: usize,
+
+    /// Address expiration time in seconds
+    #[serde(default = "default_address_db_expiration")]
+    pub expiration_seconds: u64,
+}
+
+fn default_address_db_max_addresses() -> usize {
+    10000
+}
+
+fn default_address_db_expiration() -> u64 {
+    24 * 60 * 60 // 24 hours
+}
+
+impl Default for AddressDatabaseConfig {
+    fn default() -> Self {
+        Self {
+            max_addresses: 10000,
+            expiration_seconds: 24 * 60 * 60,
+        }
+    }
+}
+
+/// Dandelion++ privacy relay configuration
+#[cfg(feature = "dandelion")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DandelionConfig {
+    /// Stem phase timeout in seconds
+    #[serde(default = "default_dandelion_stem_timeout")]
+    pub stem_timeout_seconds: u64,
+
+    /// Probability of fluffing at each hop (0.0 to 1.0)
+    #[serde(default = "default_dandelion_fluff_probability")]
+    pub fluff_probability: f64,
+
+    /// Maximum stem hops before forced fluff
+    #[serde(default = "default_dandelion_max_stem_hops")]
+    pub max_stem_hops: u8,
+}
+
+#[cfg(feature = "dandelion")]
+fn default_dandelion_stem_timeout() -> u64 {
+    10
+}
+
+#[cfg(feature = "dandelion")]
+fn default_dandelion_fluff_probability() -> f64 {
+    0.1 // 10%
+}
+
+#[cfg(feature = "dandelion")]
+fn default_dandelion_max_stem_hops() -> u8 {
+    2
+}
+
+#[cfg(feature = "dandelion")]
+impl Default for DandelionConfig {
+    fn default() -> Self {
+        Self {
+            stem_timeout_seconds: 10,
+            fluff_probability: 0.1,
+            max_stem_hops: 2,
+        }
+    }
+}
+
+/// Peer rate limiting configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerRateLimitingConfig {
+    /// Default burst size (token bucket)
+    #[serde(default = "default_peer_rate_burst")]
+    pub default_burst: u32,
+
+    /// Default rate (messages per second)
+    #[serde(default = "default_peer_rate_rate")]
+    pub default_rate: u32,
+}
+
+fn default_peer_rate_burst() -> u32 {
+    100
+}
+
+fn default_peer_rate_rate() -> u32 {
+    10
+}
+
+impl Default for PeerRateLimitingConfig {
+    fn default() -> Self {
+        Self {
+            default_burst: 100,
+            default_rate: 10,
+        }
     }
 }

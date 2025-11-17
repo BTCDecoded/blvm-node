@@ -212,7 +212,11 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     ))?;
             }
             
-            // Await response with timeout (30 seconds)
+            // Await response with timeout (from config)
+            let timeout_seconds = {
+                let network = network_manager.read().await;
+                network.request_timeout_config.utxo_commitment_request_timeout_seconds
+            };
             tokio::select! {
                 result = response_rx => {
                     match result {
@@ -246,7 +250,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         ))
                     }
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_seconds)) => {
                     // Timeout - cleanup request
                     {
                         let network = network_manager.read().await;
@@ -254,7 +258,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         pending.remove(&request_id);
                     }
                     Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        "Request timeout: no response received within 30 seconds".to_string()
+                        format!("Request timeout: no response received within {} seconds", timeout_seconds)
                     ))
                 }
             }
@@ -380,7 +384,11 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     ))?;
             }
             
-            // Await response with timeout (30 seconds)
+            // Await response with timeout (from config)
+            let timeout_seconds = {
+                let network = network_manager.read().await;
+                network.request_timeout_config.utxo_commitment_request_timeout_seconds
+            };
             tokio::select! {
                 result = response_rx => {
                     match result {
@@ -430,7 +438,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         ))
                     }
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_seconds)) => {
                     // Timeout - cleanup request
                     {
                         let network = network_manager.read().await;
@@ -438,7 +446,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         pending.remove(&request_id);
                     }
                     Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        "Request timeout: no response received within 30 seconds".to_string()
+                        format!("Request timeout: no response received within {} seconds", timeout_seconds)
                     ))
                 }
             }

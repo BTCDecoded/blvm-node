@@ -144,6 +144,8 @@ pub struct DosProtectionManager {
     connection_violations: Arc<Mutex<HashMap<IpAddr, usize>>>,
     /// DoS protection metrics (cumulative counters)
     metrics: Arc<Mutex<DosProtectionMetrics>>,
+    /// Ban duration in seconds
+    ban_duration_seconds: u64,
 }
 
 impl DosProtectionManager {
@@ -154,6 +156,25 @@ impl DosProtectionManager {
         max_message_queue_size: usize,
         max_active_connections: usize,
     ) -> Self {
+        Self::with_ban_settings(
+            max_connections_per_window,
+            window_seconds,
+            max_message_queue_size,
+            max_active_connections,
+            3,   // Default auto-ban threshold
+            3600, // Default ban duration (1 hour)
+        )
+    }
+
+    /// Create with custom ban settings
+    pub fn with_ban_settings(
+        max_connections_per_window: usize,
+        window_seconds: u64,
+        max_message_queue_size: usize,
+        max_active_connections: usize,
+        auto_ban_threshold: usize,
+        ban_duration_seconds: u64,
+    ) -> Self {
         Self {
             connection_rate_limiter: Arc::new(Mutex::new(ConnectionRateLimiter::new(
                 max_connections_per_window,
@@ -162,7 +183,7 @@ impl DosProtectionManager {
             max_message_queue_size,
             max_active_connections,
             resource_metrics: Arc::new(Mutex::new(ResourceMetrics::new())),
-            auto_ban_connection_violations: 3, // Ban after 3 violations
+            auto_ban_connection_violations: auto_ban_threshold,
             connection_violations: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new(Mutex::new(DosProtectionMetrics {
                 connection_rate_violations: 0,
@@ -171,6 +192,7 @@ impl DosProtectionManager {
                 active_connection_limit_hits: 0,
                 resource_exhaustion_events: 0,
             })),
+            ban_duration_seconds,
         }
     }
 
@@ -245,6 +267,11 @@ impl DosProtectionManager {
         } else {
             true
         }
+    }
+
+    /// Get ban duration in seconds
+    pub fn ban_duration_seconds(&self) -> u64 {
+        self.ban_duration_seconds
     }
 
     /// Update resource metrics

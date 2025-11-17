@@ -58,10 +58,25 @@ struct ManagedModule {
 impl ModuleManager {
     /// Create a new module manager
     pub fn new<P: AsRef<Path>>(modules_dir: P, data_dir: P, socket_dir: P) -> Self {
+        Self::with_config(modules_dir, data_dir, socket_dir, None)
+    }
+
+    /// Create a new module manager with resource limits configuration
+    pub fn with_config<P: AsRef<Path>>(
+        modules_dir: P,
+        data_dir: P,
+        socket_dir: P,
+        resource_limits_config: Option<&crate::config::ModuleResourceLimitsConfig>,
+    ) -> Self {
         let (crash_tx, crash_rx) = mpsc::unbounded_channel();
 
         Self {
-            spawner: ModuleProcessSpawner::new(&modules_dir, &data_dir, &socket_dir),
+            spawner: ModuleProcessSpawner::with_config(
+                &modules_dir,
+                &data_dir,
+                &socket_dir,
+                resource_limits_config,
+            ),
             modules: Arc::new(Mutex::new(HashMap::new())),
             ipc_server_handle: None,
             crash_rx: Some(crash_rx),
