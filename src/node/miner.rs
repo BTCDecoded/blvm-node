@@ -483,8 +483,8 @@ impl MiningCoordinator {
         // Simplified coinbase transaction
         Ok(Transaction {
             version: 1,
-            inputs: bllvm_consensus::tx_inputs![],
-            outputs: bllvm_consensus::tx_outputs![bllvm_protocol::TransactionOutput {
+            inputs: bllvm_protocol::tx_inputs![],
+            outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
                 value: 5000000000, // 50 BTC
                 script_pubkey: vec![
                     0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

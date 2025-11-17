@@ -1485,8 +1485,9 @@ impl NetworkManager {
         
         // Send to each peer using transport address (avoids needing to clone Peer)
         for addr in peer_addrs {
+            let addr_clone = addr.clone();
             if let Err(e) = self.send_to_peer_by_transport(addr, message.clone()).await {
-                warn!("Failed to broadcast message to peer {:?}: {}", addr, e);
+                warn!("Failed to broadcast message to peer {:?}: {}", addr_clone, e);
             }
         }
         Ok(())

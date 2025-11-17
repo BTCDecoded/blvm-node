@@ -58,6 +58,8 @@ pub struct Node {
     network_addr: SocketAddr,
     /// Node configuration (optional)
     config: Option<NodeConfig>,
+    /// Data directory path (stored for recreating storage if needed)
+    data_dir: PathBuf,
 }
 
 impl Node {
@@ -107,6 +109,7 @@ impl Node {
             network: Arc::try_unwrap(network_arc)
                 .unwrap_or_else(|_| NetworkManager::new(network_addr)),
             rpc,
+            data_dir: PathBuf::from(data_dir),
             sync_coordinator,
             mempool_manager: mempool_manager_arc,
             mining_coordinator,
@@ -121,7 +124,7 @@ impl Node {
     }
 
     /// Set node configuration
-    pub fn with_config(mut self, config: NodeConfig) -> Self {
+    pub fn with_config(mut self, config: NodeConfig) -> Result<Self> {
         // Apply network configuration if available
         let max_peers = config.max_peers.unwrap_or(100);
         let transport_preference = config.get_transport_preference();
@@ -129,7 +132,8 @@ impl Node {
         // Recreate network manager with config
         let network_addr = self.network_addr;
         let protocol_arc = self.protocol.clone();
-        let storage_arc = Arc::new(self.storage.clone());
+        // Note: Storage doesn't implement Clone, so we recreate it from the data_dir
+        let storage_arc = Arc::new(Storage::new(&self.data_dir)?);
         let mempool_manager_arc = Arc::clone(&self.mempool_manager);
         
         let network = NetworkManager::with_config(
@@ -145,7 +149,7 @@ impl Node {
         
         self.network = network;
         self.config = Some(config);
-        self
+        Ok(self)
     }
 
     /// Enable module system from configuration

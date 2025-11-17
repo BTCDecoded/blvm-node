@@ -271,7 +271,7 @@ impl NetworkRpc {
         if let Some(ref network) = self.network_manager {
             // Send disconnect message to network manager
             // The network manager will handle peer removal via PeerDisconnected message
-            let peer_manager = network.peer_manager();
+            let peer_manager = network.peer_manager().await;
             use crate::network::transport::TransportAddr;
             let transport_addr = TransportAddr::Tcp(addr);
             if peer_manager.get_peer(&transport_addr).is_some() {
