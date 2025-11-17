@@ -254,31 +254,14 @@ impl RpcServer {
 
         // Build HTTP response
         // Response::builder() returns http::Error, but we need hyper::Error
-        // Since hyper::Error doesn't implement From<http::Error>, we convert via io::Error
-        Response::builder()
+        // Since hyper::Error doesn't implement From<http::Error> or From<io::Error>,
+        // we use expect() since Response::builder() should never fail with valid inputs
+        Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .header("Content-Length", response_json.len())
             .body(Full::new(Bytes::from(response_json)))
-            .map_err(|e| {
-                error!("Failed to build HTTP response: {}", e);
-                // Convert http::Error -> io::Error -> hyper::Error
-                // hyper::Error implements From<io::Error> in some contexts, but not directly
-                // Use a workaround: create a new hyper::Error from the error message
-                // Actually, we can use anyhow to convert, or just return a generic error
-                // For now, use the error message to create a new hyper error
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("HTTP response build error: {}", e),
-                )
-                .into()
-            })
-            .map_err(|e: std::io::Error| {
-                // Convert io::Error to hyper::Error
-                // hyper::Error can be created from various sources
-                // Use the error message to create a new hyper error
-                hyper::Error::from(e)
-            })
+            .expect("Failed to build HTTP response - this should never happen with valid inputs"))
     }
 
     /// Create HTTP error response
