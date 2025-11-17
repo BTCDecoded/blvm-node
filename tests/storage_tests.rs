@@ -38,7 +38,7 @@ fn test_block_store() {
             bits: 0x1d00ffff,
             nonce: 0,
         },
-        transactions: vec![],
+        transactions: vec![].into_boxed_slice(),
     };
 
     // Store the block
@@ -121,8 +121,8 @@ fn test_transaction_index() {
     // Create a test transaction
     let tx = Transaction {
         version: 1,
-        inputs: vec![],
-        outputs: vec![TransactionOutput {
+        inputs: bllvm_protocol::tx_inputs![],
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 5000000000,
             script_pubkey: vec![0x76, 0xa9, 0x14],
         }],
@@ -202,7 +202,7 @@ fn test_block_store_header_only() {
     // Store block with header
     let block = Block {
         header,
-        transactions: vec![],
+        transactions: vec![].into_boxed_slice(),
     };
     blockstore.store_block(&block).unwrap();
 

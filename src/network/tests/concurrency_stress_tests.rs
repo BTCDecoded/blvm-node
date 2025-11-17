@@ -17,11 +17,8 @@ use tokio::time::timeout;
 /// without deadlocking (using tokio::sync::Mutex)
 #[tokio::test]
 async fn test_concurrent_mutex_access() {
-    let (tx, _rx) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
-        crate::network::tcp_transport::TcpTransport::new(),
-        tx,
-        Default::default(),
+        "127.0.0.1:8333".parse().unwrap(),
     ));
 
     // Spawn multiple tasks that all try to access peer_manager simultaneously
@@ -49,11 +46,8 @@ async fn test_concurrent_mutex_access() {
 /// Test that locks are not held across await points
 #[tokio::test]
 async fn test_no_lock_held_across_await() {
-    let (tx, _rx) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
-        crate::network::tcp_transport::TcpTransport::new(),
-        tx,
-        Default::default(),
+        "127.0.0.1:8333".parse().unwrap(),
     ));
 
     // This test verifies that we can await async operations
@@ -82,11 +76,8 @@ async fn test_no_lock_held_across_await() {
 /// Test lock ordering to prevent deadlocks
 #[tokio::test]
 async fn test_lock_ordering() {
-    let (tx, _rx) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
-        crate::network::tcp_transport::TcpTransport::new(),
-        tx,
-        Default::default(),
+        "127.0.0.1:8333".parse().unwrap(),
     ));
 
     // Test that we always acquire locks in the same order
@@ -106,11 +97,8 @@ async fn test_lock_ordering() {
 /// Stress test: Many concurrent operations
 #[tokio::test]
 async fn test_concurrent_operations_stress() {
-    let (tx, _rx) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
-        crate::network::tcp_transport::TcpTransport::new(),
-        tx,
-        Default::default(),
+        "127.0.0.1:8333".parse().unwrap(),
     ));
 
     // Spawn many concurrent operations
@@ -139,11 +127,8 @@ async fn test_concurrent_operations_stress() {
 /// Test that rate limiting works correctly under concurrent load
 #[tokio::test]
 async fn test_concurrent_rate_limiting() {
-    let (tx, _rx) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
-        crate::network::tcp_transport::TcpTransport::new(),
-        tx,
-        Default::default(),
+        "127.0.0.1:8333".parse().unwrap(),
     ));
 
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
@@ -171,11 +156,8 @@ async fn test_concurrent_rate_limiting() {
 /// Test timeout handling for lock acquisition
 #[tokio::test]
 async fn test_lock_timeout() {
-    let (tx, _rx) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
-        crate::network::tcp_transport::TcpTransport::new(),
-        tx,
-        Default::default(),
+        "127.0.0.1:8333".parse().unwrap(),
     ));
 
     // Hold lock for a while
@@ -204,11 +186,8 @@ async fn test_lock_timeout() {
 /// Test that peer addition/removal is thread-safe
 #[tokio::test]
 async fn test_concurrent_peer_operations() {
-    let (tx, _rx) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
-        crate::network::tcp_transport::TcpTransport::new(),
-        tx,
-        Default::default(),
+        "127.0.0.1:8333".parse().unwrap(),
     ));
 
     // Spawn tasks that add and remove peers concurrently
@@ -237,11 +216,9 @@ async fn test_concurrent_peer_operations() {
 /// Test that message processing doesn't deadlock
 #[tokio::test]
 async fn test_concurrent_message_processing() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx): (mpsc::UnboundedSender<()>, _) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
-        crate::network::tcp_transport::TcpTransport::new(),
-        tx,
-        Default::default(),
+        "127.0.0.1:8333".parse().unwrap(),
     ));
 
     // Send many messages concurrently

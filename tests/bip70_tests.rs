@@ -20,7 +20,7 @@ fn test_payment_verification() {
     // Create a payment transaction
     let tx = Transaction {
         version: 1,
-        inputs: vec![TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -28,7 +28,7 @@ fn test_payment_verification() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: vec![TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51], // Matches payment request
         }],
@@ -79,7 +79,7 @@ fn test_payment_ack_signing() {
     // Create payment
     let tx = Transaction {
         version: 1,
-        inputs: vec![TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -87,7 +87,7 @@ fn test_payment_ack_signing() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: vec![TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51],
         }],

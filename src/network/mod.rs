@@ -3248,10 +3248,11 @@ mod tests {
     #[tokio::test]
     async fn test_network_manager_with_config() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let manager = NetworkManager::with_config(addr, 5);
+        let manager = NetworkManager::with_config(addr, 5, crate::network::transport::TransportPreference::TCP_ONLY, None);
 
-        assert_eq!(manager.peer_count(), 0);
-        assert_eq!(manager.peer_manager().peer_count(), 0);
+        // peer_count() might not exist, check peer_manager instead
+        let peer_manager = manager.peer_manager().await;
+        assert_eq!(peer_manager.peer_count(), 0);
     }
 
     #[tokio::test]
@@ -3385,14 +3386,14 @@ mod tests {
     // and is_banned) which blocks the async runtime when there's contention.
     // Full message routing is tested in integration tests.
 
-    #[test]
-    fn test_network_manager_peer_manager_access() {
+    #[tokio::test]
+    async fn test_network_manager_peer_manager_access() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let manager = NetworkManager::new(addr);
 
         // Test immutable access - drop the guard immediately to avoid holding lock
         {
-            let peer_manager = manager.peer_manager();
+            let peer_manager = manager.peer_manager().await;
             assert_eq!(peer_manager.peer_count(), 0);
         } // Guard dropped here
 

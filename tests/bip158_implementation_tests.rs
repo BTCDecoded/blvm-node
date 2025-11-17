@@ -9,8 +9,8 @@ fn test_build_block_filter_with_transactions() {
     // Create transactions with different scripts
     let tx1 = Transaction {
         version: 1,
-        inputs: vec![],
-        outputs: vec![TransactionOutput {
+        inputs: bllvm_protocol::tx_inputs![],
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51], // OP_1
         }],
@@ -19,8 +19,8 @@ fn test_build_block_filter_with_transactions() {
 
     let tx2 = Transaction {
         version: 1,
-        inputs: vec![],
-        outputs: vec![TransactionOutput {
+        inputs: bllvm_protocol::tx_inputs![],
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 2000,
             script_pubkey: vec![0x52], // OP_2
         }],
@@ -37,8 +37,8 @@ fn test_build_block_filter_with_transactions() {
 fn test_match_filter_positive() {
     let tx = Transaction {
         version: 1,
-        inputs: vec![],
-        outputs: vec![TransactionOutput {
+        inputs: bllvm_protocol::tx_inputs![],
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51, 0x52, 0x53], // OP_1 OP_2 OP_3
         }],
@@ -56,7 +56,7 @@ fn test_match_filter_positive() {
 fn test_match_filter_with_previous_scripts() {
     let tx = Transaction {
         version: 1,
-        inputs: vec![TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -64,7 +64,7 @@ fn test_match_filter_with_previous_scripts() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: vec![TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51],
         }],

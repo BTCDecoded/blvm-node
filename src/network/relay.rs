@@ -383,7 +383,7 @@ mod tests {
                 bits: 0,
                 nonce: 0,
             },
-            transactions: vec![],
+            transactions: vec![].into_boxed_slice(),
         };
         let ok = relay.prioritize_block_via_fibre(&mut fibre, &block);
         assert!(ok);

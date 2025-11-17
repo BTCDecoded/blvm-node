@@ -84,8 +84,8 @@ mod tests {
     fn minimal_tx() -> Transaction {
         Transaction {
             version: 1,
-            inputs: vec![],
-            outputs: vec![TransactionOutput {
+            inputs: bllvm_protocol::tx_inputs![],
+            outputs: bllvm_protocol::tx_outputs![TransactionOutput {
                 value: 0,
                 script_pubkey: vec![],
             }],

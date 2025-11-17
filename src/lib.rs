@@ -99,8 +99,8 @@ mod tests {
         // Create a simple transaction
         let tx = Transaction {
             version: 1,
-            inputs: vec![],
-            outputs: vec![TransactionOutput {
+            inputs: bllvm_protocol::tx_inputs![],
+            outputs: bllvm_protocol::tx_outputs![TransactionOutput {
                 value: 1000,
                 script_pubkey: vec![0x51], // OP_1
             }],

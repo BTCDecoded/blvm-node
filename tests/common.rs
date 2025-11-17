@@ -90,8 +90,8 @@ impl TestTransactionBuilder {
     pub fn build(self) -> Transaction {
         Transaction {
             version: self.version,
-            inputs: self.inputs,
-            outputs: self.outputs,
+            inputs: self.inputs.into(),
+            outputs: self.outputs.into(),
             lock_time: self.lock_time,
         }
     }
@@ -150,7 +150,7 @@ impl TestBlockBuilder {
     pub fn add_coinbase_transaction(mut self, script_pubkey: ByteString) -> Self {
         let coinbase_tx = Transaction {
             version: 1,
-            inputs: vec![TransactionInput {
+            inputs: bllvm_protocol::tx_inputs![TransactionInput {
                 prevout: OutPoint {
                     hash: [0u8; 32],
                     index: 0xffffffff,
@@ -158,7 +158,7 @@ impl TestBlockBuilder {
                 script_sig: vec![0x51], // OP_1
                 sequence: 0xffffffff,
             }],
-            outputs: vec![TransactionOutput {
+            outputs: bllvm_protocol::tx_outputs![TransactionOutput {
                 value: 5000000000, // 50 BTC in satoshis
                 script_pubkey,
             }],
@@ -171,7 +171,7 @@ impl TestBlockBuilder {
     pub fn build(self) -> Block {
         Block {
             header: self.header,
-            transactions: self.transactions,
+            transactions: self.transactions.into_boxed_slice(),
         }
     }
 

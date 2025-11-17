@@ -1026,7 +1026,7 @@ mod tests {
     fn create_test_transaction(version: i32, output_value: u64) -> Transaction {
         Transaction {
             version: version as u64,
-            inputs: vec![TransactionInput {
+            inputs: bllvm_protocol::tx_inputs![TransactionInput {
                 prevout: OutPoint {
                     hash: [0u8; 32],
                     index: 0,
@@ -1037,7 +1037,7 @@ mod tests {
                 ],
                 sequence: 0xffffffff,
             }],
-            outputs: vec![TransactionOutput {
+            outputs: bllvm_protocol::tx_outputs![TransactionOutput {
                 value: output_value as i64,
                 script_pubkey: vec![
                     0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1058,7 +1058,7 @@ mod tests {
                 bits: 0x1d00ffff,
                 nonce: 0,
             },
-            transactions: vec![create_test_transaction(1, 1000)],
+            transactions: vec![create_test_transaction(1, 1000)].into_boxed_slice(),
         }
     }
 }

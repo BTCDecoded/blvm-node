@@ -54,8 +54,8 @@ async fn test_mempool_manager() {
     use bllvm_protocol::Transaction;
     let tx = Transaction {
         version: 1,
-        inputs: vec![],
-        outputs: vec![],
+        inputs: bllvm_protocol::tx_inputs![],
+        outputs: bllvm_protocol::tx_outputs![],
         lock_time: 0,
     };
 
@@ -314,7 +314,7 @@ async fn test_mempool_manager_operations() {
     // Create a completely different transaction
     let tx2 = Transaction {
         version: 2, // Different version
-        inputs: vec![TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: random_hash(),
                 index: 1,
@@ -322,7 +322,7 @@ async fn test_mempool_manager_operations() {
             script_sig: vec![0x42, 0x05], // Different signature
             sequence: 0xfffffffe,
         }],
-        outputs: vec![TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 25_0000_0000, // Different value
             script_pubkey: p2pkh_script(random_hash20()),
         }],

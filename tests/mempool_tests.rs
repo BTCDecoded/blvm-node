@@ -11,7 +11,7 @@ async fn test_mempool_stores_full_transactions() {
     // Create a test transaction
     let tx = Transaction {
         version: 1,
-        inputs: vec![TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -19,7 +19,7 @@ async fn test_mempool_stores_full_transactions() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: vec![TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51], // OP_1
         }],
@@ -61,12 +61,12 @@ async fn test_mempool_get_prioritized_transactions() {
     // High fee transaction
     let high_fee_tx = Transaction {
         version: 1,
-        inputs: vec![TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![TransactionInput {
             prevout: outpoint.clone(),
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: vec![TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 5000, // 5000 sat fee
             script_pubkey: vec![0x51],
         }],
@@ -76,7 +76,7 @@ async fn test_mempool_get_prioritized_transactions() {
     // Low fee transaction
     let low_fee_tx = Transaction {
         version: 1,
-        inputs: vec![TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [1u8; 32],
                 index: 0,
@@ -84,7 +84,7 @@ async fn test_mempool_get_prioritized_transactions() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: vec![TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 9000, // 1000 sat fee
             script_pubkey: vec![0x51],
         }],
@@ -111,7 +111,7 @@ async fn test_mempool_remove_transaction() {
 
     let tx = Transaction {
         version: 1,
-        inputs: vec![TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -119,7 +119,7 @@ async fn test_mempool_remove_transaction() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: vec![TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51],
         }],

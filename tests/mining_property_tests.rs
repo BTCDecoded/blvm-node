@@ -120,8 +120,8 @@ proptest! {
 
         let tx = Transaction {
             version: version as u64,
-            inputs,
-            outputs,
+            inputs: inputs.into(),
+            outputs: outputs.into(),
             lock_time: lock_time as u64,
         };
 

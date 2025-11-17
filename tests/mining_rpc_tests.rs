@@ -226,7 +226,7 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
     // Using a simple coinbase transaction structure
     let tx = Transaction {
         version: 1,
-        inputs: vec![bllvm_protocol::types::TransactionInput {
+          inputs: bllvm_protocol::tx_inputs![bllvm_protocol::types::TransactionInput {
             prevout: bllvm_protocol::types::OutPoint {
                 hash: [0u8; 32],
                 index: 0xffffffff,
@@ -234,7 +234,7 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
             script_sig: vec![0x03, 0x00, 0x00, 0x00], // Minimal coinbase script
             sequence: 0xffffffff,
         }],
-        outputs: vec![bllvm_protocol::types::TransactionOutput {
+          outputs: bllvm_protocol::tx_outputs![bllvm_protocol::types::TransactionOutput {
             value: 5000000000,
             script_pubkey: vec![
                 0x41, 0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6,
