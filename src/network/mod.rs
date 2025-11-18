@@ -1188,7 +1188,7 @@ impl NetworkManager {
                                                 if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
                                                     let address_db_clone = address_database_clone.clone();
                                                     tokio::spawn(async move {
-                                                        let mut db = address_db_clone.lock().await;
+                                                        let mut db = address_db_clone.write().await;
                                                         db.add_iroh_address(public_key, 0); // Services will be updated on version exchange
                                                     });
                                                 }
