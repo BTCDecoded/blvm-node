@@ -15,9 +15,11 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument, Span};
+use uuid::Uuid;
 
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};
+use crate::node::metrics::MetricsCollector;
 
 /// Maximum request body size (1MB)
 const MAX_REQUEST_SIZE: usize = 1_048_576;
@@ -35,6 +37,8 @@ pub struct RpcServer {
     control: Arc<control::ControlRpc>,
     // Authentication manager (optional)
     auth_manager: Option<Arc<auth::RpcAuthManager>>,
+    // Metrics collector (optional, for Prometheus export)
+    metrics: Option<Arc<MetricsCollector>>,
 }
 
 impl RpcServer {
@@ -49,6 +53,7 @@ impl RpcServer {
             rawtx: Arc::new(rawtx::RawTxRpc::new()),
             control: Arc::new(control::ControlRpc::new()),
             auth_manager: None,
+            metrics: None,
         }
     }
 
@@ -63,6 +68,7 @@ impl RpcServer {
             rawtx: Arc::new(rawtx::RawTxRpc::new()),
             control: Arc::new(control::ControlRpc::new()),
             auth_manager: Some(auth_manager),
+            metrics: None,
         }
     }
 
@@ -85,6 +91,31 @@ impl RpcServer {
             rawtx,
             control,
             auth_manager: None,
+            metrics: None,
+        }
+    }
+
+    /// Create with dependencies and metrics
+    pub fn with_dependencies_and_metrics(
+        addr: SocketAddr,
+        blockchain: Arc<blockchain::BlockchainRpc>,
+        network: Arc<network::NetworkRpc>,
+        mempool: Arc<mempool::MempoolRpc>,
+        mining: Arc<mining::MiningRpc>,
+        rawtx: Arc<rawtx::RawTxRpc>,
+        control: Arc<control::ControlRpc>,
+        metrics: Arc<MetricsCollector>,
+    ) -> Self {
+        Self {
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control,
+            auth_manager: None,
+            metrics: Some(metrics),
         }
     }
 
@@ -108,6 +139,32 @@ impl RpcServer {
             rawtx,
             control,
             auth_manager: Some(auth_manager),
+            metrics: None,
+        }
+    }
+
+    /// Create with dependencies, authentication, and metrics
+    pub fn with_dependencies_auth_and_metrics(
+        addr: SocketAddr,
+        blockchain: Arc<blockchain::BlockchainRpc>,
+        network: Arc<network::NetworkRpc>,
+        mempool: Arc<mempool::MempoolRpc>,
+        mining: Arc<mining::MiningRpc>,
+        rawtx: Arc<rawtx::RawTxRpc>,
+        control: Arc<control::ControlRpc>,
+        auth_manager: Arc<auth::RpcAuthManager>,
+        metrics: Arc<MetricsCollector>,
+    ) -> Self {
+        Self {
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control,
+            auth_manager: Some(auth_manager),
+            metrics: Some(metrics),
         }
     }
 
@@ -182,11 +239,20 @@ impl RpcServer {
         req: Request<Incoming>,
         addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>, hyper::Error> {
-        // Only allow POST method
+        // Handle GET requests for health and metrics endpoints
+        if req.method() == Method::GET {
+            let path = req.uri().path();
+            if path == "/metrics" {
+                return Self::handle_metrics_endpoint(server).await;
+            }
+            return Self::handle_health_endpoint(server, req).await;
+        }
+
+        // Only allow POST method for JSON-RPC
         if req.method() != Method::POST {
             return Ok(Self::http_error_response(
                 StatusCode::METHOD_NOT_ALLOWED,
-                "Only POST method is supported",
+                "Only POST method is supported for JSON-RPC",
             ));
         }
 
@@ -227,32 +293,89 @@ impl RpcServer {
             }
         };
 
+        // Generate request ID for tracing
+        let request_id = Uuid::new_v4().to_string();
+        let request_id_short = request_id.chars().take(8).collect::<String>();
+        
+        // Create tracing span with request context
+        let span = tracing::span!(
+            tracing::Level::DEBUG,
+            "rpc_request",
+            request_id = %request_id_short,
+            method = tracing::field::Empty,
+            client_addr = %addr,
+            request_size = json_body.len()
+        );
+        
+        let _guard = span.enter();
+        
         debug!("HTTP RPC request from {}: {} bytes", addr, json_body.len());
 
+        // Extract method name for per-method rate limiting (before authentication)
+        let method_name = serde_json::from_str::<Value>(&json_body)
+            .ok()
+            .and_then(|req| req.get("method").and_then(|m| m.as_str()))
+            .unwrap_or("unknown")
+            .to_string();
+        
+        // Record method in span
+        Span::current().record("method", &method_name);
+
         // Authenticate request if authentication is enabled
+        let auth_result = if let Some(ref auth_manager) = server.auth_manager {
+            Some(auth_manager.authenticate_request(&headers, addr).await)
+        } else {
+            None
+        };
+
+        // Check rate limiting (multiple layers)
         if let Some(ref auth_manager) = server.auth_manager {
-            let auth_result = auth_manager.authenticate_request(&headers, addr).await;
+            if let Some(ref auth_result) = auth_result {
+                // Check if authentication failed
+                if let Some(error) = &auth_result.error {
+                    return Ok(Self::http_error_response(StatusCode::UNAUTHORIZED, error));
+                }
 
-            // Check if authentication failed
-            if let Some(error) = auth_result.error {
-                return Ok(Self::http_error_response(StatusCode::UNAUTHORIZED, &error));
-            }
-
-            // Check rate limiting
-            if let Some(ref user_id) = auth_result.user_id {
-                if !auth_manager.check_rate_limit(user_id).await {
+                // Check per-user rate limiting (for authenticated users)
+                if let Some(ref user_id) = auth_result.user_id {
+                    if !auth_manager.check_rate_limit(user_id).await {
+                        return Ok(Self::http_error_response(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "User rate limit exceeded",
+                        ));
+                    }
+                }
+            } else {
+                // Unauthenticated request - check per-IP rate limit
+                if !auth_manager.check_ip_rate_limit(addr).await {
                     return Ok(Self::http_error_response(
                         StatusCode::TOO_MANY_REQUESTS,
-                        "Rate limit exceeded",
+                        "IP rate limit exceeded",
                     ));
                 }
+            }
+
+            // Check per-method rate limiting (applies to all requests)
+            if !auth_manager.check_method_rate_limit(&method_name).await {
+                return Ok(Self::http_error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &format!("Method '{}' rate limit exceeded", method_name),
+                ));
             }
         }
 
         // Process JSON-RPC request (reuse server instance with cached handlers)
+        let start_time = std::time::Instant::now();
         let response_json = Self::process_request_with_server(server, &json_body).await;
+        let duration = start_time.elapsed();
+        
+        // Record response metrics in span
+        Span::current().record("duration_ms", duration.as_millis() as u64);
+        Span::current().record("response_size", response_json.len());
+        
+        debug!("RPC request completed in {:?} (request_id: {})", duration, request_id_short);
 
-        // Build HTTP response
+        // Build HTTP response with request ID header
         // Response::builder() returns http::Error, but we need hyper::Error
         // Since hyper::Error doesn't implement From<http::Error> or From<io::Error>,
         // we use expect() since Response::builder() should never fail with valid inputs
@@ -260,8 +383,238 @@ impl RpcServer {
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .header("Content-Length", response_json.len())
+            .header("X-Request-ID", request_id_short)
             .body(Full::new(Bytes::from(response_json)))
             .expect("Failed to build HTTP response - this should never happen with valid inputs"))
+    }
+
+    /// Handle Prometheus metrics endpoint
+    async fn handle_metrics_endpoint(
+        server: Arc<Self>,
+    ) -> Result<Response<Full<Bytes>>, hyper::Error> {
+        // Get metrics if available
+        let metrics_text = if let Some(ref metrics_collector) = server.metrics {
+            Self::format_prometheus_metrics(metrics_collector.collect())
+        } else {
+            // Return empty metrics if collector not available
+            "# No metrics available\n".to_string()
+        };
+        
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/plain; version=0.0.4")
+            .header("Content-Length", metrics_text.len())
+            .body(Full::new(Bytes::from(metrics_text)))
+            .expect("Failed to build metrics response"))
+    }
+
+    /// Format NodeMetrics as Prometheus text format
+    fn format_prometheus_metrics(metrics: crate::node::metrics::NodeMetrics) -> String {
+        let mut output = String::new();
+        
+        // Network metrics
+        output.push_str("# HELP bllvm_network_peers_total Total number of connected peers\n");
+        output.push_str("# TYPE bllvm_network_peers_total gauge\n");
+        output.push_str(&format!("bllvm_network_peers_total {}\n", metrics.network.peer_count));
+        
+        output.push_str("# HELP bllvm_network_bytes_sent_total Total bytes sent\n");
+        output.push_str("# TYPE bllvm_network_bytes_sent_total counter\n");
+        output.push_str(&format!("bllvm_network_bytes_sent_total {}\n", metrics.network.bytes_sent));
+        
+        output.push_str("# HELP bllvm_network_bytes_received_total Total bytes received\n");
+        output.push_str("# TYPE bllvm_network_bytes_received_total counter\n");
+        output.push_str(&format!("bllvm_network_bytes_received_total {}\n", metrics.network.bytes_received));
+        
+        output.push_str("# HELP bllvm_network_messages_sent_total Total messages sent\n");
+        output.push_str("# TYPE bllvm_network_messages_sent_total counter\n");
+        output.push_str(&format!("bllvm_network_messages_sent_total {}\n", metrics.network.messages_sent));
+        
+        output.push_str("# HELP bllvm_network_messages_received_total Total messages received\n");
+        output.push_str("# TYPE bllvm_network_messages_received_total counter\n");
+        output.push_str(&format!("bllvm_network_messages_received_total {}\n", metrics.network.messages_received));
+        
+        output.push_str("# HELP bllvm_network_active_connections Active network connections\n");
+        output.push_str("# TYPE bllvm_network_active_connections gauge\n");
+        output.push_str(&format!("bllvm_network_active_connections {}\n", metrics.network.active_connections));
+        
+        output.push_str("# HELP bllvm_network_banned_peers Banned peers count\n");
+        output.push_str("# TYPE bllvm_network_banned_peers gauge\n");
+        output.push_str(&format!("bllvm_network_banned_peers {}\n", metrics.network.banned_peers));
+        
+        // Storage metrics
+        output.push_str("# HELP bllvm_storage_blocks_total Total blocks stored\n");
+        output.push_str("# TYPE bllvm_storage_blocks_total gauge\n");
+        output.push_str(&format!("bllvm_storage_blocks_total {}\n", metrics.storage.block_count));
+        
+        output.push_str("# HELP bllvm_storage_utxos_total Total UTXOs\n");
+        output.push_str("# TYPE bllvm_storage_utxos_total gauge\n");
+        output.push_str(&format!("bllvm_storage_utxos_total {}\n", metrics.storage.utxo_count));
+        
+        output.push_str("# HELP bllvm_storage_transactions_total Total transactions indexed\n");
+        output.push_str("# TYPE bllvm_storage_transactions_total gauge\n");
+        output.push_str(&format!("bllvm_storage_transactions_total {}\n", metrics.storage.transaction_count));
+        
+        output.push_str("# HELP bllvm_storage_disk_size_bytes Estimated disk size in bytes\n");
+        output.push_str("# TYPE bllvm_storage_disk_size_bytes gauge\n");
+        output.push_str(&format!("bllvm_storage_disk_size_bytes {}\n", metrics.storage.disk_size));
+        
+        output.push_str("# HELP bllvm_storage_within_bounds Storage bounds status (1=within bounds, 0=exceeded)\n");
+        output.push_str("# TYPE bllvm_storage_within_bounds gauge\n");
+        output.push_str(&format!("bllvm_storage_within_bounds {}\n", if metrics.storage.within_bounds { 1 } else { 0 }));
+        
+        // RPC metrics
+        output.push_str("# HELP bllvm_rpc_requests_total Total RPC requests\n");
+        output.push_str("# TYPE bllvm_rpc_requests_total counter\n");
+        output.push_str(&format!("bllvm_rpc_requests_total {}\n", metrics.rpc.requests_total));
+        
+        output.push_str("# HELP bllvm_rpc_requests_success_total Successful RPC requests\n");
+        output.push_str("# TYPE bllvm_rpc_requests_success_total counter\n");
+        output.push_str(&format!("bllvm_rpc_requests_success_total {}\n", metrics.rpc.requests_success));
+        
+        output.push_str("# HELP bllvm_rpc_requests_failed_total Failed RPC requests\n");
+        output.push_str("# TYPE bllvm_rpc_requests_failed_total counter\n");
+        output.push_str(&format!("bllvm_rpc_requests_failed_total {}\n", metrics.rpc.requests_failed));
+        
+        output.push_str("# HELP bllvm_rpc_requests_per_second Current RPC requests per second\n");
+        output.push_str("# TYPE bllvm_rpc_requests_per_second gauge\n");
+        output.push_str(&format!("bllvm_rpc_requests_per_second {}\n", metrics.rpc.requests_per_second));
+        
+        output.push_str("# HELP bllvm_rpc_avg_response_time_ms Average RPC response time in milliseconds\n");
+        output.push_str("# TYPE bllvm_rpc_avg_response_time_ms gauge\n");
+        output.push_str(&format!("bllvm_rpc_avg_response_time_ms {}\n", metrics.rpc.avg_response_time_ms));
+        
+        // Performance metrics
+        output.push_str("# HELP bllvm_performance_avg_block_processing_time_ms Average block processing time in milliseconds\n");
+        output.push_str("# TYPE bllvm_performance_avg_block_processing_time_ms gauge\n");
+        output.push_str(&format!("bllvm_performance_avg_block_processing_time_ms {}\n", metrics.performance.avg_block_processing_time_ms));
+        
+        output.push_str("# HELP bllvm_performance_avg_tx_validation_time_ms Average transaction validation time in milliseconds\n");
+        output.push_str("# TYPE bllvm_performance_avg_tx_validation_time_ms gauge\n");
+        output.push_str(&format!("bllvm_performance_avg_tx_validation_time_ms {}\n", metrics.performance.avg_tx_validation_time_ms));
+        
+        output.push_str("# HELP bllvm_performance_blocks_per_second Blocks processed per second\n");
+        output.push_str("# TYPE bllvm_performance_blocks_per_second gauge\n");
+        output.push_str(&format!("bllvm_performance_blocks_per_second {}\n", metrics.performance.blocks_per_second));
+        
+        output.push_str("# HELP bllvm_performance_transactions_per_second Transactions processed per second\n");
+        output.push_str("# TYPE bllvm_performance_transactions_per_second gauge\n");
+        output.push_str(&format!("bllvm_performance_transactions_per_second {}\n", metrics.performance.transactions_per_second));
+        
+        // System metrics
+        output.push_str("# HELP bllvm_system_uptime_seconds Node uptime in seconds\n");
+        output.push_str("# TYPE bllvm_system_uptime_seconds gauge\n");
+        output.push_str(&format!("bllvm_system_uptime_seconds {}\n", metrics.system.uptime_seconds));
+        
+        if let Some(memory) = metrics.system.memory_usage_bytes {
+            output.push_str("# HELP bllvm_system_memory_usage_bytes Memory usage in bytes\n");
+            output.push_str("# TYPE bllvm_system_memory_usage_bytes gauge\n");
+            output.push_str(&format!("bllvm_system_memory_usage_bytes {}\n", memory));
+        }
+        
+        if let Some(cpu) = metrics.system.cpu_usage_percent {
+            output.push_str("# HELP bllvm_system_cpu_usage_percent CPU usage percentage\n");
+            output.push_str("# TYPE bllvm_system_cpu_usage_percent gauge\n");
+            output.push_str(&format!("bllvm_system_cpu_usage_percent {}\n", cpu));
+        }
+        
+        // DoS protection metrics
+        output.push_str("# HELP bllvm_dos_connection_rate_violations_total Connection rate violations\n");
+        output.push_str("# TYPE bllvm_dos_connection_rate_violations_total counter\n");
+        output.push_str(&format!("bllvm_dos_connection_rate_violations_total {}\n", metrics.network.dos_protection.connection_rate_violations));
+        
+        output.push_str("# HELP bllvm_dos_auto_bans_total Auto-bans triggered\n");
+        output.push_str("# TYPE bllvm_dos_auto_bans_total counter\n");
+        output.push_str(&format!("bllvm_dos_auto_bans_total {}\n", metrics.network.dos_protection.auto_bans));
+        
+        output
+    }
+
+    /// Handle health check endpoints
+    async fn handle_health_endpoint(
+        server: Arc<Self>,
+        req: Request<Incoming>,
+    ) -> Result<Response<Full<Bytes>>, hyper::Error> {
+        let path = req.uri().path();
+        
+        // Call gethealth RPC method internally
+        let health_params = json!([]);
+        let health_result = server.control.gethealth(&health_params).await;
+        
+        let (status_code, body) = match health_result {
+            Ok(health_value) => {
+                match path {
+                    "/health" | "/health/live" => {
+                        // Quick health check - just return status
+                        let status = health_value.get("status")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("unknown");
+                        let is_healthy = status == "healthy" || status == "degraded";
+                        
+                        let response_body = json!({
+                            "status": status,
+                            "service": "bllvm-node"
+                        });
+                        
+                        let status_code = if is_healthy {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        };
+                        
+                        (status_code, serde_json::to_string(&response_body).unwrap_or_else(|_| "{}".to_string()))
+                    }
+                    "/health/ready" => {
+                        // Readiness probe - check if node is ready to serve traffic
+                        let status = health_value.get("status")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("unknown");
+                        let is_ready = status == "healthy";
+                        
+                        let response_body = json!({
+                            "status": if is_ready { "ready" } else { "not_ready" },
+                            "service": "bllvm-node"
+                        });
+                        
+                        let status_code = if is_ready {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        };
+                        
+                        (status_code, serde_json::to_string(&response_body).unwrap_or_else(|_| "{}".to_string()))
+                    }
+                    "/health/detailed" => {
+                        // Detailed health report
+                        (StatusCode::OK, serde_json::to_string(&health_value).unwrap_or_else(|_| "{}".to_string()))
+                    }
+                    _ => {
+                        return Ok(Self::http_error_response(
+                            StatusCode::NOT_FOUND,
+                            "Health endpoint not found",
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                // Health check failed
+                let response_body = json!({
+                    "status": "unhealthy",
+                    "service": "bllvm-node",
+                    "error": "Health check failed"
+                });
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    serde_json::to_string(&response_body).unwrap_or_else(|_| "{}".to_string())
+                )
+            }
+        };
+        
+        Ok(Response::builder()
+            .status(status_code)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Full::new(Bytes::from(body)))
+            .expect("Failed to build health response"))
     }
 
     /// Create HTTP error response

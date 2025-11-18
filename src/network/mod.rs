@@ -505,6 +505,7 @@ impl NetworkManager {
                 .map(|c| c.enable_self_advertisement)
                 .unwrap_or(true),
             request_timeout_config,
+            peer_reconnection_queue: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     
@@ -1222,6 +1223,9 @@ impl NetworkManager {
         // Start DoS protection cleanup task
         self.start_dos_protection_cleanup_task();
         
+        // Start peer reconnection task
+        self.start_peer_reconnection_task();
+        
         // Note: Peer connection initialization (DNS seeds, persistent peers, etc.)
         // should be called separately via initialize_peer_connections() after start()
         // This allows the caller to provide config, network type, and target peer count
@@ -1437,6 +1441,152 @@ impl NetworkManager {
                 
                 if expired_count > 0 {
                     info!("Cleaned up {} expired ban(s)", expired_count);
+                }
+            }
+        });
+    }
+
+    /// Start periodic task to attempt peer reconnections with exponential backoff
+    fn start_peer_reconnection_task(&self) {
+        let reconnection_queue = Arc::clone(&self.peer_reconnection_queue);
+        let peer_manager = Arc::clone(&self.peer_manager);
+        let peer_tx = self.peer_tx.clone();
+        let tcp_transport = self.tcp_transport.clone();
+        let ban_list = Arc::clone(&self.ban_list);
+        // Get max_peers (we'll need to access it later, so we'll query it in the loop)
+        
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10)); // Check every 10 seconds
+            loop {
+                interval.tick().await;
+                
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                
+                let mut queue = reconnection_queue.lock().await;
+                
+                // Get current peer count and max peers
+                let (current_peers, max_peers) = {
+                    let pm = peer_manager.lock().await;
+                    (pm.peer_count(), pm.max_peers)
+                };
+                
+                // Calculate minimum peer target (50% of max, but at least 1)
+                let min_peers = std::cmp::max(1, max_peers / 2);
+                
+                // If we have enough peers, skip reconnection attempts
+                if current_peers >= min_peers {
+                    // Clean up old entries (older than 1 hour) to prevent queue bloat
+                    queue.retain(|_, (_, last_attempt, _)| {
+                        now.saturating_sub(*last_attempt) < 3600
+                    });
+                    continue;
+                }
+                
+                // Sort peers by quality score (highest first) and attempts (lowest first)
+                let mut peers_to_reconnect: Vec<(SocketAddr, u32, f64)> = queue.iter()
+                    .map(|(addr, (attempts, last_attempt, quality))| (*addr, *attempts, *quality))
+                    .collect();
+                
+                // Sort by quality (descending), then by attempts (ascending)
+                peers_to_reconnect.sort_by(|a, b| {
+                    b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.cmp(&b.1))
+                });
+                
+                // Attempt reconnection for eligible peers
+                for (addr, attempts, quality) in peers_to_reconnect.iter() {
+                    // Check if peer is banned
+                    {
+                        let ban_list_guard = ban_list.read().await;
+                        if let Some(unban_timestamp) = ban_list_guard.get(addr) {
+                            if *unban_timestamp != u64::MAX && now < *unban_timestamp {
+                                continue; // Skip banned peers
+                            }
+                        }
+                    }
+                    
+                    // Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, max 60s
+                    let backoff_seconds = std::cmp::min(1u64 << attempts, 60);
+                    let last_attempt = queue.get(addr).map(|(_, la, _)| *la).unwrap_or(0);
+                    
+                    // Check if backoff period has elapsed
+                    if now.saturating_sub(last_attempt) < backoff_seconds {
+                        continue; // Still in backoff period
+                    }
+                    
+                    // Max reconnection attempts: 10 (after that, remove from queue)
+                    if *attempts >= 10 {
+                        debug!("Removing peer {} from reconnection queue (max attempts reached)", addr);
+                        queue.remove(addr);
+                        continue;
+                    }
+                    
+                    // Check if we have room for more peers
+                    if current_peers >= max_peers {
+                        break; // No room for more peers
+                    }
+                    
+                    // Attempt reconnection
+                    info!("Attempting to reconnect to peer {} (attempt {}, quality: {:.2})", addr, attempts + 1, quality);
+                    
+                    // Update last attempt time and increment attempts
+                    if let Some((ref mut attempts_ref, ref mut last_attempt_ref, _)) = queue.get_mut(addr) {
+                        *attempts_ref += 1;
+                        *last_attempt_ref = now;
+                    }
+                    
+                    // Clone for async move
+                    let addr_clone = *addr;
+                    let peer_tx_clone = peer_tx.clone();
+                    let peer_manager_clone = Arc::clone(&peer_manager);
+                    let tcp_transport_clone = tcp_transport.clone();
+                    let reconnection_queue_clone = Arc::clone(&reconnection_queue);
+                    
+                    // Attempt connection in background
+                    tokio::spawn(async move {
+                        use crate::network::peer::Peer;
+                        use crate::network::transport::TransportAddr;
+                        
+                        // Try TCP connection (most common)
+                        match tcp_transport_clone.connect(TransportAddr::Tcp(addr_clone)).await {
+                            Ok(conn) => {
+                                info!("Successfully reconnected to peer {}", addr_clone);
+                                
+                                // Create peer from transport connection
+                                let peer = Peer::from_transport_connection(
+                                    conn,
+                                    addr_clone,
+                                    TransportAddr::Tcp(addr_clone),
+                                    peer_tx_clone.clone(),
+                                );
+                                
+                                // Add peer to manager
+                                let mut pm = peer_manager_clone.lock().await;
+                                if let Err(e) = pm.add_peer(TransportAddr::Tcp(addr_clone), peer) {
+                                    warn!("Failed to add reconnected peer {}: {}", addr_clone, e);
+                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(addr_clone)));
+                                } else {
+                                    // Remove from reconnection queue on success
+                                    let mut queue = reconnection_queue_clone.lock().await;
+                                    queue.remove(&addr_clone);
+                                    info!("Peer {} successfully reconnected and added", addr_clone);
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Reconnection attempt to {} failed: {} (will retry with backoff)", addr_clone, e);
+                                // Peer remains in queue for next attempt
+                            }
+                        }
+                    });
+                    
+                    // Limit concurrent reconnection attempts to 3
+                    if queue.len() > 0 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    }
                 }
             }
         });
@@ -1903,8 +2053,32 @@ impl NetworkManager {
                 NetworkMessage::PeerDisconnected(addr) => {
                     info!("Peer disconnected: {:?}", addr);
                     let mut pm = self.peer_manager.lock().await;
+                    
+                    // Get peer quality score before removing
+                    let quality_score = pm.get_peer(&addr)
+                        .map(|p| p.quality_score())
+                        .unwrap_or(0.5);
+                    
                     // Remove peer directly using TransportAddr
                     pm.remove_peer(&addr);
+                    
+                    // Extract SocketAddr for reconnection tracking (only TCP/Quinn)
+                    if let Some(socket_addr) = match &addr {
+                        TransportAddr::Tcp(sock) => Some(*sock),
+                        #[cfg(feature = "quinn")]
+                        TransportAddr::Quinn(sock) => Some(*sock),
+                        #[cfg(feature = "iroh")]
+                        TransportAddr::Iroh(_) => None, // Iroh peers use different reconnection mechanism
+                    } {
+                        // Add to reconnection queue with exponential backoff
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        let mut reconnection_queue = self.peer_reconnection_queue.lock().await;
+                        reconnection_queue.insert(socket_addr, (0, now, quality_score));
+                        info!("Added peer {} to reconnection queue (quality: {:.2})", socket_addr, quality_score);
+                    }
                     
                     // Clean up per-IP connection count (only for TCP/Quinn, not Iroh)
                     if let Some(ip) = match &addr {

@@ -121,6 +121,14 @@ pub struct RpcAuthManager {
     default_rate_limit: (u32, u32),
     /// Per-user rate limits (overrides default)
     user_rate_limits: Arc<Mutex<HashMap<UserId, (u32, u32)>>>,
+    /// Per-IP rate limiters (for unauthenticated requests)
+    ip_rate_limiters: Arc<Mutex<HashMap<SocketAddr, RpcRateLimiter>>>,
+    /// Per-IP rate limit (burst, rate per second) - stricter than authenticated users
+    ip_rate_limit: (u32, u32),
+    /// Per-method rate limits (method_name -> (burst, rate))
+    method_rate_limits: Arc<Mutex<HashMap<String, (u32, u32)>>>,
+    /// Per-method rate limiters (method_name -> rate_limiter)
+    method_rate_limiters: Arc<Mutex<HashMap<String, RpcRateLimiter>>>,
 }
 
 impl RpcAuthManager {
@@ -133,6 +141,10 @@ impl RpcAuthManager {
             rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             default_rate_limit: (100, 10), // 100 burst, 10 req/sec
             user_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            ip_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            ip_rate_limit: (50, 5), // Stricter for unauthenticated: 50 burst, 5 req/sec
+            method_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            method_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -145,6 +157,10 @@ impl RpcAuthManager {
             rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             default_rate_limit: (default_burst, default_rate),
             user_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            ip_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            ip_rate_limit: (default_burst / 2, default_rate / 2), // Half of authenticated limit
+            method_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            method_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -293,6 +309,57 @@ impl RpcAuthManager {
         });
 
         limiter.check_and_consume()
+    }
+
+    /// Check rate limit for an IP address (for unauthenticated requests)
+    pub async fn check_ip_rate_limit(&self, ip: SocketAddr) -> bool {
+        let mut limiters = self.ip_rate_limiters.lock().await;
+
+        // Get or create rate limiter for this IP
+        let limiter = limiters.entry(ip).or_insert_with(|| {
+            let (burst, rate) = self.ip_rate_limit;
+            RpcRateLimiter::new(burst, rate)
+        });
+
+        limiter.check_and_consume()
+    }
+
+    /// Check rate limit for a specific RPC method
+    pub async fn check_method_rate_limit(&self, method_name: &str) -> bool {
+        let mut method_limits = self.method_rate_limits.lock().await;
+        let mut method_limiters = self.method_rate_limiters.lock().await;
+
+        // Check if there's a custom rate limit for this method
+        let (burst, rate) = method_limits
+            .get(method_name)
+            .copied()
+            .unwrap_or_else(|| {
+                // Default per-method limits (more restrictive for expensive methods)
+                match method_name {
+                    "getblock" | "getblockheader" | "getrawtransaction" => (20, 2), // Expensive queries
+                    "sendrawtransaction" | "submitblock" => (10, 1), // Write operations
+                    _ => (100, 10), // Default for other methods
+                }
+            });
+
+        // Get or create rate limiter for this method
+        let limiter = method_limiters
+            .entry(method_name.to_string())
+            .or_insert_with(|| RpcRateLimiter::new(burst, rate));
+
+        limiter.check_and_consume()
+    }
+
+    /// Set rate limit for a specific RPC method
+    pub async fn set_method_rate_limit(&self, method_name: &str, burst: u32, rate: u32) {
+        let mut method_limits = self.method_rate_limits.lock().await;
+        method_limits.insert(method_name.to_string(), (burst, rate));
+
+        // Update existing rate limiter if present
+        let mut method_limiters = self.method_rate_limiters.lock().await;
+        if let Some(limiter) = method_limiters.get_mut(method_name) {
+            *limiter = RpcRateLimiter::new(burst, rate);
+        }
     }
 
     /// Clean up rate limiters for disconnected users (optional optimization)

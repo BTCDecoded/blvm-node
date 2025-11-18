@@ -60,6 +60,8 @@ pub struct Node {
     config: Option<NodeConfig>,
     /// Data directory path (stored for recreating storage if needed)
     data_dir: PathBuf,
+    /// Disk check counter (for periodic monitoring)
+    disk_check_counter: std::sync::atomic::AtomicU64,
 }
 
 impl Node {
@@ -120,6 +122,7 @@ impl Node {
             protocol_version,
             network_addr,
             config: None,
+            disk_check_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -635,6 +638,14 @@ impl Node {
 
             // Check node health periodically
             self.check_health().await?;
+            
+            // Check disk space periodically (every 10 iterations = ~1 second)
+            let counter = self.disk_check_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if counter % 10 == 0 {
+                if let Err(e) = self.check_disk_space().await {
+                    warn!("Disk space check failed: {}", e);
+                }
+            }
         }
     }
 
@@ -662,6 +673,79 @@ impl Node {
             warn!("No blocks in storage");
         }
 
+        Ok(())
+    }
+
+    /// Check disk space and trigger pruning if needed
+    async fn check_disk_space(&self) -> Result<()> {
+        // Check storage bounds (80% threshold)
+        let within_bounds = self.storage.check_storage_bounds()?;
+        
+        if !within_bounds {
+            warn!("Storage bounds exceeded - disk space may be low");
+            
+            // Check if pruning is enabled
+            if self.storage.is_pruning_enabled() {
+                if let Some(pruning_manager) = self.storage.pruning() {
+                    // Get current chain height from chain info
+                    let chain_info = self.storage.chainstate().load_chain_info()?;
+                    if let Some(info) = chain_info {
+                        let current_height = info.height;
+                        
+                        // Get last prune height
+                        let last_prune_height = pruning_manager.get_stats().last_prune_height;
+                        
+                        // Check if we should auto-prune
+                        if pruning_manager.should_auto_prune(current_height, last_prune_height) {
+                            info!("Triggering automatic pruning due to storage bounds");
+                            
+                            // Perform pruning (prune_to_height is not async, but we're in async context)
+                            // Calculate prune height: keep only the last 1000 blocks (configurable)
+                            let prune_window = 1000; // Keep last 1000 blocks
+                            let prune_to_height = current_height.saturating_sub(prune_window);
+                            
+                            if prune_to_height > 0 && prune_to_height < current_height {
+                                match tokio::task::spawn_blocking({
+                                    let pruning_manager = Arc::clone(&pruning_manager);
+                                    let prune_to_height = prune_to_height;
+                                    let current_height = current_height;
+                                    move || pruning_manager.prune_to_height(prune_to_height, current_height, false)
+                                }).await {
+                                Ok(Ok(stats)) => {
+                                    info!(
+                                        "Automatic pruning completed: {} blocks pruned, {} blocks kept, {} bytes freed",
+                                        stats.blocks_pruned,
+                                        stats.blocks_kept,
+                                        stats.storage_freed
+                                    );
+                                    
+                                    // Flush storage to persist pruning changes
+                                    if let Err(e) = self.storage.flush() {
+                                        warn!("Failed to flush storage after automatic pruning: {}", e);
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    warn!("Automatic pruning failed: {}", e);
+                                }
+                                Err(e) => {
+                                    warn!("Pruning task failed: {}", e);
+                                }
+                            }
+                        } else {
+                            warn!("Storage bounds exceeded but auto-pruning not yet due (last prune: {:?}, current: {})", 
+                                  last_prune_height, current_height);
+                        }
+                    } else {
+                        warn!("Storage bounds exceeded but chain info not available");
+                    }
+                } else {
+                    warn!("Storage bounds exceeded but pruning manager not available");
+                }
+            } else {
+                warn!("Storage bounds exceeded but pruning is disabled (archival node mode)");
+            }
+        }
+        
         Ok(())
     }
 

@@ -233,31 +233,60 @@ impl RpcManager {
                 Arc::new(network::NetworkRpc::new())
             };
 
-            // Use auth manager if configured
-            if let Some(ref auth_manager) = self.auth_manager {
-                server::RpcServer::with_dependencies_and_auth(
-                    self.server_addr,
-                    blockchain,
-                    network,
-                    mempool_rpc,
-                    mining,
-                    rawtx_rpc,
-                    Arc::clone(&control_rpc),
-                    Arc::clone(auth_manager),
-                )
-            } else {
-                server::RpcServer::with_dependencies(
-                    self.server_addr,
-                    blockchain,
-                    network,
-                    mempool_rpc,
-                    mining,
-                    rawtx_rpc,
-                    Arc::clone(&control_rpc),
-                )
+            // Use auth manager and/or metrics if configured
+            match (self.auth_manager.as_ref(), self.metrics.as_ref()) {
+                (Some(auth_manager), Some(metrics)) => {
+                    server::RpcServer::with_dependencies_auth_and_metrics(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                        Arc::clone(auth_manager),
+                        Arc::clone(metrics),
+                    )
+                }
+                (Some(auth_manager), None) => {
+                    server::RpcServer::with_dependencies_and_auth(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                        Arc::clone(auth_manager),
+                    )
+                }
+                (None, Some(metrics)) => {
+                    server::RpcServer::with_dependencies_and_metrics(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                        Arc::clone(metrics),
+                    )
+                }
+                (None, None) => {
+                    server::RpcServer::with_dependencies(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                    )
+                }
             }
         } else {
-            // No dependencies - use auth if configured
+            // No dependencies - use auth and/or metrics if configured
+            // Note: Without dependencies, metrics won't be very useful, but we support it
             if let Some(ref auth_manager) = self.auth_manager {
                 server::RpcServer::with_auth(self.server_addr, Arc::clone(auth_manager))
             } else {
