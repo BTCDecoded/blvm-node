@@ -135,6 +135,8 @@ libc = ["dep:libc"]
 production = ["bllvm-protocol/production", "dep:rayon"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF
 dandelion = []
+# CTV (BIP119 CheckTemplateVerify) - passed through from bllvm-protocol
+ctv = ["bllvm-protocol/ctv"]
 
 # Formal verification (Kani model checking) - verification only, not in release builds
 verify = ["kani-verifier"]
