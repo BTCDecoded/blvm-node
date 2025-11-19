@@ -122,7 +122,6 @@ impl ControlRpc {
                 // Get system memory information
                 #[cfg(feature = "sysinfo")]
                 {
-                    use std::sync::Mutex;
                     use std::time::Duration;
                     use sysinfo::System;
 

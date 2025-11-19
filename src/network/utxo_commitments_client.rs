@@ -8,16 +8,12 @@
 //! - Modern Iroh QUIC transport (encrypted, NAT-traversing)
 
 #[cfg(feature = "utxo-commitments")]
-use crate::network::peer::Peer;
-#[cfg(feature = "utxo-commitments")]
 use crate::network::{
-    protocol::{Bip158FilterData, FilteredBlockMessage, GetFilteredBlockMessage, GetUTXOSetMessage, UTXOSetMessage},
+    protocol::{GetFilteredBlockMessage, GetUTXOSetMessage},
     protocol_extensions::{serialize_get_filtered_block, serialize_get_utxo_set},
     transport::TransportType,
     NetworkManager,
 };
-#[cfg(feature = "utxo-commitments")]
-use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::types::{BlockHeader, Hash, Natural};
 #[cfg(feature = "utxo-commitments")]

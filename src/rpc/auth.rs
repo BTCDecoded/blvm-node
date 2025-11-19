@@ -326,7 +326,7 @@ impl RpcAuthManager {
 
     /// Check rate limit for a specific RPC method
     pub async fn check_method_rate_limit(&self, method_name: &str) -> bool {
-        let mut method_limits = self.method_rate_limits.lock().await;
+        let method_limits = self.method_rate_limits.lock().await;
         let mut method_limiters = self.method_rate_limiters.lock().await;
 
         // Check if there's a custom rate limit for this method

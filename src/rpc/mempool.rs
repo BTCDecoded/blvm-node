@@ -100,7 +100,7 @@ impl MempoolRpc {
             if verbose {
                 let mut result = serde_json::Map::new();
                 
-                let utxo_set = if let (Some(ref mempool), Some(ref storage)) = (self.mempool.as_ref(), self.storage.as_ref()) {
+                let utxo_set = if let (Some(_mempool), Some(ref storage)) = (self.mempool.as_ref(), self.storage.as_ref()) {
                     Some(storage.utxos().get_all_utxos().unwrap_or_default())
                 } else {
                     None
@@ -412,15 +412,13 @@ impl MempoolRpc {
 
     /// Get specific mempool entry
     ///
-    /// Params: ["txid", verbose (optional, default: false)]
+    /// Params: ["txid"]
     pub async fn getmempoolentry(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmempoolentry");
 
         let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
             crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
         })?;
-
-        let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
         let hash_bytes = hex::decode(txid).map_err(|e| {
             crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {e}"))

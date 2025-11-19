@@ -3,7 +3,7 @@
 //! Handles block mining, template generation, and mining coordination.
 
 use anyhow::Result;
-use bllvm_protocol::{Block, BlockHeader, OutPoint, Transaction, TransactionInput};
+use bllvm_protocol::{Block, BlockHeader, Transaction};
 use std::collections::HashMap;
 use tracing::{debug, info};
 
@@ -1024,6 +1024,7 @@ mod tests {
 
     // Helper functions for tests
     fn create_test_transaction(version: i32, output_value: u64) -> Transaction {
+        use bllvm_protocol::{OutPoint, TransactionInput};
         Transaction {
             version: version as u64,
             inputs: bllvm_protocol::tx_inputs![TransactionInput {

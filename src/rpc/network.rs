@@ -328,15 +328,17 @@ impl NetworkRpc {
     pub async fn get_dos_protection_info(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: getdosprotectioninfo");
 
-        if let Some(ref network) = self.network_manager {
-            // Access dos_protection field directly (would need to add getter methods to NetworkManager)
-            // For now, return placeholder data
+        if let Some(network) = self.network_manager.as_ref() {
+            let dos_protection = network.dos_protection();
+            let dos_metrics = dos_protection.get_dos_metrics().await;
+            let dos_config = dos_protection.get_config().await;
+            
             let metrics = crate::node::metrics::DosMetrics {
-                connection_rate_violations: 0,
-                auto_bans: 0,
-                message_queue_overflows: 0,
-                active_connection_limit_hits: 0,
-                resource_exhaustion_events: 0,
+                connection_rate_violations: dos_metrics.connection_rate_violations,
+                auto_bans: dos_metrics.auto_bans_applied,
+                message_queue_overflows: dos_metrics.message_queue_overflows,
+                active_connection_limit_hits: dos_metrics.active_connection_limit_hits,
+                resource_exhaustion_events: dos_metrics.resource_exhaustion_events,
             };
 
             Ok(json!({
@@ -348,11 +350,11 @@ impl NetworkRpc {
                     "resource_exhaustion_events": metrics.resource_exhaustion_events,
                 },
                 "config": {
-                    "max_connections_per_window": 10,
-                    "window_seconds": 60,
-                    "max_message_queue_size": 1000,
-                    "max_active_connections": 125,
-                    "auto_ban_connection_violations": 5,
+                    "max_connections_per_window": dos_config.max_connections_per_window,
+                    "window_seconds": dos_config.window_seconds,
+                    "max_message_queue_size": dos_config.max_message_queue_size,
+                    "max_active_connections": dos_config.max_active_connections,
+                    "auto_ban_connection_violations": dos_config.auto_ban_connection_violations,
                 }
             }))
         } else {

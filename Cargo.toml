@@ -13,7 +13,7 @@ categories = ["cryptography::cryptocurrencies", "network-programming"]
 rust-version = "1.82"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(feature, values("governance"))'] }
 
 [package.metadata.docs.rs]
 all-features = true

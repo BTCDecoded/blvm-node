@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info, warn, Instrument, Span};
+use tracing::{debug, error, info, warn, Span};
 use uuid::Uuid;
 
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};

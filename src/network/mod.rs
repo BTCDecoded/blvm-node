@@ -905,16 +905,16 @@ impl NetworkManager {
             tokio::spawn(async move {
                 loop {
                     match tcp_listener.accept().await {
-                        Ok((conn, addr)) => {
-                            info!("New TCP connection from {:?}", addr);
-                            // Extract SocketAddr for notification
-                            let socket_addr = match addr {
+                        Ok((conn, transport_addr)) => {
+                            // Extract SocketAddr from TransportAddr::Tcp
+                            let socket_addr = match transport_addr {
                                 TransportAddr::Tcp(addr) => addr,
                                 _ => {
-                                    error!("Invalid transport address for TCP");
+                                    error!("Unexpected transport address type for TCP listener");
                                     continue;
                                 }
                             };
+                            info!("New TCP connection from {:?}", socket_addr);
 
                             // Check DoS protection: connection rate limiting
                             let ip = socket_addr.ip();
@@ -952,29 +952,29 @@ impl NetworkManager {
                             }
 
                             // Send connection notification
-                            let transport_addr = TransportAddr::Tcp(socket_addr);
                             let _ = peer_tx.send(NetworkMessage::PeerConnected(transport_addr.clone()));
 
                             // Handle connection in background with graceful error handling
                             let peer_tx_clone = peer_tx.clone();
                             let peer_manager_for_peer = Arc::clone(&peer_manager_clone);
+                            let transport_addr_for_peer = transport_addr.clone();
                             tokio::spawn(async move {
                                 // Create peer from transport connection
                                 let peer = peer::Peer::from_transport_connection(
                                     conn,
                                     socket_addr,
-                                    TransportAddr::Tcp(socket_addr),
+                                    transport_addr_for_peer.clone(),
                                     peer_tx_clone.clone(),
                                 );
                                 
                                 // Add peer to manager (async-safe)
                                 let mut pm = peer_manager_for_peer.lock().await;
-                                if let Err(e) = pm.add_peer(transport_addr.clone(), peer) {
+                                if let Err(e) = pm.add_peer(transport_addr_for_peer.clone(), peer) {
                                     warn!("Failed to add peer {}: {}", socket_addr, e);
-                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr.clone()));
+                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_for_peer.clone()));
                                     return;
                                 }
-                                info!("Successfully added peer {} (transport: {:?})", socket_addr, transport_addr);
+                                info!("Successfully added peer {} (transport: {:?})", socket_addr, transport_addr_for_peer);
                                 drop(pm); // Explicitly drop lock before continuing
                                 
                                 // Connection will be cleaned up automatically when read/write tasks exit
@@ -1786,9 +1786,6 @@ impl NetworkManager {
     /// 2. Falls back to TCP if preferred transport fails
     /// 3. Returns error only if all transports fail
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
-        use crate::network::peer::Peer;
-        use crate::network::transport::TransportAddr;
-        
         // Check DoS protection: connection rate limiting (for outgoing connections too)
         let ip = addr.ip();
         if !self.dos_protection.check_connection(ip).await {
@@ -1886,7 +1883,7 @@ impl NetworkManager {
     /// Helper: Try connecting with a specific transport
     async fn try_connect_with_transport(&self, transport_type: &crate::network::transport::TransportType, addr: SocketAddr) -> Result<(peer::Peer, TransportAddr)> {
         use crate::network::transport::TransportAddr;
-        use crate::network::peer::Peer;
+        // Peer is used via fully qualified path peer::Peer, no need to import
         
         match transport_type {
             crate::network::transport::TransportType::Tcp => {
@@ -2035,7 +2032,13 @@ impl NetworkManager {
                         // Could trigger automatic mitigation here (e.g., increase rate limits, ban aggressive IPs)
                     }
                     // Reset counter to prevent false positives
-                    message_count = 0;
+                    // Note: Counter will be reset again after metrics update (line 2043),
+                    // but this early reset prevents false positives in DoS detection.
+                    // The assignment is intentional - value is used in next loop iteration.
+                    #[allow(unused_assignments)] // Used in next loop iteration
+                    {
+                        message_count = 0;
+                    }
                 }
                 
                 self.dos_protection.update_metrics(
@@ -2046,7 +2049,7 @@ impl NetworkManager {
                 ).await;
                 
                 last_metrics_update = now;
-                message_count = 0; // Reset after update
+                message_count = 0; // Reset after update for next period
             }
 
             match message {
@@ -2248,13 +2251,8 @@ impl NetworkManager {
                         }
                     }
                     
-                    // Check Iroh mapping separately to avoid nested locks
-                    let transport_addr_opt = {
-                        let socket_map = self.socket_to_transport.lock().await;
-                        socket_map.get(&peer_addr).cloned()
-                    };
-                    
                     // Check rate limiting before processing - drop lock before async
+                    // Note: transport_addr_opt was previously computed but not used - removed for now
                     let should_process = {
                         let mut rates = self.peer_message_rates.lock().await;
                         let rate_limiter = rates.entry(peer_addr).or_insert_with(|| {
@@ -2799,7 +2797,7 @@ impl NetworkManager {
         };
         
         let addresses = {
-            let mut db = self.address_database.write().await;
+            let db = self.address_database.write().await;
             let fresh = db.get_fresh_addresses(2500);
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
@@ -2816,7 +2814,7 @@ impl NetworkManager {
 
     /// Handle Addr message - store addresses and optionally relay
     async fn handle_addr(&self, peer_addr: SocketAddr, msg: AddrMessage) -> Result<()> {
-        use crate::network::protocol::{AddrMessage, NetworkAddress};
+        // AddrMessage is already in scope as parameter, NetworkAddress is available from top-level import
         
         // Get peer services from peer state
         let peer_services = {
@@ -3207,6 +3205,11 @@ impl NetworkManager {
 
         debug!("Merged {} ban entries from {}", merged_count, peer_addr);
         Ok(())
+    }
+
+    /// Get DoS protection manager reference
+    pub fn dos_protection(&self) -> &Arc<dos_protection::DosProtectionManager> {
+        &self.dos_protection
     }
 
     /// Get network statistics

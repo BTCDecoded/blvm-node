@@ -107,7 +107,6 @@ impl BlockchainRpc {
     /// Matches Bitcoin Core's gettxoutsetinfo hash_serialized_2 calculation.
     fn calculate_utxo_set_hash(utxo_set: &bllvm_protocol::UtxoSet) -> [u8; 32] {
         use crate::storage::hashing::double_sha256;
-        use sha2::Digest;
 
         // Sort UTXOs for deterministic hashing (by outpoint: hash first, then index)
         let mut entries: Vec<_> = utxo_set.iter().collect();
