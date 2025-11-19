@@ -58,7 +58,7 @@ async fn test_per_ip_connection_limit() {
     assert!(true); // Placeholder - per-IP limits tested in integration
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ban_list_cleanup() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -88,7 +88,7 @@ async fn test_ban_list_cleanup() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ban_list_permanent() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -110,7 +110,7 @@ async fn test_ban_list_permanent() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ban_list_temporary() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -135,7 +135,7 @@ async fn test_ban_list_temporary() {
     manager.unban_peer(test_addr);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_clear_bans() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
