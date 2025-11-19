@@ -154,27 +154,13 @@ impl Node {
             mempool_manager_arc,
         );
         
-        // Initialize governance webhook client if configured
+        // Initialize governance webhook client if configured (from environment variables)
         #[cfg(feature = "governance")]
-        let governance_webhook = config.governance.as_ref()
-            .and_then(|g| {
-                if g.enabled {
-                    Some(crate::governance::GovernanceWebhookClient::new(
-                        g.webhook_url.clone(),
-                        g.node_id.clone(),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                // Fallback to environment variables if not in config
-                std::env::var("GOVERNANCE_WEBHOOK_URL").ok()
-                    .map(|url| crate::governance::GovernanceWebhookClient::new(
-                        Some(url),
-                        std::env::var("GOVERNANCE_NODE_ID").ok(),
-                    ))
-            });
+        let governance_webhook = std::env::var("GOVERNANCE_WEBHOOK_URL").ok()
+            .map(|url| crate::governance::GovernanceWebhookClient::new(
+                Some(url),
+                std::env::var("GOVERNANCE_NODE_ID").ok(),
+            ));
         
         self.network = network;
         self.config = Some(config);
