@@ -4,7 +4,7 @@ use bllvm_node::network::NetworkManager;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ban_list_operations() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -26,7 +26,7 @@ async fn test_ban_list_operations() {
     assert!(!manager.is_banned(test_addr));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ban_list_expiration() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -45,7 +45,7 @@ async fn test_ban_list_expiration() {
     assert!(!manager.is_banned(test_addr));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ban_list_permanent() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -62,7 +62,7 @@ async fn test_ban_list_permanent() {
     assert_eq!(manager.get_banned_peers().len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ban_list_multiple_peers() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);

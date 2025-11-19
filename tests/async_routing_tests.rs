@@ -2,10 +2,9 @@
 
 use bllvm_node::network::{transport::TransportPreference, NetworkManager};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_request_id_matching() {
     // Test that requests are matched by request_id, not FIFO
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -57,7 +56,7 @@ async fn test_request_id_matching() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_request_cancellation() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager =
@@ -76,7 +75,7 @@ async fn test_request_cancellation() {
     assert!(rx.await.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_timestamp_cleanup() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager =
@@ -97,7 +96,7 @@ async fn test_timestamp_cleanup() {
     assert!(!manager.complete_request(request_id, vec![1, 2, 3]));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_concurrent_requests_per_peer() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager =
@@ -127,7 +126,7 @@ async fn test_multiple_concurrent_requests_per_peer() {
     assert_eq!(rx3.await.unwrap(), vec![3]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_request_metrics() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager =
@@ -159,7 +158,7 @@ async fn test_request_metrics() {
     // assert_eq!(m.failed_requests, 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_request_priority() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager =
