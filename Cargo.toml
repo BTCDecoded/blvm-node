@@ -157,6 +157,7 @@ cargo-tarpaulin = "0.27"
 criterion = "0.5"
 proptest = "1.4.0"
 dhat = "0.3"  # Heap profiling
+serial_test = "3.0"  # Sequential test execution for database isolation
 
 # Release profile optimizations (mirrors bllvm-consensus)
 [profile.release]

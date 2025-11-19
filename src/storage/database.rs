@@ -217,6 +217,7 @@ mod redb_impl {
     static BLOCKS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blocks");
     static HEADERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("headers");
     static HEIGHT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("height_index");
+    static HASH_TO_HEIGHT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("hash_to_height");
     static WITNESSES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("witnesses");
     static RECENT_HEADERS_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("recent_headers");
@@ -231,6 +232,12 @@ mod redb_impl {
     static INVALID_BLOCKS_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("invalid_blocks");
     static CHAIN_TIPS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_tips");
+    static BLOCK_METADATA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("block_metadata");
+    static CHAINWORK_CACHE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chainwork_cache");
+    static UTXO_STATS_CACHE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("utxo_stats_cache");
+    static NETWORK_HASHRATE_CACHE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("network_hashrate_cache");
+    static UTXO_COMMITMENTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("utxo_commitments");
+    static COMMITMENT_HEIGHT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("commitment_height_index");
 
     pub struct RedbDatabase {
         db: Arc<RedbDb>,
@@ -238,7 +245,57 @@ mod redb_impl {
 
     impl RedbDatabase {
         pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+            use std::sync::Mutex;
+            // Global mutex to serialize database creation (prevents lock conflicts in tests)
+            static DB_CREATE_MUTEX: Mutex<()> = Mutex::new(());
+            let _guard = DB_CREATE_MUTEX.lock().unwrap();
+            
             let db_path = data_dir.as_ref().join("redb.db");
+            // Remove existing database file if it exists (for test isolation)
+            // This ensures we start with a fresh database each time
+            if db_path.exists() {
+                if let Err(e) = std::fs::remove_file(&db_path) {
+                    // If removal fails, try to open the existing database
+                    // This handles the case where the database is in use
+                    match RedbDb::open(&db_path) {
+                        Ok(db) => {
+                            // Database exists and is openable, use it
+                            let write_txn = db.begin_write()?;
+                            {
+                                // Open all tables to ensure they exist
+                                let _ = write_txn.open_table(BLOCKS_TABLE)?;
+                                let _ = write_txn.open_table(HEADERS_TABLE)?;
+                                let _ = write_txn.open_table(HEIGHT_INDEX_TABLE)?;
+                                let _ = write_txn.open_table(HASH_TO_HEIGHT_TABLE)?;
+                                let _ = write_txn.open_table(WITNESSES_TABLE)?;
+                                let _ = write_txn.open_table(RECENT_HEADERS_TABLE)?;
+                                let _ = write_txn.open_table(UTXOS_TABLE)?;
+                                let _ = write_txn.open_table(SPENT_OUTPUTS_TABLE)?;
+                                let _ = write_txn.open_table(CHAIN_INFO_TABLE)?;
+                                let _ = write_txn.open_table(WORK_CACHE_TABLE)?;
+                                let _ = write_txn.open_table(TX_BY_HASH_TABLE)?;
+                                let _ = write_txn.open_table(TX_BY_BLOCK_TABLE)?;
+                                let _ = write_txn.open_table(TX_METADATA_TABLE)?;
+                                let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
+                                let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
+                                let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
+                                let _ = write_txn.open_table(CHAINWORK_CACHE_TABLE)?;
+                                let _ = write_txn.open_table(UTXO_STATS_CACHE_TABLE)?;
+                                let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
+                                let _ = write_txn.open_table(UTXO_COMMITMENTS_TABLE)?;
+                                let _ = write_txn.open_table(COMMITMENT_HEIGHT_INDEX_TABLE)?;
+                            }
+                            write_txn.commit()?;
+                            return Ok(Self { db: Arc::new(db) });
+                        }
+                        Err(_) => {
+                            // Database exists but can't be opened, try to remove it again
+                            let _ = std::fs::remove_file(&db_path);
+                        }
+                    }
+                }
+            }
+            
             let db = RedbDb::create(&db_path)?;
 
             // Initialize all tables in a write transaction
@@ -248,6 +305,7 @@ mod redb_impl {
                 let _ = write_txn.open_table(BLOCKS_TABLE)?;
                 let _ = write_txn.open_table(HEADERS_TABLE)?;
                 let _ = write_txn.open_table(HEIGHT_INDEX_TABLE)?;
+                let _ = write_txn.open_table(HASH_TO_HEIGHT_TABLE)?;
                 let _ = write_txn.open_table(WITNESSES_TABLE)?;
                 let _ = write_txn.open_table(RECENT_HEADERS_TABLE)?;
                 let _ = write_txn.open_table(UTXOS_TABLE)?;
@@ -259,6 +317,12 @@ mod redb_impl {
                 let _ = write_txn.open_table(TX_METADATA_TABLE)?;
                 let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
                 let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
+                let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
+                let _ = write_txn.open_table(CHAINWORK_CACHE_TABLE)?;
+                let _ = write_txn.open_table(UTXO_STATS_CACHE_TABLE)?;
+                let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
+                let _ = write_txn.open_table(UTXO_COMMITMENTS_TABLE)?;
+                let _ = write_txn.open_table(COMMITMENT_HEIGHT_INDEX_TABLE)?;
             }
             write_txn.commit()?;
 
@@ -273,6 +337,7 @@ mod redb_impl {
                 "blocks" => Some(&BLOCKS_TABLE),
                 "headers" => Some(&HEADERS_TABLE),
                 "height_index" => Some(&HEIGHT_INDEX_TABLE),
+                "hash_to_height" => Some(&HASH_TO_HEIGHT_TABLE),
                 "witnesses" => Some(&WITNESSES_TABLE),
                 "recent_headers" => Some(&RECENT_HEADERS_TABLE),
                 "utxos" => Some(&UTXOS_TABLE),
@@ -284,6 +349,12 @@ mod redb_impl {
                 "tx_metadata" => Some(&TX_METADATA_TABLE),
                 "invalid_blocks" => Some(&INVALID_BLOCKS_TABLE),
                 "chain_tips" => Some(&CHAIN_TIPS_TABLE),
+                "block_metadata" => Some(&BLOCK_METADATA_TABLE),
+                "chainwork_cache" => Some(&CHAINWORK_CACHE_TABLE),
+                "utxo_stats_cache" => Some(&UTXO_STATS_CACHE_TABLE),
+                "network_hashrate_cache" => Some(&NETWORK_HASHRATE_CACHE_TABLE),
+                "utxo_commitments" => Some(&UTXO_COMMITMENTS_TABLE),
+                "commitment_height_index" => Some(&COMMITMENT_HEIGHT_INDEX_TABLE),
                 _ => None,
             }
         }

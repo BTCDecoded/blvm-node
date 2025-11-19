@@ -8,7 +8,11 @@ mod common;
 use bllvm_protocol::ProtocolVersion;
 use common::*;
 
+// Import serial_test for sequential execution of database-heavy tests
+use serial_test::serial;
+
 #[tokio::test]
+#[serial]
 async fn test_node_creation() {
     let temp_dir = TempDir::new().unwrap();
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -124,6 +128,7 @@ async fn test_mining_info() {
 // ===== NODE ORCHESTRATION COMPREHENSIVE TESTS =====
 
 #[tokio::test]
+#[serial]
 async fn test_node_creation_with_different_protocols() {
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let rpc_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -174,7 +179,8 @@ async fn test_node_creation_with_different_protocols() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn test_node_component_initialization() {
     let temp_dir = TempDir::new().unwrap();
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -207,6 +213,7 @@ async fn test_node_component_initialization() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_node_startup_shutdown() {
     let temp_dir = TempDir::new().unwrap();
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -584,7 +591,8 @@ async fn test_mining_mempool_interaction() {
     // assert!(!selected_txs.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn test_full_node_coordination() {
     let temp_dir = TempDir::new().unwrap();
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -664,7 +672,8 @@ async fn test_mempool_cleanup_workflow() {
     assert_eq!(mempool.size(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn test_node_run_once() {
     let temp_dir = TempDir::new().unwrap();
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -687,7 +696,8 @@ async fn test_node_run_once() {
     assert_eq!(node.network().peer_count(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn test_node_health_check() {
     let temp_dir = TempDir::new().unwrap();
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
