@@ -12,7 +12,7 @@ use bllvm_node::network::inventory::{InventoryRequest, MSG_BLOCK, MSG_TX};
 use bllvm_node::network::protocol::InventoryItem as NetworkInventoryItem;
 use common::*;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_network_manager_creation() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -180,7 +180,7 @@ async fn test_peer_address_handling() {
     assert_eq!(peer_v6.address(), addr_v6);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_peer_tracking() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let mut manager = NetworkManager::new(addr);
@@ -874,7 +874,7 @@ async fn test_getdata_message() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_persistent_peers() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -899,7 +899,7 @@ async fn test_persistent_peers() {
     assert!(persistent.contains(&peer2));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_ban_list() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -935,7 +935,7 @@ async fn test_ban_list() {
     assert!(manager.get_banned_peers().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_network_stats() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -946,16 +946,16 @@ async fn test_network_stats() {
     assert_eq!(received, 0);
 
     // Track some bytes
-    manager.track_bytes_sent(100);
-    manager.track_bytes_received(200);
+    manager.track_bytes_sent(100).await;
+    manager.track_bytes_received(200).await;
 
     let (sent, received) = manager.get_network_stats_legacy();
     assert_eq!(sent, 100);
     assert_eq!(received, 200);
 
     // Track more bytes (should accumulate)
-    manager.track_bytes_sent(50);
-    manager.track_bytes_received(75);
+    manager.track_bytes_sent(50).await;
+    manager.track_bytes_received(75).await;
 
     let (sent, received) = manager.get_network_stats_legacy();
     assert_eq!(sent, 150);
