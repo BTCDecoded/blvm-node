@@ -23,11 +23,12 @@ pub struct TempDb {
 impl TempDb {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
-        let db_path = temp_dir.path().join("test.db");
+        // Use the directory path, not a file path - create_database handles the file creation
+        let db_path = temp_dir.path();
 
-        use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
+        use bllvm_node::storage::database::{create_database, default_backend, Database};
         let db_arc: std::sync::Arc<dyn Database> =
-            std::sync::Arc::from(create_database(&db_path, DatabaseBackend::Sled)?);
+            std::sync::Arc::from(create_database(db_path, default_backend())?);
         let utxo_store = UtxoStore::new(db_arc.clone())?;
         let tx_index = TxIndex::new(db_arc.clone())?;
         let block_store = BlockStore::new(db_arc.clone())?;

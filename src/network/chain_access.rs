@@ -106,20 +106,32 @@ impl ChainStateAccess for NodeChainAccess {
 /// with node storage. It can be called from network message handlers.
 ///
 /// Example usage in a network handler:
-/// ```rust,no_run
-/// use bllvm_protocol::network::{process_network_message, PeerState};
+/// ```rust,ignore
+/// use bllvm_protocol::network::{process_network_message, PeerState, ChainStateAccess};
 /// use bllvm_protocol::BitcoinProtocolEngine;
 /// use bllvm_node::network::chain_access::NodeChainAccess;
+/// use std::collections::HashMap;
+/// use bllvm_protocol::UTXO;
+/// use std::sync::Arc;
 ///
 /// // In your message handler:
-/// let response = process_network_message(
-///     &protocol_engine,
-///     &message,
-///     &mut peer_state,
-///     Some(&chain_access as &dyn ChainStateAccess),
-///     Some(&utxo_set),
-///     Some(height),
-/// )?;
+/// // let protocol_engine = BitcoinProtocolEngine::new(bllvm_protocol::ProtocolVersion::Regtest)?;
+/// // let message = /* your network message */;
+/// // let mut peer_state = PeerState::default();
+/// // let storage = Arc::new(bllvm_node::storage::Storage::new("data")?);
+/// // let tx_index = storage.transactions();
+/// // let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+/// // let chain_access = NodeChainAccess::new(storage.blocks(), tx_index, mempool);
+/// // let utxo_set: HashMap<_, UTXO> = HashMap::new();
+/// // let height = 0u64;
+/// // let response = process_network_message(
+/// //     &protocol_engine,
+/// //     &message,
+/// //     &mut peer_state,
+/// //     Some(&chain_access as &dyn ChainStateAccess),
+/// //     Some(&utxo_set),
+/// //     Some(height),
+/// // )?;
 /// ```
 pub fn process_protocol_message(
     engine: &bllvm_protocol::BitcoinProtocolEngine,

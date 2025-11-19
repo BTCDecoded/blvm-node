@@ -285,6 +285,9 @@ fn test_block_store_persistence() {
             .build();
 
         blockstore.store_block(&block).unwrap();
+        
+        // Flush database to ensure persistence
+        storage.flush().unwrap();
     }
 
     // Reopen storage and verify block still exists
@@ -589,9 +592,9 @@ fn test_transaction_index_metadata() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_chainstate_work_accumulation() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+        use bllvm_node::storage::database::{create_database, default_backend, Database};
+        let db_arc: std::sync::Arc<dyn Database> =
+            std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
     let chainstate = ChainState::new(db_arc).unwrap();
 
     // Test work accumulation
@@ -631,8 +634,8 @@ async fn test_chainstate_persistence() {
 
     // Create first chainstate
     {
-        use bllvm_node::storage::database::{create_database, DatabaseBackend};
-        let db_arc = std::sync::Arc::from(create_database(db_path, DatabaseBackend::Sled).unwrap());
+        use bllvm_node::storage::database::{create_database, default_backend};
+        let db_arc = std::sync::Arc::from(create_database(db_path, default_backend()).unwrap());
         let chainstate = ChainState::new(db_arc).unwrap();
 
         let header = TestBlockBuilder::new()
@@ -650,8 +653,8 @@ async fn test_chainstate_persistence() {
 
     // Reopen and verify persistence
     {
-        use bllvm_node::storage::database::{create_database, DatabaseBackend};
-        let db_arc = std::sync::Arc::from(create_database(db_path, DatabaseBackend::Sled).unwrap());
+        use bllvm_node::storage::database::{create_database, default_backend};
+        let db_arc = std::sync::Arc::from(create_database(db_path, default_backend()).unwrap());
         let chainstate = ChainState::new(db_arc).unwrap();
 
         let chain_info = chainstate.load_chain_info().unwrap();
@@ -664,9 +667,9 @@ async fn test_chainstate_persistence() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_utxostore_concurrent_operations() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+        use bllvm_node::storage::database::{create_database, default_backend, Database};
+        let db_arc: std::sync::Arc<dyn Database> =
+            std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
     let utxostore = UtxoStore::new(db_arc).unwrap();
 
     // Create multiple UTXOs
@@ -715,9 +718,9 @@ async fn test_utxostore_concurrent_operations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_txindex_lookup_paths() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+        use bllvm_node::storage::database::{create_database, default_backend, Database};
+        let db_arc: std::sync::Arc<dyn Database> =
+            std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
     let txindex = TxIndex::new(db_arc).unwrap();
 
     // Create test transaction
@@ -762,9 +765,9 @@ async fn test_txindex_lookup_paths() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_storage_integration_workflow() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+        use bllvm_node::storage::database::{create_database, default_backend, Database};
+        let db_arc: std::sync::Arc<dyn Database> =
+            std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
 
     // Initialize all storage components
     let blockstore = BlockStore::new(db_arc.clone()).unwrap();

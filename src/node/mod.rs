@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// Main node orchestrator
 pub struct Node {
     protocol: Arc<BitcoinProtocolEngine>,
-    storage: Storage,
+    storage: Arc<Storage>,
     network: NetworkManager,
     rpc: RpcManager,
     #[allow(dead_code)]
@@ -109,8 +109,7 @@ impl Node {
 
         Ok(Self {
             protocol: protocol_arc,
-            storage: Arc::try_unwrap(storage_arc)
-                .unwrap_or_else(|_| Storage::new(data_dir).unwrap()),
+            storage: storage_arc,
             network: Arc::try_unwrap(network_arc)
                 .unwrap_or_else(|_| NetworkManager::new(network_addr)),
             rpc,
@@ -140,8 +139,8 @@ impl Node {
         // Recreate network manager with config
         let network_addr = self.network_addr;
         let protocol_arc = self.protocol.clone();
-        // Note: Storage doesn't implement Clone, so we recreate it from the data_dir
-        let storage_arc = Arc::new(Storage::new(&self.data_dir)?);
+        // Use existing storage Arc instead of creating a new one
+        let storage_arc = Arc::clone(&self.storage);
         let mempool_manager_arc = Arc::clone(&self.mempool_manager);
         
         let network = NetworkManager::with_config(

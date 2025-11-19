@@ -11,7 +11,7 @@ use common::*;
 // Import serial_test for sequential execution of database-heavy tests
 use serial_test::serial;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn test_node_creation() {
     let temp_dir = TempDir::new().unwrap();
@@ -127,7 +127,7 @@ async fn test_mining_info() {
 
 // ===== NODE ORCHESTRATION COMPREHENSIVE TESTS =====
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn test_node_creation_with_different_protocols() {
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -212,7 +212,7 @@ async fn test_node_component_initialization() {
     let _mining = rpc.mining();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn test_node_startup_shutdown() {
     let temp_dir = TempDir::new().unwrap();

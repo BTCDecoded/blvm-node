@@ -251,52 +251,49 @@ mod redb_impl {
             let _guard = DB_CREATE_MUTEX.lock().unwrap();
             
             let db_path = data_dir.as_ref().join("redb.db");
-            // Remove existing database file if it exists (for test isolation)
-            // This ensures we start with a fresh database each time
-            if db_path.exists() {
-                if let Err(e) = std::fs::remove_file(&db_path) {
-                    // If removal fails, try to open the existing database
-                    // This handles the case where the database is in use
-                    match RedbDb::open(&db_path) {
-                        Ok(db) => {
-                            // Database exists and is openable, use it
-                            let write_txn = db.begin_write()?;
-                            {
-                                // Open all tables to ensure they exist
-                                let _ = write_txn.open_table(BLOCKS_TABLE)?;
-                                let _ = write_txn.open_table(HEADERS_TABLE)?;
-                                let _ = write_txn.open_table(HEIGHT_INDEX_TABLE)?;
-                                let _ = write_txn.open_table(HASH_TO_HEIGHT_TABLE)?;
-                                let _ = write_txn.open_table(WITNESSES_TABLE)?;
-                                let _ = write_txn.open_table(RECENT_HEADERS_TABLE)?;
-                                let _ = write_txn.open_table(UTXOS_TABLE)?;
-                                let _ = write_txn.open_table(SPENT_OUTPUTS_TABLE)?;
-                                let _ = write_txn.open_table(CHAIN_INFO_TABLE)?;
-                                let _ = write_txn.open_table(WORK_CACHE_TABLE)?;
-                                let _ = write_txn.open_table(TX_BY_HASH_TABLE)?;
-                                let _ = write_txn.open_table(TX_BY_BLOCK_TABLE)?;
-                                let _ = write_txn.open_table(TX_METADATA_TABLE)?;
-                                let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
-                                let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
-                                let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
-                                let _ = write_txn.open_table(CHAINWORK_CACHE_TABLE)?;
-                                let _ = write_txn.open_table(UTXO_STATS_CACHE_TABLE)?;
-                                let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
-                                let _ = write_txn.open_table(UTXO_COMMITMENTS_TABLE)?;
-                                let _ = write_txn.open_table(COMMITMENT_HEIGHT_INDEX_TABLE)?;
-                            }
-                            write_txn.commit()?;
-                            return Ok(Self { db: Arc::new(db) });
+            // Try to open existing database first, then create if it doesn't exist
+            let db = if db_path.exists() {
+                // Database exists, try to open it
+                match RedbDb::open(&db_path) {
+                    Ok(db) => {
+                        // Database exists and is openable, use it
+                        let write_txn = db.begin_write()?;
+                        {
+                            // Open all tables to ensure they exist
+                            let _ = write_txn.open_table(BLOCKS_TABLE)?;
+                            let _ = write_txn.open_table(HEADERS_TABLE)?;
+                            let _ = write_txn.open_table(HEIGHT_INDEX_TABLE)?;
+                            let _ = write_txn.open_table(HASH_TO_HEIGHT_TABLE)?;
+                            let _ = write_txn.open_table(WITNESSES_TABLE)?;
+                            let _ = write_txn.open_table(RECENT_HEADERS_TABLE)?;
+                            let _ = write_txn.open_table(UTXOS_TABLE)?;
+                            let _ = write_txn.open_table(SPENT_OUTPUTS_TABLE)?;
+                            let _ = write_txn.open_table(CHAIN_INFO_TABLE)?;
+                            let _ = write_txn.open_table(WORK_CACHE_TABLE)?;
+                            let _ = write_txn.open_table(TX_BY_HASH_TABLE)?;
+                            let _ = write_txn.open_table(TX_BY_BLOCK_TABLE)?;
+                            let _ = write_txn.open_table(TX_METADATA_TABLE)?;
+                            let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
+                            let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
+                            let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
+                            let _ = write_txn.open_table(CHAINWORK_CACHE_TABLE)?;
+                            let _ = write_txn.open_table(UTXO_STATS_CACHE_TABLE)?;
+                            let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
+                            let _ = write_txn.open_table(UTXO_COMMITMENTS_TABLE)?;
+                            let _ = write_txn.open_table(COMMITMENT_HEIGHT_INDEX_TABLE)?;
                         }
-                        Err(_) => {
-                            // Database exists but can't be opened, try to remove it again
-                            let _ = std::fs::remove_file(&db_path);
-                        }
+                        write_txn.commit()?;
+                        db
+                    }
+                    Err(_) => {
+                        // Can't open existing database, create new one
+                        RedbDb::create(&db_path)?
                     }
                 }
-            }
-            
-            let db = RedbDb::create(&db_path)?;
+            } else {
+                // Database doesn't exist, create new one
+                RedbDb::create(&db_path)?
+            };
 
             // Initialize all tables in a write transaction
             let write_txn = db.begin_write()?;
@@ -442,10 +439,48 @@ mod redb_impl {
         }
 
         fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-            // Note: Range from iter() doesn't implement Iterator as expected
-            // For now, return an empty iterator
-            // TODO: Implement proper Range iteration when API is better understood
-            Box::new(std::iter::empty())
+            // Redb iteration requires a read transaction
+            // We need to collect all items into a vector since the transaction must outlive the iterator
+            let read_txn = match self.db.begin_read() {
+                Ok(txn) => txn,
+                Err(e) => {
+                    return Box::new(std::iter::once(Err(anyhow::anyhow!("Failed to begin read transaction: {}", e))));
+                }
+            };
+            
+            let table = match read_txn.open_table(*self.table_def) {
+                Ok(tbl) => tbl,
+                Err(e) => {
+                    return Box::new(std::iter::once(Err(anyhow::anyhow!("Failed to open table: {}", e))));
+                }
+            };
+            
+            // Collect all items into a vector
+            // Redb Range implements IntoIterator, but we need to collect into a vector
+            // because the read transaction must outlive the iterator
+            let mut items = Vec::new();
+            // Redb's range() returns a Result<Range, Error>
+            // Each iteration over the Range yields a Result<(Key, Value), Error>
+            // Use turbofish syntax to specify the type parameter for the range bounds
+            match table.range::<&[u8]>(..) {
+                Ok(range_iter) => {
+                    for item_result in range_iter {
+                        match item_result {
+                            Ok((key, value)) => {
+                                items.push(Ok((key.value().to_vec(), value.value().to_vec())));
+                            }
+                            Err(e) => {
+                                items.push(Err(anyhow::anyhow!("Redb iteration error: {}", e)));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    items.push(Err(anyhow::anyhow!("Failed to create range: {}", e)));
+                }
+            }
+            
+            Box::new(items.into_iter())
         }
     }
 }

@@ -51,7 +51,8 @@ impl TxIndex {
         block_height: u64,
         tx_index: u32,
     ) -> Result<()> {
-        let tx_hash = self.calculate_tx_hash(tx);
+        // Use the standard transaction ID calculation from bllvm-protocol
+        let tx_hash = bllvm_protocol::block::calculate_tx_id(tx);
         let tx_data = bincode::serialize(tx)?;
 
         // Store transaction by hash
