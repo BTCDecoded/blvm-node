@@ -158,10 +158,21 @@ impl ChainState {
 
         // Calculate target: target = mantissa * 2^(8*(exponent-3))
         // For simplicity, use a simplified calculation
+        // Prevent overflow by capping the shift amount
         let target = if exponent <= 3 {
-            mantissa >> (8 * (3 - exponent))
+            let shift = 8 * (3 - exponent);
+            if shift >= 64 {
+                0 // Shift would overflow, return 0
+            } else {
+                mantissa >> shift
+            }
         } else {
-            mantissa << (8 * (exponent - 3))
+            let shift = 8 * (exponent - 3);
+            if shift >= 64 {
+                u64::MAX // Shift would overflow, return max value
+            } else {
+                mantissa << shift
+            }
         };
 
         // Work = MAX_TARGET / (target + 1)
