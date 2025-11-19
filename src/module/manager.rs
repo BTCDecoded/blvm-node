@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 
 use crate::module::api::events::EventManager;
 use crate::module::api::hub::ModuleApiHub;
+#[cfg(unix)]
 use crate::module::ipc::server::ModuleIpcServer;
 use crate::module::loader::ModuleLoader;
 use crate::module::process::{
@@ -104,13 +105,20 @@ impl ModuleManager {
         ))));
         self.api_hub = Some(Arc::clone(&api_hub));
 
-        // Start IPC server in background task
-        let mut ipc_server = ModuleIpcServer::new(&socket_path)
-            .with_event_manager(Arc::clone(&self.event_manager))
-            .with_api_hub(Arc::clone(&api_hub));
-        let node_api_clone = Arc::clone(&node_api);
-        let server_handle = tokio::spawn(async move { ipc_server.start(node_api_clone).await });
-        self.ipc_server_handle = Some(server_handle);
+        // Start IPC server in background task (Unix only)
+        #[cfg(unix)]
+        {
+            let mut ipc_server = ModuleIpcServer::new(&socket_path)
+                .with_event_manager(Arc::clone(&self.event_manager))
+                .with_api_hub(Arc::clone(&api_hub));
+            let node_api_clone = Arc::clone(&node_api);
+            let server_handle = tokio::spawn(async move { ipc_server.start(node_api_clone).await });
+            self.ipc_server_handle = Some(server_handle);
+        }
+        #[cfg(not(unix))]
+        {
+            warn!("IPC server not available on Windows - module communication disabled");
+        }
 
         // Start crash handler
         let modules = Arc::clone(&self.modules);
@@ -358,7 +366,8 @@ impl ModuleManager {
             }
         }
 
-        // Stop IPC server
+        // Stop IPC server (Unix only)
+        #[cfg(unix)]
         if let Some(handle) = self.ipc_server_handle.take() {
             handle.abort();
         }

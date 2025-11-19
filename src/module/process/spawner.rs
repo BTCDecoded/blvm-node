@@ -8,6 +8,7 @@ use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
+#[cfg(unix)]
 use crate::module::ipc::client::ModuleIpcClient;
 use crate::module::sandbox::{FileSystemSandbox, NetworkSandbox, ProcessSandbox, SandboxConfig};
 use crate::module::traits::{ModuleContext, ModuleError};
@@ -172,16 +173,19 @@ impl ModuleProcessSpawner {
             }
         }
 
-        // Connect to the module IPC
-        let client = ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
+        // Connect to the module IPC (Unix only)
+        #[cfg(unix)]
+        let client = Some(ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
             ModuleError::IpcError(format!("Failed to connect to module IPC: {}", e))
-        })?;
+        })?);
+        #[cfg(not(unix))]
+        let client = None;
 
         Ok(ModuleProcess {
             module_name: module_name.to_string(),
             process: child,
             socket_path,
-            client: Some(client),
+            client,
         })
     }
 
@@ -221,7 +225,8 @@ pub struct ModuleProcess {
     pub process: Child,
     /// IPC socket path
     pub socket_path: PathBuf,
-    /// IPC client connection (optional, may be dropped for cleanup)
+    /// IPC client connection (optional, may be dropped for cleanup, Unix only)
+    #[cfg(unix)]
     client: Option<ModuleIpcClient>,
 }
 
@@ -270,12 +275,14 @@ impl ModuleProcess {
         Ok(())
     }
 
-    /// Get IPC client (mutable)
+    /// Get IPC client (mutable, Unix only)
+    #[cfg(unix)]
     pub fn client_mut(&mut self) -> Option<&mut ModuleIpcClient> {
         self.client.as_mut()
     }
 
-    /// Take IPC client (for cleanup)
+    /// Take IPC client (for cleanup, Unix only)
+    #[cfg(unix)]
     pub fn take_client(&mut self) -> Option<ModuleIpcClient> {
         self.client.take()
     }

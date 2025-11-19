@@ -19,3 +19,4 @@ disallowed-methods = []
 # Allow some patterns that are common in network code
 disallowed-types = []
 
+

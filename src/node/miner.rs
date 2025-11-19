@@ -441,8 +441,8 @@ impl MiningCoordinator {
             .transaction_selector
             .select_transactions(&*self.mempool as &dyn MempoolProvider, &utxo_set);
 
-        // Create coinbase transaction (simplified)
-        let coinbase_tx = self.create_coinbase_transaction().await?;
+        // Create coinbase transaction with subsidy + fees
+        let coinbase_tx = self.create_coinbase_transaction(height + 1, &transactions, &utxo_set).await?;
 
         // Build transaction list (coinbase first)
         let mut all_transactions = vec![coinbase_tx];
@@ -478,14 +478,41 @@ impl MiningCoordinator {
         Ok(template)
     }
 
-    /// Create coinbase transaction
-    async fn create_coinbase_transaction(&self) -> Result<Transaction> {
-        // Simplified coinbase transaction
+    /// Create coinbase transaction with subsidy + fees
+    async fn create_coinbase_transaction(
+        &self,
+        height: u64,
+        selected_transactions: &[Transaction],
+        utxo_set: &bllvm_protocol::UtxoSet,
+    ) -> Result<Transaction> {
+        use bllvm_protocol::ConsensusProof;
+        
+        // 1. Get block subsidy from consensus layer
+        let consensus = ConsensusProof::new();
+        let subsidy = consensus.get_block_subsidy(height) as u64;
+        
+        // 2. Calculate total fees from selected transactions
+        let total_fees: u64 = selected_transactions
+            .iter()
+            .map(|tx| self.mempool.calculate_transaction_fee(tx, utxo_set))
+            .sum();
+        
+        // 3. Coinbase value = subsidy + fees
+        let coinbase_value = subsidy
+            .checked_add(total_fees)
+            .ok_or_else(|| anyhow::anyhow!("Coinbase value overflow: subsidy {} + fees {}", subsidy, total_fees))?;
+        
+        debug!(
+            "Creating coinbase: height={}, subsidy={}, fees={}, total={}",
+            height, subsidy, total_fees, coinbase_value
+        );
+        
+        // 4. Create coinbase transaction
         Ok(Transaction {
             version: 1,
             inputs: bllvm_protocol::tx_inputs![],
             outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
-                value: 5000000000, // 50 BTC
+                value: coinbase_value as i64,
                 script_pubkey: vec![
                     0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0xac,
@@ -1011,13 +1038,16 @@ mod tests {
         let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
         let coordinator = MiningCoordinator::new(mempool, None);
 
-        let coinbase = coordinator.create_coinbase_transaction().await;
+        // Test coinbase creation with no transactions (subsidy only)
+        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let coinbase = coordinator.create_coinbase_transaction(0, &[], &empty_utxo_set).await;
         assert!(coinbase.is_ok());
 
         let tx = coinbase.unwrap();
         assert_eq!(tx.version, 1);
         assert!(tx.inputs.is_empty()); // Coinbase has no inputs
         assert_eq!(tx.outputs.len(), 1);
+        // Should be 50 BTC (subsidy) at height 0, with no fees
         assert_eq!(tx.outputs[0].value, 5000000000); // 50 BTC
         assert_eq!(tx.lock_time, 0);
     }

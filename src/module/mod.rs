@@ -13,6 +13,7 @@
 //! - **State Separation**: Module state is completely separate from consensus state
 
 pub mod api;
+#[cfg(unix)]
 pub mod ipc;
 pub mod loader;
 pub mod manager;
@@ -28,3 +29,7 @@ pub use security::{Permission, PermissionChecker, PermissionSet, RequestValidato
 pub use manager::ModuleManager;
 pub use process::{ModuleProcess, ModuleProcessMonitor, ModuleProcessSpawner};
 pub use traits::{Module, ModuleContext, ModuleError, ModuleMetadata, ModuleState, NodeAPI};
+
+// Re-export IPC types conditionally
+#[cfg(unix)]
+pub use ipc::{ModuleIpcClient, ModuleIpcServer};

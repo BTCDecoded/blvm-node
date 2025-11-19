@@ -166,6 +166,30 @@ impl MergeMiningCoordinator {
             )))
         }
     }
+    
+    /// Record governance contribution (1% of secondary chain reward)
+    /// This should be called when a reward is recorded to track the Commons contribution
+    /// Note: This is a placeholder - actual implementation would integrate with ContributionTracker
+    /// from bllvm-commons, but that requires cross-crate integration which is complex.
+    /// For now, this method exists to mark where contribution tracking should happen.
+    pub fn record_governance_contribution(&mut self, chain_id: &str, reward: u64) {
+        // Calculate 1% contribution (per whitepaper)
+        let contribution = reward / 100;  // 1% of reward
+        
+        // TODO: Integrate with bllvm-commons ContributionTracker
+        // This requires:
+        // 1. Passing ContributionTracker instance to MergeMiningCoordinator
+        // 2. Or using a callback/event system
+        // 3. Or storing contributions locally and syncing periodically
+        
+        debug!(
+            "Governance contribution: {} (1% of {} reward) for chain {}",
+            contribution, reward, chain_id
+        );
+        
+        // For now, we track this in the coordinator
+        // In production, this would call ContributionTracker::record_merge_mining_contribution
+    }
 
     /// Calculate revenue distribution (per whitepaper: 60% core, 25% grants, 10% audits, 5% ops)
     pub fn calculate_revenue_distribution(&self, total_revenue: u64) -> RevenueDistribution {
