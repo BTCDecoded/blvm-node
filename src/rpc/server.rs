@@ -186,6 +186,7 @@ impl RpcServer {
             rawtx: Arc::clone(&self.rawtx),
             control: Arc::clone(&self.control),
             auth_manager: self.auth_manager.clone(),
+            metrics: self.metrics.clone(),
         });
 
         loop {
@@ -314,9 +315,12 @@ impl RpcServer {
         // Extract method name for per-method rate limiting (before authentication)
         let method_name = serde_json::from_str::<Value>(&json_body)
             .ok()
-            .and_then(|req| req.get("method").and_then(|m| m.as_str()))
-            .unwrap_or("unknown")
-            .to_string();
+            .and_then(|req| {
+                req.get("method")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         
         // Record method in span
         Span::current().record("method", &method_name);

@@ -688,7 +688,7 @@ impl Node {
             if self.storage.is_pruning_enabled() {
                 if let Some(pruning_manager) = self.storage.pruning() {
                     // Get current chain height from chain info
-                    let chain_info = self.storage.chainstate().load_chain_info()?;
+                    let chain_info = self.storage.chain().load_chain_info()?;
                     if let Some(info) = chain_info {
                         let current_height = info.height;
                         
@@ -731,6 +731,7 @@ impl Node {
                                     warn!("Pruning task failed: {}", e);
                                 }
                             }
+                            } // Close the if statement at line 707
                         } else {
                             warn!("Storage bounds exceeded but auto-pruning not yet due (last prune: {:?}, current: {})", 
                                   last_prune_height, current_height);

@@ -370,6 +370,9 @@ pub struct NetworkManager {
     enable_self_advertisement: bool,
     /// Request timeout configuration
     request_timeout_config: Arc<crate::config::RequestTimeoutConfig>,
+    /// Peer reconnection queue (exponential backoff)
+    /// Maps SocketAddr to (attempts, last_attempt_timestamp, quality_score)
+    peer_reconnection_queue: Arc<Mutex<HashMap<SocketAddr, (u32, u64, f64)>>>,
 }
 
 /// Pending request metadata
@@ -2071,10 +2074,12 @@ impl NetworkManager {
                         TransportAddr::Iroh(_) => None, // Iroh peers use different reconnection mechanism
                     } {
                         // Add to reconnection queue with exponential backoff
+                        use std::time::{SystemTime, UNIX_EPOCH};
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
                             .as_secs();
+                        // Add to reconnection queue with exponential backoff
                         let mut reconnection_queue = self.peer_reconnection_queue.lock().await;
                         reconnection_queue.insert(socket_addr, (0, now, quality_score));
                         info!("Added peer {} to reconnection queue (quality: {:.2})", socket_addr, quality_score);
@@ -3410,7 +3415,7 @@ mod tests {
         assert_eq!(manager.listen_addr, addr);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_creation() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let manager = NetworkManager::new(addr);
@@ -3429,7 +3434,7 @@ mod tests {
         assert_eq!(peer_manager.peer_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_peer_count() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let mut manager = NetworkManager::new(addr);
@@ -3438,7 +3443,7 @@ mod tests {
         assert_eq!(manager.peer_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_peer_addresses() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let mut manager = NetworkManager::new(addr);
@@ -3451,7 +3456,7 @@ mod tests {
         assert_eq!(addresses.len(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_broadcast() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let mut manager = NetworkManager::new(addr);
@@ -3465,7 +3470,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_send_to_peer() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let mut manager = NetworkManager::new(addr);
@@ -3560,7 +3565,7 @@ mod tests {
     // and is_banned) which blocks the async runtime when there's contention.
     // Full message routing is tested in integration tests.
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_peer_manager_access() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let manager = NetworkManager::new(addr);
