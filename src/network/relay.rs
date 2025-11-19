@@ -10,7 +10,7 @@ use super::dandelion::DandelionRelay;
 use bllvm_protocol::{Block, Hash};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Relay manager
 pub struct RelayManager {
