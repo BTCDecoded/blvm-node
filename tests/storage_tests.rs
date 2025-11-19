@@ -586,7 +586,7 @@ fn test_transaction_index_metadata() {
     assert!(metadata.is_ok() || metadata.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_chainstate_work_accumulation() {
     let temp_dir = TempDir::new().unwrap();
     use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
@@ -624,7 +624,7 @@ async fn test_chainstate_work_accumulation() {
     assert_eq!(info.tip_hash, tip_hash);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_chainstate_persistence() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path();
@@ -661,7 +661,7 @@ async fn test_chainstate_persistence() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_utxostore_concurrent_operations() {
     let temp_dir = TempDir::new().unwrap();
     use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
@@ -712,7 +712,7 @@ async fn test_utxostore_concurrent_operations() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_txindex_lookup_paths() {
     let temp_dir = TempDir::new().unwrap();
     use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
@@ -759,7 +759,7 @@ async fn test_txindex_lookup_paths() {
     }));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_storage_integration_workflow() {
     let temp_dir = TempDir::new().unwrap();
     use bllvm_node::storage::database::{create_database, Database, DatabaseBackend};
