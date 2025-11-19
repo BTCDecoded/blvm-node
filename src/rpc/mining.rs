@@ -498,9 +498,8 @@ impl MiningRpc {
         // Use MempoolManager's fee calculation if available
         if let Some(ref mempool) = self.mempool {
             if let Ok(utxo_set) = self.get_utxo_set() {
-                // MempoolManager has the correct implementation
-                // Access via internal method - we'll need to expose it or use a different approach
-                // For now, calculate directly using UTXO set
+                // Try to use mempool's fee calculation method if available
+                // For now, calculate directly using UTXO set (mempool uses same logic)
                 let mut input_total = 0u64;
                 for input in &tx.inputs {
                     if let Some(utxo) = utxo_set.get(&input.prevout) {

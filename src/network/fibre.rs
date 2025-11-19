@@ -202,7 +202,7 @@ impl FibreRelay {
 
     /// Clean up expired encoded blocks
     pub fn cleanup_expired(&mut self) {
-        let now = Instant::now();
+        let _now = Instant::now(); // Track cleanup time for potential metrics/logging
         let expired: Vec<Hash> = self
             .encoded_blocks
             .iter()

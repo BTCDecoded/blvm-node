@@ -207,6 +207,11 @@ impl SyncCoordinator {
             &stored_witnesses
         };
 
+        // Log recent headers availability for BIP113 median time validation
+        if let Some(ref headers) = recent_headers {
+            debug!("Using {} recent headers for BIP113 median time validation", headers.len());
+        }
+
         // Validate block with witness data and headers
         let validation_result = validate_block_with_context(
             blockstore,

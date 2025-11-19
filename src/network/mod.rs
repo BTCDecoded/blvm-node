@@ -1401,13 +1401,37 @@ impl NetworkManager {
                 dos_protection.cleanup().await;
                 
                 // Auto-ban IPs that should be banned
-                // Note: This is a simplified version - in production, you'd want more sophisticated logic
+                // Periodic check for IPs that have exceeded violation thresholds
                 let dos_clone = Arc::clone(&dos_protection);
                 let ban_list_clone = Arc::clone(&ban_list);
+                let ban_duration = dos_protection.ban_duration_seconds();
                 tokio::spawn(async move {
-                    // Get list of IPs that should be auto-banned
-                    // For now, we'll check during connection attempts
-                    // This is a placeholder for future enhancement
+                    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Check every minute
+                    loop {
+                        interval.tick().await;
+                        
+                        // Get IPs that should be auto-banned
+                        let ips_to_ban = dos_clone.get_ips_to_auto_ban().await;
+                        
+                        // Ban IPs that exceed threshold
+                        if !ips_to_ban.is_empty() {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
+                            let unban_timestamp = now + ban_duration;
+                            
+                            let mut ban_list_guard = ban_list_clone.write().await;
+                            for ip in ips_to_ban {
+                                // Convert IpAddr to SocketAddr (use port 0 as placeholder)
+                                let socket_addr = std::net::SocketAddr::new(ip, 0);
+                                if !ban_list_guard.contains_key(&socket_addr) {
+                                    ban_list_guard.insert(socket_addr, unban_timestamp);
+                                    warn!("Auto-banned IP {} for connection rate violations (unban at {})", ip, unban_timestamp);
+                                }
+                            }
+                        }
+                    }
                 });
             }
         });
@@ -1489,16 +1513,27 @@ impl NetworkManager {
                     continue;
                 }
                 
-                // Sort peers by quality score (highest first) and attempts (lowest first)
-                let mut peers_to_reconnect: Vec<(SocketAddr, u32, f64)> = queue.iter()
-                    .map(|(addr, (attempts, last_attempt, quality))| (*addr, *attempts, *quality))
+                // Sort peers by quality score (highest first), attempts (lowest first), and recency (oldest first)
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let mut peers_to_reconnect: Vec<(SocketAddr, u32, f64, u64)> = queue.iter()
+                    .map(|(addr, (attempts, last_attempt, quality))| (*addr, *attempts, *quality, *last_attempt))
                     .collect();
                 
-                // Sort by quality (descending), then by attempts (ascending)
+                // Sort by quality (descending), then by attempts (ascending), then by recency (oldest first)
                 peers_to_reconnect.sort_by(|a, b| {
                     b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| a.1.cmp(&b.1))
+                        .then_with(|| a.3.cmp(&b.3)) // Prefer peers that haven't been attempted recently
                 });
+                
+                // Extract just the address, attempts, and quality for reconnection
+                let peers_to_reconnect: Vec<(SocketAddr, u32, f64)> = peers_to_reconnect
+                    .into_iter()
+                    .map(|(addr, attempts, quality, _)| (addr, attempts, quality))
+                    .collect();
                 
                 // Attempt reconnection for eligible peers
                 for (addr, attempts, quality) in peers_to_reconnect.iter() {

@@ -139,9 +139,9 @@ pub trait TransportConnection: Send + Sync {
     /// Default implementation just calls `send()` - transports that don't support channels
     /// will use the default behavior. Transports that support channels (e.g., QUIC streams)
     /// should override this method.
-    async fn send_on_channel(&mut self, channel_id: Option<u32>, data: &[u8]) -> Result<()> {
+    async fn send_on_channel(&mut self, _channel_id: Option<u32>, data: &[u8]) -> Result<()> {
         // Default: ignore channel_id and use standard send
-        // Transports that support channels should override this
+        // Transports that support channels (e.g., QUIC streams) should override this method
         self.send(data).await
     }
 

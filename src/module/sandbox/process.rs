@@ -7,7 +7,7 @@
 use nix::sys::resource::{setrlimit, Resource};
 
 use std::path::Path;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::module::traits::ModuleError;
 
@@ -105,12 +105,73 @@ impl ProcessSandbox {
         #[cfg(unix)]
         {
             if let Some(pid) = pid {
-                // Note: setrlimit applies to the current process, not another process
-                // For applying limits to another process, we would need to:
-                // 1. Set limits before spawning the child process, or
-                // 2. Use prlimit (Linux-specific) to set limits on another process
-                // For now, we apply limits to the current process context
-                // In practice, limits should be set before spawning module processes
+                // Use prlimit (Linux-specific) to set limits on another process
+                #[cfg(all(feature = "libc", target_os = "linux"))]
+                {
+                    use libc::{prlimit64, rlimit64, RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_NPROC};
+                    
+                    // Apply memory limit using prlimit
+                    if let Some(max_memory) = limits.max_memory_bytes {
+                        let rlim = rlimit64 {
+                            rlim_cur: max_memory,
+                            rlim_max: max_memory,
+                        };
+                        unsafe {
+                            if prlimit64(pid as libc::pid_t, RLIMIT_AS, &rlim, std::ptr::null_mut()) != 0 {
+                                warn!("Failed to set memory limit for PID {} using prlimit: {}", pid, std::io::Error::last_os_error());
+                            } else {
+                                debug!("Set memory limit for PID {}: {} bytes", pid, max_memory);
+                            }
+                        }
+                    }
+                    
+                    // Apply file descriptor limit using prlimit
+                    if let Some(max_fds) = limits.max_file_descriptors {
+                        let rlim = rlimit64 {
+                            rlim_cur: max_fds as u64,
+                            rlim_max: max_fds as u64,
+                        };
+                        unsafe {
+                            if prlimit64(pid as libc::pid_t, RLIMIT_NOFILE, &rlim, std::ptr::null_mut()) != 0 {
+                                warn!("Failed to set file descriptor limit for PID {} using prlimit: {}", pid, std::io::Error::last_os_error());
+                            } else {
+                                debug!("Set file descriptor limit for PID {}: {}", pid, max_fds);
+                            }
+                        }
+                    }
+                    
+                    // Apply process limit using prlimit
+                    if let Some(max_children) = limits.max_child_processes {
+                        let rlim = rlimit64 {
+                            rlim_cur: max_children as u64,
+                            rlim_max: max_children as u64,
+                        };
+                        unsafe {
+                            if prlimit64(pid as libc::pid_t, RLIMIT_NPROC, &rlim, std::ptr::null_mut()) != 0 {
+                                warn!("Failed to set process limit for PID {} using prlimit: {}", pid, std::io::Error::last_os_error());
+                            } else {
+                                debug!("Set process limit for PID {}: {}", pid, max_children);
+                            }
+                        }
+                    }
+                    
+                    // Apply CPU limit using prlimit (RLIMIT_CPU = CPU time in seconds)
+                    if let Some(max_cpu_percent) = limits.max_cpu_percent {
+                        // Convert percentage to CPU time limit (approximate: 100% = unlimited)
+                        // For now, we'll skip CPU percentage as it requires more complex calculation
+                        debug!("CPU percentage limit ({}) not yet implemented for prlimit", max_cpu_percent);
+                    }
+                    
+                    // Return early since we've applied limits via prlimit
+                    return Ok(());
+                }
+                
+                // Fallback: Note that setrlimit applies to the current process, not another process
+                // For non-Linux systems or when libc feature is disabled, we can't set limits on another process
+                #[cfg(not(all(feature = "libc", target_os = "linux")))]
+                {
+                    warn!("prlimit not available (requires Linux with libc feature). Limits should be set before spawning process with PID {}", pid);
+                }
 
                 // Apply memory limit (RLIMIT_AS = address space limit)
                 #[cfg(feature = "nix")]

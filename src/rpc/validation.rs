@@ -147,7 +147,30 @@ where
     <T as TryFrom<u64>>::Error: std::fmt::Display,
 {
     if let Some(value) = params.get(index).and_then(|p| p.as_u64()) {
-        validate_numeric_param(params, index, param_name, min, max)
+        // Validate the extracted value against bounds
+        let typed_value = T::try_from(value).map_err(|e| {
+            RpcError::invalid_params(format!("Invalid {}: {}", param_name, e))
+        })?;
+        
+        if let Some(min_val) = min {
+            if typed_value < min_val {
+                return Err(RpcError::invalid_params(format!(
+                    "{} must be >= {}",
+                    param_name, min_val
+                )));
+            }
+        }
+        
+        if let Some(max_val) = max {
+            if typed_value > max_val {
+                return Err(RpcError::invalid_params(format!(
+                    "{} must be <= {}",
+                    param_name, max_val
+                )));
+            }
+        }
+        
+        Ok(typed_value)
     } else {
         Ok(default)
     }

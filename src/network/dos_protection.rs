@@ -274,6 +274,21 @@ impl DosProtectionManager {
         self.ban_duration_seconds
     }
 
+    /// Get auto-ban threshold (number of violations before auto-ban)
+    pub fn auto_ban_connection_violations(&self) -> usize {
+        self.auto_ban_connection_violations
+    }
+
+    /// Get list of IPs that should be auto-banned (exceeded violation threshold)
+    pub async fn get_ips_to_auto_ban(&self) -> Vec<IpAddr> {
+        let violations = self.connection_violations.lock().await;
+        violations
+            .iter()
+            .filter(|(_, &count)| count >= self.auto_ban_connection_violations)
+            .map(|(ip, _)| *ip)
+            .collect()
+    }
+
     /// Update resource metrics
     pub async fn update_metrics(
         &self,

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+use secp256k1::{Message, Secp256k1, SecretKey, PublicKey, Signature};
 
 /// User signaling message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,14 +100,32 @@ impl UserSignalingManager {
         Ok(signal)
     }
 
-    /// Sign a message with node's private key
+    /// Sign a message with node's private key using secp256k1
     fn sign_message(&self, message: &str) -> Result<String, String> {
-        // TODO: Use proper secp256k1 signing
-        // For now, create a simple signature hash
+        // Hash message (Bitcoin message signing format)
         let mut hasher = Sha256::new();
+        hasher.update(b"\x18Bitcoin Signed Message:\n");
+        hasher.update(&[message.len() as u8]);
         hasher.update(message.as_bytes());
-        hasher.update(&self.node_private_key);
-        Ok(hex::encode(hasher.finalize()))
+        let message_hash = hasher.finalize();
+        
+        // Parse private key
+        if self.node_private_key.len() != 32 {
+            return Err("Private key must be 32 bytes".to_string());
+        }
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(&self.node_private_key);
+        let secret_key = SecretKey::from_slice(&key_bytes)
+            .map_err(|e| format!("Invalid private key: {}", e))?;
+        
+        // Sign message
+        let secp = Secp256k1::new();
+        let msg = Message::from_digest_slice(&message_hash)
+            .map_err(|e| format!("Failed to create message: {}", e))?;
+        let signature = secp.sign_ecdsa(&msg, &secret_key);
+        
+        // Serialize signature as DER (standard Bitcoin format)
+        Ok(hex::encode(signature.serialize_der()))
     }
 
     /// Verify a signal from another node
@@ -120,13 +139,38 @@ impl UserSignalingManager {
             signal.timestamp
         );
 
-        // Verify signature (simplified - in production, use proper secp256k1 verification)
+        // Verify signature using secp256k1
+        // Hash message (Bitcoin message signing format)
         let mut hasher = Sha256::new();
+        hasher.update(b"\x18Bitcoin Signed Message:\n");
+        hasher.update(&[message.len() as u8]);
         hasher.update(message.as_bytes());
-        hasher.update(node_public_key);
-        let expected_signature = hex::encode(hasher.finalize());
-
-        expected_signature == signal.signature
+        let message_hash = hasher.finalize();
+        
+        // Parse public key
+        let public_key = match PublicKey::from_slice(node_public_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        
+        // Parse signature
+        let signature_bytes = match hex::decode(&signal.signature) {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        };
+        let signature = match Signature::from_der(&signature_bytes) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        
+        // Verify signature
+        let secp = Secp256k1::new();
+        let msg = match Message::from_digest_slice(&message_hash) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        
+        secp.verify_ecdsa(&msg, &signature, &public_key).is_ok()
     }
 
     /// Get signal for a change

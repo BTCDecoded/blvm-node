@@ -411,15 +411,21 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                             match parsed {
                                 ProtocolMessage::FilteredBlock(filtered_block_msg) => {
                                     // Convert to FilteredBlock
-                                    // Note: FilteredBlock structure from bllvm_protocol doesn't match FilteredBlockMessage
-                                    // We need to construct it from available data
-                                    let header = BlockHeader {
-                                        version: 1,
-                                        prev_block_hash: [0; 32], // TODO: Get from message if available
-                                        merkle_root: filtered_block_msg.commitment.merkle_root,
-                                        timestamp: 0, // TODO: Get from message if available
-                                        bits: 0, // TODO: Get from message if available
-                                        nonce: 0, // TODO: Get from message if available
+                                    // Use header from message if available, otherwise construct from commitment
+                                    let header = if filtered_block_msg.header.version != 0 
+                                        || filtered_block_msg.header.prev_block_hash != [0; 32] {
+                                        // Use provided header
+                                        filtered_block_msg.header.clone()
+                                    } else {
+                                        // Construct minimal header from commitment data
+                                        BlockHeader {
+                                            version: 1,
+                                            prev_block_hash: [0; 32], // Not available in commitment
+                                            merkle_root: filtered_block_msg.commitment.merkle_root,
+                                            timestamp: 0, // Not available in commitment
+                                            bits: 0, // Not available in commitment
+                                            nonce: 0, // Not available in commitment
+                                        }
                                     };
                                     let filtered_block = FilteredBlock {
                                         header,
@@ -432,7 +438,20 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                         },
                                         transactions: filtered_block_msg.transactions.clone(),
                                         transaction_indices: (0..filtered_block_msg.transactions.len() as u32).collect(),
-                                        spam_summary: Default::default(), // TODO: Get from message if available
+                                        spam_summary: {
+                                            // Convert network::protocol::SpamSummary to bllvm_protocol::SpamSummary
+                                            let network_summary = &filtered_block_msg.spam_summary;
+                                            bllvm_protocol::utxo_commitments::spam_filter::SpamSummary {
+                                                filtered_count: network_summary.filtered_count,
+                                                filtered_size: network_summary.filtered_size,
+                                                by_type: bllvm_protocol::utxo_commitments::spam_filter::SpamBreakdown {
+                                                    ordinals: network_summary.by_type.ordinals,
+                                                    inscriptions: network_summary.by_type.inscriptions,
+                                                    dust: network_summary.by_type.dust,
+                                                    brc20: network_summary.by_type.brc20,
+                                                },
+                                            }
+                                        }
                                     };
                                     Ok(filtered_block)
                                 }

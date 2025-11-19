@@ -123,8 +123,8 @@ impl RpcManager {
         self.mining_rpc =
             mining::MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
         self.blockchain_rpc = blockchain::BlockchainRpc::with_dependencies(Arc::clone(&storage));
-        let mempool_rpc =
-            mempool::MempoolRpc::with_dependencies(Arc::clone(&mempool), Arc::clone(&storage));
+        // Note: mempool_rpc is created later in with_dependencies_auth_and_metrics if needed
+        // This early creation was unused - removed to avoid warning
         let _rawtx_rpc = rawtx::RawTxRpc::with_dependencies(
             Arc::clone(&storage),
             Arc::clone(&mempool),
