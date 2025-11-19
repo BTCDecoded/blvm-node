@@ -175,18 +175,26 @@ impl ModuleProcessSpawner {
 
         // Connect to the module IPC (Unix only)
         #[cfg(unix)]
-        let client = Some(ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
-            ModuleError::IpcError(format!("Failed to connect to module IPC: {}", e))
-        })?);
+        {
+            let client = Some(ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
+                ModuleError::IpcError(format!("Failed to connect to module IPC: {}", e))
+            })?);
+            
+            Ok(ModuleProcess {
+                module_name: module_name.to_string(),
+                process: child,
+                socket_path,
+                client,
+            })
+        }
         #[cfg(not(unix))]
-        let client = None;
-
-        Ok(ModuleProcess {
-            module_name: module_name.to_string(),
-            process: child,
-            socket_path,
-            client,
-        })
+        {
+            Ok(ModuleProcess {
+                module_name: module_name.to_string(),
+                process: child,
+                socket_path,
+            })
+        }
     }
 
     /// Wait for socket file to be created

@@ -85,44 +85,52 @@ impl ModuleProcessMonitor {
                 }
             }
 
-            // Check heartbeat via IPC
-            if let Some(client) = process.client_mut() {
-                use crate::module::ipc::protocol::MessageType;
-                use crate::module::ipc::protocol::RequestMessage;
-                use crate::module::ipc::protocol::RequestPayload;
+            // Check heartbeat via IPC (Unix only)
+            #[cfg(unix)]
+            {
+                if let Some(client) = process.client_mut() {
+                    use crate::module::ipc::protocol::MessageType;
+                    use crate::module::ipc::protocol::RequestMessage;
+                    use crate::module::ipc::protocol::RequestPayload;
 
-                // Use GetChainTip as a lightweight heartbeat check
-                let heartbeat_request = RequestMessage {
-                    correlation_id: 0, // Use 0 for heartbeat (won't match any real request)
-                    request_type: MessageType::GetChainTip,
-                    payload: RequestPayload::GetChainTip,
-                };
+                    // Use GetChainTip as a lightweight heartbeat check
+                    let heartbeat_request = RequestMessage {
+                        correlation_id: 0, // Use 0 for heartbeat (won't match any real request)
+                        request_type: MessageType::GetChainTip,
+                        payload: RequestPayload::GetChainTip,
+                    };
 
-                // Send heartbeat with timeout
-                let heartbeat_result =
-                    tokio::time::timeout(Duration::from_secs(2), client.request(heartbeat_request))
-                        .await;
+                    // Send heartbeat with timeout
+                    let heartbeat_result =
+                        tokio::time::timeout(Duration::from_secs(2), client.request(heartbeat_request))
+                            .await;
 
-                match heartbeat_result {
-                    Ok(Ok(_)) => {
-                        // Heartbeat successful - module is responsive
-                        debug!("Module {} heartbeat OK", module_name);
+                    match heartbeat_result {
+                        Ok(Ok(_)) => {
+                            // Heartbeat successful - module is responsive
+                            debug!("Module {} heartbeat OK", module_name);
+                        }
+                        Ok(Err(e)) => {
+                            warn!("Module {} heartbeat failed: {}", module_name, e);
+                            // Mark as unresponsive but don't crash yet
+                        }
+                        Err(_) => {
+                            warn!("Module {} heartbeat timeout", module_name);
+                            // Timeout - module may be unresponsive
+                        }
                     }
-                    Ok(Err(e)) => {
-                        warn!("Module {} heartbeat failed: {}", module_name, e);
-                        // Mark as unresponsive but don't crash yet
-                    }
-                    Err(_) => {
-                        warn!("Module {} heartbeat timeout", module_name);
-                        // Timeout - module may be unresponsive
-                    }
+                } else {
+                    // No IPC client available - can't check heartbeat
+                    debug!(
+                        "Module {} has no IPC client for heartbeat check",
+                        module_name
+                    );
                 }
-            } else {
-                // No IPC client available - can't check heartbeat
-                debug!(
-                    "Module {} has no IPC client for heartbeat check",
-                    module_name
-                );
+            }
+            #[cfg(not(unix))]
+            {
+                // IPC not available on Windows - skip heartbeat check
+                debug!("Module {} heartbeat check skipped (Windows - IPC not available)", module_name);
             }
 
             // Loop continues to next iteration
@@ -180,7 +188,8 @@ impl ModuleProcessMonitor {
                 }
             }
 
-            // Check heartbeat via IPC
+            // Check heartbeat via IPC (Unix only)
+            #[cfg(unix)]
             {
                 let mut process_guard = shared_process.lock().await;
                 if let Some(client) = process_guard.client_mut() {
@@ -233,39 +242,49 @@ impl ModuleProcessMonitor {
     pub fn check_health(process: &mut ModuleProcess) -> ModuleHealth {
         if !process.is_running() {
             ModuleHealth::Crashed("Process exited".to_string())
-        } else if let Some(client) = process.client_mut() {
-            // Check heartbeat via IPC with short timeout
-            use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
-            use tokio::time::timeout;
+        } else {
+            #[cfg(unix)]
+            {
+                if let Some(client) = process.client_mut() {
+                    // Check heartbeat via IPC with short timeout
+                    use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
+                    use tokio::time::timeout;
 
-            let heartbeat_request = RequestMessage {
-                correlation_id: 0,
-                request_type: MessageType::GetChainTip,
-                payload: RequestPayload::GetChainTip,
-            };
+                    let heartbeat_request = RequestMessage {
+                        correlation_id: 0,
+                        request_type: MessageType::GetChainTip,
+                        payload: RequestPayload::GetChainTip,
+                    };
 
-            // Use tokio::runtime::Handle to run async code in sync context
-            // This is a simplified check - in production would use proper async context
-            match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    let result = handle.block_on(timeout(
-                        Duration::from_secs(1),
-                        client.request(heartbeat_request),
-                    ));
+                    // Use tokio::runtime::Handle to run async code in sync context
+                    // This is a simplified check - in production would use proper async context
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(handle) => {
+                            let result = handle.block_on(timeout(
+                                Duration::from_secs(1),
+                                client.request(heartbeat_request),
+                            ));
 
-                    match result {
-                        Ok(Ok(_)) => ModuleHealth::Healthy,
-                        _ => ModuleHealth::Unresponsive,
+                            match result {
+                                Ok(Ok(_)) => ModuleHealth::Healthy,
+                                _ => ModuleHealth::Unresponsive,
+                            }
+                        }
+                        Err(_) => {
+                            // No async runtime - can't check heartbeat
+                            ModuleHealth::Healthy // Assume healthy if we can't check
+                        }
                     }
-                }
-                Err(_) => {
-                    // No async runtime - can't check heartbeat
-                    ModuleHealth::Healthy // Assume healthy if we can't check
+                } else {
+                    // No IPC client - can only check if process is running
+                    ModuleHealth::Healthy
                 }
             }
-        } else {
-            // No IPC client - can only check if process is running
-            ModuleHealth::Healthy
+            #[cfg(not(unix))]
+            {
+                // IPC not available on Windows - can only check if process is running
+                ModuleHealth::Healthy
+            }
         }
     }
 }

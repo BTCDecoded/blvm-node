@@ -13,7 +13,6 @@
 //! - **State Separation**: Module state is completely separate from consensus state
 
 pub mod api;
-#[cfg(unix)]
 pub mod ipc;
 pub mod loader;
 pub mod manager;
