@@ -1,6 +1,9 @@
-//! Governance Module
+//! Governance integration for bllvm-node
 //!
-//! User-operated node signaling and governance participation.
+//! Provides webhook integration with bllvm-commons for fee forwarding tracking
 
 #[cfg(feature = "governance")]
-pub mod user_signaling;
+pub mod webhook;
+
+#[cfg(feature = "governance")]
+pub use webhook::GovernanceWebhookClient;

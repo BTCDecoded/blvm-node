@@ -93,6 +93,9 @@ rayon = { version = "1.8", optional = true }
 # System information for memory stats (optional feature)
 sysinfo = { version = "0.30", optional = true }
 
+# HTTP client for governance webhooks (optional feature)
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
 # Iroh networking (optional feature)
 # Updated to iroh 0.95 to fix security vulnerabilities in iroh-net 0.12
 iroh = { version = "0.95", optional = true }
@@ -114,7 +117,7 @@ rustls = { version = "0.21", optional = true }
 # iroh 0.95 uses actively maintained dependencies and fixes all known security issues.
 
 [features]
-default = ["sysinfo", "redb", "nix", "libc", "utxo-commitments", "production"]
+default = ["sysinfo", "redb", "nix", "libc", "utxo-commitments", "production", "governance"]
 iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
 utxo-commitments = ["bllvm-protocol/utxo-commitments"]
@@ -137,6 +140,8 @@ production = ["bllvm-protocol/production", "dep:rayon"]
 dandelion = []
 # CTV (BIP119 CheckTemplateVerify) - passed through from bllvm-protocol
 ctv = ["bllvm-protocol/ctv"]
+# Governance webhook integration
+governance = ["dep:reqwest"]
 
 # Formal verification (Kani model checking) - verification only, not in release builds
 verify = ["kani-verifier"]

@@ -252,6 +252,32 @@ impl Default for ModuleResourceLimitsConfig {
     }
 }
 
+/// Governance webhook configuration
+#[cfg(feature = "governance")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceConfig {
+    /// Webhook URL for bllvm-commons (e.g., "http://localhost:3000/webhooks/block")
+    pub webhook_url: Option<String>,
+    
+    /// Node identifier for contributor attribution (optional)
+    pub node_id: Option<String>,
+    
+    /// Enable governance webhook notifications
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[cfg(feature = "governance")]
+impl Default for GovernanceConfig {
+    fn default() -> Self {
+        Self {
+            webhook_url: None,
+            node_id: None,
+            enabled: false,
+        }
+    }
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -296,6 +322,10 @@ pub struct NodeConfig {
 
     /// Network relay configuration
     pub relay: Option<RelayConfig>,
+    
+    /// Governance webhook configuration (for fee forwarding integration)
+    #[cfg(feature = "governance")]
+    pub governance: Option<GovernanceConfig>,
 
     /// Address database configuration
     pub address_database: Option<AddressDatabaseConfig>,
@@ -386,6 +416,8 @@ impl Default for NodeConfig {
             network_timing: None,
             request_timeouts: None,
             module_resource_limits: None,
+            #[cfg(feature = "governance")]
+            governance: None,
         }
     }
 }

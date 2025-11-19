@@ -62,6 +62,9 @@ pub struct Node {
     data_dir: PathBuf,
     /// Disk check counter (for periodic monitoring)
     disk_check_counter: std::sync::atomic::AtomicU64,
+    /// Governance webhook client (for fee forwarding integration)
+    #[cfg(feature = "governance")]
+    governance_webhook: Option<crate::governance::GovernanceWebhookClient>,
 }
 
 impl Node {
@@ -123,6 +126,8 @@ impl Node {
             network_addr,
             config: None,
             disk_check_counter: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "governance")]
+            governance_webhook: None,
         })
     }
 
@@ -150,8 +155,34 @@ impl Node {
             mempool_manager_arc,
         );
         
+        // Initialize governance webhook client if configured
+        #[cfg(feature = "governance")]
+        let governance_webhook = config.governance.as_ref()
+            .and_then(|g| {
+                if g.enabled {
+                    Some(crate::governance::GovernanceWebhookClient::new(
+                        g.webhook_url.clone(),
+                        g.node_id.clone(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // Fallback to environment variables if not in config
+                std::env::var("GOVERNANCE_WEBHOOK_URL").ok()
+                    .map(|url| crate::governance::GovernanceWebhookClient::new(
+                        Some(url),
+                        std::env::var("GOVERNANCE_NODE_ID").ok(),
+                    ))
+            });
+        
         self.network = network;
         self.config = Some(config);
+        #[cfg(feature = "governance")]
+        {
+            self.governance_webhook = governance_webhook;
+        }
         Ok(self)
     }
 
@@ -430,8 +461,9 @@ impl Node {
                 ) {
                     Ok(true) => {
                         info!("Block accepted at height {}", current_height);
-
-                        // Get block hash for cache updates
+                        
+                        // Parse block for governance webhook (need block object, not just block_data)
+                        // We'll get it from storage after it's stored
                         let blocks_arc = self.storage.blocks();
                         let block_hash =
                             if let Ok(Some(hash)) = blocks_arc.get_hash_by_height(current_height) {
@@ -470,6 +502,14 @@ impl Node {
                                 .calculate_and_cache_network_hashrate(current_height, &*blocks_arc)
                             {
                                 warn!("Failed to update network hashrate cache: {}", e);
+                            }
+                            
+                            // Notify governance app about new block (for fee forwarding tracking)
+                            #[cfg(feature = "governance")]
+                            if let Some(ref webhook) = self.governance_webhook {
+                                if let Err(e) = webhook.notify_block(&block, current_height).await {
+                                    warn!("Failed to notify governance app about block at height {}: {}", current_height, e);
+                                }
                             }
                         }
 
