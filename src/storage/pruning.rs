@@ -492,7 +492,7 @@ impl PruningManager {
         keep_headers: bool,
         keep_bodies_from_height: u64,
         keep_commitments: bool,
-        keep_filters: bool,
+        _keep_filters: bool,
         keep_filtered_blocks: bool,
         keep_witnesses: bool,
         _keep_tx_index: bool,

@@ -526,7 +526,7 @@ impl MiningRpc {
 
     fn calculate_transaction_fee(&self, tx: &Transaction) -> u64 {
         // Use MempoolManager's fee calculation if available
-        if let Some(ref mempool) = self.mempool {
+        if let Some(ref _mempool) = self.mempool {
             if let Ok(utxo_set) = self.get_utxo_set() {
                 // Try to use mempool's fee calculation method if available
                 // For now, calculate directly using UTXO set (mempool uses same logic)

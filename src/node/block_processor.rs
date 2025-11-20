@@ -45,7 +45,7 @@ pub fn store_block_with_context(
 pub fn prepare_block_validation_context(
     blockstore: &BlockStore,
     block: &Block,
-    current_height: u64,
+    _current_height: u64,
 ) -> Result<(Vec<Witness>, Option<Vec<BlockHeader>>)> {
     // Get witnesses for this block
     let block_hash = blockstore.get_block_hash(block);
