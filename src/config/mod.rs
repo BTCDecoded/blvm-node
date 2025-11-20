@@ -343,13 +343,11 @@ pub struct NodeConfig {
     /// Module resource limits configuration
     pub module_resource_limits: Option<ModuleResourceLimitsConfig>,
 
-<<<<<<< HEAD
     /// Fee forwarding configuration (for governance contributions)
     pub fee_forwarding: Option<FeeForwardingConfig>,
-=======
+
     /// Logging configuration
     pub logging: Option<LoggingConfig>,
->>>>>>> f1486b8 (Improve logging system: add utilities, config integration, and standards compliance)
 }
 
 /// Transport preference configuration (serializable)
@@ -460,11 +458,6 @@ impl Default for FeeForwardingConfig {
             commons_address: None,
             forwarding_percentage: 0,
             contributor_id: None,
-=======
-            #[cfg(feature = "governance")]
-            governance: None,
-            logging: None,
->>>>>>> f1486b8 (Improve logging system: add utilities, config integration, and standards compliance)
         }
     }
 }
