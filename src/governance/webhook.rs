@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 use reqwest::Client;
 
 /// Governance webhook client
+#[cfg(feature = "governance")]
 pub struct GovernanceWebhookClient {
     client: Client,
     webhook_url: String,
@@ -18,6 +19,7 @@ pub struct GovernanceWebhookClient {
     enabled: bool,
 }
 
+#[cfg(feature = "governance")]
 impl GovernanceWebhookClient {
     /// Create a new governance webhook client
     pub fn new(webhook_url: Option<String>, node_id: Option<String>) -> Self {

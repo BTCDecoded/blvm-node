@@ -149,7 +149,10 @@ impl ControlRpc {
 
                     CACHED_SYSTEM.with(|cache| {
                         let mut cache = cache.borrow_mut();
-                        let (ref mut system, ref mut last_refresh, ref mut cached_value) = *cache;
+                        let tuple_ref = cache.as_mut();
+                        let system: &mut System = &mut tuple_ref.0;
+                        let last_refresh: &mut Instant = &mut tuple_ref.1;
+                        let cached_value: &mut Value = &mut tuple_ref.2;
 
                         // Memory stats don't need millisecond accuracy, 5s is fine
                         if last_refresh.elapsed() >= Duration::from_secs(5) {
@@ -169,7 +172,7 @@ impl ControlRpc {
                             });
                             *last_refresh = Instant::now();
                             *cached_value = value.clone();
-                            Ok(value)
+                            Ok(value.clone())
                         } else {
                             Ok(cached_value.clone())
                         }

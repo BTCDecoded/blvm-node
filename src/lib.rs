@@ -22,6 +22,8 @@
 
 // Memory allocator optimization using mimalloc (faster than default allocator)
 // Note: Only in reference-node, not consensus-proof, to maintain Kani compatibility
+// Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
+#[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

@@ -88,11 +88,14 @@ impl ParallelBlockValidator {
             return self.validate_blocks_sequential(contexts);
         }
 
-        // Validate blocks in parallel
+        // Validate blocks in parallel (if production feature enabled)
         // Note: Each block uses its own UTXO set, so they're independent
-        let results: Vec<_> = contexts
-            .par_iter()
-            .map(|context| {
+        #[cfg(feature = "production")]
+        let results: Vec<_> = {
+            use rayon::prelude::*;
+            contexts
+                .par_iter()
+                .map(|context| {
                 // Create empty witnesses for each transaction
                 let witnesses: Vec<Witness> = context
                     .block
@@ -109,7 +112,33 @@ impl ParallelBlockValidator {
                 )
                 .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
             })
-            .collect();
+            .collect()
+        };
+
+        #[cfg(not(feature = "production"))]
+        let results: Vec<_> = {
+            // Fallback to sequential validation if production feature not enabled
+            contexts
+                .iter()
+                .map(|context| {
+                    // Create empty witnesses for each transaction
+                    let witnesses: Vec<Witness> = context
+                        .block
+                        .transactions
+                        .iter()
+                        .map(|_| Vec::new())
+                        .collect();
+                    connect_block(
+                        &context.block,
+                        &witnesses,
+                        context.prev_utxo_set.clone(),
+                        context.height,
+                        None, // No recent headers for parallel validation
+                    )
+                    .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
+                })
+                .collect()
+        };
 
         // Collect results and check for errors
         let mut validated_results = Vec::new();
