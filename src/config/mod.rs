@@ -419,8 +419,8 @@ impl Default for NodeConfig {
             network_timing: None,
             request_timeouts: None,
             module_resource_limits: None,
-<<<<<<< HEAD
             fee_forwarding: None,
+            logging: None,
         }
     }
 }
