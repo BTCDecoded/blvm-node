@@ -10,10 +10,8 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // Initialize logging using standard utility (respects RUST_LOG)
+    bllvm_node::utils::init_logging(None);
 
     // Get server address from args or use default
     let server_addr: SocketAddr = match std::env::args().nth(1) {

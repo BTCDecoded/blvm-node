@@ -9,8 +9,8 @@
 use super::dandelion::DandelionRelay;
 use bllvm_protocol::{Block, Hash};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
+use crate::utils::current_timestamp;
 
 /// Relay manager
 pub struct RelayManager {
@@ -152,10 +152,7 @@ impl RelayManager {
 
     /// Mark a block as relayed
     pub fn mark_block_relayed(&mut self, block_hash: Hash) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
 
         self.recently_relayed_blocks.insert(block_hash, now);
         self.cleanup_old_items();
@@ -165,10 +162,7 @@ impl RelayManager {
 
     /// Mark a transaction as relayed
     pub fn mark_transaction_relayed(&mut self, tx_hash: Hash) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
 
         self.recently_relayed_txs.insert(tx_hash, now);
 
@@ -293,10 +287,7 @@ impl RelayManager {
 
     /// Clean up old relayed items
     fn cleanup_old_items(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
 
         // Clean up old blocks
         let old_blocks: Vec<Hash> = self

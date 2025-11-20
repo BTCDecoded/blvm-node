@@ -36,6 +36,7 @@ pub mod network;
 pub mod node;
 pub mod rpc;
 pub mod storage;
+pub mod utils;
 #[cfg(feature = "production")]
 pub mod validation;
 

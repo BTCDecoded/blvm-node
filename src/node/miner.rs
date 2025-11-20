@@ -5,7 +5,8 @@
 use anyhow::Result;
 use bllvm_protocol::{Block, BlockHeader, Transaction};
 use std::collections::HashMap;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+use crate::utils::current_timestamp;
 
 /// Mempool provider trait for dependency injection
 pub trait MempoolProvider: Send + Sync {
@@ -224,31 +225,144 @@ impl MiningEngine {
         self.mining_threads = threads;
     }
 
-    /// Mine a block template
+    /// Mine a block template using actual proof of work (async, multithreaded)
     pub async fn mine_template(&mut self, template: Block) -> Result<Block> {
         debug!("Mining block template with {} threads", self.mining_threads);
 
         // Update template
         self.block_template = Some(template.clone());
 
-        // In a real implementation, this would:
-        // 1. Use consensus-proof to mine the block
-        // 2. Try different nonce values with multiple threads
-        // 3. Check proof of work
+        // Use consensus layer to mine the block (actual PoW)
+        use bllvm_protocol::ConsensusProof;
+        let consensus = ConsensusProof::new();
+        
+        // Calculate max attempts per thread based on difficulty
+        // For regtest: low difficulty, should find nonce quickly
+        // For testnet/mainnet: high difficulty, may need many attempts
+        let max_attempts_per_thread = 1_000_000u64; // Reasonable limit per thread
 
-        // Simulate mining work
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Multi-threaded mining: spawn tasks for each thread
+        if self.mining_threads > 1 {
+            self.mine_template_multithreaded(template, max_attempts_per_thread, &consensus).await
+        } else {
+            // Single-threaded: use blocking task to avoid blocking async runtime
+            let template_clone = template.clone();
+            let (mined_block, result) = tokio::task::spawn_blocking(move || {
+                consensus.mine_block(template_clone, max_attempts_per_thread)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Mining task panicked: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Mining failed: {}", e))?;
 
-        // Update statistics
-        self.stats.blocks_mined += 1;
-        self.stats.last_block_time = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
+            self.handle_mining_result(mined_block, result)
+        }
+    }
 
-        Ok(template)
+    /// Multi-threaded mining implementation
+    async fn mine_template_multithreaded(
+        &mut self,
+        template: Block,
+        max_attempts_per_thread: u64,
+        _consensus: &bllvm_protocol::ConsensusProof,
+    ) -> Result<Block> {
+        use bllvm_protocol::mining::MiningResult;
+        use bllvm_protocol::pow::check_proof_of_work;
+        use tokio::sync::oneshot;
+
+        // Calculate nonce range per thread
+        let nonces_per_thread = max_attempts_per_thread;
+        let total_threads = self.mining_threads as u64;
+
+        // Spawn mining tasks for each thread
+        let mut handles = Vec::new();
+        for thread_id in 0..total_threads {
+            let template_clone = template.clone();
+            let start_nonce = thread_id * nonces_per_thread;
+            let end_nonce = start_nonce + nonces_per_thread;
+
+            let (tx, rx) = oneshot::channel();
+
+            // Spawn blocking task for CPU-bound mining work
+            let handle = tokio::task::spawn_blocking(move || {
+                // Try nonces in this thread's range
+                for nonce in start_nonce..end_nonce {
+                    let mut block = template_clone.clone();
+                    block.header.nonce = nonce;
+
+                    // Check proof of work using standalone function
+                    if let Ok(valid) = check_proof_of_work(&block.header) {
+                        if valid {
+                            let _ = tx.send(Ok((block, MiningResult::Success)));
+                            return;
+                        }
+                    }
+                }
+
+                // No valid nonce found in this range
+                let mut block = template_clone;
+                block.header.nonce = start_nonce; // Use first nonce as placeholder
+                let _ = tx.send(Ok((block, MiningResult::Failure)));
+            });
+
+            handles.push((handle, rx));
+        }
+
+        // Wait for first successful result or all failures
+        let mut results = Vec::new();
+        for (handle, rx) in handles {
+            // Wait for task completion
+            handle.await.map_err(|e| anyhow::anyhow!("Mining task panicked: {}", e))?;
+            
+            // Get result
+            match rx.await {
+                Ok(Ok((block, result))) => {
+                    if matches!(result, MiningResult::Success) {
+                        // Found valid nonce! Return immediately
+                        return self.handle_mining_result(block, result);
+                    }
+                    results.push((block, result));
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    // Channel closed, task may have found solution
+                    continue;
+                }
+            }
+        }
+
+        // All threads failed
+        if let Some((block, _)) = results.first() {
+            self.handle_mining_result(block.clone(), MiningResult::Failure)
+        } else {
+            Err(anyhow::anyhow!("Mining failed: all threads exhausted"))
+        }
+    }
+
+    /// Handle mining result and update statistics
+    fn handle_mining_result(
+        &mut self,
+        mined_block: Block,
+        result: bllvm_protocol::mining::MiningResult,
+    ) -> Result<Block> {
+        use bllvm_protocol::mining::MiningResult;
+        
+        match result {
+            MiningResult::Success => {
+                info!("Successfully mined block with nonce {}", mined_block.header.nonce);
+                
+                // Update statistics
+                self.stats.blocks_mined += 1;
+                self.stats.last_block_time = Some(current_timestamp());
+
+                Ok(mined_block)
+            }
+            MiningResult::Failure => {
+                // Could not find valid nonce in max_attempts
+                // This is normal for high difficulty (mainnet)
+                warn!("Could not find valid nonce (difficulty may be too high)");
+                Err(anyhow::anyhow!("Mining failed: could not find valid nonce"))
+            }
+        }
     }
 
     /// Get current block template
@@ -454,10 +568,7 @@ impl MiningCoordinator {
             .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {}", e))?;
 
         // Get current timestamp
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_timestamp();
 
         // Build block template
         let template = Block {
@@ -777,18 +888,85 @@ mod tests {
     }
 
     #[tokio::test]
+    #[tokio::test]
     async fn test_mining_engine_mine_template() {
         let mut engine = MiningEngine::new();
         let template = create_test_block();
 
         let result = engine.mine_template(template.clone()).await;
-        assert!(result.is_ok());
+        
+        // Mining may succeed (if low difficulty) or fail (if high difficulty)
+        // Both are valid outcomes for real PoW mining
+        if let Ok(mined_block) = result {
+            // Successfully mined - verify the block
+            assert_eq!(mined_block.header.version, template.header.version);
+            assert_ne!(mined_block.header.nonce, template.header.nonce); // Nonce should change
+            
+            // Verify proof of work
+            use bllvm_protocol::pow::check_proof_of_work;
+            let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
+            assert!(pow_valid, "Mined block should have valid proof of work");
 
-        let mined_block = result.unwrap();
+            // Check that template was stored
+            assert!(engine.get_block_template().is_some());
+            assert_eq!(engine.get_stats().blocks_mined, 1);
+        } else {
+            // Mining failed (high difficulty) - this is expected for mainnet difficulty
+            // Just verify the template was stored
+            assert!(engine.get_block_template().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mining_engine_mine_template_multithreaded() {
+        let mut engine = MiningEngine::with_threads(4);
+        let template = create_test_block();
+
+        let result = engine.mine_template(template.clone()).await;
+        
+        // Mining may succeed (if low difficulty) or fail (if high difficulty)
+        if let Ok(mined_block) = result {
+            // Successfully mined - verify the block
+            assert_eq!(mined_block.header.version, template.header.version);
+            
+            // Verify proof of work
+            use bllvm_protocol::pow::check_proof_of_work;
+            let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
+            assert!(pow_valid, "Mined block should have valid proof of work");
+
+            // Check that template was stored
+            assert!(engine.get_block_template().is_some());
+            assert_eq!(engine.get_stats().blocks_mined, 1);
+        } else {
+            // Mining failed (high difficulty) - this is expected
+            assert!(engine.get_block_template().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mining_engine_mine_template_regtest_difficulty() {
+        // Test with regtest difficulty (very low, should succeed quickly)
+        let mut engine = MiningEngine::new();
+        let mut template = create_test_block();
+        
+        // Set regtest difficulty (0x207fffff = very easy)
+        template.header.bits = 0x207fffff;
+
+        let result = engine.mine_template(template.clone()).await;
+        
+        // With regtest difficulty, mining should succeed
+        let mined_block = result.expect("Mining should succeed with regtest difficulty");
+        
+        // Verify the block
         assert_eq!(mined_block.header.version, template.header.version);
-
-        // Check that template was stored
-        assert!(engine.get_block_template().is_some());
+        assert_ne!(mined_block.header.nonce, template.header.nonce);
+        
+        // Verify proof of work
+        use bllvm_protocol::pow::check_proof_of_work;
+        let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
+        assert!(pow_valid, "Mined block should have valid proof of work");
+        
+        // Check statistics
         assert_eq!(engine.get_stats().blocks_mined, 1);
     }
 

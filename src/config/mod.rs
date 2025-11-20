@@ -140,6 +140,18 @@ pub struct RequestTimeoutConfig {
     /// Maximum age for pending requests before cleanup
     #[serde(default = "default_pending_request_max_age")]
     pub pending_request_max_age_seconds: u64,
+
+    /// Timeout for storage operations (seconds)
+    #[serde(default = "default_storage_timeout")]
+    pub storage_timeout_seconds: u64,
+
+    /// Timeout for network operations (seconds)
+    #[serde(default = "default_network_timeout")]
+    pub network_timeout_seconds: u64,
+
+    /// Timeout for RPC operations (seconds)
+    #[serde(default = "default_rpc_timeout")]
+    pub rpc_timeout_seconds: u64,
 }
 
 fn default_async_request_timeout() -> u64 {
@@ -158,6 +170,18 @@ fn default_pending_request_max_age() -> u64 {
     300 // 5 minutes
 }
 
+fn default_storage_timeout() -> u64 {
+    10 // 10 seconds
+}
+
+fn default_network_timeout() -> u64 {
+    30 // 30 seconds
+}
+
+fn default_rpc_timeout() -> u64 {
+    60 // 60 seconds
+}
+
 impl Default for RequestTimeoutConfig {
     fn default() -> Self {
         Self {
@@ -165,6 +189,9 @@ impl Default for RequestTimeoutConfig {
             utxo_commitment_request_timeout_seconds: 30,
             request_cleanup_interval_seconds: 60,
             pending_request_max_age_seconds: 300,
+            storage_timeout_seconds: 10,
+            network_timeout_seconds: 30,
+            rpc_timeout_seconds: 60,
         }
     }
 }
@@ -316,8 +343,13 @@ pub struct NodeConfig {
     /// Module resource limits configuration
     pub module_resource_limits: Option<ModuleResourceLimitsConfig>,
 
+<<<<<<< HEAD
     /// Fee forwarding configuration (for governance contributions)
     pub fee_forwarding: Option<FeeForwardingConfig>,
+=======
+    /// Logging configuration
+    pub logging: Option<LoggingConfig>,
+>>>>>>> f1486b8 (Improve logging system: add utilities, config integration, and standards compliance)
 }
 
 /// Transport preference configuration (serializable)
@@ -389,6 +421,7 @@ impl Default for NodeConfig {
             network_timing: None,
             request_timeouts: None,
             module_resource_limits: None,
+<<<<<<< HEAD
             fee_forwarding: None,
         }
     }
@@ -427,6 +460,11 @@ impl Default for FeeForwardingConfig {
             commons_address: None,
             forwarding_percentage: 0,
             contributor_id: None,
+=======
+            #[cfg(feature = "governance")]
+            governance: None,
+            logging: None,
+>>>>>>> f1486b8 (Improve logging system: add utilities, config integration, and standards compliance)
         }
     }
 }
@@ -1231,6 +1269,28 @@ impl Default for PeerRateLimitingConfig {
         Self {
             default_burst: 100,
             default_rate: 10,
+        }
+    }
+}
+
+/// Logging configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Log level filter (e.g., "info", "debug", "bllvm_node=debug,network=trace")
+    /// If not set, uses RUST_LOG environment variable or defaults to "info"
+    #[serde(default)]
+    pub filter: Option<String>,
+
+    /// Enable JSON logging format (for log aggregation systems)
+    #[serde(default)]
+    pub json_format: bool,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            filter: None,
+            json_format: false,
         }
     }
 }

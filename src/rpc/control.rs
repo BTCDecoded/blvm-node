@@ -374,7 +374,8 @@ impl ControlRpc {
         // 3. Rebuild the subscriber with the new filter
 
         // Check current filter state from environment
-        let current_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+        use crate::utils::env_or_default;
+        let current_filter = env_or_default("RUST_LOG", "info");
 
         // Determine if debug logging is active based on filter
         let active = current_filter.contains("debug")

@@ -9,6 +9,7 @@
 use crate::network::protocol::*;
 use crate::network::txhash::calculate_txid;
 use crate::storage::Storage;
+use crate::utils::option_to_result;
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
@@ -121,31 +122,26 @@ pub async fn handle_get_filtered_block(
     // Get block from storage
     let (block, block_height) = if let Some(ref storage) = storage {
         // Get block by hash
-        let block = storage.blocks().get_block(&message.block_hash)?;
-        match block {
-            Some(block) => {
-                // Get block height from chain state
-                let height = storage.chain().get_height()?.unwrap_or(0);
-                // Try to find exact height by iterating backwards from tip
-                // For now, use tip height as approximation
-                (Some(block), height)
-            }
-            None => {
-                // Block not found
-                return Err(anyhow::anyhow!(
-                    "Block not found: block hash {} not in storage",
-                    hex::encode(message.block_hash)
-                ));
-            }
-        }
+        let block_opt = storage.blocks().get_block(&message.block_hash)?;
+        let block = option_to_result(
+            block_opt,
+            &format!(
+                "Block not found: block hash {} not in storage",
+                hex::encode(message.block_hash)
+            ),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to get block from storage: {}", e))?;
+        // Get block height from chain state
+        let height = storage.chain().get_height()?.unwrap_or(0);
+        // Try to find exact height by iterating backwards from tip
+        // For now, use tip height as approximation
+        (block, height)
     } else {
         // Storage is required for filtered blocks
         return Err(anyhow::anyhow!(
             "Storage not available: filtered blocks require storage to be initialized"
         ));
     };
-
-    let block = block.unwrap();
 
     // Create spam filter from preferences
     #[cfg(feature = "utxo-commitments")]

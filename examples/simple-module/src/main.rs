@@ -29,10 +29,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter("simple_module=info,reference_node::module=debug")
-        .init();
+    // Initialize logging using standard utility (respects RUST_LOG)
+    bllvm_node::utils::init_module_logging("simple_module", None);
     
     let args = Args::parse();
     

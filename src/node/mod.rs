@@ -205,8 +205,8 @@ impl Node {
         modules_dir: P,
         socket_dir: P,
     ) -> anyhow::Result<Self> {
-        let data_dir =
-            PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string()));
+        use crate::utils::env_or_default;
+        let data_dir = PathBuf::from(env_or_default("DATA_DIR", "data"));
         let modules_data_dir = data_dir.join("modules");
 
         let module_manager = ModuleManager::new(
@@ -309,12 +309,8 @@ impl Node {
                                     info!("Startup pruning completed: {} blocks pruned, {} blocks kept", 
                                           stats.blocks_pruned, stats.blocks_kept);
                                     // Flush storage to persist pruning changes
-                                    if let Err(e) = self.storage.flush() {
-                                        warn!(
-                                            "Failed to flush storage after startup pruning: {}",
-                                            e
-                                        );
-                                    }
+                                    use crate::utils::log_error;
+                                    log_error(|| self.storage.flush(), "Failed to flush storage after startup pruning");
                                 }
                                 Err(e) => {
                                     warn!("Startup pruning failed: {}", e);
@@ -332,14 +328,14 @@ impl Node {
         if let Some(ref mut module_manager) = self.module_manager {
             // Create new Storage instance for modules (Storage doesn't implement Clone)
             // Both instances use the same data directory, so they access the same data
-            let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
+            use crate::utils::env_or_default;
+            let data_dir = env_or_default("DATA_DIR", "data");
             let storage_arc = Arc::new(
                 Storage::new(&data_dir)
                     .map_err(|e| anyhow::anyhow!("Failed to create storage for modules: {}", e))?,
             );
             let node_api = Arc::new(NodeApiImpl::new(storage_arc));
-            let socket_path = std::env::var("MODULE_SOCKET_DIR")
-                .unwrap_or_else(|_| "data/modules/socket".to_string());
+            let socket_path = env_or_default("MODULE_SOCKET_DIR", "data/modules/socket");
 
             module_manager
                 .start(&socket_path, node_api)
@@ -425,13 +421,20 @@ impl Node {
     async fn run(&mut self) -> Result<()> {
         info!("Node running - main loop started");
 
+        // Set up graceful shutdown signal handling
+        let shutdown_rx = crate::utils::create_shutdown_receiver();
+
         // Get initial state for block processing
         let mut current_height = self.storage.chain().get_height()?.unwrap_or(0);
         let mut utxo_set = bllvm_protocol::UtxoSet::new();
 
-        // Main node loop - in a real implementation this would coordinate
-        // between all components and handle shutdown signals
+        // Main node loop - coordinates between all components and handles shutdown signals
         loop {
+            // Check for shutdown signal (non-blocking)
+            if *shutdown_rx.borrow() {
+                info!("Shutdown signal received, stopping node gracefully...");
+                break;
+            }
             // Process any received blocks (non-blocking)
             while let Some(block_data) = self.network.try_recv_block() {
                 info!("Processing block from network");
@@ -630,9 +633,8 @@ impl Node {
                                                 info!("Automatic pruning completed: {} blocks pruned, {} blocks kept", 
                                                       prune_stats.blocks_pruned, prune_stats.blocks_kept);
                                                 // Flush storage to persist pruning changes
-                                                if let Err(e) = self.storage.flush() {
-                                                    warn!("Failed to flush storage after automatic pruning: {}", e);
-                                                }
+                                                use crate::utils::log_error;
+                                                log_error(|| self.storage.flush(), "Failed to flush storage after automatic pruning");
                                             }
                                             Err(e) => {
                                                 warn!("Automatic pruning failed: {}", e);
@@ -665,13 +667,32 @@ impl Node {
             self.check_health().await?;
             
             // Check disk space periodically (every 10 iterations = ~1 second)
+            // Use timeout to prevent hanging on slow disk operations
             let counter = self.disk_check_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if counter % 10 == 0 {
-                if let Err(e) = self.check_disk_space().await {
-                    warn!("Disk space check failed: {}", e);
+                use crate::utils::with_storage_timeout;
+                match with_storage_timeout(async {
+                    self.check_disk_space().await
+                }).await {
+                    Ok(Ok(())) => {
+                        // Disk check succeeded
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Disk space check failed: {}", e);
+                        // Continue - disk errors don't stop the node
+                    }
+                    Err(_) => {
+                        warn!("Disk space check timed out");
+                        // Continue - timeout doesn't stop the node
+                    }
                 }
             }
         }
+        
+        // Graceful shutdown - stop all components
+        info!("Initiating graceful shutdown...");
+        self.stop().await?;
+        Ok(())
     }
 
     /// Run node processing once (for testing)
@@ -684,18 +705,32 @@ impl Node {
         Ok(())
     }
 
-    /// Check node health
+    /// Check node health with graceful error handling
     async fn check_health(&self) -> Result<()> {
-        // Simplified health check
+        // Check peer count (non-blocking, always succeeds)
         let peer_count = self.network.peer_count();
-        let storage_blocks = self.storage.blocks().block_count()?;
-
         if peer_count == 0 {
             warn!("No peers connected");
         }
 
-        if storage_blocks == 0 {
-            warn!("No blocks in storage");
+        // Check storage with timeout and graceful degradation
+        use crate::utils::with_storage_timeout;
+        match with_storage_timeout(async {
+            self.storage.blocks().block_count()
+        }).await {
+            Ok(Ok(blocks)) => {
+                if blocks == 0 {
+                    warn!("No blocks in storage");
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("Storage error during health check: {}", e);
+                // Continue - storage errors don't stop the node
+            }
+            Err(_) => {
+                warn!("Storage health check timed out");
+                // Continue - timeout doesn't stop the node
+            }
         }
 
         Ok(())
@@ -745,9 +780,8 @@ impl Node {
                                     );
                                     
                                     // Flush storage to persist pruning changes
-                                    if let Err(e) = self.storage.flush() {
-                                        warn!("Failed to flush storage after automatic pruning: {}", e);
-                                    }
+                                    use crate::utils::log_error;
+                                    log_error(|| self.storage.flush(), "Failed to flush storage after automatic pruning");
                                 }
                                 Ok(Err(e)) => {
                                     warn!("Automatic pruning failed: {}", e);

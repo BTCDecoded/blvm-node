@@ -22,6 +22,7 @@ pub mod utxostore;
 pub mod utxostore_proofs;
 
 use crate::config::PruningConfig;
+use crate::utils::arc_clone;
 use anyhow::Result;
 use database::{create_database, default_backend, fallback_backend, Database, DatabaseBackend};
 use std::path::Path;
@@ -85,38 +86,41 @@ impl Storage {
     ) -> Result<Self> {
         let db = Arc::from(create_database(data_dir, backend)?);
 
-        let blockstore = Arc::new(blockstore::BlockStore::new(Arc::clone(&db))?);
-        let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
+        use crate::utils::arc_new;
+        let blockstore = arc_new(blockstore::BlockStore::new(Arc::clone(&db))?);
+        let utxostore = arc_new(utxostore::UtxoStore::new(Arc::clone(&db))?);
         let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
-        let txindex = Arc::new(txindex::TxIndex::new(Arc::clone(&db))?);
+        let txindex = arc_new(txindex::TxIndex::new(Arc::clone(&db))?);
 
         let pruning_manager = pruning_config.map(|config| {
+            use crate::utils::{arc_clone, arc_new};
             #[cfg(feature = "utxo-commitments")]
             {
-// Check if aggressive mode requires UTXO commitments
-let needs_commitments = matches!(config.mode, crate::config::PruningMode::Aggressive { keep_commitments: true, .. })
-    || matches!(config.mode, crate::config::PruningMode::Custom { keep_commitments: true, .. });
-if needs_commitments {
-    let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db)) {
-        Ok(store) => Arc::new(store),
-        Err(e) => {
-            warn!("Failed to create commitment store: {}. Pruning will continue without commitments.", e);
-            return Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)));
-        }
-    };
-    Arc::new(pruning::PruningManager::with_utxo_commitments(
-        config,
-        Arc::clone(&blockstore),
-        commitment_store,
-        Arc::clone(&utxostore),
-    ))
-} else {
-Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
-}
+                // Check if aggressive mode requires UTXO commitments
+                let needs_commitments = matches!(config.mode, crate::config::PruningMode::Aggressive { keep_commitments: true, .. })
+                    || matches!(config.mode, crate::config::PruningMode::Custom { keep_commitments: true, .. });
+                if needs_commitments {
+                    let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db)) {
+                        Ok(store) => arc_new(store),
+                        Err(e) => {
+                            warn!("Failed to create commitment store: {}. Pruning will continue without commitments.", e);
+                            use crate::utils::arc_clone;
+                            return arc_new(pruning::PruningManager::new(config, arc_clone(&blockstore)));
+                        }
+                    };
+                    arc_new(pruning::PruningManager::with_utxo_commitments(
+                        config,
+                        arc_clone(&blockstore),
+                        commitment_store,
+                        arc_clone(&utxostore),
+                    ))
+                } else {
+                    arc_new(pruning::PruningManager::new(config, arc_clone(&blockstore)))
+                }
             }
             #[cfg(not(feature = "utxo-commitments"))]
             {
-Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
+                arc_new(pruning::PruningManager::new(config, arc_clone(&blockstore)))
             }
         });
 
@@ -132,7 +136,8 @@ Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
 
     /// Get the block store (as Arc for sharing)
     pub fn blocks(&self) -> Arc<blockstore::BlockStore> {
-        Arc::clone(&self.blockstore)
+        use crate::utils::arc_clone;
+        arc_clone(&self.blockstore)
     }
 
     /// Get the UTXO store
@@ -142,7 +147,7 @@ Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
 
     /// Get the UTXO store as Arc (for sharing)
     pub fn utxos_arc(&self) -> Arc<utxostore::UtxoStore> {
-        Arc::clone(&self.utxostore)
+        arc_clone(&self.utxostore)
     }
 
     /// Get the chain state
@@ -152,7 +157,7 @@ Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
 
     /// Get the transaction index (as Arc for sharing)
     pub fn transactions(&self) -> Arc<txindex::TxIndex> {
-        Arc::clone(&self.txindex)
+        arc_clone(&self.txindex)
     }
 
     /// Flush all pending writes to disk

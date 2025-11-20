@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::debug;
+use crate::utils::current_timestamp;
 
 /// Network RPC methods
 #[derive(Clone)]
@@ -302,10 +303,7 @@ impl NetworkRpc {
                 "activeconnections": stats.active_connections,
                 "bannedpeers": stats.banned_peers,
                 "messagequeuesize": 0, // Would need to track this separately
-                "timemillis": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
+                "timemillis": current_timestamp() as u128 * 1000
             }))
         } else {
             Ok(json!({
@@ -314,10 +312,7 @@ impl NetworkRpc {
             "activeconnections": 0,
             "bannedpeers": 0,
             "messagequeuesize": 0,
-            "timemillis": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64
+            "timemillis": current_timestamp() * 1000
             }))
         }
     }
@@ -403,11 +398,7 @@ impl NetworkRpc {
         let absolute = params.get(3).and_then(|p| p.as_bool()).unwrap_or(false);
 
         if let Some(ref network) = self.network_manager {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let now = current_timestamp();
 
             let unban_timestamp = if absolute {
                 bantime // Already a timestamp
@@ -541,10 +532,7 @@ impl NetworkRpc {
                 match addr {
                     crate::network::transport::TransportAddr::Tcp(sock) => {
                         addresses.push(json!({
-                            "time": std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
+                            "time": current_timestamp(),
                             "services": "0000000000000001",
                             "address": sock.ip().to_string(),
                             "port": sock.port(),
@@ -554,10 +542,7 @@ impl NetworkRpc {
                     #[cfg(feature = "quinn")]
                     crate::network::transport::TransportAddr::Quinn(sock) => {
                         addresses.push(json!({
-                            "time": std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
+                            "time": current_timestamp(),
                             "services": "0000000000000001",
                             "address": sock.ip().to_string(),
                             "port": sock.port(),

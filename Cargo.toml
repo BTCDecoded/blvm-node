@@ -78,7 +78,7 @@ clap = { version = "=4.4.11", features = ["derive"] }
 async-trait = "=0.1.75"
 
 # Bitflags for transport preference combinations
-bitflags = "=2.4"
+bitflags = "^2.6"
 
 # Memory allocator optimization (not in bllvm-consensus to maintain Kani compatibility)
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
@@ -184,3 +184,17 @@ codegen-units = 16
 # Benchmark targets
 # Benchmarks have been moved to bllvm-bench crate
 # See: https://github.com/BTCDecoded/bllvm-bench
+
+# Examples
+[[example]]
+name = "electrum-integration"
+path = "examples/electrum-integration.rs"
+
+[[example]]
+name = "wallet-integration"
+path = "examples/wallet-integration.rs"
+
+# Tools
+[[bin]]
+name = "convert-bitcoin-core-config"
+path = "tools/convert-bitcoin-core-config.rs"

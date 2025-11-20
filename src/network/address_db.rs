@@ -19,8 +19,11 @@ use iroh::PublicKey;
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+            .unwrap_or_else(|_| {
+                tracing::warn!("System time error, using fallback timestamp");
+                std::time::Duration::from_secs(0)
+            })
+            .as_secs()
 }
 
 /// Address entry with metadata

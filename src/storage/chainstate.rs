@@ -519,7 +519,11 @@ impl ChainState {
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| {
+                // Fallback to 0 if system time is before epoch (should never happen)
+                tracing::warn!("System time is before UNIX epoch, using 0 as timestamp");
+                std::time::Duration::from_secs(0)
+            })
             .as_secs();
         let value = timestamp.to_be_bytes();
         self.invalid_blocks.insert(hash.as_slice(), &value)?;

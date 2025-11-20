@@ -12,6 +12,7 @@ use bllvm_protocol::Hash;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::debug;
+use crate::utils::current_timestamp;
 
 /// Mempool RPC methods
 #[derive(Clone)]
@@ -121,10 +122,7 @@ impl MempoolRpc {
                             0.00001000
                         },
                         "modifiedfee": 0.00001000,
-                        "time": std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
+                        "time": current_timestamp(),
                         "height": -1,
                         "descendantcount": 1,
                         "descendantsize": size,
@@ -195,7 +193,8 @@ impl MempoolRpc {
         debug!("RPC: savemempool");
 
         if let Some(mempool) = &self.mempool {
-            let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
+            use crate::utils::env_or_default;
+            let data_dir = env_or_default("DATA_DIR", "data");
             let mempool_path = std::path::Path::new(&data_dir).join("mempool.dat");
 
             // Arc implements Deref, so we can call methods directly
@@ -261,10 +260,7 @@ impl MempoolRpc {
                                 0.0
                             },
                             "modifiedfee": 0.0,
-                            "time": std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
+                            "time": current_timestamp(),
                             "height": -1,
                             "descendantcount": 1,
                             "descendantsize": size,
@@ -371,10 +367,7 @@ impl MempoolRpc {
                                 0.0
                             },
                             "modifiedfee": 0.0,
-                            "time": std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
+                            "time": current_timestamp(),
                             "height": -1,
                             "descendantcount": 1,
                             "descendantsize": size,
@@ -465,10 +458,7 @@ impl MempoolRpc {
                     "size": size,
                     "fee": fee,
                     "modifiedfee": fee,
-                    "time": std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
+                    "time": current_timestamp(),
                     "height": -1,
                     "descendantcount": descendant_count + 1,
                     "descendantsize": descendant_size + size,

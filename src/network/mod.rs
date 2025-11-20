@@ -60,6 +60,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 use crate::storage::Storage;
 use crate::node::mempool::MempoolManager;
+use crate::utils::current_timestamp;
 
 use crate::network::tcp_transport::TcpTransport;
 use crate::network::transport::{
@@ -233,11 +234,7 @@ pub struct PeerRateLimiter {
 impl PeerRateLimiter {
     /// Create a new rate limiter
     pub fn new(burst_limit: u32, rate: u32) -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should always be after UNIX_EPOCH")
-            .as_secs();
+        let now = current_timestamp();
         Self {
             tokens: burst_limit,
             burst_limit,
@@ -259,11 +256,7 @@ impl PeerRateLimiter {
     
     /// Refill tokens based on elapsed time
     fn refill(&mut self) {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should always be after UNIX_EPOCH")
-            .as_secs();
+        let now = current_timestamp();
         
         if now > self.last_refill {
             let elapsed = now - self.last_refill;
@@ -898,10 +891,11 @@ impl NetworkManager {
             info!("TCP listener started on {}", listen_addr);
 
             // Start TCP accept loop
+            use crate::utils::arc_clone;
             let peer_tx = self.peer_tx.clone();
-            let dos_protection = Arc::clone(&self.dos_protection);
-            let peer_manager_clone = Arc::clone(&self.peer_manager);
-            let ban_list = Arc::clone(&self.ban_list);
+            let dos_protection = arc_clone(&self.dos_protection);
+            let peer_manager_clone = arc_clone(&self.peer_manager);
+            let ban_list = arc_clone(&self.ban_list);
             tokio::spawn(async move {
                 loop {
                     match tcp_listener.accept().await {
@@ -956,7 +950,8 @@ impl NetworkManager {
 
                             // Handle connection in background with graceful error handling
                             let peer_tx_clone = peer_tx.clone();
-                            let peer_manager_for_peer = Arc::clone(&peer_manager_clone);
+                            use crate::utils::arc_clone;
+                            let peer_manager_for_peer = arc_clone(&peer_manager_clone);
                             let transport_addr_for_peer = transport_addr.clone();
                             tokio::spawn(async move {
                                 // Create peer from transport connection
@@ -996,9 +991,10 @@ impl NetworkManager {
                 Ok(mut quinn_listener) => {
                     info!("Quinn listener started on {}", listen_addr);
                     let peer_tx = self.peer_tx.clone();
-                    let peer_manager = Arc::clone(&self.peer_manager);
-                    let dos_protection = Arc::clone(&self.dos_protection);
-                    let ban_list = Arc::clone(&self.ban_list);
+                    use crate::utils::arc_clone;
+                    let peer_manager = arc_clone(&self.peer_manager);
+                    let dos_protection = arc_clone(&self.dos_protection);
+                    let ban_list = arc_clone(&self.ban_list);
                     
                     tokio::spawn(async move {
                         loop {
@@ -1023,9 +1019,8 @@ impl NetworkManager {
                                             warn!("Auto-banning IP {} for repeated connection rate violations", ip);
                                             // Auto-ban the IP using configured ban duration
                                             let ban_duration = dos_protection.ban_duration_seconds();
-                                            let unban_timestamp = std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap()
+                                            let unban_timestamp = current_timestamp()
+                                                + ban_duration
                                                 .as_secs()
                                                 + ban_duration;
                                             let mut ban_list_guard = ban_list.write().await;
@@ -1051,8 +1046,9 @@ impl NetworkManager {
                                     let _ = peer_tx.send(NetworkMessage::PeerConnected(quinn_transport_addr.clone()));
 
                                     // Handle connection in background with graceful error handling
+                                    use crate::utils::arc_clone;
                                     let peer_tx_clone = peer_tx.clone();
-                                    let peer_manager_clone = Arc::clone(&peer_manager);
+                                    let peer_manager_clone = arc_clone(&peer_manager);
                                     tokio::spawn(async move {
                                         use crate::network::peer::Peer;
                                         use crate::network::transport::TransportAddr;
@@ -1099,10 +1095,11 @@ impl NetworkManager {
                 Ok(mut iroh_listener) => {
                     info!("Iroh listener started on {}", listen_addr);
                     let peer_tx = self.peer_tx.clone();
-                    let peer_manager = Arc::clone(&self.peer_manager);
-                    let dos_protection = Arc::clone(&self.dos_protection);
-                    let address_database = Arc::clone(&self.address_database);
-                    let socket_to_transport = Arc::clone(&self.socket_to_transport);
+                    use crate::utils::arc_clone;
+                    let peer_manager = arc_clone(&self.peer_manager);
+                    let dos_protection = arc_clone(&self.dos_protection);
+                    let address_database = arc_clone(&self.address_database);
+                    let socket_to_transport = arc_clone(&self.socket_to_transport);
                     tokio::spawn(async move {
                         loop {
                             match iroh_listener.accept().await {
@@ -1262,11 +1259,7 @@ impl NetworkManager {
         let request_id = self.generate_request_id();
         let (tx, rx) = tokio::sync::oneshot::channel();
         
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_timestamp();
         
         let pending_req = PendingRequest {
             sender: tx,
@@ -1328,11 +1321,7 @@ impl NetworkManager {
     
     /// Clean up expired requests (older than max_age_seconds)
     pub fn cleanup_expired_requests(&self, max_age_seconds: u64) -> usize {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
         
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
@@ -1354,8 +1343,9 @@ impl NetworkManager {
     
     /// Start periodic task to clean up expired pending requests
     fn start_request_cleanup_task(&self) {
-        let pending_requests = Arc::clone(&self.pending_requests);
-        let timeout_config = Arc::clone(&self.request_timeout_config);
+        use crate::utils::arc_clone;
+        let pending_requests = arc_clone(&self.pending_requests);
+        let timeout_config = arc_clone(&self.request_timeout_config);
         
         tokio::spawn(async move {
             let cleanup_interval = timeout_config.request_cleanup_interval_seconds;
@@ -1365,11 +1355,7 @@ impl NetworkManager {
                 interval.tick().await;
                 
                 // Clean up old pending requests
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                let now = current_timestamp();
                 
                 let mut pending = pending_requests.lock().await;
                 let initial_count = pending.len();
@@ -1389,8 +1375,9 @@ impl NetworkManager {
     
     /// Start periodic task to clean up DoS protection data
     fn start_dos_protection_cleanup_task(&self) {
-        let dos_protection = Arc::clone(&self.dos_protection);
-        let ban_list = Arc::clone(&self.ban_list);
+        use crate::utils::arc_clone;
+        let dos_protection = arc_clone(&self.dos_protection);
+        let ban_list = arc_clone(&self.ban_list);
         
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
@@ -1402,8 +1389,9 @@ impl NetworkManager {
                 
                 // Auto-ban IPs that should be banned
                 // Periodic check for IPs that have exceeded violation thresholds
-                let dos_clone = Arc::clone(&dos_protection);
-                let ban_list_clone = Arc::clone(&ban_list);
+                use crate::utils::arc_clone;
+                let dos_clone = arc_clone(&dos_protection);
+                let ban_list_clone = arc_clone(&ban_list);
                 let ban_duration = dos_protection.ban_duration_seconds();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Check every minute
@@ -1415,10 +1403,7 @@ impl NetworkManager {
                         
                         // Ban IPs that exceed threshold
                         if !ips_to_ban.is_empty() {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
+                            let now = current_timestamp();
                             let unban_timestamp = now + ban_duration;
                             
                             let mut ban_list_guard = ban_list_clone.write().await;
@@ -1439,17 +1424,14 @@ impl NetworkManager {
     
     /// Start periodic task to clean up expired bans
     fn start_ban_cleanup_task(&self) {
-        let ban_list = Arc::clone(&self.ban_list);
+        use crate::utils::arc_clone;
+        let ban_list = arc_clone(&self.ban_list);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
             loop {
                 interval.tick().await;
                 
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                let now = current_timestamp();
                 
                 let mut ban_list_guard = ban_list.write().await;
                 let expired: Vec<SocketAddr> = ban_list_guard
@@ -1475,11 +1457,12 @@ impl NetworkManager {
 
     /// Start periodic task to attempt peer reconnections with exponential backoff
     fn start_peer_reconnection_task(&self) {
-        let reconnection_queue = Arc::clone(&self.peer_reconnection_queue);
-        let peer_manager = Arc::clone(&self.peer_manager);
+        use crate::utils::arc_clone;
+        let reconnection_queue = arc_clone(&self.peer_reconnection_queue);
+        let peer_manager = arc_clone(&self.peer_manager);
         let peer_tx = self.peer_tx.clone();
         let tcp_transport = self.tcp_transport.clone();
-        let ban_list = Arc::clone(&self.ban_list);
+        let ban_list = arc_clone(&self.ban_list);
         // Get max_peers (we'll need to access it later, so we'll query it in the loop)
         
         tokio::spawn(async move {
@@ -1487,11 +1470,7 @@ impl NetworkManager {
             loop {
                 interval.tick().await;
                 
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                let now = current_timestamp();
                 
                 let mut queue = reconnection_queue.lock().await;
                 
@@ -1514,10 +1493,7 @@ impl NetworkManager {
                 }
                 
                 // Sort peers by quality score (highest first), attempts (lowest first), and recency (oldest first)
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                let now = current_timestamp();
                 let mut peers_to_reconnect: Vec<(SocketAddr, u32, f64, u64)> = queue.iter()
                     .map(|(addr, (attempts, last_attempt, quality))| (*addr, *attempts, *quality, *last_attempt))
                     .collect();
@@ -1580,9 +1556,10 @@ impl NetworkManager {
                     // Clone for async move
                     let addr_clone = *addr;
                     let peer_tx_clone = peer_tx.clone();
-                    let peer_manager_clone = Arc::clone(&peer_manager);
+                    use crate::utils::arc_clone;
+                    let peer_manager_clone = arc_clone(&peer_manager);
                     let tcp_transport_clone = tcp_transport.clone();
-                    let reconnection_queue_clone = Arc::clone(&reconnection_queue);
+                    let reconnection_queue_clone = arc_clone(&reconnection_queue);
                     
                     // Attempt connection in background
                     tokio::spawn(async move {
@@ -1831,11 +1808,7 @@ impl NetworkManager {
                 warn!("Auto-banning IP {} for repeated connection rate violations", ip);
                 // Ban the IP using configured ban duration
                 let ban_duration = self.dos_protection.ban_duration_seconds();
-                let unban_timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    + ban_duration;
+                let unban_timestamp = current_timestamp() + ban_duration;
                 let mut ban_list = self.ban_list.write().await;
                 ban_list.insert(addr, unban_timestamp);
                 return Err(anyhow::anyhow!("IP {} is banned due to connection rate violations", ip));
@@ -2047,7 +2020,9 @@ impl NetworkManager {
             // Update metrics periodically (every 100 messages or 10 seconds)
             let now = std::time::SystemTime::now();
             let should_update = message_count % 100 == 0 
-                || now.duration_since(last_metrics_update).unwrap().as_secs() >= 10;
+                || now.duration_since(last_metrics_update)
+                    .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+                    .as_secs() >= 10;
             
             if should_update {
                 let pm = self.peer_manager.lock().await;
@@ -2112,11 +2087,7 @@ impl NetworkManager {
                         TransportAddr::Iroh(_) => None, // Iroh peers use different reconnection mechanism
                     } {
                         // Add to reconnection queue with exponential backoff
-                        use std::time::{SystemTime, UNIX_EPOCH};
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
+                        let now = current_timestamp();
                         // Add to reconnection queue with exponential backoff
                         let mut reconnection_queue = self.peer_reconnection_queue.lock().await;
                         reconnection_queue.insert(socket_addr, (0, now, quality_score));
@@ -2418,10 +2389,11 @@ impl NetworkManager {
             
             // Create NodeChainAccess
             use crate::network::chain_access::NodeChainAccess;
+            use crate::utils::arc_clone;
             let chain_access = NodeChainAccess::new(
                 storage.blocks(),
                 storage.transactions(),
-                Arc::clone(mempool_manager),
+                arc_clone(mempool_manager),
             );
             
             // Get UTXO set and height
@@ -2881,13 +2853,8 @@ impl NetworkManager {
         addresses: &[NetworkAddress],
     ) -> Result<()> {
         use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
-        use std::time::{SystemTime, UNIX_EPOCH};
-        
         // Rate limiting: don't send addr messages too frequently (Bitcoin Core: ~every 2.4 hours)
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
         let min_interval = 2 * 60 * 60 + 24 * 60; // 2.4 hours in seconds
         
         {
@@ -3049,11 +3016,7 @@ impl NetworkManager {
                         return true; // Permanent ban
                     }
                     // Check if ban has expired
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
+                    let now = current_timestamp();
                     if now < unban_timestamp {
                         return true; // Still banned
                     } else {
@@ -3088,17 +3051,12 @@ impl NetworkManager {
     ) -> Result<()> {
         use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
         use crate::network::ban_list_merging::calculate_ban_list_hash;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
         debug!("GetBanList request from {}: full={}, min_duration={}", 
                peer_addr, msg.request_full, msg.min_ban_duration);
 
         // Get current ban list
         let ban_list = self.ban_list.read().await;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
 
         // Convert to BanEntry format, filtering by min_ban_duration
         let mut ban_entries: Vec<BanEntry> = Vec::new();

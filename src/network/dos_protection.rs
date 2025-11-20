@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tracing::warn;
+use crate::utils::current_timestamp;
 
 /// Connection rate limiter (tracks connection attempts per time window)
 pub struct ConnectionRateLimiter {
@@ -32,10 +32,7 @@ impl ConnectionRateLimiter {
 
     /// Check if a connection attempt is allowed
     pub fn check_connection(&mut self, ip: IpAddr) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
 
         // Clean up old entries outside the time window
         let cutoff = now.saturating_sub(self.window_seconds);
@@ -61,10 +58,7 @@ impl ConnectionRateLimiter {
 
     /// Clean up old entries (periodic maintenance)
     pub fn cleanup(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
         let cutoff = now.saturating_sub(self.window_seconds);
 
         self.connection_attempts.retain(|_, attempts| {
@@ -114,10 +108,7 @@ pub struct DosProtectionMetrics {
 
 impl ResourceMetrics {
     pub fn new() -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
         Self {
             active_connections: 0,
             message_queue_size: 0,
@@ -298,10 +289,7 @@ impl DosProtectionManager {
         bytes_sent: u64,
     ) {
         let mut metrics = self.resource_metrics.lock().await;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
 
         metrics.active_connections = active_connections;
         metrics.message_queue_size = message_queue_size;

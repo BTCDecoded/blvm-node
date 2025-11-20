@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::{debug, warn};
+use crate::utils::current_timestamp;
 
 /// Mining RPC methods with dependencies
 pub struct MiningRpc {
@@ -618,10 +619,7 @@ impl MiningRpc {
     fn get_min_time(&self, _height: Natural) -> Natural {
         // Get minimum time (median time of last 11 blocks + 1)
         // For now, return current time
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as Natural
+        current_timestamp() as Natural
     }
 
     /// Submit a block to the network

@@ -301,28 +301,70 @@ impl BlockchainRpc {
     pub async fn get_block(&self, hash: &str) -> Result<Value> {
         debug!("RPC: getblock {}", hash);
 
-        // Simplified implementation - in real implementation would query storage
-        Ok(json!({
-            "hash": hash,
-            "confirmations": 0,
-            "strippedsize": 0,
-            "size": 0,
-            "weight": 0,
-            "height": 0,
-            "version": 1,
-            "versionHex": "00000001",
-            "merkleroot": "0000000000000000000000000000000000000000000000000000000000000000",
-            "tx": [],
-            "time": 1231006505,
-            "mediantime": 1231006505,
-            "nonce": 0,
-            "bits": "1d00ffff",
-            "difficulty": 1.0,
-            "chainwork": "0000000000000000000000000000000000000000000000000000000000000000",
-            "nTx": 0,
-            "previousblockhash": null,
-            "nextblockhash": null
-        }))
+        // Decode hash first (before async operations)
+        let hash_bytes = match hex::decode(hash) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Err(anyhow::anyhow!("Invalid hash: {}", e));
+            }
+        };
+        
+        if hash_bytes.len() != 32 {
+            return Err(anyhow::anyhow!("Invalid hash length"));
+        }
+        
+        let mut hash_array = [0u8; 32];
+        hash_array.copy_from_slice(&hash_bytes);
+
+        // Try to get block from storage with graceful degradation
+        if let Some(ref storage) = self.storage {
+            // Use timeout to prevent hanging on slow storage (wrap sync operation)
+            use crate::utils::with_storage_timeout;
+            match with_storage_timeout(async {
+                tokio::task::spawn_blocking({
+                    let storage = storage.clone();
+                    let hash_array = hash_array;
+                    move || storage.blocks().get_block(&hash_array)
+                }).await
+            }).await {
+                Ok(Ok(Ok(Some(block)))) => {
+                    // Block found - return it
+                    // TODO: Format block according to verbosity parameter
+                    return Ok(json!({
+                        "hash": hash,
+                        "confirmations": 1, // TODO: Calculate actual confirmations
+                        "size": 0, // TODO: Calculate size
+                        "height": 0, // TODO: Get height
+                        "version": block.header.version,
+                        "merkleroot": hex::encode(block.header.merkle_root),
+                        "tx": [], // TODO: Include transactions
+                        "time": block.header.timestamp,
+                        "bits": format!("{:08x}", block.header.bits),
+                        "difficulty": 1.0, // TODO: Calculate difficulty
+                    }));
+                }
+                Ok(Ok(Ok(None))) => {
+                    // Block not found - return error
+                    return Err(anyhow::anyhow!("Block not found"));
+                }
+                Ok(Ok(Err(e))) => {
+                    // Storage error - log and fall through to graceful degradation
+                    warn!("Storage error getting block {}: {}", hash, e);
+                }
+                Ok(Err(_)) => {
+                    // Task join error - log and fall through
+                    warn!("Task error getting block {}", hash);
+                }
+                Err(_) => {
+                    // Timeout - log and fall through to graceful degradation
+                    warn!("Timeout getting block {} from storage", hash);
+                }
+            }
+        }
+
+        // Graceful degradation: return error if storage unavailable or block not found
+        // (Don't return fake data - that's misleading)
+        Err(anyhow::anyhow!("Block not found or storage unavailable"))
     }
 
     /// Get block hash by height

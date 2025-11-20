@@ -13,6 +13,7 @@ use crate::network::stratum_v2::miner::StratumV2Miner;
 use crate::network::stratum_v2::protocol::{TlvDecoder, TlvEncoder};
 use crate::network::tcp_transport::TcpTransport;
 use crate::network::transport::{Transport, TransportAddr, TransportConnection, TransportType};
+use crate::utils::option_to_result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -230,8 +231,9 @@ impl StratumV2Client {
                                 let mut pending = pending_requests.write().await;
                                 if let Some((&req_id, _sender)) = pending.iter().next() {
                                     // Clone sender before moving it
-                                    let sender = pending.remove(&req_id).unwrap();
-                                    let _ = sender.send(data.clone());
+                                    if let Some(sender) = pending.remove(&req_id) {
+                                        let _ = sender.send(data.clone());
+                                    }
                                 }
                             }
                             Err(e) => {

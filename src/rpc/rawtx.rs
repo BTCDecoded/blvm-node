@@ -18,7 +18,7 @@ use hex;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Raw Transaction RPC methods
 pub struct RawTxRpc {
@@ -101,7 +101,10 @@ impl RawTxRpc {
             let _timer = self
                 .profiler
                 .as_ref()
-                .map(|p| PerformanceTimer::start(Arc::clone(p), OperationType::TxValidation));
+                .map(|p| {
+                    use crate::utils::arc_clone;
+                    PerformanceTimer::start(arc_clone(p), OperationType::TxValidation)
+                });
             let validation_start = Instant::now();
             use bllvm_protocol::ConsensusProof;
             let consensus = ConsensusProof::new();
@@ -455,56 +458,104 @@ impl RawTxRpc {
                 }
             }
 
-            // Check storage
-            if let Ok(Some(utxo)) = storage.utxos().get_utxo(&outpoint) {
-                let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
-                let tip_height = storage.chain().get_height()?.unwrap_or(0);
-
-                // Find block height containing this transaction
-                let mut tx_height: Option<u64> = None;
-                for h in 0..=tip_height {
-                    if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(h) {
-                        if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
-                            for tx in &block.transactions {
-                                use bllvm_protocol::block::calculate_tx_id;
-                                let txid = calculate_tx_id(tx);
-                                if txid == outpoint.hash {
-                                    tx_height = Some(h);
-                                    break;
-                                }
+            // Check storage with timeout to prevent hanging (wrap sync operations)
+            use crate::utils::with_storage_timeout;
+            match with_storage_timeout(async {
+                tokio::task::spawn_blocking({
+                    let storage = storage.clone();
+                    let outpoint = outpoint.clone();
+                    move || storage.utxos().get_utxo(&outpoint)
+                }).await
+            }).await {
+                Ok(Ok(Ok(Some(utxo)))) => {
+                    // UTXO found - get chain info with timeout
+                    let (best_hash, tip_height) = match with_storage_timeout(async {
+                        tokio::task::spawn_blocking({
+                            let storage = storage.clone();
+                            move || -> Result<([u8; 32], u64), anyhow::Error> {
+                                let best_hash = storage.chain().get_tip_hash()
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or([0u8; 32]);
+                                let tip_height = storage.chain().get_height()
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(0);
+                                Ok((best_hash, tip_height))
                             }
-                        }
-                        if tx_height.is_some() {
-                            break;
-                        }
-                    }
+                        }).await
+                    }).await {
+                        Ok(Ok(Ok((hash, height)))) => (hash, height),
+                        _ => ([0u8; 32], 0), // Fallback on error/timeout
+                    };
+
+                    // Find block height containing this transaction (with timeout protection)
+                    // Use blocking task with timeout to prevent hanging
+                    let tx_height = match with_storage_timeout(async {
+                        tokio::task::spawn_blocking({
+                            let storage = storage.clone();
+                            let outpoint_hash = outpoint.hash;
+                            let search_limit = tip_height.min(1000); // Limit search
+                            move || -> Result<Option<u64>, anyhow::Error> {
+                                let mut tx_height: Option<u64> = None;
+                                for h in 0..=search_limit {
+                                    if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(h) {
+                                        if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
+                                            for tx in &block.transactions {
+                                                use bllvm_protocol::block::calculate_tx_id;
+                                                let txid = calculate_tx_id(tx);
+                                                if txid == outpoint_hash {
+                                                    tx_height = Some(h);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if tx_height.is_some() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(tx_height)
+                            }
+                        }).await
+                    }).await {
+                        Ok(Ok(Ok(height))) => height,
+                        _ => None, // Fallback on error/timeout
+                    };
+
+                    let confirmations = tx_height
+                        .map(|h| {
+                            if h > tip_height {
+                                0
+                            } else {
+                                (tip_height - h + 1) as i64
+                            }
+                        })
+                        .unwrap_or(0);
+
+                    return Ok(json!({
+                        "bestblock": hex::encode(best_hash),
+                        "confirmations": confirmations,
+                        "value": utxo.value as f64 / 100_000_000.0,
+                        "scriptPubKey": {
+                            "asm": "",
+                            "hex": hex::encode(&utxo.script_pubkey),
+                            "reqSigs": 1,
+                            "type": "pubkeyhash",
+                            "addresses": []
+                        },
+                        "coinbase": false
+                    }));
                 }
-
-                let confirmations = tx_height
-                    .map(|h| {
-                        if h > tip_height {
-                            0
-                        } else {
-                            (tip_height - h + 1) as i64
-                        }
-                    })
-                    .unwrap_or(0);
-
-                Ok(json!({
-                    "bestblock": hex::encode(best_hash),
-                    "confirmations": confirmations,
-                    "value": utxo.value as f64 / 100_000_000.0,
-                    "scriptPubKey": {
-                        "asm": "",
-                        "hex": hex::encode(&utxo.script_pubkey),
-                        "reqSigs": 1,
-                        "type": "pubkeyhash",
-                        "addresses": []
-                    },
-                    "coinbase": false
-                }))
-            } else {
-                Ok(Value::Null)
+                Ok(Ok(Ok(None))) | Ok(Ok(Err(_))) | Ok(Err(_)) => {
+                    // UTXO not found or error - return null (normal case)
+                    return Ok(Value::Null);
+                }
+                Err(_) => {
+                    // Timeout - log and return null (graceful degradation)
+                    warn!("Timeout getting UTXO from storage");
+                    return Ok(Value::Null);
+                }
             }
         } else {
             Ok(json!(null))
