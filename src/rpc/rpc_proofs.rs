@@ -148,11 +148,3 @@ mod kani_proofs {
         }
     }
 }
-<<<<<<< Updated upstream
-=======
-
-
-
-
-
->>>>>>> Stashed changes

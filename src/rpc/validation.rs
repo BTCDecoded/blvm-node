@@ -266,9 +266,3 @@ mod tests {
         assert!(validate_numeric_param::<u64>(&params, 0, "value", Some(0), Some(1000)).is_err());
     }
 }
-<<<<<<< Updated upstream
-=======
-
-
-
->>>>>>> Stashed changes
