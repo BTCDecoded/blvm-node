@@ -17,7 +17,7 @@ use tokio::io::AsyncReadExt;
 #[cfg(feature = "iroh")]
 use tracing::{debug, error, info, warn};
 #[cfg(feature = "iroh")]
-use iroh::endpoint::{Endpoint, Connection, SendStream, RecvStream};
+use iroh::endpoint::{Endpoint, Connection, SendStream};
 #[cfg(feature = "iroh")]
 use iroh::{PublicKey, EndpointId, EndpointAddr, SecretKey};
 
@@ -218,7 +218,7 @@ impl TransportConnection for IrohConnection {
     /// Opens a dedicated QUIC stream for the channel, enabling parallel operations.
     /// Streams are not reused (they're closed after sending) to avoid complexity.
     /// For true stream reuse, would need async HashMap with proper locking.
-    async fn send_on_channel(&mut self, channel_id: Option<u32>, data: &[u8]) -> Result<()> {
+    async fn send_on_channel(&mut self, _channel_id: Option<u32>, data: &[u8]) -> Result<()> {
         if !self.connected {
             return Err(anyhow::anyhow!("Connection closed"));
         }

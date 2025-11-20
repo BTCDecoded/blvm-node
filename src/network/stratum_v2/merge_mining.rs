@@ -8,9 +8,8 @@
 
 use crate::network::stratum_v2::error::{StratumV2Error, StratumV2Result};
 use crate::network::stratum_v2::messages::*;
-use bllvm_protocol::types::{Block, Hash};
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Secondary chain configuration for merge mining
 #[derive(Debug, Clone)]
@@ -95,7 +94,7 @@ impl MergeMiningCoordinator {
     /// Create merge mining channel for a chain
     pub fn create_channel(&mut self, chain_id: &str, channel_id: u32) -> StratumV2Result<()> {
         // Verify chain is enabled
-        let chain = self
+        let _chain = self
             .secondary_chains
             .iter()
             .find(|c| c.chain_id == chain_id && c.enabled)

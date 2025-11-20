@@ -12,9 +12,9 @@
 use bllvm_protocol::Hash;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Dandelion relay state
 pub struct DandelionRelay<C: Clock = SystemClock> {

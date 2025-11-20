@@ -13,7 +13,6 @@ use crate::network::stratum_v2::miner::StratumV2Miner;
 use crate::network::stratum_v2::protocol::{TlvDecoder, TlvEncoder};
 use crate::network::tcp_transport::TcpTransport;
 use crate::network::transport::{Transport, TransportAddr, TransportConnection, TransportType};
-use crate::utils::option_to_result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -371,7 +370,7 @@ impl StratumV2Client {
     async fn send_request<T: StratumV2Message>(&self, message: &T) -> StratumV2Result<Vec<u8>> {
         // Get connection
         let mut conn_guard = self.connection.write().await;
-        let mut conn = conn_guard
+        let conn = conn_guard
             .as_mut()
             .ok_or_else(|| StratumV2Error::Connection(anyhow::anyhow!("Not connected")))?;
 

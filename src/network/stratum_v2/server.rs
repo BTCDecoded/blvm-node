@@ -10,11 +10,10 @@ use crate::network::stratum_v2::messages::{
     SetupConnectionMessage, SetupConnectionSuccessMessage, StratumV2Message, SubmitSharesMessage,
     SubmitSharesSuccessMessage,
 };
-use crate::network::stratum_v2::pool::{JobInfo, StratumV2Pool};
+use crate::network::stratum_v2::pool::StratumV2Pool;
 use crate::network::stratum_v2::protocol::{TlvDecoder, TlvEncoder};
 use crate::network::NetworkManager;
 use crate::node::miner::MiningCoordinator;
-use bllvm_protocol::types::Block;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;

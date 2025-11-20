@@ -195,7 +195,7 @@ async fn test_concurrent_peer_operations() {
     for i in 0..10 {
         let manager_clone = Arc::clone(&manager);
         let handle = tokio::spawn(async move {
-            let addr: SocketAddr = format!("127.0.0.1:{}", 8080 + i).parse().unwrap();
+            let _addr: SocketAddr = format!("127.0.0.1:{}", 8080 + i).parse().unwrap();
             // Try to get peer count (read operation)
             let _count = {
                 let pm = manager_clone.peer_manager().await;
@@ -216,7 +216,7 @@ async fn test_concurrent_peer_operations() {
 /// Test that message processing doesn't deadlock
 #[tokio::test]
 async fn test_concurrent_message_processing() {
-    let (tx, mut rx): (mpsc::UnboundedSender<()>, _) = mpsc::unbounded_channel();
+    let (_tx, mut rx): (mpsc::UnboundedSender<()>, _) = mpsc::unbounded_channel();
     let manager = Arc::new(NetworkManager::new(
         "127.0.0.1:8333".parse().unwrap(),
     ));

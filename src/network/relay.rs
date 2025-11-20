@@ -9,7 +9,7 @@
 use super::dandelion::DandelionRelay;
 use bllvm_protocol::{Block, Hash};
 use std::collections::HashMap;
-use tracing::{debug, info};
+use tracing::debug;
 use crate::utils::current_timestamp;
 
 /// Relay manager

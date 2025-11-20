@@ -1050,7 +1050,6 @@ impl NetworkManager {
                                     let peer_tx_clone = peer_tx.clone();
                                     let peer_manager_clone = arc_clone(&peer_manager);
                                     tokio::spawn(async move {
-                                        use crate::network::peer::Peer;
                                         use crate::network::transport::TransportAddr;
                                         
                                         let quinn_addr = TransportAddr::Quinn(socket_addr);
@@ -1141,8 +1140,6 @@ impl NetworkManager {
                                     let socket_to_transport_clone = Arc::clone(&socket_to_transport);
                                     let address_database_clone = Arc::clone(&address_database);
                                     tokio::spawn(async move {
-                                        use crate::network::peer::Peer;
-                                        
                                         // For Iroh, we need a SocketAddr for Peer::from_transport_connection
                                         // Generate a unique placeholder based on key hash for lookups
                                         let placeholder_socket = if let TransportAddr::Iroh(ref key) = iroh_addr_clone {
@@ -3336,7 +3333,7 @@ mod tests {
         let mut manager = PeerManager::new(2);
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         // Create a mock peer without requiring network connection
-        let (tx, _rx): (mpsc::UnboundedSender<NetworkMessage>, _) = mpsc::unbounded_channel();
+        let (_tx, _rx): (mpsc::UnboundedSender<NetworkMessage>, _) = mpsc::unbounded_channel();
 
         // Skip this test since we can't easily create a mock TcpStream
         // In a real implementation, we'd use dependency injection
@@ -3348,8 +3345,8 @@ mod tests {
     #[tokio::test]
     async fn test_peer_manager_max_peers() {
         let mut manager = PeerManager::new(1);
-        let addr1: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let addr2: std::net::SocketAddr = "127.0.0.1:8081".parse().unwrap();
+        let _addr1: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let _addr2: std::net::SocketAddr = "127.0.0.1:8081".parse().unwrap();
 
         // Test manager capacity without creating real peers
         assert_eq!(manager.peer_count(), 0);
@@ -3392,8 +3389,8 @@ mod tests {
     #[tokio::test]
     async fn test_peer_manager_peer_addresses() {
         let mut manager = PeerManager::new(10);
-        let addr1: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let addr2: std::net::SocketAddr = "127.0.0.1:8081".parse().unwrap();
+        let _addr1: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let _addr2: std::net::SocketAddr = "127.0.0.1:8081".parse().unwrap();
 
         // Test manager logic without creating real peers
         assert_eq!(manager.peer_count(), 0);

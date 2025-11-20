@@ -256,7 +256,7 @@ impl StratumV2Pool {
         );
 
         // Get miner connection and extract channel info
-        let (mut total_shares, mut accepted_shares, mut rejected_shares, last_job_id) = {
+        let (_total_shares, accepted_shares, rejected_shares, last_job_id) = {
             let miner = self
                 .miners
                 .get_mut(endpoint)
@@ -439,7 +439,7 @@ impl StratumV2Pool {
 
         // Use network difficulty as base (if available)
         // For now, use genesis difficulty as fallback
-        let network_bits = 0x1d00ffffu32; // Genesis difficulty
+        let _network_bits = 0x1d00ffffu32; // Genesis difficulty
 
         // Calculate network target using consensus-proof logic
         // Channel target = network_target * (network_difficulty / channel_difficulty)
@@ -485,7 +485,7 @@ impl StratumV2Pool {
         }
 
         // Calculate all transaction hashes
-        let mut tx_hashes: Vec<Hash> = block
+        let tx_hashes: Vec<Hash> = block
             .transactions
             .iter()
             .map(|tx| calculate_tx_id(tx))

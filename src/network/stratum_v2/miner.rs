@@ -33,7 +33,7 @@ impl StratumV2Miner {
     }
 
     /// Open a mining channel with the pool
-    pub async fn open_channel(&mut self, min_difficulty: u32) -> StratumV2Result<u32> {
+    pub async fn open_channel(&mut self, _min_difficulty: u32) -> StratumV2Result<u32> {
         // Generate new channel ID
         let channel_id = 1; // In full implementation, would use unique ID
 
@@ -62,7 +62,7 @@ impl StratumV2Miner {
         // Update current job if it matches
         if let Some(job_id) = self.current_job_id {
             if job_id == msg.job_id {
-                if let Some(ref mut job) = self.jobs.get_mut(&job_id) {
+                if let Some(ref mut _job) = self.jobs.get_mut(&job_id) {
                     // Update job with new prev hash
                 }
             }
@@ -84,7 +84,7 @@ impl StratumV2Miner {
     ///
     /// This converts the Stratum V2 mining job into a Block structure
     /// that can be used by the mining engine.
-    pub fn template_to_block(&self, job: &NewMiningJobMessage) -> StratumV2Result<Block> {
+    pub fn template_to_block(&self, _job: &NewMiningJobMessage) -> StratumV2Result<Block> {
         // In full implementation, would construct Block from:
         // - prev_hash
         // - merkle_path
@@ -100,7 +100,7 @@ impl StratumV2Miner {
     /// Validate share before submission
     ///
     /// Validates that a share meets the required difficulty before submitting to pool.
-    pub fn validate_share(&self, share: &ShareData) -> StratumV2Result<bool> {
+    pub fn validate_share(&self, _share: &ShareData) -> StratumV2Result<bool> {
         // In full implementation, would:
         // 1. Construct block header from share data
         // 2. Verify proof of work using consensus-proof::pow::check_proof_of_work

@@ -144,6 +144,11 @@ dandelion = []
 ctv = ["bllvm-protocol/ctv"]
 # Governance webhook integration
 governance = ["dep:reqwest"]
+# Memory allocator optimization (mimalloc) - faster than default allocator
+# Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
+mimalloc = []
+# JSON logging format for structured logging (production/monitoring)
+json-logging = []
 
 # Formal verification (Kani model checking) - verification only, not in release builds
 verify = ["kani-verifier"]
