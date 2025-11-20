@@ -22,21 +22,18 @@ env:
 
 jobs:
   setup:
-    name: Setup Dependencies and Cache
+    name: Setup
     runs-on: [self-hosted, linux, x64]
     outputs:
       cache-key: ${{ steps.setup-cache.outputs.cache-key }}
       consensus-cache-key: ${{ steps.setup-cache.outputs.consensus-cache-key }}
       protocol-cache-key: ${{ steps.setup-cache.outputs.protocol-cache-key }}
     steps:
-      - name: Emergency disk space check
+      - name: Disk check
         run: |
-          echo "🔍 DEBUG: Disk space before setup:"
           df -h
           if [ $(df / | tail -1 | awk '{print $5}' | sed 's/%//') -gt 80 ]; then
-            echo "⚠️ Disk space >80%, cleaning old caches..."
             find /tmp/runner-cache -maxdepth 2 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
-            echo "🔍 DEBUG: Disk space after cleanup:"
             df -h
           fi
 
@@ -48,7 +45,7 @@ jobs:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
-      - name: Checkout bllvm-consensus dependency
+      - name: Checkout consensus
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
@@ -61,7 +58,7 @@ jobs:
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
       
-      - name: Setup local cache system
+      - name: Cache
         id: setup-cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
@@ -95,8 +92,6 @@ jobs:
           
           mkdir -p "$CARGO_CACHE_DIR"/{registry,git} "$TARGET_CACHE_DIR" "$CONSENSUS_TARGET_DIR" "$PROTOCOL_TARGET_DIR"
           
-          echo "🔍 DEBUG: Cache setup complete"
-          echo "🔍 DEBUG: Cache keys:"
           echo "  - Main: ${CACHE_KEY:0:16}..."
           echo "  - Consensus: ${CONSENSUS_CACHE_KEY:0:16}..."
           echo "  - Protocol: ${PROTOCOL_CACHE_KEY:0:16}..."
@@ -119,7 +114,7 @@ jobs:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
-      - name: Checkout bllvm-consensus dependency
+      - name: Checkout consensus
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
@@ -132,7 +127,7 @@ jobs:
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
       
-      - name: Setup cache environment
+      - name: Cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
@@ -144,35 +139,29 @@ jobs:
           echo "CONSENSUS_TARGET_DIR=$CACHE_ROOT/bllvm-consensus-target/$CONSENSUS_CACHE_KEY" >> $GITHUB_ENV
           echo "PROTOCOL_TARGET_DIR=$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY" >> $GITHUB_ENV
       
-      - name: Restore Cargo registry cache
+      - name: Restore registry
         run: |
           if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
-            echo "🚀 Restoring Cargo registry from local cache..."
             mkdir -p "$HOME/.cargo/registry"
             rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
-            echo "✅ Cargo registry restored (size: $(du -sh $HOME/.cargo/registry 2>/dev/null | cut -f1 || echo 'N/A'))"
           else
             echo "💿 No Cargo registry cache found"
           fi
       
-      - name: Restore Cargo git cache
+      - name: Restore git
         run: |
           if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
-            echo "🚀 Restoring Cargo git cache from local cache..."
             mkdir -p "$HOME/.cargo/git"
             rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
-            echo "✅ Cargo git cache restored"
           else
             echo "💿 No Cargo git cache found"
           fi
       
-      - name: Restore bllvm-consensus build artifacts
+      - name: Restore consensus
         run: |
           if [ -d "$CONSENSUS_TARGET_DIR" ] && [ "$(ls -A $CONSENSUS_TARGET_DIR 2>/dev/null)" ]; then
-            echo "🚀 Restoring bllvm-consensus target from cache..."
             mkdir -p ../bllvm-consensus/target
             rsync -a --delete "$CONSENSUS_TARGET_DIR/" ../bllvm-consensus/target/ || true
-            echo "✅ bllvm-consensus target restored (size: $(du -sh ../bllvm-consensus/target 2>/dev/null | cut -f1 || echo 'N/A'))"
           else
             echo "💿 No bllvm-consensus target cache found"
           fi
@@ -180,20 +169,16 @@ jobs:
       - name: Restore bllvm-protocol build artifacts
         run: |
           if [ -d "$PROTOCOL_TARGET_DIR" ] && [ "$(ls -A $PROTOCOL_TARGET_DIR 2>/dev/null)" ]; then
-            echo "🚀 Restoring bllvm-protocol target from cache..."
             mkdir -p ../bllvm-protocol/target
             rsync -a --delete "$PROTOCOL_TARGET_DIR/" ../bllvm-protocol/target/ || true
-            echo "✅ bllvm-protocol target restored (size: $(du -sh ../bllvm-protocol/target 2>/dev/null | cut -f1 || echo 'N/A'))"
           else
             echo "💿 No bllvm-protocol target cache found"
           fi
       
-      - name: Restore target directory cache
+      - name: Restore target
         run: |
           if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
-            echo "🚀 Restoring target directory from local cache..."
             rsync -a --delete "$TARGET_CACHE_DIR/" ./target/ || true
-            echo "✅ Target directory restored (size: $(du -sh ./target 2>/dev/null | cut -f1 || echo 'N/A'))"
           else
             echo "💿 No target cache found, will build from scratch"
           fi
@@ -206,49 +191,39 @@ jobs:
       - name: Run tests
         run: cargo test --verbose --all-features
       
-      - name: Cache Cargo registry
+      - name: Cache registry
         if: always()
         run: |
           if [ -d "$HOME/.cargo/registry" ] && [ "$CARGO_CACHE_DIR" != "" ]; then
-            echo "💾 Caching Cargo registry..."
             rsync -a --delete "$HOME/.cargo/registry/" "$CARGO_CACHE_DIR/registry/" || true
-            echo "✅ Cargo registry cached"
           fi
       
-      - name: Cache Cargo git
+      - name: Cache git
         if: always()
         run: |
           if [ -d "$HOME/.cargo/git" ] && [ "$CARGO_CACHE_DIR" != "" ]; then
-            echo "💾 Caching Cargo git cache..."
             rsync -a --delete "$HOME/.cargo/git/" "$CARGO_CACHE_DIR/git/" || true
-            echo "✅ Cargo git cache saved"
           fi
       
-      - name: Cache bllvm-consensus build artifacts
+      - name: Cache consensus
         if: always()
         run: |
           if [ -d "../bllvm-consensus/target" ] && [ "$CONSENSUS_TARGET_DIR" != "" ]; then
-            echo "💾 Caching bllvm-consensus target..."
             rsync -a --delete ../bllvm-consensus/target/ "$CONSENSUS_TARGET_DIR/" || true
-            echo "✅ bllvm-consensus target cached"
           fi
       
       - name: Cache bllvm-protocol build artifacts
         if: always()
         run: |
           if [ -d "../bllvm-protocol/target" ] && [ "$PROTOCOL_TARGET_DIR" != "" ]; then
-            echo "💾 Caching bllvm-protocol target..."
             rsync -a --delete ../bllvm-protocol/target/ "$PROTOCOL_TARGET_DIR/" || true
-            echo "✅ bllvm-protocol target cached"
           fi
       
-      - name: Cache target directory
+      - name: Cache target
         if: always()
         run: |
           if [ -d "./target" ] && [ "$TARGET_CACHE_DIR" != "" ]; then
-            echo "💾 Caching target directory..."
             rsync -a --delete ./target/ "$TARGET_CACHE_DIR/" || true
-            echo "✅ Target directory cached"
           fi
       
       - name: Run tests with coverage
@@ -261,7 +236,7 @@ jobs:
         with:
           file: coverage/cobertura.xml
       
-      - name: Cache cleanup management
+      - name: Cleanup
         if: always()
         run: |
           echo "🧹 Cleaning up old caches..."
@@ -272,7 +247,6 @@ jobs:
           find "$CACHE_ROOT/target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
           find "$CACHE_ROOT/bllvm-consensus-target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
           find "$CACHE_ROOT/bllvm-protocol-target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
-          echo "✅ Cache cleanup completed"
 
   clippy:
     name: Clippy
@@ -287,7 +261,7 @@ jobs:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
-      - name: Checkout bllvm-consensus dependency
+      - name: Checkout consensus
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
@@ -300,21 +274,21 @@ jobs:
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
       
-      - name: Setup cache environment
+      - name: Cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
           echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
           echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
       
-      - name: Restore Cargo registry cache
+      - name: Restore registry
         run: |
           if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/registry"
             rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
           fi
       
-      - name: Restore Cargo git cache
+      - name: Restore git
         run: |
           if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/git"
@@ -331,7 +305,7 @@ jobs:
         run: cargo clippy -- -D warnings
 
   fmt:
-    name: Rustfmt
+    name: Format
     needs: setup
     runs-on: [self-hosted, linux, x64]
     steps:
@@ -347,26 +321,26 @@ jobs:
         run: cargo fmt -- --check
 
   docs:
-    name: Documentation
+    name: Docs
     needs: setup
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
       
-      - name: Setup cache environment
+      - name: Cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
           echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
       
-      - name: Restore Cargo registry cache
+      - name: Restore registry
         run: |
           if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/registry"
             rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
           fi
       
-      - name: Restore Cargo git cache
+      - name: Restore git
         run: |
           if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/git"
@@ -385,7 +359,7 @@ jobs:
         run: cargo doc --no-deps --document-private-items
 
   security:
-    name: Security Audit
+    name: Security
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
@@ -405,7 +379,6 @@ jobs:
           # updating iroh-net to 0.28+ (deprecated, requires API changes)
           # See Cargo.toml security note for details
           cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 || {
-            echo "⚠️  Security audit found vulnerabilities in optional dependencies"
             echo "These are in iroh-net feature (not enabled by default)"
             echo "See Cargo.toml for details on how to address them"
             exit 0  # Don't fail CI for optional feature vulnerabilities
@@ -424,7 +397,7 @@ jobs:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
-      - name: Checkout bllvm-consensus dependency
+      - name: Checkout consensus
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
@@ -437,7 +410,7 @@ jobs:
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
       
-      - name: Setup cache environment
+      - name: Cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
@@ -449,21 +422,21 @@ jobs:
           echo "CONSENSUS_TARGET_DIR=$CACHE_ROOT/bllvm-consensus-target/$CONSENSUS_CACHE_KEY" >> $GITHUB_ENV
           echo "PROTOCOL_TARGET_DIR=$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY" >> $GITHUB_ENV
       
-      - name: Restore Cargo registry cache
+      - name: Restore registry
         run: |
           if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/registry"
             rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
           fi
       
-      - name: Restore Cargo git cache
+      - name: Restore git
         run: |
           if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/git"
             rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
           fi
       
-      - name: Restore bllvm-consensus build artifacts
+      - name: Restore consensus
         run: |
           if [ -d "$CONSENSUS_TARGET_DIR" ] && [ "$(ls -A $CONSENSUS_TARGET_DIR 2>/dev/null)" ]; then
             mkdir -p ../bllvm-consensus/target
@@ -477,7 +450,7 @@ jobs:
             rsync -a --delete "$PROTOCOL_TARGET_DIR/" ../bllvm-protocol/target/ || true
           fi
       
-      - name: Restore target directory cache
+      - name: Restore target
         run: |
           if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
             rsync -a --delete "$TARGET_CACHE_DIR/" ./target/ || true
@@ -494,7 +467,7 @@ jobs:
       - name: Build tests
         run: cargo test --no-run --release --all-features
       
-      - name: Cache bllvm-consensus build artifacts
+      - name: Cache consensus
         if: always()
         run: |
           if [ -d "../bllvm-consensus/target" ] && [ "$CONSENSUS_TARGET_DIR" != "" ]; then
@@ -508,7 +481,7 @@ jobs:
             rsync -a --delete ../bllvm-protocol/target/ "$PROTOCOL_TARGET_DIR/" || true
           fi
       
-      - name: Cache target directory
+      - name: Cache target
         if: always()
         run: |
           if [ -d "./target" ] && [ "$TARGET_CACHE_DIR" != "" ]; then
