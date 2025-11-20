@@ -30,27 +30,25 @@ where
 }
 
 /// Default timeout for network operations
-/// 
+///
 /// Note: These are fallback defaults. Prefer using configurable timeouts
 /// from RequestTimeoutConfig when available.
 pub const DEFAULT_NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default timeout for storage operations
-/// 
+///
 /// Note: These are fallback defaults. Prefer using configurable timeouts
 /// from RequestTimeoutConfig when available.
 pub const DEFAULT_STORAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default timeout for RPC operations
-/// 
+///
 /// Note: These are fallback defaults. Prefer using configurable timeouts
 /// from RequestTimeoutConfig when available.
 pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Execute operation with default network timeout
-pub async fn with_network_timeout<F, T>(
-    operation: F,
-) -> Result<T, tokio::time::error::Elapsed>
+pub async fn with_network_timeout<F, T>(operation: F) -> Result<T, tokio::time::error::Elapsed>
 where
     F: std::future::Future<Output = T>,
 {
@@ -58,9 +56,7 @@ where
 }
 
 /// Execute operation with default storage timeout
-pub async fn with_storage_timeout<F, T>(
-    operation: F,
-) -> Result<T, tokio::time::error::Elapsed>
+pub async fn with_storage_timeout<F, T>(operation: F) -> Result<T, tokio::time::error::Elapsed>
 where
     F: std::future::Future<Output = T>,
 {
@@ -68,9 +64,7 @@ where
 }
 
 /// Execute operation with default RPC timeout
-pub async fn with_rpc_timeout<F, T>(
-    operation: F,
-) -> Result<T, tokio::time::error::Elapsed>
+pub async fn with_rpc_timeout<F, T>(operation: F) -> Result<T, tokio::time::error::Elapsed>
 where
     F: std::future::Future<Output = T>,
 {
@@ -87,4 +81,3 @@ where
 {
     timeout(duration, operation).await
 }
-

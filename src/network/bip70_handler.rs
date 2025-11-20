@@ -24,9 +24,9 @@ pub async fn handle_get_payment_request(
     payment_store: Option<&PaymentRequestStore>,
 ) -> Result<PaymentRequestMessage> {
     if let Some(store) = payment_store {
-        let store = store.lock().map_err(|e| {
-            anyhow::anyhow!("Failed to acquire payment store lock: {}", e)
-        })?;
+        let store = store
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire payment store lock: {}", e))?;
         let key = format!(
             "{}_{}",
             hex::encode(&request.payment_id),
@@ -57,9 +57,9 @@ pub async fn handle_payment(
 ) -> Result<PaymentACKMessage> {
     // Look up original PaymentRequest
     let original_request = if let Some(store) = payment_store {
-        let store = store.lock().map_err(|e| {
-            anyhow::anyhow!("Failed to acquire payment store lock: {}", e)
-        })?;
+        let store = store
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire payment store lock: {}", e))?;
         let _key = format!("{}_{}", hex::encode(&payment_msg.payment_id), "");
         // Find matching request (simplified - would use proper lookup)
         store.values().next().cloned()

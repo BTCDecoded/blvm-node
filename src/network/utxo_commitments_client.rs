@@ -86,7 +86,10 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         Box::pin(async move {
             // Parse peer_id to get SocketAddr or TransportAddr
             // Format: "tcp:127.0.0.1:8333" or "iroh:<pubkey_hex>"
-            let peer_addr_opt: Option<(std::net::SocketAddr, Option<crate::network::transport::TransportAddr>)> = if peer_id.starts_with("tcp:") {
+            let peer_addr_opt: Option<(
+                std::net::SocketAddr,
+                Option<crate::network::transport::TransportAddr>,
+            )> = if peer_id.starts_with("tcp:") {
                 peer_id
                     .strip_prefix("tcp:")
                     .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
@@ -97,32 +100,37 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 {
                     use crate::network::transport::TransportAddr;
                     use hex;
-                    
+
                     let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
                         bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh peer_id format: {}", peer_id)
                         )
                     })?;
-                    
+
                     let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
                         bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh node ID hex: {}", e)
                         )
                     })?;
-                    
+
                     // Validate node ID length (Iroh uses 32-byte public keys)
                     if node_id_bytes.len() != 32 {
                         return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh node ID length: expected 32 bytes, got {}", node_id_bytes.len())
                         ));
                     }
-                    
+
                     // Create placeholder SocketAddr for Iroh (same approach as mod.rs)
                     // Use first 4 bytes of key for IP, last 2 bytes for port
-                    let ip_bytes = [node_id_bytes[0], node_id_bytes[1], node_id_bytes[2], node_id_bytes[3]];
+                    let ip_bytes = [
+                        node_id_bytes[0],
+                        node_id_bytes[1],
+                        node_id_bytes[2],
+                        node_id_bytes[3],
+                    ];
                     let port = u16::from_be_bytes([node_id_bytes[30], node_id_bytes[31]]);
                     let placeholder_addr = std::net::SocketAddr::from((ip_bytes, port));
-                    
+
                     let transport_addr = TransportAddr::Iroh(node_id_bytes);
                     Some((placeholder_addr, Some(transport_addr)))
                 }
@@ -144,7 +152,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     ));
                 }
             };
-            
+
             // Store TransportAddr mapping if Iroh - drop RwLock before Mutex lock
             if let Some(transport_addr) = transport_addr_opt {
                 let socket_to_transport = {
@@ -153,7 +161,10 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     Arc::clone(&network.socket_to_transport)
                 };
                 // Now lock the Mutex without holding the RwLock
-                socket_to_transport.lock().await.insert(peer_addr, transport_addr);
+                socket_to_transport
+                    .lock()
+                    .await
+                    .insert(peer_addr, transport_addr);
             }
 
             // Check if peer supports UTXO commitments before sending request
@@ -162,7 +173,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 let network = network_manager.read().await;
                 Arc::clone(&network.peer_states)
             };
-            
+
             // Get peer version to check capabilities - now safe to lock RwLock
             let peer_supports_utxo_commitments = {
                 let peer_states = peer_states_arc.read().await;
@@ -181,32 +192,29 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     false
                 }
             };
-            
+
             // If we know the peer doesn't support UTXO commitments, return error early
             if !peer_supports_utxo_commitments {
                 return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::VerificationFailed(
                     format!("Peer {} does not support UTXO commitments (missing NODE_UTXO_COMMITMENTS service flag)", peer_id)
                 ));
             }
-            
+
             // Register pending request before sending - need to get network manager again
             let (request_id, response_rx) = {
                 let network = network_manager.read().await;
                 network.register_request(peer_addr)
             }; // RwLock guard dropped here before async wait
-            
+
             // Create GetUTXOSet message (request_id is generated by the handler, not stored in the message)
-            let get_utxo_set_msg = GetUTXOSetMessage { 
-                height, 
-                block_hash 
-            };
+            let get_utxo_set_msg = GetUTXOSetMessage { height, block_hash };
 
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
             let wire_format = serialize_get_utxo_set(&get_utxo_set_msg)
                 .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to serialize GetUTXOSet: {}", e)
                 ))?;
-            
+
             // Send message to peer via NetworkManager
             {
                 let network = network_manager.read().await;
@@ -215,11 +223,13 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
                     ))?;
             }
-            
+
             // Await response with timeout (from config)
             let timeout_seconds = {
                 let network = network_manager.read().await;
-                network.request_timeout_config.utxo_commitment_request_timeout_seconds
+                network
+                    .request_timeout_config
+                    .utxo_commitment_request_timeout_seconds
             };
             tokio::select! {
                 result = response_rx => {
@@ -231,7 +241,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                 .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                                     format!("Failed to parse UTXOSet response: {}", e)
                                 ))?;
-                            
+
                             match parsed {
                                 ProtocolMessage::UTXOSet(utxo_set_msg) => {
                                     // Convert to UtxoCommitment
@@ -290,7 +300,10 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         Box::pin(async move {
             // Parse peer_id to get SocketAddr or TransportAddr
             // Format: "tcp:127.0.0.1:8333" or "iroh:<pubkey_hex>"
-            let peer_addr_opt: Option<(std::net::SocketAddr, Option<crate::network::transport::TransportAddr>)> = if peer_id.starts_with("tcp:") {
+            let peer_addr_opt: Option<(
+                std::net::SocketAddr,
+                Option<crate::network::transport::TransportAddr>,
+            )> = if peer_id.starts_with("tcp:") {
                 peer_id
                     .strip_prefix("tcp:")
                     .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
@@ -301,32 +314,37 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 {
                     use crate::network::transport::TransportAddr;
                     use hex;
-                    
+
                     let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
                         bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh peer_id format: {}", peer_id)
                         )
                     })?;
-                    
+
                     let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
                         bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh node ID hex: {}", e)
                         )
                     })?;
-                    
+
                     // Validate node ID length (Iroh uses 32-byte public keys)
                     if node_id_bytes.len() != 32 {
                         return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh node ID length: expected 32 bytes, got {}", node_id_bytes.len())
                         ));
                     }
-                    
+
                     // Create placeholder SocketAddr for Iroh (same approach as mod.rs)
                     // Use first 4 bytes of key for IP, last 2 bytes for port
-                    let ip_bytes = [node_id_bytes[0], node_id_bytes[1], node_id_bytes[2], node_id_bytes[3]];
+                    let ip_bytes = [
+                        node_id_bytes[0],
+                        node_id_bytes[1],
+                        node_id_bytes[2],
+                        node_id_bytes[3],
+                    ];
                     let port = u16::from_be_bytes([node_id_bytes[30], node_id_bytes[31]]);
                     let placeholder_addr = std::net::SocketAddr::from((ip_bytes, port));
-                    
+
                     let transport_addr = TransportAddr::Iroh(node_id_bytes);
                     Some((placeholder_addr, Some(transport_addr)))
                 }
@@ -348,21 +366,24 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     ));
                 }
             };
-            
+
             // Store TransportAddr mapping if Iroh - drop RwLock before Mutex lock
             if let Some(transport_addr) = transport_addr_opt {
                 let socket_to_transport = {
                     let network = network_manager.read().await;
                     Arc::clone(&network.socket_to_transport)
                 };
-                socket_to_transport.lock().await.insert(peer_addr, transport_addr);
+                socket_to_transport
+                    .lock()
+                    .await
+                    .insert(peer_addr, transport_addr);
             }
 
             // Register pending request before sending
             let network = network_manager.read().await;
             let (request_id, response_rx) = network.register_request(peer_addr);
             drop(network); // Release read lock before async wait
-            
+
             // Create GetFilteredBlock message with request_id
             use crate::network::protocol::FilterPreferences;
             let get_filtered_block_msg = GetFilteredBlockMessage {
@@ -382,7 +403,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to serialize GetFilteredBlock: {}", e)
                 ))?;
-            
+
             // Send message to peer via NetworkManager
             {
                 let network = network_manager.read().await;
@@ -391,11 +412,13 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
                     ))?;
             }
-            
+
             // Await response with timeout (from config)
             let timeout_seconds = {
                 let network = network_manager.read().await;
-                network.request_timeout_config.utxo_commitment_request_timeout_seconds
+                network
+                    .request_timeout_config
+                    .utxo_commitment_request_timeout_seconds
             };
             tokio::select! {
                 result = response_rx => {
@@ -407,12 +430,12 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                 .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                                     format!("Failed to parse FilteredBlock response: {}", e)
                                 ))?;
-                            
+
                             match parsed {
                                 ProtocolMessage::FilteredBlock(filtered_block_msg) => {
                                     // Convert to FilteredBlock
                                     // Use header from message if available, otherwise construct from commitment
-                                    let header = if filtered_block_msg.header.version != 0 
+                                    let header = if filtered_block_msg.header.version != 0
                                         || filtered_block_msg.header.prev_block_hash != [0; 32] {
                                         // Use provided header
                                         filtered_block_msg.header.clone()

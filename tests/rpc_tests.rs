@@ -231,7 +231,7 @@ async fn test_blockchain_rpc_getblock() {
     // Test getblock with genesis block hash (may fail if storage not set up - that's expected)
     let genesis_hash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
     let block_result = blockchain.get_block(genesis_hash).await;
-    
+
     if let Ok(block) = block_result {
         // If block found, verify structure
         assert!(block.get("hash").is_some());
@@ -425,16 +425,16 @@ async fn test_mining_rpc_getmininginfo() {
 #[tokio::test]
 async fn test_mining_rpc_getblocktemplate() {
     use bllvm_node::storage::Storage;
+    use bllvm_protocol::BlockHeader;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use bllvm_protocol::BlockHeader;
-    
+
     // Initialize chain state (required for getblocktemplate)
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
     let mining = mining::MiningRpc::with_dependencies(storage.clone(), mempool);
-    
+
     // Set up minimal chain (from mining_rpc_tests helper)
     // Initialize with genesis block
     let genesis_header = BlockHeader {
@@ -456,7 +456,9 @@ async fn test_mining_rpc_getblocktemplate() {
         Err(e) => {
             // If it fails with "Target too large" or "Insufficient headers", skip the test
             // This is expected behavior when we have fewer than 2016 headers
-            if e.to_string().contains("Target too large") || e.to_string().contains("Insufficient headers") {
+            if e.to_string().contains("Target too large")
+                || e.to_string().contains("Insufficient headers")
+            {
                 return; // Skip test - expected behavior with few headers
             }
             panic!("Unexpected error: {:?}", e);

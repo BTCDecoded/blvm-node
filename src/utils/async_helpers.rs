@@ -38,10 +38,7 @@ where
 /// Execute multiple async operations and collect results
 ///
 /// Returns a vector of results, with None for failed operations.
-pub async fn collect_results<F, Fut, T, E>(
-    operations: Vec<F>,
-    context: &str,
-) -> Vec<Option<T>>
+pub async fn collect_results<F, Fut, T, E>(operations: Vec<F>, context: &str) -> Vec<Option<T>>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
@@ -71,9 +68,12 @@ where
     match tokio_timeout(timeout_duration, operation()).await {
         Ok(value) => Some(value),
         Err(_) => {
-            tracing::warn!("{}: Operation timed out after {:?}", context, timeout_duration);
+            tracing::warn!(
+                "{}: Operation timed out after {:?}",
+                context,
+                timeout_duration
+            );
             None
         }
     }
 }
-

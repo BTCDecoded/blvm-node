@@ -8,11 +8,11 @@
 use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::RpcResult;
 use crate::storage::Storage;
+use crate::utils::current_timestamp;
 use bllvm_protocol::Hash;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::debug;
-use crate::utils::current_timestamp;
 
 /// Mempool RPC methods
 #[derive(Clone)]
@@ -100,13 +100,15 @@ impl MempoolRpc {
 
             if verbose {
                 let mut result = serde_json::Map::new();
-                
-                let utxo_set = if let (Some(_mempool), Some(ref storage)) = (self.mempool.as_ref(), self.storage.as_ref()) {
+
+                let utxo_set = if let (Some(_mempool), Some(ref storage)) =
+                    (self.mempool.as_ref(), self.storage.as_ref())
+                {
                     Some(storage.utxos().get_all_utxos().unwrap_or_default())
                 } else {
                     None
                 };
-                
+
                 for tx in transactions {
                     let txid = calculate_tx_id(&tx);
                     let txid_hex = hex::encode(txid);

@@ -4,11 +4,11 @@
 
 use crate::network::NetworkManager;
 use crate::rpc::errors::{RpcError, RpcResult};
+use crate::utils::current_timestamp;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::debug;
-use crate::utils::current_timestamp;
 
 /// Network RPC methods
 #[derive(Clone)]
@@ -37,12 +37,12 @@ impl NetworkRpc {
         debug!("RPC: getnetworkinfo");
 
         use std::sync::OnceLock;
-        
+
         static CACHED_NETWORK_INFO: OnceLock<Value> = OnceLock::new();
-        
+
         if let Some(ref network) = self.network_manager {
             let peer_count = network.peer_count();
-            
+
             // Build static template once
             let base_info = CACHED_NETWORK_INFO.get_or_init(|| {
                 json!({
@@ -76,7 +76,7 @@ impl NetworkRpc {
                     "warnings": ""
                 })
             });
-            
+
             // Clone and update only the dynamic field
             let mut result = base_info.clone();
             result["connections"] = json!(peer_count);
@@ -327,7 +327,7 @@ impl NetworkRpc {
             let dos_protection = network.dos_protection();
             let dos_metrics = dos_protection.get_dos_metrics().await;
             let dos_config = dos_protection.get_config().await;
-            
+
             let metrics = crate::node::metrics::DosMetrics {
                 connection_rate_violations: dos_metrics.connection_rate_violations,
                 auto_bans: dos_metrics.auto_bans_applied,

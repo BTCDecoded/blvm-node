@@ -43,7 +43,9 @@ pub fn validate_string_param(
     if value.len() > max_len {
         return Err(RpcError::invalid_params(format!(
             "{} parameter too long: {} bytes (max: {})",
-            param_name, value.len(), max_len
+            param_name,
+            value.len(),
+            max_len
         )));
     }
 
@@ -78,13 +80,18 @@ pub fn validate_hex_string_param(
 }
 
 /// Validate and extract a hash string parameter (64 hex chars)
-pub fn validate_hash_param(params: &Value, index: usize, param_name: &str) -> Result<String, RpcError> {
+pub fn validate_hash_param(
+    params: &Value,
+    index: usize,
+    param_name: &str,
+) -> Result<String, RpcError> {
     let hash = validate_hex_string_param(params, index, param_name, Some(MAX_HASH_STRING_LENGTH))?;
 
     if hash.len() != 64 {
         return Err(RpcError::invalid_params(format!(
             "{} must be 64 hex characters (32 bytes), got {}",
-            param_name, hash.len()
+            param_name,
+            hash.len()
         )));
     }
 
@@ -148,10 +155,9 @@ where
 {
     if let Some(value) = params.get(index).and_then(|p| p.as_u64()) {
         // Validate the extracted value against bounds
-        let typed_value = T::try_from(value).map_err(|e| {
-            RpcError::invalid_params(format!("Invalid {}: {}", param_name, e))
-        })?;
-        
+        let typed_value = T::try_from(value)
+            .map_err(|e| RpcError::invalid_params(format!("Invalid {}: {}", param_name, e)))?;
+
         if let Some(min_val) = min {
             if typed_value < min_val {
                 return Err(RpcError::invalid_params(format!(
@@ -160,7 +166,7 @@ where
                 )));
             }
         }
-        
+
         if let Some(max_val) = max {
             if typed_value > max_val {
                 return Err(RpcError::invalid_params(format!(
@@ -169,7 +175,7 @@ where
                 )));
             }
         }
-        
+
         Ok(typed_value)
     } else {
         Ok(default)
@@ -189,11 +195,7 @@ pub fn validate_bool_param(
 }
 
 /// Validate and extract an optional boolean parameter
-pub fn validate_optional_bool_param(
-    params: &Value,
-    index: usize,
-    default: bool,
-) -> bool {
+pub fn validate_optional_bool_param(params: &Value, index: usize, default: bool) -> bool {
     params
         .get(index)
         .and_then(|p| p.as_bool())
@@ -264,5 +266,3 @@ mod tests {
         assert!(validate_numeric_param::<u64>(&params, 0, "value", Some(0), Some(1000)).is_err());
     }
 }
-
-

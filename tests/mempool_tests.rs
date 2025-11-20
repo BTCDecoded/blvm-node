@@ -99,17 +99,20 @@ async fn test_mempool_get_prioritized_transactions() {
     let prioritized = mempool.get_prioritized_transactions(10, &utxo_set);
     // Both transactions are returned, but high fee should be first
     assert!(prioritized.len() >= 1);
-    
+
     // Verify high fee transaction is first (it should have higher fee rate)
     // The high fee tx has 5000 sat fee, low fee tx has 1000 sat fee
     // Both have similar sizes, so high fee should be prioritized
     assert_eq!(prioritized[0].version, high_fee_tx.version);
-    
+
     // Verify the high fee transaction is in the results
     use bllvm_protocol::block::calculate_tx_id;
     let high_fee_hash = calculate_tx_id(&high_fee_tx);
     let prioritized_hashes: Vec<_> = prioritized.iter().map(|tx| calculate_tx_id(tx)).collect();
-    assert!(prioritized_hashes.contains(&high_fee_hash), "High fee transaction should be in prioritized list");
+    assert!(
+        prioritized_hashes.contains(&high_fee_hash),
+        "High fee transaction should be in prioritized list"
+    );
 }
 
 #[tokio::test]

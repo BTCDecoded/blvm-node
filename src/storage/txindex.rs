@@ -159,10 +159,7 @@ impl TxIndex {
 
     /// Get transactions by address (script pubkey)
     /// Requires address index to be built (future enhancement)
-    pub fn get_transactions_by_address(
-        &self,
-        _script_pubkey: &[u8],
-    ) -> Result<Vec<Transaction>> {
+    pub fn get_transactions_by_address(&self, _script_pubkey: &[u8]) -> Result<Vec<Transaction>> {
         // TODO: Implement address index for efficient address-based queries
         // This would require:
         // 1. Index: script_pubkey → Vec<tx_hash>

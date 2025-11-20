@@ -5,8 +5,8 @@
 use anyhow::Result;
 use bllvm_protocol::mempool::Mempool;
 use bllvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::RwLock;
 use tracing::{debug, info};
 
@@ -175,7 +175,7 @@ impl MempoolManager {
     ///
     /// Returns transactions sorted by fee rate (satoshis per vbyte) in descending order.
     /// Requires UTXO set to calculate fee rates.
-    /// 
+    ///
     /// Optimization: Uses sorted index (BTreeMap) for O(log n) insertion, O(1) top-N retrieval
     /// instead of O(n log n) sort on every call.
     pub fn get_prioritized_transactions(
@@ -204,9 +204,9 @@ impl MempoolManager {
     }
 
     /// Update fee index with current UTXO set
-    /// 
+    ///
     /// Recalculates fee rates for all transactions and rebuilds the sorted index.
-    /// 
+    ///
     /// Optimization: Batch UTXO lookups across all transactions for better cache locality
     fn update_fee_index(&self, utxo_set: &UtxoSet) {
         // Clear existing index
@@ -221,9 +221,7 @@ impl MempoolManager {
         let all_prevouts: Vec<(&Hash, &OutPoint)> = self
             .transactions
             .iter()
-            .flat_map(|(tx_hash, tx)| {
-                tx.inputs.iter().map(move |input| (tx_hash, &input.prevout))
-            })
+            .flat_map(|(tx_hash, tx)| tx.inputs.iter().map(move |input| (tx_hash, &input.prevout)))
             .collect();
 
         // Batch UTXO lookup for all transactions (single pass through HashMap)
@@ -279,13 +277,13 @@ impl MempoolManager {
     /// Calculate transaction fee
     ///
     /// Fee = sum of inputs - sum of outputs
-    /// 
+    ///
     /// Optimization: Uses batch UTXO lookup pattern for better cache locality
     pub fn calculate_transaction_fee(&self, tx: &Transaction, utxo_set: &UtxoSet) -> u64 {
         // Optimization: Batch UTXO lookups - collect all prevouts first, then lookup
         // This improves cache locality and reduces HashMap traversal overhead
         let prevouts: Vec<&OutPoint> = tx.inputs.iter().map(|input| &input.prevout).collect();
-        
+
         // Batch UTXO lookup (single pass through HashMap)
         let mut input_total = 0u64;
         for prevout in prevouts {

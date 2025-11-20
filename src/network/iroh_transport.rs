@@ -11,15 +11,15 @@ use crate::network::transport::{
 #[cfg(feature = "iroh")]
 use anyhow::Result;
 #[cfg(feature = "iroh")]
+use iroh::endpoint::{Connection, Endpoint, SendStream};
+#[cfg(feature = "iroh")]
+use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey};
+#[cfg(feature = "iroh")]
 use std::net::SocketAddr;
 #[cfg(feature = "iroh")]
 use tokio::io::AsyncReadExt;
 #[cfg(feature = "iroh")]
 use tracing::{debug, error, info, warn};
-#[cfg(feature = "iroh")]
-use iroh::endpoint::{Endpoint, Connection, SendStream};
-#[cfg(feature = "iroh")]
-use iroh::{PublicKey, EndpointId, EndpointAddr, SecretKey};
 
 /// Iroh transport implementation
 ///
@@ -150,7 +150,7 @@ impl TransportListener for IrohListener {
 
         // Accept the incoming connection - returns Accepting future
         let accepting = incoming.accept()?;
-        
+
         // Await connection establishment
         let conn = accepting.await?;
 
@@ -161,7 +161,10 @@ impl TransportListener for IrohListener {
         let peer_node_id = peer_id; // Already have it from connecting.id()
         let peer_addr = TransportAddr::Iroh(peer_node_id.as_bytes().to_vec());
 
-        debug!("Iroh connection accepted - peer endpoint ID: {}", peer_node_id);
+        debug!(
+            "Iroh connection accepted - peer endpoint ID: {}",
+            peer_node_id
+        );
 
         Ok((
             IrohConnection {

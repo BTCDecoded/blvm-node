@@ -209,7 +209,10 @@ impl SyncCoordinator {
 
         // Log recent headers availability for BIP113 median time validation
         if let Some(ref headers) = recent_headers {
-            debug!("Using {} recent headers for BIP113 median time validation", headers.len());
+            debug!(
+                "Using {} recent headers for BIP113 median time validation",
+                headers.len()
+            );
         }
 
         // Validate block with witness data and headers

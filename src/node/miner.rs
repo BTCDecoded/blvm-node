@@ -2,11 +2,11 @@
 //!
 //! Handles block mining, template generation, and mining coordination.
 
+use crate::utils::current_timestamp;
 use anyhow::Result;
 use bllvm_protocol::{Block, BlockHeader, Transaction};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
-use crate::utils::current_timestamp;
 
 /// Mempool provider trait for dependency injection
 pub trait MempoolProvider: Send + Sync {
@@ -235,7 +235,7 @@ impl MiningEngine {
         // Use consensus layer to mine the block (actual PoW)
         use bllvm_protocol::ConsensusProof;
         let consensus = ConsensusProof::new();
-        
+
         // Calculate max attempts per thread based on difficulty
         // For regtest: low difficulty, should find nonce quickly
         // For testnet/mainnet: high difficulty, may need many attempts
@@ -243,7 +243,8 @@ impl MiningEngine {
 
         // Multi-threaded mining: spawn tasks for each thread
         if self.mining_threads > 1 {
-            self.mine_template_multithreaded(template, max_attempts_per_thread, &consensus).await
+            self.mine_template_multithreaded(template, max_attempts_per_thread, &consensus)
+                .await
         } else {
             // Single-threaded: use blocking task to avoid blocking async runtime
             let template_clone = template.clone();
@@ -311,8 +312,10 @@ impl MiningEngine {
         let mut results = Vec::new();
         for (handle, rx) in handles {
             // Wait for task completion
-            handle.await.map_err(|e| anyhow::anyhow!("Mining task panicked: {}", e))?;
-            
+            handle
+                .await
+                .map_err(|e| anyhow::anyhow!("Mining task panicked: {}", e))?;
+
             // Get result
             match rx.await {
                 Ok(Ok((block, result))) => {
@@ -345,11 +348,14 @@ impl MiningEngine {
         result: bllvm_protocol::mining::MiningResult,
     ) -> Result<Block> {
         use bllvm_protocol::mining::MiningResult;
-        
+
         match result {
             MiningResult::Success => {
-                info!("Successfully mined block with nonce {}", mined_block.header.nonce);
-                
+                info!(
+                    "Successfully mined block with nonce {}",
+                    mined_block.header.nonce
+                );
+
                 // Update statistics
                 self.stats.blocks_mined += 1;
                 self.stats.last_block_time = Some(current_timestamp());
@@ -556,7 +562,9 @@ impl MiningCoordinator {
             .select_transactions(&*self.mempool as &dyn MempoolProvider, &utxo_set);
 
         // Create coinbase transaction with subsidy + fees
-        let coinbase_tx = self.create_coinbase_transaction(height + 1, &transactions, &utxo_set).await?;
+        let coinbase_tx = self
+            .create_coinbase_transaction(height + 1, &transactions, &utxo_set)
+            .await?;
 
         // Build transaction list (coinbase first)
         let mut all_transactions = vec![coinbase_tx];
@@ -597,27 +605,31 @@ impl MiningCoordinator {
         utxo_set: &bllvm_protocol::UtxoSet,
     ) -> Result<Transaction> {
         use bllvm_protocol::ConsensusProof;
-        
+
         // 1. Get block subsidy from consensus layer
         let consensus = ConsensusProof::new();
         let subsidy = consensus.get_block_subsidy(height) as u64;
-        
+
         // 2. Calculate total fees from selected transactions
         let total_fees: u64 = selected_transactions
             .iter()
             .map(|tx| self.mempool.calculate_transaction_fee(tx, utxo_set))
             .sum();
-        
+
         // 3. Coinbase value = subsidy + fees
-        let coinbase_value = subsidy
-            .checked_add(total_fees)
-            .ok_or_else(|| anyhow::anyhow!("Coinbase value overflow: subsidy {} + fees {}", subsidy, total_fees))?;
-        
+        let coinbase_value = subsidy.checked_add(total_fees).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Coinbase value overflow: subsidy {} + fees {}",
+                subsidy,
+                total_fees
+            )
+        })?;
+
         debug!(
             "Creating coinbase: height={}, subsidy={}, fees={}, total={}",
             height, subsidy, total_fees, coinbase_value
         );
-        
+
         // 4. Create coinbase transaction
         Ok(Transaction {
             version: 1,
@@ -893,14 +905,14 @@ mod tests {
         let template = create_test_block();
 
         let result = engine.mine_template(template.clone()).await;
-        
+
         // Mining may succeed (if low difficulty) or fail (if high difficulty)
         // Both are valid outcomes for real PoW mining
         if let Ok(mined_block) = result {
             // Successfully mined - verify the block
             assert_eq!(mined_block.header.version, template.header.version);
             assert_ne!(mined_block.header.nonce, template.header.nonce); // Nonce should change
-            
+
             // Verify proof of work
             use bllvm_protocol::pow::check_proof_of_work;
             let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
@@ -922,12 +934,12 @@ mod tests {
         let template = create_test_block();
 
         let result = engine.mine_template(template.clone()).await;
-        
+
         // Mining may succeed (if low difficulty) or fail (if high difficulty)
         if let Ok(mined_block) = result {
             // Successfully mined - verify the block
             assert_eq!(mined_block.header.version, template.header.version);
-            
+
             // Verify proof of work
             use bllvm_protocol::pow::check_proof_of_work;
             let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
@@ -951,19 +963,19 @@ mod tests {
         // template already has bits: 0x1d00ffff (mainnet difficulty)
 
         let result = engine.mine_template(template.clone()).await;
-        
+
         // Mining may succeed (if we find a nonce) or fail (if we don't within max_attempts)
         // Both are valid outcomes for real PoW mining
         if let Ok(mined_block) = result {
             // Successfully mined - verify the block
             assert_eq!(mined_block.header.version, template.header.version);
             assert_ne!(mined_block.header.nonce, template.header.nonce);
-            
+
             // Verify proof of work
             use bllvm_protocol::pow::check_proof_of_work;
             let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
             assert!(pow_valid, "Mined block should have valid proof of work");
-            
+
             // Check statistics
             assert_eq!(engine.get_stats().blocks_mined, 1);
         } else {
@@ -1221,7 +1233,9 @@ mod tests {
 
         // Test coinbase creation with no transactions (subsidy only)
         let empty_utxo_set = bllvm_protocol::UtxoSet::new();
-        let coinbase = coordinator.create_coinbase_transaction(0, &[], &empty_utxo_set).await;
+        let coinbase = coordinator
+            .create_coinbase_transaction(0, &[], &empty_utxo_set)
+            .await;
         assert!(coinbase.is_ok());
 
         let tx = coinbase.unwrap();

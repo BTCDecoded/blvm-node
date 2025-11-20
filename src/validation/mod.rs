@@ -96,23 +96,23 @@ impl ParallelBlockValidator {
             contexts
                 .par_iter()
                 .map(|context| {
-                // Create empty witnesses for each transaction
-                let witnesses: Vec<Witness> = context
-                    .block
-                    .transactions
-                    .iter()
-                    .map(|_| Vec::new())
-                    .collect();
-                connect_block(
-                    &context.block,
-                    &witnesses,
-                    context.prev_utxo_set.clone(),
-                    context.height,
-                    None, // No recent headers for parallel validation
-                )
-                .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
-            })
-            .collect()
+                    // Create empty witnesses for each transaction
+                    let witnesses: Vec<Witness> = context
+                        .block
+                        .transactions
+                        .iter()
+                        .map(|_| Vec::new())
+                        .collect();
+                    connect_block(
+                        &context.block,
+                        &witnesses,
+                        context.prev_utxo_set.clone(),
+                        context.height,
+                        None, // No recent headers for parallel validation
+                    )
+                    .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
+                })
+                .collect()
         };
 
         #[cfg(not(feature = "production"))]

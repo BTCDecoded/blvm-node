@@ -43,8 +43,8 @@ impl RateLimiter {
     fn new(max_requests: u64, window_seconds: u64) -> Self {
         // Buffer size: track at least 2x the max requests to handle bursts
         // Also ensure we have enough capacity for the time window
-        let buffer_size = ((max_requests * 2).max(100) as usize)
-            .max((window_seconds as usize).min(1000)); // Cap at 1000 for memory efficiency
+        let buffer_size =
+            ((max_requests * 2).max(100) as usize).max((window_seconds as usize).min(1000)); // Cap at 1000 for memory efficiency
         Self {
             request_timestamps: Vec::with_capacity(buffer_size),
             current_index: 0,

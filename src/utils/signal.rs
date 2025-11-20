@@ -81,4 +81,3 @@ pub fn create_shutdown_receiver() -> tokio::sync::watch::Receiver<bool> {
 
     rx
 }
-

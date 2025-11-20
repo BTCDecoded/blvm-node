@@ -562,7 +562,7 @@ impl PruningManager {
                         }
                     }
                 }
-                
+
                 // Handle filtered blocks if enabled
                 // Note: Filtered blocks are lightweight versions of blocks used for SPV clients
                 // If keep_filtered_blocks is false, we can remove them to save space

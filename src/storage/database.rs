@@ -217,7 +217,8 @@ mod redb_impl {
     static BLOCKS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blocks");
     static HEADERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("headers");
     static HEIGHT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("height_index");
-    static HASH_TO_HEIGHT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("hash_to_height");
+    static HASH_TO_HEIGHT_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("hash_to_height");
     static WITNESSES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("witnesses");
     static RECENT_HEADERS_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("recent_headers");
@@ -232,12 +233,18 @@ mod redb_impl {
     static INVALID_BLOCKS_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("invalid_blocks");
     static CHAIN_TIPS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_tips");
-    static BLOCK_METADATA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("block_metadata");
-    static CHAINWORK_CACHE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chainwork_cache");
-    static UTXO_STATS_CACHE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("utxo_stats_cache");
-    static NETWORK_HASHRATE_CACHE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("network_hashrate_cache");
-    static UTXO_COMMITMENTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("utxo_commitments");
-    static COMMITMENT_HEIGHT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("commitment_height_index");
+    static BLOCK_METADATA_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("block_metadata");
+    static CHAINWORK_CACHE_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("chainwork_cache");
+    static UTXO_STATS_CACHE_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("utxo_stats_cache");
+    static NETWORK_HASHRATE_CACHE_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("network_hashrate_cache");
+    static UTXO_COMMITMENTS_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("utxo_commitments");
+    static COMMITMENT_HEIGHT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("commitment_height_index");
 
     pub struct RedbDatabase {
         db: Arc<RedbDb>,
@@ -249,7 +256,7 @@ mod redb_impl {
             // Global mutex to serialize database creation (prevents lock conflicts in tests)
             static DB_CREATE_MUTEX: Mutex<()> = Mutex::new(());
             let _guard = DB_CREATE_MUTEX.lock().unwrap();
-            
+
             let db_path = data_dir.as_ref().join("redb.db");
             // Try to open existing database first, then create if it doesn't exist
             let db = if db_path.exists() {
@@ -444,17 +451,23 @@ mod redb_impl {
             let read_txn = match self.db.begin_read() {
                 Ok(txn) => txn,
                 Err(e) => {
-                    return Box::new(std::iter::once(Err(anyhow::anyhow!("Failed to begin read transaction: {}", e))));
+                    return Box::new(std::iter::once(Err(anyhow::anyhow!(
+                        "Failed to begin read transaction: {}",
+                        e
+                    ))));
                 }
             };
-            
+
             let table = match read_txn.open_table(*self.table_def) {
                 Ok(tbl) => tbl,
                 Err(e) => {
-                    return Box::new(std::iter::once(Err(anyhow::anyhow!("Failed to open table: {}", e))));
+                    return Box::new(std::iter::once(Err(anyhow::anyhow!(
+                        "Failed to open table: {}",
+                        e
+                    ))));
                 }
             };
-            
+
             // Collect all items into a vector
             // Redb Range implements IntoIterator, but we need to collect into a vector
             // because the read transaction must outlive the iterator
@@ -479,7 +492,7 @@ mod redb_impl {
                     items.push(Err(anyhow::anyhow!("Failed to create range: {}", e)));
                 }
             }
-            
+
             Box::new(items.into_iter())
         }
     }

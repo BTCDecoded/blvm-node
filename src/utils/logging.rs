@@ -50,7 +50,7 @@ pub fn init_logging(filter: Option<&str>) {
     // Standard practice: Use EnvFilter::from_default_env() which properly handles RUST_LOG
     // This respects the standard RUST_LOG environment variable format
     let mut env_filter = EnvFilter::from_default_env();
-    
+
     // If config provides a filter and RUST_LOG is not set, use config filter
     // RUST_LOG always takes precedence (standard practice)
     if filter.is_some() && std::env::var("RUST_LOG").is_err() {
@@ -58,7 +58,7 @@ pub fn init_logging(filter: Option<&str>) {
             env_filter = EnvFilter::new(f);
         }
     }
-    
+
     // If neither RUST_LOG nor config filter is set, default to "info"
     if std::env::var("RUST_LOG").is_err() && filter.is_none() {
         env_filter = EnvFilter::new("info");
@@ -109,10 +109,10 @@ pub fn init_logging(filter: Option<&str>) {
 pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
     // Standard practice: Use EnvFilter::from_default_env() for RUST_LOG
     let mut env_filter = EnvFilter::from_default_env();
-    
+
     // Default filter for modules: module at info, node module communication at debug
     let default_filter = format!("{}={},bllvm_node::module=debug", module_name, "info");
-    
+
     // If RUST_LOG is not set, use config filter or default
     if std::env::var("RUST_LOG").is_err() {
         env_filter = filter
@@ -168,14 +168,14 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
 pub fn init_json_logging(filter: Option<&str>) {
     // Standard practice: Use EnvFilter::from_default_env() for RUST_LOG
     let mut env_filter = EnvFilter::from_default_env();
-    
+
     // If config provides a filter and RUST_LOG is not set, use config filter
     if filter.is_some() && std::env::var("RUST_LOG").is_err() {
         if let Some(f) = filter {
             env_filter = EnvFilter::new(f);
         }
     }
-    
+
     // If neither RUST_LOG nor config filter is set, default to "info"
     if std::env::var("RUST_LOG").is_err() && filter.is_none() {
         env_filter = EnvFilter::new("info");
@@ -215,7 +215,7 @@ pub fn init_json_logging(filter: Option<&str>) {
 /// ```
 pub fn init_logging_from_config(config: Option<&crate::config::LoggingConfig>) {
     let filter = config.and_then(|c| c.filter.as_deref());
-    
+
     if config.map(|c| c.json_format).unwrap_or(false) {
         #[cfg(feature = "json-logging")]
         {
@@ -242,4 +242,3 @@ mod tests {
         // In real usage, these are called once at startup
     }
 }
-

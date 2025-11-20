@@ -300,7 +300,7 @@ impl RpcServer {
         // Generate request ID for tracing
         let request_id = Uuid::new_v4().to_string();
         let request_id_short = request_id.chars().take(8).collect::<String>();
-        
+
         // Create tracing span with request context
         let span = tracing::span!(
             tracing::Level::DEBUG,
@@ -310,9 +310,9 @@ impl RpcServer {
             client_addr = %addr,
             request_size = json_body.len()
         );
-        
+
         let _guard = span.enter();
-        
+
         debug!("HTTP RPC request from {}: {} bytes", addr, json_body.len());
 
         // Extract method name for per-method rate limiting (before authentication)
@@ -324,7 +324,7 @@ impl RpcServer {
                     .map(|s| s.to_string())
             })
             .unwrap_or_else(|| "unknown".to_string());
-        
+
         // Record method in span
         Span::current().record("method", &method_name);
 
@@ -375,12 +375,15 @@ impl RpcServer {
         let start_time = std::time::Instant::now();
         let response_json = Self::process_request_with_server(server, &json_body).await;
         let duration = start_time.elapsed();
-        
+
         // Record response metrics in span
         Span::current().record("duration_ms", duration.as_millis() as u64);
         Span::current().record("response_size", response_json.len());
-        
-        debug!("RPC request completed in {:?} (request_id: {})", duration, request_id_short);
+
+        debug!(
+            "RPC request completed in {:?} (request_id: {})",
+            duration, request_id_short
+        );
 
         // Build HTTP response with request ID header
         // Response::builder() returns http::Error, but we need hyper::Error
@@ -406,7 +409,7 @@ impl RpcServer {
             // Return empty metrics if collector not available
             "# No metrics available\n".to_string()
         };
-        
+
         Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain; version=0.0.4")
@@ -418,121 +421,199 @@ impl RpcServer {
     /// Format NodeMetrics as Prometheus text format
     fn format_prometheus_metrics(metrics: crate::node::metrics::NodeMetrics) -> String {
         let mut output = String::new();
-        
+
         // Network metrics
         output.push_str("# HELP bllvm_network_peers_total Total number of connected peers\n");
         output.push_str("# TYPE bllvm_network_peers_total gauge\n");
-        output.push_str(&format!("bllvm_network_peers_total {}\n", metrics.network.peer_count));
-        
+        output.push_str(&format!(
+            "bllvm_network_peers_total {}\n",
+            metrics.network.peer_count
+        ));
+
         output.push_str("# HELP bllvm_network_bytes_sent_total Total bytes sent\n");
         output.push_str("# TYPE bllvm_network_bytes_sent_total counter\n");
-        output.push_str(&format!("bllvm_network_bytes_sent_total {}\n", metrics.network.bytes_sent));
-        
+        output.push_str(&format!(
+            "bllvm_network_bytes_sent_total {}\n",
+            metrics.network.bytes_sent
+        ));
+
         output.push_str("# HELP bllvm_network_bytes_received_total Total bytes received\n");
         output.push_str("# TYPE bllvm_network_bytes_received_total counter\n");
-        output.push_str(&format!("bllvm_network_bytes_received_total {}\n", metrics.network.bytes_received));
-        
+        output.push_str(&format!(
+            "bllvm_network_bytes_received_total {}\n",
+            metrics.network.bytes_received
+        ));
+
         output.push_str("# HELP bllvm_network_messages_sent_total Total messages sent\n");
         output.push_str("# TYPE bllvm_network_messages_sent_total counter\n");
-        output.push_str(&format!("bllvm_network_messages_sent_total {}\n", metrics.network.messages_sent));
-        
+        output.push_str(&format!(
+            "bllvm_network_messages_sent_total {}\n",
+            metrics.network.messages_sent
+        ));
+
         output.push_str("# HELP bllvm_network_messages_received_total Total messages received\n");
         output.push_str("# TYPE bllvm_network_messages_received_total counter\n");
-        output.push_str(&format!("bllvm_network_messages_received_total {}\n", metrics.network.messages_received));
-        
+        output.push_str(&format!(
+            "bllvm_network_messages_received_total {}\n",
+            metrics.network.messages_received
+        ));
+
         output.push_str("# HELP bllvm_network_active_connections Active network connections\n");
         output.push_str("# TYPE bllvm_network_active_connections gauge\n");
-        output.push_str(&format!("bllvm_network_active_connections {}\n", metrics.network.active_connections));
-        
+        output.push_str(&format!(
+            "bllvm_network_active_connections {}\n",
+            metrics.network.active_connections
+        ));
+
         output.push_str("# HELP bllvm_network_banned_peers Banned peers count\n");
         output.push_str("# TYPE bllvm_network_banned_peers gauge\n");
-        output.push_str(&format!("bllvm_network_banned_peers {}\n", metrics.network.banned_peers));
-        
+        output.push_str(&format!(
+            "bllvm_network_banned_peers {}\n",
+            metrics.network.banned_peers
+        ));
+
         // Storage metrics
         output.push_str("# HELP bllvm_storage_blocks_total Total blocks stored\n");
         output.push_str("# TYPE bllvm_storage_blocks_total gauge\n");
-        output.push_str(&format!("bllvm_storage_blocks_total {}\n", metrics.storage.block_count));
-        
+        output.push_str(&format!(
+            "bllvm_storage_blocks_total {}\n",
+            metrics.storage.block_count
+        ));
+
         output.push_str("# HELP bllvm_storage_utxos_total Total UTXOs\n");
         output.push_str("# TYPE bllvm_storage_utxos_total gauge\n");
-        output.push_str(&format!("bllvm_storage_utxos_total {}\n", metrics.storage.utxo_count));
-        
+        output.push_str(&format!(
+            "bllvm_storage_utxos_total {}\n",
+            metrics.storage.utxo_count
+        ));
+
         output.push_str("# HELP bllvm_storage_transactions_total Total transactions indexed\n");
         output.push_str("# TYPE bllvm_storage_transactions_total gauge\n");
-        output.push_str(&format!("bllvm_storage_transactions_total {}\n", metrics.storage.transaction_count));
-        
+        output.push_str(&format!(
+            "bllvm_storage_transactions_total {}\n",
+            metrics.storage.transaction_count
+        ));
+
         output.push_str("# HELP bllvm_storage_disk_size_bytes Estimated disk size in bytes\n");
         output.push_str("# TYPE bllvm_storage_disk_size_bytes gauge\n");
-        output.push_str(&format!("bllvm_storage_disk_size_bytes {}\n", metrics.storage.disk_size));
-        
+        output.push_str(&format!(
+            "bllvm_storage_disk_size_bytes {}\n",
+            metrics.storage.disk_size
+        ));
+
         output.push_str("# HELP bllvm_storage_within_bounds Storage bounds status (1=within bounds, 0=exceeded)\n");
         output.push_str("# TYPE bllvm_storage_within_bounds gauge\n");
-        output.push_str(&format!("bllvm_storage_within_bounds {}\n", if metrics.storage.within_bounds { 1 } else { 0 }));
-        
+        output.push_str(&format!(
+            "bllvm_storage_within_bounds {}\n",
+            if metrics.storage.within_bounds { 1 } else { 0 }
+        ));
+
         // RPC metrics
         output.push_str("# HELP bllvm_rpc_requests_total Total RPC requests\n");
         output.push_str("# TYPE bllvm_rpc_requests_total counter\n");
-        output.push_str(&format!("bllvm_rpc_requests_total {}\n", metrics.rpc.requests_total));
-        
+        output.push_str(&format!(
+            "bllvm_rpc_requests_total {}\n",
+            metrics.rpc.requests_total
+        ));
+
         output.push_str("# HELP bllvm_rpc_requests_success_total Successful RPC requests\n");
         output.push_str("# TYPE bllvm_rpc_requests_success_total counter\n");
-        output.push_str(&format!("bllvm_rpc_requests_success_total {}\n", metrics.rpc.requests_success));
-        
+        output.push_str(&format!(
+            "bllvm_rpc_requests_success_total {}\n",
+            metrics.rpc.requests_success
+        ));
+
         output.push_str("# HELP bllvm_rpc_requests_failed_total Failed RPC requests\n");
         output.push_str("# TYPE bllvm_rpc_requests_failed_total counter\n");
-        output.push_str(&format!("bllvm_rpc_requests_failed_total {}\n", metrics.rpc.requests_failed));
-        
+        output.push_str(&format!(
+            "bllvm_rpc_requests_failed_total {}\n",
+            metrics.rpc.requests_failed
+        ));
+
         output.push_str("# HELP bllvm_rpc_requests_per_second Current RPC requests per second\n");
         output.push_str("# TYPE bllvm_rpc_requests_per_second gauge\n");
-        output.push_str(&format!("bllvm_rpc_requests_per_second {}\n", metrics.rpc.requests_per_second));
-        
-        output.push_str("# HELP bllvm_rpc_avg_response_time_ms Average RPC response time in milliseconds\n");
+        output.push_str(&format!(
+            "bllvm_rpc_requests_per_second {}\n",
+            metrics.rpc.requests_per_second
+        ));
+
+        output.push_str(
+            "# HELP bllvm_rpc_avg_response_time_ms Average RPC response time in milliseconds\n",
+        );
         output.push_str("# TYPE bllvm_rpc_avg_response_time_ms gauge\n");
-        output.push_str(&format!("bllvm_rpc_avg_response_time_ms {}\n", metrics.rpc.avg_response_time_ms));
-        
+        output.push_str(&format!(
+            "bllvm_rpc_avg_response_time_ms {}\n",
+            metrics.rpc.avg_response_time_ms
+        ));
+
         // Performance metrics
         output.push_str("# HELP bllvm_performance_avg_block_processing_time_ms Average block processing time in milliseconds\n");
         output.push_str("# TYPE bllvm_performance_avg_block_processing_time_ms gauge\n");
-        output.push_str(&format!("bllvm_performance_avg_block_processing_time_ms {}\n", metrics.performance.avg_block_processing_time_ms));
-        
+        output.push_str(&format!(
+            "bllvm_performance_avg_block_processing_time_ms {}\n",
+            metrics.performance.avg_block_processing_time_ms
+        ));
+
         output.push_str("# HELP bllvm_performance_avg_tx_validation_time_ms Average transaction validation time in milliseconds\n");
         output.push_str("# TYPE bllvm_performance_avg_tx_validation_time_ms gauge\n");
-        output.push_str(&format!("bllvm_performance_avg_tx_validation_time_ms {}\n", metrics.performance.avg_tx_validation_time_ms));
-        
+        output.push_str(&format!(
+            "bllvm_performance_avg_tx_validation_time_ms {}\n",
+            metrics.performance.avg_tx_validation_time_ms
+        ));
+
         output.push_str("# HELP bllvm_performance_blocks_per_second Blocks processed per second\n");
         output.push_str("# TYPE bllvm_performance_blocks_per_second gauge\n");
-        output.push_str(&format!("bllvm_performance_blocks_per_second {}\n", metrics.performance.blocks_per_second));
-        
-        output.push_str("# HELP bllvm_performance_transactions_per_second Transactions processed per second\n");
+        output.push_str(&format!(
+            "bllvm_performance_blocks_per_second {}\n",
+            metrics.performance.blocks_per_second
+        ));
+
+        output.push_str(
+            "# HELP bllvm_performance_transactions_per_second Transactions processed per second\n",
+        );
         output.push_str("# TYPE bllvm_performance_transactions_per_second gauge\n");
-        output.push_str(&format!("bllvm_performance_transactions_per_second {}\n", metrics.performance.transactions_per_second));
-        
+        output.push_str(&format!(
+            "bllvm_performance_transactions_per_second {}\n",
+            metrics.performance.transactions_per_second
+        ));
+
         // System metrics
         output.push_str("# HELP bllvm_system_uptime_seconds Node uptime in seconds\n");
         output.push_str("# TYPE bllvm_system_uptime_seconds gauge\n");
-        output.push_str(&format!("bllvm_system_uptime_seconds {}\n", metrics.system.uptime_seconds));
-        
+        output.push_str(&format!(
+            "bllvm_system_uptime_seconds {}\n",
+            metrics.system.uptime_seconds
+        ));
+
         if let Some(memory) = metrics.system.memory_usage_bytes {
             output.push_str("# HELP bllvm_system_memory_usage_bytes Memory usage in bytes\n");
             output.push_str("# TYPE bllvm_system_memory_usage_bytes gauge\n");
             output.push_str(&format!("bllvm_system_memory_usage_bytes {}\n", memory));
         }
-        
+
         if let Some(cpu) = metrics.system.cpu_usage_percent {
             output.push_str("# HELP bllvm_system_cpu_usage_percent CPU usage percentage\n");
             output.push_str("# TYPE bllvm_system_cpu_usage_percent gauge\n");
             output.push_str(&format!("bllvm_system_cpu_usage_percent {}\n", cpu));
         }
-        
+
         // DoS protection metrics
-        output.push_str("# HELP bllvm_dos_connection_rate_violations_total Connection rate violations\n");
+        output.push_str(
+            "# HELP bllvm_dos_connection_rate_violations_total Connection rate violations\n",
+        );
         output.push_str("# TYPE bllvm_dos_connection_rate_violations_total counter\n");
-        output.push_str(&format!("bllvm_dos_connection_rate_violations_total {}\n", metrics.network.dos_protection.connection_rate_violations));
-        
+        output.push_str(&format!(
+            "bllvm_dos_connection_rate_violations_total {}\n",
+            metrics.network.dos_protection.connection_rate_violations
+        ));
+
         output.push_str("# HELP bllvm_dos_auto_bans_total Auto-bans triggered\n");
         output.push_str("# TYPE bllvm_dos_auto_bans_total counter\n");
-        output.push_str(&format!("bllvm_dos_auto_bans_total {}\n", metrics.network.dos_protection.auto_bans));
-        
+        output.push_str(&format!(
+            "bllvm_dos_auto_bans_total {}\n",
+            metrics.network.dos_protection.auto_bans
+        ));
+
         output
     }
 
@@ -542,57 +623,71 @@ impl RpcServer {
         req: Request<Incoming>,
     ) -> Result<Response<Full<Bytes>>, hyper::Error> {
         let path = req.uri().path();
-        
+
         // Call gethealth RPC method internally
         let health_params = json!([]);
         let health_result = server.control.gethealth(&health_params).await;
-        
+
         let (status_code, body) = match health_result {
             Ok(health_value) => {
                 match path {
                     "/health" | "/health/live" => {
                         // Quick health check - just return status
-                        let status = health_value.get("status")
+                        let status = health_value
+                            .get("status")
                             .and_then(|s| s.as_str())
                             .unwrap_or("unknown");
                         let is_healthy = status == "healthy" || status == "degraded";
-                        
+
                         let response_body = json!({
                             "status": status,
                             "service": "bllvm-node"
                         });
-                        
+
                         let status_code = if is_healthy {
                             StatusCode::OK
                         } else {
                             StatusCode::SERVICE_UNAVAILABLE
                         };
-                        
-                        (status_code, serde_json::to_string(&response_body).unwrap_or_else(|_| "{}".to_string()))
+
+                        (
+                            status_code,
+                            serde_json::to_string(&response_body)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        )
                     }
                     "/health/ready" => {
                         // Readiness probe - check if node is ready to serve traffic
-                        let status = health_value.get("status")
+                        let status = health_value
+                            .get("status")
                             .and_then(|s| s.as_str())
                             .unwrap_or("unknown");
                         let is_ready = status == "healthy";
-                        
+
                         let response_body = json!({
                             "status": if is_ready { "ready" } else { "not_ready" },
                             "service": "bllvm-node"
                         });
-                        
+
                         let status_code = if is_ready {
                             StatusCode::OK
                         } else {
                             StatusCode::SERVICE_UNAVAILABLE
                         };
-                        
-                        (status_code, serde_json::to_string(&response_body).unwrap_or_else(|_| "{}".to_string()))
+
+                        (
+                            status_code,
+                            serde_json::to_string(&response_body)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        )
                     }
                     "/health/detailed" => {
                         // Detailed health report
-                        (StatusCode::OK, serde_json::to_string(&health_value).unwrap_or_else(|_| "{}".to_string()))
+                        (
+                            StatusCode::OK,
+                            serde_json::to_string(&health_value)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        )
                     }
                     _ => {
                         return Ok(Self::http_error_response(
@@ -611,11 +706,11 @@ impl RpcServer {
                 });
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
-                    serde_json::to_string(&response_body).unwrap_or_else(|_| "{}".to_string())
+                    serde_json::to_string(&response_body).unwrap_or_else(|_| "{}".to_string()),
                 )
             }
         };
-        
+
         Ok(Response::builder()
             .status(status_code)
             .header("Content-Type", "application/json")
@@ -644,7 +739,9 @@ impl RpcServer {
                 error!("Failed to build error response: {}", e);
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Full::new(Bytes::from("{\"error\":\"Internal server error\"}")))
+                    .body(Full::new(Bytes::from(
+                        "{\"error\":\"Internal server error\"}",
+                    )))
                     .expect("Fallback response should always succeed")
             })
     }
@@ -1287,10 +1384,10 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
                 method
             );
-        let response_str = RpcServer::process_request(&request).await;
-        let response: Value = serde_json::from_str(&response_str).unwrap();
+            let response_str = RpcServer::process_request(&request).await;
+            let response: Value = serde_json::from_str(&response_str).unwrap();
 
-        assert_eq!(response["jsonrpc"], "2.0");
+            assert_eq!(response["jsonrpc"], "2.0");
             // Result may be an object, string, or null (if method failed due to missing dependencies)
             assert!(
                 response["result"].is_object()

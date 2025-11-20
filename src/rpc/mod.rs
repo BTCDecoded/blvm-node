@@ -252,41 +252,35 @@ impl RpcManager {
                         arc_clone(metrics),
                     )
                 }
-                (Some(auth_manager), None) => {
-                    server::RpcServer::with_dependencies_and_auth(
-                        self.server_addr,
-                        blockchain,
-                        network,
-                        mempool_rpc,
-                        mining,
-                        rawtx_rpc,
-                        arc_clone(&control_rpc),
-                        arc_clone(auth_manager),
-                    )
-                }
-                (None, Some(metrics)) => {
-                    server::RpcServer::with_dependencies_and_metrics(
-                        self.server_addr,
-                        blockchain,
-                        network,
-                        mempool_rpc,
-                        mining,
-                        rawtx_rpc,
-                        arc_clone(&control_rpc),
-                        arc_clone(metrics),
-                    )
-                }
-                (None, None) => {
-                    server::RpcServer::with_dependencies(
-                        self.server_addr,
-                        blockchain,
-                        network,
-                        mempool_rpc,
-                        mining,
-                        rawtx_rpc,
-                        arc_clone(&control_rpc),
-                    )
-                }
+                (Some(auth_manager), None) => server::RpcServer::with_dependencies_and_auth(
+                    self.server_addr,
+                    blockchain,
+                    network,
+                    mempool_rpc,
+                    mining,
+                    rawtx_rpc,
+                    arc_clone(&control_rpc),
+                    arc_clone(auth_manager),
+                ),
+                (None, Some(metrics)) => server::RpcServer::with_dependencies_and_metrics(
+                    self.server_addr,
+                    blockchain,
+                    network,
+                    mempool_rpc,
+                    mining,
+                    rawtx_rpc,
+                    arc_clone(&control_rpc),
+                    arc_clone(metrics),
+                ),
+                (None, None) => server::RpcServer::with_dependencies(
+                    self.server_addr,
+                    blockchain,
+                    network,
+                    mempool_rpc,
+                    mining,
+                    rawtx_rpc,
+                    arc_clone(&control_rpc),
+                ),
             }
         } else {
             // No dependencies - use auth and/or metrics if configured

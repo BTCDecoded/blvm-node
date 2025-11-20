@@ -84,7 +84,7 @@ impl Node {
         let storage = Storage::new(data_dir)?;
         let storage_arc = Arc::new(storage);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
-        
+
         // Create network manager (config will be applied later if available)
         let network = NetworkManager::new(network_addr).with_dependencies(
             Arc::clone(&protocol_arc),
@@ -135,33 +135,31 @@ impl Node {
         // Apply network configuration if available
         let max_peers = config.max_peers.unwrap_or(100);
         let transport_preference = config.get_transport_preference();
-        
+
         // Recreate network manager with config
         let network_addr = self.network_addr;
         let protocol_arc = self.protocol.clone();
         // Use existing storage Arc instead of creating a new one
         let storage_arc = Arc::clone(&self.storage);
         let mempool_manager_arc = Arc::clone(&self.mempool_manager);
-        
+
         let network = NetworkManager::with_config(
             network_addr,
             max_peers,
             transport_preference,
             Some(&config),
-        ).with_dependencies(
-            protocol_arc,
-            storage_arc,
-            mempool_manager_arc,
-        );
-        
+        )
+        .with_dependencies(protocol_arc, storage_arc, mempool_manager_arc);
+
         // Initialize governance webhook client if configured (from environment variables)
         #[cfg(feature = "governance")]
-        let governance_webhook = std::env::var("GOVERNANCE_WEBHOOK_URL").ok()
-            .map(|url| crate::governance::GovernanceWebhookClient::new(
+        let governance_webhook = std::env::var("GOVERNANCE_WEBHOOK_URL").ok().map(|url| {
+            crate::governance::GovernanceWebhookClient::new(
                 Some(url),
                 std::env::var("GOVERNANCE_NODE_ID").ok(),
-            ));
-        
+            )
+        });
+
         self.network = network;
         self.config = Some(config);
         #[cfg(feature = "governance")]
@@ -310,7 +308,10 @@ impl Node {
                                           stats.blocks_pruned, stats.blocks_kept);
                                     // Flush storage to persist pruning changes
                                     use crate::utils::log_error;
-                                    log_error(|| self.storage.flush(), "Failed to flush storage after startup pruning");
+                                    log_error(
+                                        || self.storage.flush(),
+                                        "Failed to flush storage after startup pruning",
+                                    );
                                 }
                                 Err(e) => {
                                     warn!("Startup pruning failed: {}", e);
@@ -398,10 +399,7 @@ impl Node {
 
         // Get target peer count from config
         let default_timing = crate::config::NetworkTimingConfig::default();
-        let timing_config = config
-            .network_timing
-            .as_ref()
-            .unwrap_or(&default_timing);
+        let timing_config = config.network_timing.as_ref().unwrap_or(&default_timing);
         let target_peer_count = timing_config.target_peer_count;
 
         // Initialize peer connections
@@ -449,7 +447,7 @@ impl Node {
                 ) {
                     Ok(true) => {
                         info!("Block accepted at height {}", current_height);
-                        
+
                         // Parse block for governance webhook (need block object, not just block_data)
                         // We'll get it from storage after it's stored
                         let blocks_arc = self.storage.blocks();
@@ -491,7 +489,7 @@ impl Node {
                             {
                                 warn!("Failed to update network hashrate cache: {}", e);
                             }
-                            
+
                             // Notify governance app about new block (for fee forwarding tracking)
                             #[cfg(feature = "governance")]
                             if let Some(ref webhook) = self.governance_webhook {
@@ -665,15 +663,15 @@ impl Node {
 
             // Check node health periodically
             self.check_health().await?;
-            
+
             // Check disk space periodically (every 10 iterations = ~1 second)
             // Use timeout to prevent hanging on slow disk operations
-            let counter = self.disk_check_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let counter = self
+                .disk_check_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if counter % 10 == 0 {
                 use crate::utils::with_storage_timeout;
-                match with_storage_timeout(async {
-                    self.check_disk_space().await
-                }).await {
+                match with_storage_timeout(async { self.check_disk_space().await }).await {
                     Ok(Ok(())) => {
                         // Disk check succeeded
                     }
@@ -688,7 +686,7 @@ impl Node {
                 }
             }
         }
-        
+
         // Graceful shutdown - stop all components
         info!("Initiating graceful shutdown...");
         self.stop().await?;
@@ -715,9 +713,7 @@ impl Node {
 
         // Check storage with timeout and graceful degradation
         use crate::utils::with_storage_timeout;
-        match with_storage_timeout(async {
-            self.storage.blocks().block_count()
-        }).await {
+        match with_storage_timeout(async { self.storage.blocks().block_count() }).await {
             Ok(Ok(blocks)) => {
                 if blocks == 0 {
                     warn!("No blocks in storage");
@@ -740,10 +736,10 @@ impl Node {
     async fn check_disk_space(&self) -> Result<()> {
         // Check storage bounds (80% threshold)
         let within_bounds = self.storage.check_storage_bounds()?;
-        
+
         if !within_bounds {
             warn!("Storage bounds exceeded - disk space may be low");
-            
+
             // Check if pruning is enabled
             if self.storage.is_pruning_enabled() {
                 if let Some(pruning_manager) = self.storage.pruning() {
@@ -751,46 +747,57 @@ impl Node {
                     let chain_info = self.storage.chain().load_chain_info()?;
                     if let Some(info) = chain_info {
                         let current_height = info.height;
-                        
+
                         // Get last prune height
                         let last_prune_height = pruning_manager.get_stats().last_prune_height;
-                        
+
                         // Check if we should auto-prune
                         if pruning_manager.should_auto_prune(current_height, last_prune_height) {
                             info!("Triggering automatic pruning due to storage bounds");
-                            
+
                             // Perform pruning (prune_to_height is not async, but we're in async context)
                             // Calculate prune height: keep only the last 1000 blocks (configurable)
                             let prune_window = 1000; // Keep last 1000 blocks
                             let prune_to_height = current_height.saturating_sub(prune_window);
-                            
+
                             if prune_to_height > 0 && prune_to_height < current_height {
                                 match tokio::task::spawn_blocking({
                                     let pruning_manager = Arc::clone(&pruning_manager);
                                     let prune_to_height = prune_to_height;
                                     let current_height = current_height;
-                                    move || pruning_manager.prune_to_height(prune_to_height, current_height, false)
-                                }).await {
-                                Ok(Ok(stats)) => {
-                                    info!(
+                                    move || {
+                                        pruning_manager.prune_to_height(
+                                            prune_to_height,
+                                            current_height,
+                                            false,
+                                        )
+                                    }
+                                })
+                                .await
+                                {
+                                    Ok(Ok(stats)) => {
+                                        info!(
                                         "Automatic pruning completed: {} blocks pruned, {} blocks kept, {} bytes freed",
                                         stats.blocks_pruned,
                                         stats.blocks_kept,
                                         stats.storage_freed
                                     );
-                                    
-                                    // Flush storage to persist pruning changes
-                                    use crate::utils::log_error;
-                                    log_error(|| self.storage.flush(), "Failed to flush storage after automatic pruning");
-                                }
-                                Ok(Err(e)) => {
-                                    warn!("Automatic pruning failed: {}", e);
-                                }
-                                Err(e) => {
-                                    warn!("Pruning task failed: {}", e);
+
+                                        // Flush storage to persist pruning changes
+                                        use crate::utils::log_error;
+                                        log_error(
+                                            || self.storage.flush(),
+                                            "Failed to flush storage after automatic pruning",
+                                        );
+                                    }
+                                    Ok(Err(e)) => {
+                                        warn!("Automatic pruning failed: {}", e);
+                                    }
+                                    Err(e) => {
+                                        warn!("Pruning task failed: {}", e);
+                                    }
                                 }
                             }
-                            } // Close the if statement at line 707
                         } else {
                             warn!("Storage bounds exceeded but auto-pruning not yet due (last prune: {:?}, current: {})", 
                                   last_prune_height, current_height);
@@ -805,7 +812,7 @@ impl Node {
                 warn!("Storage bounds exceeded but pruning is disabled (archival node mode)");
             }
         }
-        
+
         Ok(())
     }
 

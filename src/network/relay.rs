@@ -7,10 +7,10 @@
 
 #[cfg(feature = "dandelion")]
 use super::dandelion::DandelionRelay;
+use crate::utils::current_timestamp;
 use bllvm_protocol::{Block, Hash};
 use std::collections::HashMap;
 use tracing::debug;
-use crate::utils::current_timestamp;
 
 /// Relay manager
 pub struct RelayManager {

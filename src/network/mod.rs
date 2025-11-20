@@ -4,17 +4,17 @@
 //! message handling for communication with other Bitcoin nodes.
 
 pub mod address_db;
+pub mod ban_list_merging;
+pub mod ban_list_signing;
 pub mod chain_access;
 pub mod dns_seeds;
+pub mod dos_protection;
 pub mod inventory;
 pub mod message_bridge;
 pub mod peer;
 pub mod protocol;
 pub mod protocol_adapter;
 pub mod protocol_extensions;
-pub mod ban_list_merging;
-pub mod ban_list_signing;
-pub mod dos_protection;
 pub mod relay;
 pub mod tcp_transport;
 pub mod transport;
@@ -40,7 +40,6 @@ pub mod filter_service;
 // Payment Protocol (BIP70) - P2P handlers
 pub mod bip70_handler;
 
-
 // Privacy and Performance Enhancements
 #[cfg(feature = "dandelion")]
 pub mod dandelion; // Dandelion++ privacy-preserving transaction relay
@@ -50,6 +49,9 @@ pub mod package_relay_handler; // BIP 331 handlers
 pub mod txhash; // Non-consensus hashing helpers for relay
 
 use crate::network::protocol::{AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser};
+use crate::node::mempool::MempoolManager;
+use crate::storage::Storage;
+use crate::utils::current_timestamp;
 use anyhow::Result;
 use bllvm_protocol::mempool::Mempool;
 use bllvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
@@ -58,14 +60,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
-use crate::storage::Storage;
-use crate::node::mempool::MempoolManager;
-use crate::utils::current_timestamp;
 
 use crate::network::tcp_transport::TcpTransport;
-use crate::network::transport::{
-    Transport, TransportAddr, TransportListener, TransportPreference,
-};
+use crate::network::transport::{Transport, TransportAddr, TransportListener, TransportPreference};
 use std::collections::HashSet;
 
 /// Network I/O operations for testing
@@ -87,7 +84,7 @@ impl NetworkIO {
 }
 
 /// Peer manager for tracking connected peers
-/// 
+///
 /// Uses TransportAddr as key to support all transport types (TCP, Quinn, Iroh).
 /// This allows proper peer identification for Iroh (NodeId) while maintaining
 /// compatibility with TCP/Quinn (SocketAddr).
@@ -131,11 +128,12 @@ impl PeerManager {
     pub fn peer_addresses(&self) -> Vec<TransportAddr> {
         self.peers.keys().cloned().collect()
     }
-    
+
     /// Get peer addresses as SocketAddr (for backward compatibility)
     /// Only returns SocketAddr for TCP/Quinn peers, skips Iroh peers
     pub fn peer_socket_addresses(&self) -> Vec<SocketAddr> {
-        self.peers.keys()
+        self.peers
+            .keys()
             .filter_map(|addr| {
                 match addr {
                     TransportAddr::Tcp(sock) => Some(*sock),
@@ -151,52 +149,60 @@ impl PeerManager {
     pub fn can_accept_peer(&self) -> bool {
         self.peers.len() < self.max_peers
     }
-    
+
     /// Select best peers based on quality score
-    /// 
+    ///
     /// Returns peers sorted by quality score (highest first)
     pub fn select_best_peers(&self, count: usize) -> Vec<TransportAddr> {
-        let mut peers: Vec<_> = self.peers.iter()
+        let mut peers: Vec<_> = self
+            .peers
+            .iter()
             .map(|(addr, peer)| (addr.clone(), peer.quality_score()))
             .collect();
-        
+
         // Sort by quality score (descending)
         peers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         // Return top N addresses
-        peers.into_iter()
+        peers
+            .into_iter()
             .take(count)
             .map(|(addr, _)| addr)
             .collect()
     }
-    
+
     /// Select reliable peers only
-    /// 
+    ///
     /// Returns peers that meet reliability criteria
     pub fn select_reliable_peers(&self) -> Vec<TransportAddr> {
-        self.peers.iter()
+        self.peers
+            .iter()
             .filter(|(_, peer)| peer.quality_score() > 0.5) // Use quality_score as reliability indicator
             .map(|(addr, _)| addr.clone())
             .collect()
     }
-    
+
     /// Get peer quality statistics
     pub fn get_quality_stats(&self) -> (usize, usize, f64) {
         let total = self.peers.len();
-        let reliable = self.peers.values()
+        let reliable = self
+            .peers
+            .values()
             .filter(|peer| peer.quality_score() > 0.5) // Use quality_score as reliability indicator
             .count();
         let avg_quality = if total > 0 {
-            self.peers.values()
+            self.peers
+                .values()
                 .map(|peer| peer.quality_score())
-                .sum::<f64>() / total as f64
+                .sum::<f64>()
+                / total as f64
         } else {
             0.0
         };
-        
+
         (total, reliable, avg_quality)
     }
-    
+
     /// Find peer by SocketAddr (tries TCP and Quinn variants)
     /// Returns the TransportAddr if found
     pub fn find_transport_addr_by_socket(&self, addr: SocketAddr) -> Option<TransportAddr> {
@@ -205,7 +211,7 @@ impl PeerManager {
         if self.peers.contains_key(&tcp_addr) {
             return Some(tcp_addr);
         }
-        
+
         // Try Quinn
         #[cfg(feature = "quinn")]
         {
@@ -214,7 +220,7 @@ impl PeerManager {
                 return Some(quinn_addr);
             }
         }
-        
+
         None
     }
 }
@@ -242,7 +248,7 @@ impl PeerRateLimiter {
             last_refill: now,
         }
     }
-    
+
     /// Check if a message can be consumed and consume a token
     pub fn check_and_consume(&mut self) -> bool {
         self.refill();
@@ -253,15 +259,18 @@ impl PeerRateLimiter {
             false
         }
     }
-    
+
     /// Refill tokens based on elapsed time
     fn refill(&mut self) {
         let now = current_timestamp();
-        
+
         if now > self.last_refill {
             let elapsed = now - self.last_refill;
             let tokens_to_add = (elapsed as u32) * self.rate;
-            self.tokens = self.tokens.saturating_add(tokens_to_add).min(self.burst_limit);
+            self.tokens = self
+                .tokens
+                .saturating_add(tokens_to_add)
+                .min(self.burst_limit);
             self.last_refill = now;
         }
     }
@@ -431,30 +440,26 @@ impl NetworkManager {
         let dos_config = config
             .and_then(|c| c.dos_protection.as_ref())
             .unwrap_or(&dos_config_default);
-        
-        let dos_protection = Arc::new(
-            dos_protection::DosProtectionManager::with_ban_settings(
-                dos_config.max_connections_per_window,
-                dos_config.window_seconds,
-                dos_config.max_message_queue_size,
-                dos_config.max_active_connections,
-                dos_config.auto_ban_threshold,
-                dos_config.ban_duration_seconds,
-            )
-        );
-        
+
+        let dos_protection = Arc::new(dos_protection::DosProtectionManager::with_ban_settings(
+            dos_config.max_connections_per_window,
+            dos_config.window_seconds,
+            dos_config.max_message_queue_size,
+            dos_config.max_active_connections,
+            dos_config.auto_ban_threshold,
+            dos_config.ban_duration_seconds,
+        ));
+
         // Use config for address database
         let addr_db_config_default = crate::config::AddressDatabaseConfig::default();
         let addr_db_config = config
             .and_then(|c| c.address_database.as_ref())
             .unwrap_or(&addr_db_config_default);
-        
-        let address_database = Arc::new(RwLock::new(
-            address_db::AddressDatabase::with_expiration(
-                addr_db_config.max_addresses,
-                addr_db_config.expiration_seconds,
-            )
-        ));
+
+        let address_database = Arc::new(RwLock::new(address_db::AddressDatabase::with_expiration(
+            addr_db_config.max_addresses,
+            addr_db_config.expiration_seconds,
+        )));
 
         // Use config for request timeouts
         let timeout_config_default = crate::config::RequestTimeoutConfig::default();
@@ -497,14 +502,12 @@ impl NetworkManager {
             ban_list_sharing_config: config.and_then(|c| c.ban_list_sharing.clone()),
             address_database,
             last_addr_sent: Arc::new(Mutex::new(0)),
-            enable_self_advertisement: config
-                .map(|c| c.enable_self_advertisement)
-                .unwrap_or(true),
+            enable_self_advertisement: config.map(|c| c.enable_self_advertisement).unwrap_or(true),
             request_timeout_config,
             peer_reconnection_queue: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    
+
     /// Set dependencies for protocol message processing
     pub fn with_dependencies(
         mut self,
@@ -540,7 +543,7 @@ impl NetworkManager {
         config: &crate::config::NodeConfig,
     ) -> Result<()> {
         use crate::network::dns_seeds;
-        
+
         let seeds = match network {
             "mainnet" => dns_seeds::MAINNET_DNS_SEEDS,
             "testnet" => dns_seeds::TESTNET_DNS_SEEDS,
@@ -549,7 +552,7 @@ impl NetworkManager {
                 return Ok(());
             }
         };
-        
+
         info!("Discovering peers from DNS seeds for {}", network);
         // Get max addresses from config
         let timing_config_default = crate::config::NetworkTimingConfig::default();
@@ -560,7 +563,7 @@ impl NetworkManager {
         let max_addresses = timing_config.max_addresses_from_dns;
         let addresses = dns_seeds::resolve_dns_seeds(seeds, port, max_addresses).await;
         let address_count = addresses.len();
-        
+
         // Add discovered addresses to database
         {
             let mut db = self.address_database.write().await;
@@ -568,7 +571,7 @@ impl NetworkManager {
                 db.add_address(addr, 0); // Services will be updated on connection
             }
         }
-        
+
         info!("Discovered {} addresses from DNS seeds", address_count);
         Ok(())
     }
@@ -578,7 +581,7 @@ impl NetworkManager {
         for peer_addr in persistent_peers {
             // Add to persistent peer set
             self.add_persistent_peer(*peer_addr);
-            
+
             // Try to connect
             info!("Connecting to persistent peer: {}", peer_addr);
             if let Err(e) = self.connect_to_peer(*peer_addr).await {
@@ -589,12 +592,12 @@ impl NetworkManager {
     }
 
     /// Discover Iroh peers and add to address database
-    /// 
+    ///
     /// Iroh peers are discovered through:
     /// 1. Incoming connections (automatically stored)
     /// 2. DERP servers (if configured)
     /// 3. Gossip discovery (if available)
-    /// 
+    ///
     /// This method can be extended to use Iroh's gossip discovery APIs when available.
     #[cfg(feature = "iroh")]
     pub async fn discover_iroh_peers(&self) -> Result<usize> {
@@ -602,12 +605,12 @@ impl NetworkManager {
         // 1. Incoming connections (handled automatically in accept loop)
         // 2. DERP servers (configured in IrohTransport)
         // 3. Gossip discovery (would require iroh-gossip-discovery crate)
-        
+
         // For now, we rely on:
         // - Persistent Iroh peers from config
         // - Incoming connections (stored automatically)
         // - DERP servers (handled by Iroh's MagicEndpoint)
-        
+
         // Future: Integrate with iroh-gossip-discovery when available
         info!("Iroh peer discovery: relying on DERP servers and incoming connections");
         Ok(0) // Return 0 for now - discovery happens through Iroh's native mechanisms
@@ -616,9 +619,9 @@ impl NetworkManager {
     /// Connect to Iroh peers from address database
     #[cfg(feature = "iroh")]
     pub async fn connect_iroh_peers_from_database(&self, target_count: usize) -> Result<usize> {
-        use crate::network::transport::TransportAddr;
         use crate::network::peer::Peer;
-        
+        use crate::network::transport::TransportAddr;
+
         // Count current Iroh peers
         let current_iroh_count = {
             let pm = self.peer_manager.lock().await;
@@ -627,25 +630,28 @@ impl NetworkManager {
                 .filter(|addr| matches!(addr, TransportAddr::Iroh(_)))
                 .count()
         };
-        
+
         if current_iroh_count >= target_count {
             return Ok(0);
         }
-        
+
         let needed = target_count - current_iroh_count;
-        info!("Need {} more Iroh peers (current: {}, target: {})", needed, current_iroh_count, target_count);
-        
+        info!(
+            "Need {} more Iroh peers (current: {}, target: {})",
+            needed, current_iroh_count, target_count
+        );
+
         // Get fresh Iroh NodeIds from database
         let node_ids = {
             let db = self.address_database.read().await;
             db.get_fresh_iroh_addresses(needed * 2) // Get 2x needed for retries
         };
-        
+
         if node_ids.is_empty() {
             warn!("No fresh Iroh addresses available in database");
             return Ok(0);
         }
-        
+
         // Get Iroh transport
         let iroh_transport = match &self.iroh_transport {
             Some(transport) => transport,
@@ -654,13 +660,13 @@ impl NetworkManager {
                 return Ok(0);
             }
         };
-        
+
         // Try to connect to Iroh peers
         let mut connected = 0;
         for node_id in node_ids.into_iter().take(needed * 2) {
             let node_id_bytes = node_id.as_bytes().to_vec();
             let transport_addr = TransportAddr::Iroh(node_id_bytes.clone());
-            
+
             // Connect directly using Iroh transport
             match iroh_transport.connect(transport_addr.clone()).await {
                 Ok(conn) => {
@@ -673,7 +679,7 @@ impl NetworkManager {
                         transport_addr.clone(),
                         self.peer_tx.clone(),
                     );
-                    
+
                     // Add peer to manager
                     {
                         let mut pm = self.peer_manager.lock().await;
@@ -682,13 +688,13 @@ impl NetworkManager {
                             continue;
                         }
                     }
-                    
+
                     // Store mapping for Iroh (if needed)
                     {
                         let mut socket_to_transport = self.socket_to_transport.lock().await;
                         socket_to_transport.insert(placeholder_socket, transport_addr.clone());
                     }
-                    
+
                     info!("Successfully connected to Iroh peer: {}", node_id);
                     connected += 1;
                     if connected >= needed {
@@ -700,13 +706,16 @@ impl NetworkManager {
                 }
             }
         }
-        
-        info!("Connected to {} new Iroh peers from address database", connected);
+
+        info!(
+            "Connected to {} new Iroh peers from address database",
+            connected
+        );
         Ok(connected)
     }
 
     /// Connect to peers from address database when below target count
-    /// 
+    ///
     /// Works with both SocketAddr-based addresses (TCP/Quinn) and Iroh NodeIds.
     pub async fn connect_peers_from_database(&self, target_count: usize) -> Result<usize> {
         let current_count = self.peer_count();
@@ -715,7 +724,10 @@ impl NetworkManager {
         }
 
         let needed = target_count - current_count;
-        info!("Need {} more peers (current: {}, target: {})", needed, current_count, target_count);
+        info!(
+            "Need {} more peers (current: {}, target: {})",
+            needed, current_count, target_count
+        );
 
         // Get fresh addresses from database
         let ban_list = self.ban_list.read().await.clone();
@@ -738,7 +750,8 @@ impl NetworkManager {
         // Convert addresses to SocketAddrs first
         let sockets: Vec<SocketAddr> = {
             let db = self.address_database.read().await;
-            addresses.iter()
+            addresses
+                .iter()
                 .take(needed * 2)
                 .map(|addr| db.network_addr_to_socket(addr))
                 .collect()
@@ -747,7 +760,6 @@ impl NetworkManager {
         // Try to connect to addresses
         let mut connected = 0;
         for socket in sockets {
-
             if let Err(e) = self.connect_to_peer(socket).await {
                 debug!("Failed to connect to {}: {}", socket, e);
                 // Continue trying other addresses
@@ -760,25 +772,25 @@ impl NetworkManager {
         }
 
         info!("Connected to {} new peers from address database", connected);
-        
+
         // Also try to connect Iroh peers if Iroh is enabled
         #[cfg(feature = "iroh")]
         if self.transport_preference.allows_iroh() {
             let iroh_connected = self.connect_iroh_peers_from_database(target_count).await?;
             connected += iroh_connected;
         }
-        
+
         Ok(connected)
     }
 
     /// Initialize peer connections after startup
-    /// 
+    ///
     /// This is automatically called by `start()` to:
     /// 1. Discover peers from DNS seeds (for TCP/Quinn transports)
     /// 2. Connect to persistent peers from config
     /// 3. Discover Iroh peers (if Iroh is enabled) - uses Iroh's DERP servers and gossip
     /// 4. Connect to peers from address database to reach target count
-    /// 
+    ///
     /// Note: The address database now supports both SocketAddr-based addresses (TCP/Quinn)
     /// and Iroh NodeIds. Iroh peers are discovered through:
     /// - DERP servers (handled by Iroh's MagicEndpoint)
@@ -793,17 +805,16 @@ impl NetworkManager {
         target_peer_count: usize,
     ) -> Result<()> {
         // 1. Discover peers from DNS seeds (only for TCP/Quinn, not Iroh)
-        let should_discover_dns = self.transport_preference.allows_tcp() || 
+        let should_discover_dns = self.transport_preference.allows_tcp() || {
+            #[cfg(feature = "quinn")]
             {
-                #[cfg(feature = "quinn")]
-                {
-                    self.transport_preference.allows_quinn()
-                }
-                #[cfg(not(feature = "quinn"))]
-                {
-                    false
-                }
-            };
+                self.transport_preference.allows_quinn()
+            }
+            #[cfg(not(feature = "quinn"))]
+            {
+                false
+            }
+        };
         if should_discover_dns {
             if let Err(e) = self.discover_peers_from_dns(network, port, config).await {
                 warn!("DNS seed discovery failed: {}", e);
@@ -812,7 +823,10 @@ impl NetworkManager {
 
         // 2. Connect to persistent peers
         if !config.persistent_peers.is_empty() {
-            if let Err(e) = self.connect_persistent_peers(&config.persistent_peers).await {
+            if let Err(e) = self
+                .connect_persistent_peers(&config.persistent_peers)
+                .await
+            {
                 warn!("Failed to connect to some persistent peers: {}", e);
             }
         }
@@ -834,7 +848,7 @@ impl NetworkManager {
             .unwrap_or(&timing_config_default);
         let delay_seconds = timing_config.peer_connection_delay_seconds;
         tokio::time::sleep(tokio::time::Duration::from_secs(delay_seconds)).await;
-        
+
         if let Err(e) = self.connect_peers_from_database(target_peer_count).await {
             warn!("Failed to connect peers from database: {}", e);
         }
@@ -848,7 +862,7 @@ impl NetworkManager {
             "Starting network manager with transport preference: {:?}",
             self.transport_preference
         );
-        
+
         // Start listening first
 
         // Initialize Quinn transport if enabled
@@ -914,7 +928,7 @@ impl NetworkManager {
                             let ip = socket_addr.ip();
                             if !dos_protection.check_connection(ip).await {
                                 warn!("Connection rate limit exceeded for IP {}, rejecting connection", ip);
-                                
+
                                 // Check if we should auto-ban
                                 if dos_protection.should_auto_ban(ip).await {
                                     warn!("Auto-banning IP {} for repeated connection rate violations", ip);
@@ -928,7 +942,7 @@ impl NetworkManager {
                                     let mut ban_list_guard = ban_list.write().await;
                                     ban_list_guard.insert(socket_addr, unban_timestamp);
                                 }
-                                
+
                                 // Close connection immediately
                                 drop(conn);
                                 continue;
@@ -939,14 +953,18 @@ impl NetworkManager {
                                 let pm = peer_manager_clone.lock().await;
                                 pm.peer_count()
                             };
-                            if !dos_protection.check_active_connections(current_connections).await {
+                            if !dos_protection
+                                .check_active_connections(current_connections)
+                                .await
+                            {
                                 warn!("Active connection limit exceeded, rejecting connection from {}", socket_addr);
                                 drop(conn);
                                 continue;
                             }
 
                             // Send connection notification
-                            let _ = peer_tx.send(NetworkMessage::PeerConnected(transport_addr.clone()));
+                            let _ =
+                                peer_tx.send(NetworkMessage::PeerConnected(transport_addr.clone()));
 
                             // Handle connection in background with graceful error handling
                             let peer_tx_clone = peer_tx.clone();
@@ -961,17 +979,22 @@ impl NetworkManager {
                                     transport_addr_for_peer.clone(),
                                     peer_tx_clone.clone(),
                                 );
-                                
+
                                 // Add peer to manager (async-safe)
                                 let mut pm = peer_manager_for_peer.lock().await;
                                 if let Err(e) = pm.add_peer(transport_addr_for_peer.clone(), peer) {
                                     warn!("Failed to add peer {}: {}", socket_addr, e);
-                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_for_peer.clone()));
+                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                        transport_addr_for_peer.clone(),
+                                    ));
                                     return;
                                 }
-                                info!("Successfully added peer {} (transport: {:?})", socket_addr, transport_addr_for_peer);
+                                info!(
+                                    "Successfully added peer {} (transport: {:?})",
+                                    socket_addr, transport_addr_for_peer
+                                );
                                 drop(pm); // Explicitly drop lock before continuing
-                                
+
                                 // Connection will be cleaned up automatically when read/write tasks exit
                                 // Peer removal happens in process_messages when PeerDisconnected is received
                             });
@@ -995,7 +1018,7 @@ impl NetworkManager {
                     let peer_manager = arc_clone(&self.peer_manager);
                     let dos_protection = arc_clone(&self.dos_protection);
                     let ban_list = arc_clone(&self.ban_list);
-                    
+
                     tokio::spawn(async move {
                         loop {
                             match quinn_listener.accept().await {
@@ -1014,14 +1037,14 @@ impl NetworkManager {
                                     let ip = socket_addr.ip();
                                     if !dos_protection.check_connection(ip).await {
                                         warn!("Connection rate limit exceeded for IP {}, rejecting Quinn connection", ip);
-                                        
+
                                         if dos_protection.should_auto_ban(ip).await {
                                             warn!("Auto-banning IP {} for repeated connection rate violations", ip);
                                             // Auto-ban the IP using configured ban duration
-                                            let ban_duration = dos_protection.ban_duration_seconds();
+                                            let ban_duration =
+                                                dos_protection.ban_duration_seconds();
                                             let unban_timestamp = current_timestamp()
-                                                + ban_duration
-                                                .as_secs()
+                                                + ban_duration.as_secs()
                                                 + ban_duration;
                                             let mut ban_list_guard = ban_list.write().await;
                                             ban_list_guard.insert(socket_addr, unban_timestamp);
@@ -1035,7 +1058,10 @@ impl NetworkManager {
                                         let pm = peer_manager.lock().await;
                                         pm.peer_count()
                                     };
-                                    if !dos_protection.check_active_connections(current_connections).await {
+                                    if !dos_protection
+                                        .check_active_connections(current_connections)
+                                        .await
+                                    {
                                         warn!("Active connection limit exceeded, rejecting Quinn connection from {}", socket_addr);
                                         drop(conn);
                                         continue;
@@ -1043,7 +1069,9 @@ impl NetworkManager {
 
                                     // Send connection notification
                                     let quinn_transport_addr = TransportAddr::Quinn(socket_addr);
-                                    let _ = peer_tx.send(NetworkMessage::PeerConnected(quinn_transport_addr.clone()));
+                                    let _ = peer_tx.send(NetworkMessage::PeerConnected(
+                                        quinn_transport_addr.clone(),
+                                    ));
 
                                     // Handle connection in background with graceful error handling
                                     use crate::utils::arc_clone;
@@ -1051,7 +1079,7 @@ impl NetworkManager {
                                     let peer_manager_clone = arc_clone(&peer_manager);
                                     tokio::spawn(async move {
                                         use crate::network::transport::TransportAddr;
-                                        
+
                                         let quinn_addr = TransportAddr::Quinn(socket_addr);
                                         let quinn_addr_clone = quinn_addr.clone();
                                         let peer = peer::Peer::from_transport_connection(
@@ -1060,12 +1088,20 @@ impl NetworkManager {
                                             quinn_addr,
                                             peer_tx_clone.clone(),
                                         );
-                                        
+
                                         // Add peer to manager (async-safe)
                                         let mut pm = peer_manager_clone.lock().await;
-                                        if let Err(e) = pm.add_peer(quinn_addr_clone.clone(), peer) {
-                                            warn!("Failed to add Quinn peer {}: {}", socket_addr, e);
-                                            let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(quinn_addr_clone.clone()));
+                                        if let Err(e) = pm.add_peer(quinn_addr_clone.clone(), peer)
+                                        {
+                                            warn!(
+                                                "Failed to add Quinn peer {}: {}",
+                                                socket_addr, e
+                                            );
+                                            let _ = peer_tx_clone.send(
+                                                NetworkMessage::PeerDisconnected(
+                                                    quinn_addr_clone.clone(),
+                                                ),
+                                            );
                                             return;
                                         }
                                         info!("Successfully added Quinn peer {}", socket_addr);
@@ -1081,7 +1117,10 @@ impl NetworkManager {
                     });
                 }
                 Err(e) => {
-                    warn!("Failed to start Quinn listener (graceful degradation): {}", e);
+                    warn!(
+                        "Failed to start Quinn listener (graceful degradation): {}",
+                        e
+                    );
                     // Continue with other transports - don't fail entire startup
                 }
             }
@@ -1124,76 +1163,101 @@ impl NetworkManager {
                                         let pm = peer_manager.lock().await;
                                         pm.peer_count()
                                     };
-                                    if !dos_protection.check_active_connections(current_connections).await {
+                                    if !dos_protection
+                                        .check_active_connections(current_connections)
+                                        .await
+                                    {
                                         warn!("Active connection limit exceeded, rejecting Iroh connection");
                                         drop(conn);
                                         continue;
                                     }
 
                                     // Send connection notification using TransportAddr directly
-                                    let _ = peer_tx.send(NetworkMessage::PeerConnected(iroh_addr.clone()));
+                                    let _ = peer_tx
+                                        .send(NetworkMessage::PeerConnected(iroh_addr.clone()));
 
                                     // Handle connection in background with graceful error handling
                                     let peer_tx_clone = peer_tx.clone();
                                     let peer_manager_clone = Arc::clone(&peer_manager);
                                     let iroh_addr_clone = iroh_addr.clone();
-                                    let socket_to_transport_clone = Arc::clone(&socket_to_transport);
+                                    let socket_to_transport_clone =
+                                        Arc::clone(&socket_to_transport);
                                     let address_database_clone = Arc::clone(&address_database);
                                     tokio::spawn(async move {
                                         // For Iroh, we need a SocketAddr for Peer::from_transport_connection
                                         // Generate a unique placeholder based on key hash for lookups
-                                        let placeholder_socket = if let TransportAddr::Iroh(ref key) = iroh_addr_clone {
-                                            // Use first 4 bytes of key for IP, last 2 bytes for port to create unique placeholder
-                                            let ip_bytes = if key.len() >= 4 {
-                                                [key[0], key[1], key[2], key[3]]
+                                        let placeholder_socket =
+                                            if let TransportAddr::Iroh(ref key) = iroh_addr_clone {
+                                                // Use first 4 bytes of key for IP, last 2 bytes for port to create unique placeholder
+                                                let ip_bytes = if key.len() >= 4 {
+                                                    [key[0], key[1], key[2], key[3]]
+                                                } else {
+                                                    [0, 0, 0, 0]
+                                                };
+                                                let port = if key.len() >= 6 {
+                                                    u16::from_be_bytes([
+                                                        key[key.len() - 2],
+                                                        key[key.len() - 1],
+                                                    ])
+                                                } else {
+                                                    0
+                                                };
+                                                std::net::SocketAddr::from((ip_bytes, port))
                                             } else {
-                                                [0, 0, 0, 0]
+                                                std::net::SocketAddr::from(([0, 0, 0, 0], 0))
                                             };
-                                            let port = if key.len() >= 6 {
-                                                u16::from_be_bytes([key[key.len()-2], key[key.len()-1]])
-                                            } else {
-                                                0
-                                            };
-                                            std::net::SocketAddr::from((ip_bytes, port))
-                                        } else {
-                                            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-                                        };
-                                        
+
                                         let peer = peer::Peer::from_transport_connection(
                                             conn,
                                             placeholder_socket,
                                             iroh_addr_clone.clone(),
                                             peer_tx_clone.clone(),
                                         );
-                                        
+
                                         // Add peer to manager (async-safe)
                                         let mut pm = peer_manager_clone.lock().await;
                                         if let Err(e) = pm.add_peer(iroh_addr_clone.clone(), peer) {
                                             warn!("Failed to add Iroh peer: {}", e);
-                                            let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(iroh_addr_clone.clone()));
+                                            let _ = peer_tx_clone.send(
+                                                NetworkMessage::PeerDisconnected(
+                                                    iroh_addr_clone.clone(),
+                                                ),
+                                            );
                                             return;
                                         }
                                         drop(pm); // Drop peer_manager lock before locking socket_to_transport
-                                        // Store mapping from placeholder SocketAddr to TransportAddr for Iroh lookups
-                                        socket_to_transport_clone.lock().await.insert(placeholder_socket, iroh_addr_clone.clone());
-                                        
+                                                  // Store mapping from placeholder SocketAddr to TransportAddr for Iroh lookups
+                                        socket_to_transport_clone
+                                            .lock()
+                                            .await
+                                            .insert(placeholder_socket, iroh_addr_clone.clone());
+
                                         // Store Iroh NodeId in address database
-                                        if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
+                                        if let TransportAddr::Iroh(ref node_id_bytes) =
+                                            iroh_addr_clone
+                                        {
                                             if node_id_bytes.len() == 32 {
                                                 use iroh::PublicKey;
                                                 let mut key_array = [0u8; 32];
                                                 key_array.copy_from_slice(node_id_bytes);
-                                                if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
-                                                    let address_db_clone = address_database_clone.clone();
+                                                if let Ok(public_key) =
+                                                    PublicKey::from_bytes(&key_array)
+                                                {
+                                                    let address_db_clone =
+                                                        address_database_clone.clone();
                                                     tokio::spawn(async move {
                                                         let mut db = address_db_clone.write().await;
-                                                        db.add_iroh_address(public_key, 0); // Services will be updated on version exchange
+                                                        db.add_iroh_address(public_key, 0);
+                                                        // Services will be updated on version exchange
                                                     });
                                                 }
                                             }
                                         }
-                                        
-                                        info!("Successfully added Iroh peer (transport: {:?})", iroh_addr_clone);
+
+                                        info!(
+                                            "Successfully added Iroh peer (transport: {:?})",
+                                            iroh_addr_clone
+                                        );
                                     });
                                 }
                                 Err(e) => {
@@ -1205,7 +1269,10 @@ impl NetworkManager {
                     });
                 }
                 Err(e) => {
-                    warn!("Failed to start Iroh listener (graceful degradation): {}", e);
+                    warn!(
+                        "Failed to start Iroh listener (graceful degradation): {}",
+                        e
+                    );
                     // Continue with other transports - don't fail entire startup
                 }
             }
@@ -1213,23 +1280,23 @@ impl NetworkManager {
 
         // Start periodic ban cleanup task
         self.start_ban_cleanup_task();
-        
+
         // Start pending request cleanup task
         self.start_request_cleanup_task();
-        
+
         // Start DoS protection cleanup task
         self.start_dos_protection_cleanup_task();
-        
+
         // Start peer reconnection task
         self.start_peer_reconnection_task();
-        
+
         // Note: Peer connection initialization (DNS seeds, persistent peers, etc.)
         // should be called separately via initialize_peer_connections() after start()
         // This allows the caller to provide config, network type, and target peer count
-        
+
         Ok(())
     }
-    
+
     /// Generate a new request ID for async request-response patterns
     pub fn generate_request_id(&self) -> u64 {
         // Use block_in_place to avoid blocking async runtime
@@ -1242,22 +1309,29 @@ impl NetworkManager {
             })
         })
     }
-    
+
     /// Register a pending request and return the response receiver
     /// Returns (request_id, response_receiver)
-    pub fn register_request(&self, peer_addr: SocketAddr) -> (u64, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+    pub fn register_request(
+        &self,
+        peer_addr: SocketAddr,
+    ) -> (u64, tokio::sync::oneshot::Receiver<Vec<u8>>) {
         self.register_request_with_priority(peer_addr, 0)
     }
-    
+
     /// Register a pending request with priority and return the response receiver
     /// Returns (request_id, response_receiver)
     /// Priority: 0 = normal, higher = more important
-    pub fn register_request_with_priority(&self, peer_addr: SocketAddr, priority: u8) -> (u64, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+    pub fn register_request_with_priority(
+        &self,
+        peer_addr: SocketAddr,
+        priority: u8,
+    ) -> (u64, tokio::sync::oneshot::Receiver<Vec<u8>>) {
         let request_id = self.generate_request_id();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        
+
         let timestamp = current_timestamp();
-        
+
         let pending_req = PendingRequest {
             sender: tx,
             peer_addr,
@@ -1265,16 +1339,19 @@ impl NetworkManager {
             priority,
             retry_count: 0,
         };
-        
+
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                self.pending_requests.lock().await.insert(request_id, pending_req);
+                self.pending_requests
+                    .lock()
+                    .await
+                    .insert(request_id, pending_req);
             })
         });
         (request_id, rx)
     }
-    
+
     /// Complete a pending request by sending the response
     pub fn complete_request(&self, request_id: u64, response: Vec<u8>) -> bool {
         // Use block_in_place to avoid blocking async runtime
@@ -1290,7 +1367,7 @@ impl NetworkManager {
             })
         })
     }
-    
+
     /// Cancel a pending request
     pub fn cancel_request(&self, request_id: u64) -> bool {
         // Use block_in_place to avoid blocking async runtime
@@ -1301,67 +1378,71 @@ impl NetworkManager {
             })
         })
     }
-    
+
     /// Get pending requests for a specific peer
     pub fn get_pending_requests_for_peer(&self, peer_addr: SocketAddr) -> Vec<u64> {
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let pending = self.pending_requests.lock().await;
-                pending.iter()
+                pending
+                    .iter()
                     .filter(|(_, req)| req.peer_addr == peer_addr)
                     .map(|(id, _)| *id)
                     .collect()
             })
         })
     }
-    
+
     /// Clean up expired requests (older than max_age_seconds)
     pub fn cleanup_expired_requests(&self, max_age_seconds: u64) -> usize {
         let now = current_timestamp();
-        
+
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut pending = self.pending_requests.lock().await;
-                let expired: Vec<u64> = pending.iter()
+                let expired: Vec<u64> = pending
+                    .iter()
                     .filter(|(_, req)| now.saturating_sub(req.timestamp) > max_age_seconds)
                     .map(|(id, _)| *id)
                     .collect();
-                
+
                 for id in &expired {
                     pending.remove(id);
                 }
-                
+
                 expired.len()
             })
         })
     }
-    
+
     /// Start periodic task to clean up expired pending requests
     fn start_request_cleanup_task(&self) {
         use crate::utils::arc_clone;
         let pending_requests = arc_clone(&self.pending_requests);
         let timeout_config = arc_clone(&self.request_timeout_config);
-        
+
         tokio::spawn(async move {
             let cleanup_interval = timeout_config.request_cleanup_interval_seconds;
             let max_age = timeout_config.pending_request_max_age_seconds;
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(cleanup_interval));
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(cleanup_interval));
             loop {
                 interval.tick().await;
-                
+
                 // Clean up old pending requests
                 let now = current_timestamp();
-                
+
                 let mut pending = pending_requests.lock().await;
                 let initial_count = pending.len();
-                pending.retain(|_, req| {
-                    now.saturating_sub(req.timestamp) < max_age
-                });
+                pending.retain(|_, req| now.saturating_sub(req.timestamp) < max_age);
                 let removed = initial_count - pending.len();
                 if removed > 0 {
-                    debug!("Cleaned up {} stale pending requests (older than {}s)", removed, max_age);
+                    debug!(
+                        "Cleaned up {} stale pending requests (older than {}s)",
+                        removed, max_age
+                    );
                 }
                 if !pending.is_empty() {
                     debug!("Pending requests: {}", pending.len());
@@ -1369,21 +1450,21 @@ impl NetworkManager {
             }
         });
     }
-    
+
     /// Start periodic task to clean up DoS protection data
     fn start_dos_protection_cleanup_task(&self) {
         use crate::utils::arc_clone;
         let dos_protection = arc_clone(&self.dos_protection);
         let ban_list = arc_clone(&self.ban_list);
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
             loop {
                 interval.tick().await;
-                
+
                 // Cleanup old connection rate limiter entries
                 dos_protection.cleanup().await;
-                
+
                 // Auto-ban IPs that should be banned
                 // Periodic check for IPs that have exceeded violation thresholds
                 use crate::utils::arc_clone;
@@ -1394,15 +1475,15 @@ impl NetworkManager {
                     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Check every minute
                     loop {
                         interval.tick().await;
-                        
+
                         // Get IPs that should be auto-banned
                         let ips_to_ban = dos_clone.get_ips_to_auto_ban().await;
-                        
+
                         // Ban IPs that exceed threshold
                         if !ips_to_ban.is_empty() {
                             let now = current_timestamp();
                             let unban_timestamp = now + ban_duration;
-                            
+
                             let mut ban_list_guard = ban_list_clone.write().await;
                             for ip in ips_to_ban {
                                 // Convert IpAddr to SocketAddr (use port 0 as placeholder)
@@ -1418,7 +1499,7 @@ impl NetworkManager {
             }
         });
     }
-    
+
     /// Start periodic task to clean up expired bans
     fn start_ban_cleanup_task(&self) {
         use crate::utils::arc_clone;
@@ -1427,9 +1508,9 @@ impl NetworkManager {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
             loop {
                 interval.tick().await;
-                
+
                 let now = current_timestamp();
-                
+
                 let mut ban_list_guard = ban_list.write().await;
                 let expired: Vec<SocketAddr> = ban_list_guard
                     .iter()
@@ -1438,13 +1519,13 @@ impl NetworkManager {
                     })
                     .map(|(addr, _)| *addr)
                     .collect();
-                
+
                 let expired_count = expired.len();
                 for addr in &expired {
                     ban_list_guard.remove(addr);
                     debug!("Cleaned up expired ban for {}", addr);
                 }
-                
+
                 if expired_count > 0 {
                     info!("Cleaned up {} expired ban(s)", expired_count);
                 }
@@ -1461,53 +1542,56 @@ impl NetworkManager {
         let tcp_transport = self.tcp_transport.clone();
         let ban_list = arc_clone(&self.ban_list);
         // Get max_peers (we'll need to access it later, so we'll query it in the loop)
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10)); // Check every 10 seconds
             loop {
                 interval.tick().await;
-                
+
                 let now = current_timestamp();
-                
+
                 let mut queue = reconnection_queue.lock().await;
-                
+
                 // Get current peer count and max peers
                 let (current_peers, max_peers) = {
                     let pm = peer_manager.lock().await;
                     (pm.peer_count(), pm.max_peers)
                 };
-                
+
                 // Calculate minimum peer target (50% of max, but at least 1)
                 let min_peers = std::cmp::max(1, max_peers / 2);
-                
+
                 // If we have enough peers, skip reconnection attempts
                 if current_peers >= min_peers {
                     // Clean up old entries (older than 1 hour) to prevent queue bloat
-                    queue.retain(|_, (_, last_attempt, _)| {
-                        now.saturating_sub(*last_attempt) < 3600
-                    });
+                    queue
+                        .retain(|_, (_, last_attempt, _)| now.saturating_sub(*last_attempt) < 3600);
                     continue;
                 }
-                
+
                 // Sort peers by quality score (highest first), attempts (lowest first), and recency (oldest first)
                 let now = current_timestamp();
-                let mut peers_to_reconnect: Vec<(SocketAddr, u32, f64, u64)> = queue.iter()
-                    .map(|(addr, (attempts, last_attempt, quality))| (*addr, *attempts, *quality, *last_attempt))
+                let mut peers_to_reconnect: Vec<(SocketAddr, u32, f64, u64)> = queue
+                    .iter()
+                    .map(|(addr, (attempts, last_attempt, quality))| {
+                        (*addr, *attempts, *quality, *last_attempt)
+                    })
                     .collect();
-                
+
                 // Sort by quality (descending), then by attempts (ascending), then by recency (oldest first)
                 peers_to_reconnect.sort_by(|a, b| {
-                    b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+                    b.2.partial_cmp(&a.2)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| a.1.cmp(&b.1))
                         .then_with(|| a.3.cmp(&b.3)) // Prefer peers that haven't been attempted recently
                 });
-                
+
                 // Extract just the address, attempts, and quality for reconnection
                 let peers_to_reconnect: Vec<(SocketAddr, u32, f64)> = peers_to_reconnect
                     .into_iter()
                     .map(|(addr, attempts, quality, _)| (addr, attempts, quality))
                     .collect();
-                
+
                 // Attempt reconnection for eligible peers
                 for (addr, attempts, quality) in peers_to_reconnect.iter() {
                     // Check if peer is banned
@@ -1519,37 +1603,47 @@ impl NetworkManager {
                             }
                         }
                     }
-                    
+
                     // Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, max 60s
                     let backoff_seconds = std::cmp::min(1u64 << attempts, 60);
                     let last_attempt = queue.get(addr).map(|(_, la, _)| *la).unwrap_or(0);
-                    
+
                     // Check if backoff period has elapsed
                     if now.saturating_sub(last_attempt) < backoff_seconds {
                         continue; // Still in backoff period
                     }
-                    
+
                     // Max reconnection attempts: 10 (after that, remove from queue)
                     if *attempts >= 10 {
-                        debug!("Removing peer {} from reconnection queue (max attempts reached)", addr);
+                        debug!(
+                            "Removing peer {} from reconnection queue (max attempts reached)",
+                            addr
+                        );
                         queue.remove(addr);
                         continue;
                     }
-                    
+
                     // Check if we have room for more peers
                     if current_peers >= max_peers {
                         break; // No room for more peers
                     }
-                    
+
                     // Attempt reconnection
-                    info!("Attempting to reconnect to peer {} (attempt {}, quality: {:.2})", addr, attempts + 1, quality);
-                    
+                    info!(
+                        "Attempting to reconnect to peer {} (attempt {}, quality: {:.2})",
+                        addr,
+                        attempts + 1,
+                        quality
+                    );
+
                     // Update last attempt time and increment attempts
-                    if let Some((ref mut attempts_ref, ref mut last_attempt_ref, _)) = queue.get_mut(addr) {
+                    if let Some((ref mut attempts_ref, ref mut last_attempt_ref, _)) =
+                        queue.get_mut(addr)
+                    {
                         *attempts_ref += 1;
                         *last_attempt_ref = now;
                     }
-                    
+
                     // Clone for async move
                     let addr_clone = *addr;
                     let peer_tx_clone = peer_tx.clone();
@@ -1557,17 +1651,20 @@ impl NetworkManager {
                     let peer_manager_clone = arc_clone(&peer_manager);
                     let tcp_transport_clone = tcp_transport.clone();
                     let reconnection_queue_clone = arc_clone(&reconnection_queue);
-                    
+
                     // Attempt connection in background
                     tokio::spawn(async move {
                         use crate::network::peer::Peer;
                         use crate::network::transport::TransportAddr;
-                        
+
                         // Try TCP connection (most common)
-                        match tcp_transport_clone.connect(TransportAddr::Tcp(addr_clone)).await {
+                        match tcp_transport_clone
+                            .connect(TransportAddr::Tcp(addr_clone))
+                            .await
+                        {
                             Ok(conn) => {
                                 info!("Successfully reconnected to peer {}", addr_clone);
-                                
+
                                 // Create peer from transport connection
                                 let peer = Peer::from_transport_connection(
                                     conn,
@@ -1575,12 +1672,14 @@ impl NetworkManager {
                                     TransportAddr::Tcp(addr_clone),
                                     peer_tx_clone.clone(),
                                 );
-                                
+
                                 // Add peer to manager
                                 let mut pm = peer_manager_clone.lock().await;
                                 if let Err(e) = pm.add_peer(TransportAddr::Tcp(addr_clone), peer) {
                                     warn!("Failed to add reconnected peer {}: {}", addr_clone, e);
-                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(addr_clone)));
+                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                        TransportAddr::Tcp(addr_clone),
+                                    ));
                                 } else {
                                     // Remove from reconnection queue on success
                                     let mut queue = reconnection_queue_clone.lock().await;
@@ -1594,7 +1693,7 @@ impl NetworkManager {
                             }
                         }
                     });
-                    
+
                     // Limit concurrent reconnection attempts to 3
                     if queue.len() > 0 {
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -1625,7 +1724,7 @@ impl NetworkManager {
             })
         })
     }
-    
+
     /// Get all peer addresses (as TransportAddr)
     pub fn peer_transport_addresses(&self) -> Vec<TransportAddr> {
         // Use block_in_place to avoid blocking async runtime
@@ -1644,12 +1743,15 @@ impl NetworkManager {
             let pm = self.peer_manager.lock().await;
             pm.peer_addresses()
         };
-        
+
         // Send to each peer using transport address (avoids needing to clone Peer)
         for addr in peer_addrs {
             let addr_clone = addr.clone();
             if let Err(e) = self.send_to_peer_by_transport(addr, message.clone()).await {
-                warn!("Failed to broadcast message to peer {:?}: {}", addr_clone, e);
+                warn!(
+                    "Failed to broadcast message to peer {:?}: {}",
+                    addr_clone, e
+                );
             }
         }
         Ok(())
@@ -1663,28 +1765,35 @@ impl NetworkManager {
             let pm = self.peer_manager.lock().await;
             pm.select_reliable_peers()
         };
-        
+
         // Send to reliable peers first
         for addr in &reliable_peers {
-            if let Err(e) = self.send_to_peer_by_transport(addr.clone(), message.clone()).await {
+            if let Err(e) = self
+                .send_to_peer_by_transport(addr.clone(), message.clone())
+                .await
+            {
                 warn!("Failed to send to reliable peer {:?}: {}", addr, e);
             }
         }
-        
+
         // Then send to remaining peers
         let pm = self.peer_manager.lock().await;
         let all_peers = pm.peer_addresses();
-        let remaining_peers: Vec<_> = all_peers.iter()
+        let remaining_peers: Vec<_> = all_peers
+            .iter()
             .filter(|addr| !reliable_peers.contains(addr))
             .collect();
         drop(pm);
-        
+
         for addr in remaining_peers {
-            if let Err(e) = self.send_to_peer_by_transport(addr.clone(), message.clone()).await {
+            if let Err(e) = self
+                .send_to_peer_by_transport(addr.clone(), message.clone())
+                .await
+            {
                 warn!("Failed to send to peer {:?}: {}", addr, e);
             }
         }
-        
+
         Ok(())
     }
 
@@ -1694,9 +1803,10 @@ impl NetworkManager {
         let pm = self.peer_manager.lock().await;
         let best_peers = pm.select_best_peers(1);
         drop(pm);
-        
+
         if let Some(addr) = best_peers.first() {
-            self.send_to_peer_by_transport(addr.clone(), message).await?;
+            self.send_to_peer_by_transport(addr.clone(), message)
+                .await?;
             Ok(addr.clone())
         } else {
             Err(anyhow::anyhow!("No peers available"))
@@ -1709,23 +1819,25 @@ impl NetworkManager {
         let pm = self.peer_manager.lock().await;
         let reliable_peers = pm.select_reliable_peers();
         drop(pm);
-        
+
         if reliable_peers.is_empty() {
             return Err(anyhow::anyhow!("No reliable peers available"));
         }
-        
+
         // Select best reliable peer
         let pm = self.peer_manager.lock().await;
-        let best_reliable = reliable_peers.iter()
-            .max_by(|a, b| {
-                let score_a = pm.get_peer(a).map(|p| p.quality_score()).unwrap_or(0.0);
-                let score_b = pm.get_peer(b).map(|p| p.quality_score()).unwrap_or(0.0);
-                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
-            });
+        let best_reliable = reliable_peers.iter().max_by(|a, b| {
+            let score_a = pm.get_peer(a).map(|p| p.quality_score()).unwrap_or(0.0);
+            let score_b = pm.get_peer(b).map(|p| p.quality_score()).unwrap_or(0.0);
+            score_a
+                .partial_cmp(&score_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         drop(pm);
-        
+
         if let Some(addr) = best_reliable {
-            self.send_to_peer_by_transport(addr.clone(), message).await?;
+            self.send_to_peer_by_transport(addr.clone(), message)
+                .await?;
             Ok(addr.clone())
         } else {
             Err(anyhow::anyhow!("No reliable peers available"))
@@ -1738,30 +1850,36 @@ impl NetworkManager {
         // Try to find transport address (TCP, Quinn, or Iroh mapping)
         let transport_addr = {
             let pm = self.peer_manager.lock().await;
-            pm.find_transport_addr_by_socket(addr)
-                .or_else(|| {
-                    // Check socket_to_transport mapping (synchronous access needed)
-                    // Note: This is a fallback, so we use try_lock to avoid blocking
-                    // If we can't get the lock immediately, return None
-                    self.socket_to_transport.try_lock()
-                        .ok()
-                        .and_then(|map| map.get(&addr).cloned())
-                })
+            pm.find_transport_addr_by_socket(addr).or_else(|| {
+                // Check socket_to_transport mapping (synchronous access needed)
+                // Note: This is a fallback, so we use try_lock to avoid blocking
+                // If we can't get the lock immediately, return None
+                self.socket_to_transport
+                    .try_lock()
+                    .ok()
+                    .and_then(|map| map.get(&addr).cloned())
+            })
         };
-        
+
         if let Some(transport_addr) = transport_addr {
-            self.send_to_peer_by_transport(transport_addr, message).await
+            self.send_to_peer_by_transport(transport_addr, message)
+                .await
         } else {
             // Fallback: try TCP (for backward compatibility)
-            self.send_to_peer_by_transport(TransportAddr::Tcp(addr), message).await
+            self.send_to_peer_by_transport(TransportAddr::Tcp(addr), message)
+                .await
         }
     }
-    
+
     /// Send a message to a specific peer (by TransportAddr - supports all transports)
     /// Returns Ok even if peer doesn't exist (graceful no-op)
-    pub async fn send_to_peer_by_transport(&self, addr: TransportAddr, message: Vec<u8>) -> Result<()> {
+    pub async fn send_to_peer_by_transport(
+        &self,
+        addr: TransportAddr,
+        message: Vec<u8>,
+    ) -> Result<()> {
         let message_len = message.len();
-        
+
         // Check if peer exists and get sender channel before dropping lock
         let sender = {
             let pm = self.peer_manager.lock().await;
@@ -1772,14 +1890,15 @@ impl NetworkManager {
                 return Ok(());
             }
         };
-        
+
         // Track bytes sent only if peer exists (async-safe)
         self.track_bytes_sent(message_len as u64).await;
-        
+
         // Send message without holding the lock (unbounded channel, so send won't block)
-        sender.send(message)
+        sender
+            .send(message)
             .map_err(|e| anyhow::anyhow!("Failed to send message to peer: {}", e))?;
-        
+
         // Record send after message is sent
         let mut pm = self.peer_manager.lock().await;
         if let Some(peer) = pm.get_peer_mut(&addr) {
@@ -1789,7 +1908,7 @@ impl NetworkManager {
     }
 
     /// Connect to a peer at the given address
-    /// 
+    ///
     /// Attempts to connect using available transports with graceful degradation:
     /// 1. Tries preferred transport (based on transport_preference)
     /// 2. Falls back to TCP if preferred transport fails
@@ -1798,35 +1917,49 @@ impl NetworkManager {
         // Check DoS protection: connection rate limiting (for outgoing connections too)
         let ip = addr.ip();
         if !self.dos_protection.check_connection(ip).await {
-            warn!("Connection rate limit exceeded for IP {}, rejecting outgoing connection", ip);
-            
+            warn!(
+                "Connection rate limit exceeded for IP {}, rejecting outgoing connection",
+                ip
+            );
+
             // Check if we should auto-ban
             if self.dos_protection.should_auto_ban(ip).await {
-                warn!("Auto-banning IP {} for repeated connection rate violations", ip);
+                warn!(
+                    "Auto-banning IP {} for repeated connection rate violations",
+                    ip
+                );
                 // Ban the IP using configured ban duration
                 let ban_duration = self.dos_protection.ban_duration_seconds();
                 let unban_timestamp = current_timestamp() + ban_duration;
                 let mut ban_list = self.ban_list.write().await;
                 ban_list.insert(addr, unban_timestamp);
-                return Err(anyhow::anyhow!("IP {} is banned due to connection rate violations", ip));
+                return Err(anyhow::anyhow!(
+                    "IP {} is banned due to connection rate violations",
+                    ip
+                ));
             }
-            
-            return Err(anyhow::anyhow!("Connection rate limit exceeded for IP {}", ip));
+
+            return Err(anyhow::anyhow!(
+                "Connection rate limit exceeded for IP {}",
+                ip
+            ));
         }
-        
+
         // Eclipse attack prevention: check IP diversity
         if !self.check_eclipse_prevention(ip) {
             let prefix = self.get_ip_prefix(ip);
             warn!("Eclipse attack prevention: too many connections from IP range {:?}, rejecting connection from {}", 
                   prefix, ip);
-            return Err(anyhow::anyhow!("Eclipse attack prevention: too many connections from IP range"));
+            return Err(anyhow::anyhow!(
+                "Eclipse attack prevention: too many connections from IP range"
+            ));
         }
-        
+
         let mut last_error = None;
-        
+
         // Try transports in preference order with graceful degradation
         let transports_to_try = self.get_transports_for_connection();
-        
+
         for transport_type in transports_to_try {
             match self.try_connect_with_transport(&transport_type, addr).await {
                 Ok((peer, transport_addr)) => {
@@ -1835,61 +1968,74 @@ impl NetworkManager {
                         let mut pm = self.peer_manager.lock().await;
                         pm.add_peer(transport_addr.clone(), peer)?;
                     }
-                    
+
                     // Note: Peer handler is managed by Peer::from_transport_connection
                     // No need to spawn additional handler task
-                    
-                    info!("Successfully connected to {} via {:?} (transport: {:?})", addr, transport_type, transport_addr);
+
+                    info!(
+                        "Successfully connected to {} via {:?} (transport: {:?})",
+                        addr, transport_type, transport_addr
+                    );
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("Failed to connect to {} via {:?}: {}", addr, transport_type, e);
+                    warn!(
+                        "Failed to connect to {} via {:?}: {}",
+                        addr, transport_type, e
+                    );
                     last_error = Some(e);
                     // Continue to next transport
                 }
             }
         }
-        
+
         // All transports failed
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All transport attempts failed")))
     }
-    
+
     /// Helper: Get list of transports to try for a connection
     fn get_transports_for_connection(&self) -> Vec<crate::network::transport::TransportType> {
         let mut transports = Vec::new();
-        
+
         // Add transports in preference order
         if self.transport_preference.allows_tcp() {
             transports.push(crate::network::transport::TransportType::Tcp);
         }
-        
+
         #[cfg(feature = "quinn")]
         if self.transport_preference.allows_quinn() {
             if let Some(ref _quinn) = self.quinn_transport {
                 transports.push(crate::network::transport::TransportType::Quinn);
             }
         }
-        
+
         #[cfg(feature = "iroh")]
         if self.transport_preference.allows_iroh() {
             if let Some(ref _iroh) = self.iroh_transport {
                 transports.push(crate::network::transport::TransportType::Iroh);
             }
         }
-        
+
         // Always try TCP as fallback if not already in list
-        if !transports.iter().any(|t| matches!(t, crate::network::transport::TransportType::Tcp)) {
+        if !transports
+            .iter()
+            .any(|t| matches!(t, crate::network::transport::TransportType::Tcp))
+        {
             transports.push(crate::network::transport::TransportType::Tcp);
         }
-        
+
         transports
     }
-    
+
     /// Helper: Try connecting with a specific transport
-    async fn try_connect_with_transport(&self, transport_type: &crate::network::transport::TransportType, addr: SocketAddr) -> Result<(peer::Peer, TransportAddr)> {
+    async fn try_connect_with_transport(
+        &self,
+        transport_type: &crate::network::transport::TransportType,
+        addr: SocketAddr,
+    ) -> Result<(peer::Peer, TransportAddr)> {
         use crate::network::transport::TransportAddr;
         // Peer is used via fully qualified path peer::Peer, no need to import
-        
+
         match transport_type {
             crate::network::transport::TransportType::Tcp => {
                 // Use TcpTransport to create connection properly
@@ -1929,25 +2075,27 @@ impl NetworkManager {
             crate::network::transport::TransportType::Iroh => {
                 // Iroh requires public key, not SocketAddr
                 // For now, return error - would need peer discovery or address resolution
-                Err(anyhow::anyhow!("Iroh transport requires public key, not SocketAddr"))
+                Err(anyhow::anyhow!(
+                    "Iroh transport requires public key, not SocketAddr"
+                ))
             }
         }
     }
-    
+
     /// Send ping message to all connected peers
     pub async fn ping_all_peers(&self) -> Result<()> {
-        use crate::network::protocol::{ProtocolMessage, ProtocolParser, PingMessage};
+        use crate::network::protocol::{PingMessage, ProtocolMessage, ProtocolParser};
         use std::time::{SystemTime, UNIX_EPOCH};
-        
+
         // Generate nonce for ping
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        
+
         let ping_msg = ProtocolMessage::Ping(PingMessage { nonce });
         let wire_msg = ProtocolParser::serialize_message(&ping_msg)?;
-        
+
         let peer_addrs = {
             let pm = self.peer_manager.lock().await;
             pm.peer_addresses()
@@ -1963,19 +2111,25 @@ impl NetworkManager {
                 }
                 #[cfg(feature = "quinn")]
                 crate::network::transport::TransportAddr::Quinn(sock) => {
-                    if let Err(e) = self.send_to_peer_by_transport(addr_clone.clone(), wire_msg.clone()).await {
+                    if let Err(e) = self
+                        .send_to_peer_by_transport(addr_clone.clone(), wire_msg.clone())
+                        .await
+                    {
                         warn!("Failed to ping peer {}: {}", sock, e);
                     }
                 }
                 #[cfg(feature = "iroh")]
                 crate::network::transport::TransportAddr::Iroh(_) => {
-                    if let Err(e) = self.send_to_peer_by_transport(addr_clone.clone(), wire_msg.clone()).await {
+                    if let Err(e) = self
+                        .send_to_peer_by_transport(addr_clone.clone(), wire_msg.clone())
+                        .await
+                    {
                         warn!("Failed to ping peer {}: {}", addr_clone, e);
                     }
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -2010,29 +2164,38 @@ impl NetworkManager {
         // Track message queue size manually (unbounded channel doesn't have len())
         let mut message_count = 0u64;
         let mut last_metrics_update = std::time::SystemTime::now();
-        
+
         while let Some(message) = self.peer_rx.recv().await {
             message_count += 1;
-            
+
             // Update metrics periodically (every 100 messages or 10 seconds)
             let now = std::time::SystemTime::now();
-            let should_update = message_count % 100 == 0 
-                || now.duration_since(last_metrics_update)
+            let should_update = message_count % 100 == 0
+                || now
+                    .duration_since(last_metrics_update)
                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                    .as_secs() >= 10;
-            
+                    .as_secs()
+                    >= 10;
+
             if should_update {
                 let pm = self.peer_manager.lock().await;
                 let active_connections = pm.peer_count();
                 let bytes_received = *self.bytes_received.lock().await;
                 let bytes_sent = *self.bytes_sent.lock().await;
-                
+
                 // Approximate queue size (messages processed since last check)
                 let queue_size = message_count as usize;
-                
+
                 // Check message queue size limit
-                if !self.dos_protection.check_message_queue_size(queue_size).await {
-                    warn!("Message queue size limit exceeded (processed {} messages), potential DoS", queue_size);
+                if !self
+                    .dos_protection
+                    .check_message_queue_size(queue_size)
+                    .await
+                {
+                    warn!(
+                        "Message queue size limit exceeded (processed {} messages), potential DoS",
+                        queue_size
+                    );
                     // Optionally detect DoS attack
                     if self.dos_protection.detect_dos_attack().await {
                         warn!("DoS attack detected - message queue and connections at high levels");
@@ -2047,14 +2210,11 @@ impl NetworkManager {
                         message_count = 0;
                     }
                 }
-                
-                self.dos_protection.update_metrics(
-                    active_connections,
-                    queue_size,
-                    bytes_received,
-                    bytes_sent,
-                ).await;
-                
+
+                self.dos_protection
+                    .update_metrics(active_connections, queue_size, bytes_received, bytes_sent)
+                    .await;
+
                 last_metrics_update = now;
                 message_count = 0; // Reset after update for next period
             }
@@ -2066,15 +2226,14 @@ impl NetworkManager {
                 NetworkMessage::PeerDisconnected(addr) => {
                     info!("Peer disconnected: {:?}", addr);
                     let mut pm = self.peer_manager.lock().await;
-                    
+
                     // Get peer quality score before removing
-                    let quality_score = pm.get_peer(&addr)
-                        .map(|p| p.quality_score())
-                        .unwrap_or(0.5);
-                    
+                    let quality_score =
+                        pm.get_peer(&addr).map(|p| p.quality_score()).unwrap_or(0.5);
+
                     // Remove peer directly using TransportAddr
                     pm.remove_peer(&addr);
-                    
+
                     // Extract SocketAddr for reconnection tracking (only TCP/Quinn)
                     if let Some(socket_addr) = match &addr {
                         TransportAddr::Tcp(sock) => Some(*sock),
@@ -2088,9 +2247,12 @@ impl NetworkManager {
                         // Add to reconnection queue with exponential backoff
                         let mut reconnection_queue = self.peer_reconnection_queue.lock().await;
                         reconnection_queue.insert(socket_addr, (0, now, quality_score));
-                        info!("Added peer {} to reconnection queue (quality: {:.2})", socket_addr, quality_score);
+                        info!(
+                            "Added peer {} to reconnection queue (quality: {:.2})",
+                            socket_addr, quality_score
+                        );
                     }
-                    
+
                     // Clean up per-IP connection count (only for TCP/Quinn, not Iroh)
                     if let Some(ip) = match &addr {
                         TransportAddr::Tcp(sock) => Some(sock.ip()),
@@ -2107,7 +2269,7 @@ impl NetworkManager {
                             }
                         }
                     }
-                    
+
                     // Clean up rate limiter (use SocketAddr for TCP/Quinn, or a key for Iroh)
                     {
                         let mut rates = self.peer_message_rates.lock().await;
@@ -2123,7 +2285,7 @@ impl NetworkManager {
                             rates.remove(&sock_addr);
                         }
                     }
-                    
+
                     // Clean up eclipse attack prevention tracking
                     if let Some(ip) = match &addr {
                         TransportAddr::Tcp(sock) => Some(sock.ip()),
@@ -2253,7 +2415,7 @@ impl NetworkManager {
                             }
                         }
                     }
-                    
+
                     // Check rate limiting before processing - drop lock before async
                     // Note: transport_addr_opt was previously computed but not used - removed for now
                     let should_process = {
@@ -2264,14 +2426,17 @@ impl NetworkManager {
                         });
                         rate_limiter.check_and_consume()
                     };
-                    
+
                     if !should_process {
-                        warn!("Rate limit exceeded for peer {}, dropping message", peer_addr);
+                        warn!(
+                            "Rate limit exceeded for peer {}, dropping message",
+                            peer_addr
+                        );
                         // Optionally ban peer after repeated rate limit violations
                         // For now, just drop the message
                         continue;
                     }
-                    
+
                     // Check if this is a response to a pending request (UTXOSet or FilteredBlock)
                     // Extract request_id from message and route to correct pending request
                     if let Ok(parsed) = ProtocolParser::parse_message(&data) {
@@ -2280,7 +2445,7 @@ impl NetworkManager {
                             ProtocolMessage::FilteredBlock(msg) => Some(msg.request_id),
                             _ => None,
                         };
-                        
+
                         if let Some(request_id) = request_id_opt {
                             // Route to pending request by request_id
                             let mut pending = self.pending_requests.lock().await;
@@ -2293,7 +2458,7 @@ impl NetworkManager {
                             }
                         }
                     }
-                    
+
                     // Process through protocol layer
                     if let Err(e) = self.handle_incoming_wire_tcp(peer_addr, data).await {
                         warn!("Failed to process message from {}: {}", peer_addr, e);
@@ -2312,17 +2477,21 @@ impl NetworkManager {
     /// 3. Creates NodeChainAccess from storage modules
     /// 4. Calls bllvm_protocol::network::process_network_message()
     /// 5. Converts NetworkResponse back to wire format and enqueues for sending
-    pub async fn handle_incoming_wire_tcp(&self, peer_addr: SocketAddr, data: Vec<u8>) -> Result<()> {
+    pub async fn handle_incoming_wire_tcp(
+        &self,
+        peer_addr: SocketAddr,
+        data: Vec<u8>,
+    ) -> Result<()> {
         // Track bytes received (async-safe)
         self.track_bytes_received(data.len() as u64).await;
-        
+
         // Check if peer is banned
         if self.is_banned(peer_addr) {
             warn!("Rejecting message from banned peer: {}", peer_addr);
             return Ok(()); // Silently drop messages from banned peers
         }
         let parsed = ProtocolParser::parse_message(&data)?;
-        
+
         // Handle special cases that don't go through protocol layer
         match parsed {
             // BIP331
@@ -2375,15 +2544,17 @@ impl NetworkManager {
                 // Continue to protocol layer processing
             }
         }
-        
+
         // Process with protocol layer if dependencies are available
-        if let (Some(ref protocol_engine), Some(ref storage), Some(ref mempool_manager)) = 
-            (self.protocol_engine.as_ref(), self.storage.as_ref(), self.mempool_manager.as_ref()) {
-            
+        if let (Some(ref protocol_engine), Some(ref storage), Some(ref mempool_manager)) = (
+            self.protocol_engine.as_ref(),
+            self.storage.as_ref(),
+            self.mempool_manager.as_ref(),
+        ) {
             // Convert ProtocolMessage to bllvm_protocol::network::NetworkMessage
             use crate::network::protocol_adapter::ProtocolAdapter;
             let protocol_msg = ProtocolAdapter::protocol_to_consensus_message(&parsed)?;
-            
+
             // Create NodeChainAccess
             use crate::network::chain_access::NodeChainAccess;
             use crate::utils::arc_clone;
@@ -2392,20 +2563,25 @@ impl NetworkManager {
                 storage.transactions(),
                 arc_clone(mempool_manager),
             );
-            
+
             // Get UTXO set and height
-            let utxo_set = storage.utxos().get_all_utxos()
+            let utxo_set = storage
+                .utxos()
+                .get_all_utxos()
                 .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
-            let height = storage.chain().get_height()
+            let height = storage
+                .chain()
+                .get_height()
                 .map_err(|e| anyhow::anyhow!("Failed to get height: {}", e))?
                 .unwrap_or(0);
-            
+
             // Process message with protocol layer - lock peer_states only during synchronous processing
             let response = {
                 let mut peer_states = self.peer_states.write().await;
-                let peer_state = peer_states.entry(peer_addr)
+                let peer_state = peer_states
+                    .entry(peer_addr)
                     .or_insert_with(|| bllvm_protocol::network::PeerState::new());
-                
+
                 // Process message (synchronous, no await points)
                 use bllvm_protocol::network::{process_network_message, ChainStateAccess};
                 process_network_message(
@@ -2417,14 +2593,16 @@ impl NetworkManager {
                     Some(height),
                 )
             }; // Lock dropped here before async operations
-            
+
             // Now handle response without holding the lock
             match response {
                 Ok(response) => {
                     // Convert response to wire format and send via transport layer
                     use crate::network::message_bridge::MessageBridge;
                     use crate::network::transport::TransportType;
-                    if let Ok(wire_messages) = MessageBridge::extract_send_messages(&response, TransportType::Tcp) {
+                    if let Ok(wire_messages) =
+                        MessageBridge::extract_send_messages(&response, TransportType::Tcp)
+                    {
                         for wire_msg in wire_messages {
                             if let Err(e) = self.send_to_peer(peer_addr, wire_msg).await {
                                 warn!("Failed to send protocol response to {}: {}", peer_addr, e);
@@ -2442,7 +2620,7 @@ impl NetworkManager {
             // Dependencies not set - fall back to old behavior
             debug!("Protocol layer dependencies not set, skipping protocol processing");
         }
-        
+
         Ok(())
     }
 
@@ -2592,28 +2770,16 @@ impl NetworkManager {
             for tx in txs {
                 // In a real implementation, we'd send this to a mempool processing channel
                 // For now, we validate and accept using consensus layer
-                let utxo_lock = self
-                    .utxo_set
-                    .lock()
-                    .await;
-                let mempool_lock = self
-                    .mempool
-                    .lock()
-                    .await;
+                let utxo_lock = self.utxo_set.lock().await;
+                let mempool_lock = self.mempool.lock().await;
                 let _ = self
                     .consensus
                     .accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0);
             }
         } else {
             // Fallback to legacy mempool
-            let utxo_lock = self
-                .utxo_set
-                .lock()
-                .await;
-            let mempool_lock = self
-                .mempool
-                .lock()
-                .await;
+            let utxo_lock = self.utxo_set.lock().await;
+            let mempool_lock = self.mempool.lock().await;
             for tx in txs {
                 let _ = self
                     .consensus
@@ -2644,7 +2810,8 @@ impl NetworkManager {
         // Handle the request with storage and filter service
         let storage = self.storage.as_ref().map(Arc::clone);
         let response =
-            handle_get_filtered_block(get_filtered_block_msg, storage, Some(&self.filter_service)).await?;
+            handle_get_filtered_block(get_filtered_block_msg, storage, Some(&self.filter_service))
+                .await?;
 
         // Serialize and send response
         let response_wire =
@@ -2655,7 +2822,7 @@ impl NetworkManager {
     }
 
     /// Get peer manager reference (locked)
-    /// 
+    ///
     /// Note: This is now async and uses tokio::sync::Mutex to avoid deadlocks
     pub async fn peer_manager(&self) -> tokio::sync::MutexGuard<'_, PeerManager> {
         self.peer_manager.lock().await
@@ -2792,25 +2959,25 @@ impl NetworkManager {
     /// Handle GetAddr request - return known addresses
     async fn handle_get_addr(&self, peer_addr: SocketAddr) -> Result<()> {
         use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
-        
+
         // Get fresh addresses from database (up to 2500, Bitcoin Core limit)
         let ban_list = self.ban_list.read().await.clone();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
-        
+
         let addresses = {
             let db = self.address_database.write().await;
             let fresh = db.get_fresh_addresses(2500);
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
-        
+
         // Create Addr message
         let addr_msg = AddrMessage { addresses };
         let response = ProtocolMessage::Addr(addr_msg);
         let wire_msg = ProtocolParser::serialize_message(&response)?;
-        
+
         // Send response
         self.send_to_peer(peer_addr, wire_msg).await?;
         Ok(())
@@ -2819,7 +2986,7 @@ impl NetworkManager {
     /// Handle Addr message - store addresses and optionally relay
     async fn handle_addr(&self, peer_addr: SocketAddr, msg: AddrMessage) -> Result<()> {
         // AddrMessage is already in scope as parameter, NetworkAddress is available from top-level import
-        
+
         // Get peer services from peer state
         let peer_services = {
             let peer_states = self.peer_states.read().await;
@@ -2828,7 +2995,7 @@ impl NetworkManager {
                 .map(|state| state.services)
                 .unwrap_or(0)
         };
-        
+
         // Store addresses in database
         {
             let mut db = self.address_database.write().await;
@@ -2836,10 +3003,10 @@ impl NetworkManager {
                 db.add_address(addr.clone(), peer_services);
             }
         }
-        
+
         // Relay addresses to other peers (with rate limiting)
         self.relay_addresses(peer_addr, &msg.addresses).await?;
-        
+
         Ok(())
     }
 
@@ -2853,7 +3020,7 @@ impl NetworkManager {
         // Rate limiting: don't send addr messages too frequently (Bitcoin Core: ~every 2.4 hours)
         let now = current_timestamp();
         let min_interval = 2 * 60 * 60 + 24 * 60; // 2.4 hours in seconds
-        
+
         {
             let last_sent = *self.last_addr_sent.lock().await;
             if now.saturating_sub(last_sent) < min_interval {
@@ -2861,33 +3028,33 @@ impl NetworkManager {
                 return Ok(());
             }
         }
-        
+
         // Filter addresses (exclude local, banned, already connected)
         let ban_list = self.ban_list.read().await.clone();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
-        
+
         let filtered = {
             let db = self.address_database.read().await;
             db.filter_addresses(addresses.to_vec(), &ban_list, &connected_peers)
         };
-        
+
         if filtered.is_empty() {
             return Ok(());
         }
-        
+
         // Limit to 1000 addresses per message (Bitcoin Core limit)
         let addresses_to_relay: Vec<NetworkAddress> = filtered.into_iter().take(1000).collect();
-        
+
         // Create Addr message
         let addr_msg = AddrMessage {
             addresses: addresses_to_relay,
         };
         let relay_msg = ProtocolMessage::Addr(addr_msg);
         let wire_msg = ProtocolParser::serialize_message(&relay_msg)?;
-        
+
         // Send to all peers except sender
         let peer_addrs: Vec<SocketAddr> = {
             let pm = self.peer_manager.lock().await;
@@ -2896,16 +3063,16 @@ impl NetworkManager {
                 .filter(|addr| *addr != sender_addr)
                 .collect()
         };
-        
+
         for peer_addr in peer_addrs {
             if let Err(e) = self.send_to_peer(peer_addr, wire_msg.clone()).await {
                 warn!("Failed to relay addresses to {}: {}", peer_addr, e);
             }
         }
-        
+
         // Update last sent time
         *self.last_addr_sent.lock().await = now;
-        
+
         Ok(())
     }
 
@@ -2914,10 +3081,12 @@ impl NetworkManager {
         if !self.enable_self_advertisement {
             return Ok(()); // Self-advertisement disabled
         }
-        
-        use crate::network::protocol::{AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser};
+
+        use crate::network::protocol::{
+            AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser,
+        };
         use std::net::IpAddr;
-        
+
         // Convert SocketAddr to NetworkAddress
         let ip_bytes = match listen_addr.ip() {
             IpAddr::V4(ipv4) => {
@@ -2928,42 +3097,40 @@ impl NetworkManager {
                 bytes[12..16].copy_from_slice(&ipv4.octets());
                 bytes
             }
-            IpAddr::V6(ipv6) => {
-                ipv6.octets()
-            }
+            IpAddr::V6(ipv6) => ipv6.octets(),
         };
-        
+
         let our_addr = NetworkAddress {
             services,
             ip: ip_bytes,
             port: listen_addr.port(),
         };
-        
+
         // Create Addr message with just our address
         let addr_msg = AddrMessage {
             addresses: vec![our_addr.clone()],
         };
         let relay_msg = ProtocolMessage::Addr(addr_msg);
         let wire_msg = ProtocolParser::serialize_message(&relay_msg)?;
-        
+
         // Send to all connected peers
         let peer_addrs: Vec<SocketAddr> = {
             let pm = self.peer_manager.lock().await;
             pm.peer_socket_addresses()
         };
-        
+
         for peer_addr in peer_addrs {
             if let Err(e) = self.send_to_peer(peer_addr, wire_msg.clone()).await {
                 warn!("Failed to advertise self to {}: {}", peer_addr, e);
             }
         }
-        
+
         // Also store our own address in database
         {
             let mut db = self.address_database.write().await;
             db.add_address(our_addr, services);
         }
-        
+
         Ok(())
     }
 
@@ -2973,7 +3140,10 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let ban_list = self.ban_list.read().await;
-                ban_list.iter().map(|(addr, timestamp)| (*addr, *timestamp)).collect()
+                ban_list
+                    .iter()
+                    .map(|(addr, timestamp)| (*addr, *timestamp))
+                    .collect()
             })
         })
     }
@@ -2996,9 +3166,7 @@ impl NetworkManager {
     pub fn is_network_active(&self) -> bool {
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                *self.network_active.lock().await
-            })
+            tokio::runtime::Handle::current().block_on(async { *self.network_active.lock().await })
         })
     }
 
@@ -3046,10 +3214,12 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         msg: crate::network::protocol::GetBanListMessage,
     ) -> Result<()> {
-        use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
         use crate::network::ban_list_merging::calculate_ban_list_hash;
-        debug!("GetBanList request from {}: full={}, min_duration={}", 
-               peer_addr, msg.request_full, msg.min_ban_duration);
+        use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
+        debug!(
+            "GetBanList request from {}: full={}, min_duration={}",
+            peer_addr, msg.request_full, msg.min_ban_duration
+        );
 
         // Get current ban list
         let ban_list = self.ban_list.read().await;
@@ -3104,7 +3274,11 @@ impl NetworkManager {
         let response = BanListMessage {
             is_full: msg.request_full,
             ban_list_hash,
-            ban_entries: if msg.request_full { ban_entries } else { Vec::new() },
+            ban_entries: if msg.request_full {
+                ban_entries
+            } else {
+                Vec::new()
+            },
             timestamp: now,
         };
 
@@ -3113,8 +3287,15 @@ impl NetworkManager {
         let serialized = ProtocolParser::serialize_message(&response_msg)?;
         self.send_to_peer(peer_addr, serialized).await?;
 
-        debug!("Sent BanList response to {}: {} entries", peer_addr, 
-               if msg.request_full { ban_entries_count } else { 0 });
+        debug!(
+            "Sent BanList response to {}: {} entries",
+            peer_addr,
+            if msg.request_full {
+                ban_entries_count
+            } else {
+                0
+            }
+        );
 
         Ok(())
     }
@@ -3128,8 +3309,12 @@ impl NetworkManager {
         use crate::network::ban_list_merging::{validate_ban_entry, verify_ban_list_hash};
         use std::net::IpAddr;
 
-        debug!("BanList received from {}: full={}, {} entries", 
-               peer_addr, msg.is_full, msg.ban_entries.len());
+        debug!(
+            "BanList received from {}: full={}, {} entries",
+            peer_addr,
+            msg.is_full,
+            msg.ban_entries.len()
+        );
 
         // Verify hash if full list provided
         if msg.is_full {
@@ -3141,7 +3326,10 @@ impl NetworkManager {
 
         // If hash-only, we can't merge (would need to request full list)
         if !msg.is_full {
-            debug!("Received hash-only ban list from {}, skipping merge", peer_addr);
+            debug!(
+                "Received hash-only ban list from {}, skipping merge",
+                peer_addr
+            );
             return Ok(());
         }
 
@@ -3159,7 +3347,10 @@ impl NetworkManager {
                 // IPv4-mapped IPv6 address
                 let ipv4_bytes = &entry.addr.ip[12..16];
                 IpAddr::V4(std::net::Ipv4Addr::new(
-                    ipv4_bytes[0], ipv4_bytes[1], ipv4_bytes[2], ipv4_bytes[3]
+                    ipv4_bytes[0],
+                    ipv4_bytes[1],
+                    ipv4_bytes[2],
+                    ipv4_bytes[3],
                 ))
             } else {
                 // IPv6 address
@@ -3215,23 +3406,23 @@ impl NetworkManager {
             ban_list.len()
         };
         let _resource_metrics = self.dos_protection.get_metrics().await;
-        
+
         crate::node::metrics::NetworkMetrics {
             peer_count: active_connections,
             bytes_sent: sent,
             bytes_received: received,
-            messages_sent: 0, // Would need to track this
+            messages_sent: 0,     // Would need to track this
             messages_received: 0, // Would need to track this
             active_connections,
             banned_peers: banned_peers_count,
             connection_attempts: 0, // Would need to track this
             connection_failures: 0, // Would need to track this
             dos_protection: crate::node::metrics::DosMetrics {
-                connection_rate_violations: 0, // Would need to track this
-                auto_bans: 0, // Would need to track this
-                message_queue_overflows: 0, // Would need to track this
+                connection_rate_violations: 0,   // Would need to track this
+                auto_bans: 0,                    // Would need to track this
+                message_queue_overflows: 0,      // Would need to track this
                 active_connection_limit_hits: 0, // Would need to track this
-                resource_exhaustion_events: 0, // Would need to track this
+                resource_exhaustion_events: 0,   // Would need to track this
             },
         }
     }
@@ -3251,7 +3442,7 @@ impl NetworkManager {
     /// Create version message with service flags
     ///
     /// Creates version message with service flags for all supported features
-    /// 
+    ///
     /// Sets service flags based on:
     /// - BIP157: NODE_COMPACT_FILTERS (always enabled if filter service exists)
     /// - UTXO Commitments: NODE_UTXO_COMMITMENTS (if feature enabled)
@@ -3275,30 +3466,30 @@ impl NetworkManager {
 
         // Add service flags for supported features
         let mut services_with_filters = services;
-        
+
         // BIP157 Compact Block Filters (always enabled if filter service exists)
         services_with_filters |= NODE_COMPACT_FILTERS;
-        
+
         // UTXO Commitments (if feature enabled)
         #[cfg(feature = "utxo-commitments")]
         {
             services_with_filters |= crate::network::protocol::NODE_UTXO_COMMITMENTS;
         }
-        
+
         // Ban List Sharing (if config enabled)
         if self.ban_list_sharing_config.is_some() {
             services_with_filters |= crate::network::protocol::NODE_BAN_LIST_SHARING;
         }
-        
+
         // Dandelion (if feature enabled)
         #[cfg(feature = "dandelion")]
         {
             services_with_filters |= crate::network::protocol::NODE_DANDELION;
         }
-        
+
         // Package Relay (BIP331) - always enabled
         services_with_filters |= crate::network::protocol::NODE_PACKAGE_RELAY;
-        
+
         // FIBRE - always enabled
         services_with_filters |= crate::network::protocol::NODE_FIBRE;
 
@@ -3420,7 +3611,12 @@ mod tests {
     #[tokio::test]
     async fn test_network_manager_with_config() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let manager = NetworkManager::with_config(addr, 5, crate::network::transport::TransportPreference::TCP_ONLY, None);
+        let manager = NetworkManager::with_config(
+            addr,
+            5,
+            crate::network::transport::TransportPreference::TCP_ONLY,
+            None,
+        );
 
         // peer_count() might not exist, check peer_manager instead
         let peer_manager = manager.peer_manager().await;

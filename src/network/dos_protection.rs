@@ -3,12 +3,12 @@
 //! Provides connection rate limiting, message queue monitoring, resource usage tracking,
 //! and automatic mitigation for DoS attacks.
 
+use crate::utils::current_timestamp;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::warn;
-use crate::utils::current_timestamp;
 
 /// Connection rate limiter (tracks connection attempts per time window)
 pub struct ConnectionRateLimiter {
@@ -152,7 +152,7 @@ impl DosProtectionManager {
             window_seconds,
             max_message_queue_size,
             max_active_connections,
-            3,   // Default auto-ban threshold
+            3,    // Default auto-ban threshold
             3600, // Default ban duration (1 hour)
         )
     }

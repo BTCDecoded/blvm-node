@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
 
     // RPC endpoint (adjust for your setup)
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
-    // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
+                                            // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
 
     println!("RPC Endpoint: {}", rpc_url);
     println!();
@@ -72,7 +72,8 @@ fn main() -> anyhow::Result<()> {
 
     // Example 4: Send raw transaction
     println!("4. sendrawtransaction - Broadcast transaction");
-    let raw_tx = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff...";
+    let raw_tx =
+        "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff...";
     let request = json!({
         "jsonrpc": "2.0",
         "method": "sendrawtransaction",
@@ -112,4 +113,3 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-

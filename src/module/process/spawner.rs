@@ -156,8 +156,11 @@ impl ModuleProcessSpawner {
             .as_ref()
             .map(|c| c.module_socket_timeout_seconds)
             .unwrap_or(5);
-        let socket_ready =
-            timeout(Duration::from_secs(socket_timeout), self.wait_for_socket(&socket_path)).await;
+        let socket_ready = timeout(
+            Duration::from_secs(socket_timeout),
+            self.wait_for_socket(&socket_path),
+        )
+        .await;
         match socket_ready {
             Ok(Ok(_)) => {
                 info!("Module {} socket ready", module_name);
@@ -179,7 +182,7 @@ impl ModuleProcessSpawner {
             let client = Some(ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
                 ModuleError::IpcError(format!("Failed to connect to module IPC: {}", e))
             })?);
-            
+
             Ok(ModuleProcess {
                 module_name: module_name.to_string(),
                 process: child,

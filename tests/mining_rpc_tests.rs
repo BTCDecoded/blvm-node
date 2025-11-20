@@ -14,7 +14,10 @@ use common::*;
 
 /// Helper function to call get_block_template and handle "Target too large" errors gracefully
 /// This is needed because difficulty adjustment requires 2016 headers to work correctly
-async fn get_block_template_safe(mining: &MiningRpc, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+async fn get_block_template_safe(
+    mining: &MiningRpc,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let result = mining.get_block_template(params).await;
     match result {
         Ok(template) => Ok(template),
@@ -23,7 +26,10 @@ async fn get_block_template_safe(mining: &MiningRpc, params: &serde_json::Value)
             // If it fails with "Target too large" or "Insufficient headers" and we have few headers, this is expected
             // The difficulty adjustment algorithm requires 2016 headers to work correctly
             if err_str.contains("Target too large") || err_str.contains("Insufficient headers") {
-                Err(format!("{} (expected with fewer than 2016 headers)", err_str))
+                Err(format!(
+                    "{} (expected with fewer than 2016 headers)",
+                    err_str
+                ))
             } else {
                 Err(format!("Unexpected error: {:?}", e))
             }
@@ -33,9 +39,9 @@ async fn get_block_template_safe(mining: &MiningRpc, params: &serde_json::Value)
 
 /// Helper function to set up a minimal chain with at least 2 blocks for difficulty adjustment
 fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error::Error>> {
-    use sha2::{Digest, Sha256};
     use bllvm_protocol::Block;
-    
+    use sha2::{Digest, Sha256};
+
     // Initialize with genesis block (use valid bits with very low exponent to allow adjustment)
     // Use exponent 20 (0x14) to leave maximum room for difficulty adjustment
     let genesis_header = BlockHeader {
@@ -47,7 +53,7 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
         nonce: 2083236893,
     };
     storage.chain().initialize(&genesis_header)?;
-    
+
     // Create genesis block with a coinbase transaction
     let genesis_block = Block {
         header: genesis_header.clone(),
@@ -56,21 +62,24 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
             inputs: bllvm_protocol::tx_inputs![],
             outputs: bllvm_protocol::tx_outputs![],
             lock_time: 0,
-        }].into_boxed_slice(),
+        }]
+        .into_boxed_slice(),
     };
-    
+
     // Calculate genesis block hash
     let genesis_bytes = bincode::serialize(&genesis_block.header)?;
     let first_hash = Sha256::digest(&genesis_bytes);
     let genesis_hash = Sha256::digest(&first_hash);
     let mut genesis_hash_array = [0u8; 32];
     genesis_hash_array.copy_from_slice(&genesis_hash);
-    
+
     // Store genesis block
     storage.blocks().store_block(&genesis_block)?;
     storage.blocks().store_height(0, &genesis_hash_array)?;
-    storage.blocks().store_recent_header(0, &genesis_block.header)?;
-    
+    storage
+        .blocks()
+        .store_recent_header(0, &genesis_block.header)?;
+
     // Add multiple blocks to satisfy difficulty adjustment requirement
     // We need at least 2 headers, but for stable difficulty adjustment, let's add enough
     // to make the timespan close to expected_time to avoid invalid target calculation
@@ -81,7 +90,7 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
     let mut prev_hash = genesis_hash_array;
     let mut prev_timestamp = 1231006505;
     let mut prev_header = genesis_header.clone();
-    
+
     // Add blocks with spacing that makes timespan reasonable for difficulty adjustment
     // Use 10-minute intervals but ensure we have enough headers
     for i in 1..=10 {
@@ -90,10 +99,10 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
             prev_block_hash: prev_hash,
             merkle_root: [i as u8; 32],
             timestamp: prev_timestamp + 600, // 10 minutes later
-            bits: 0x1400ffff, // Same as genesis
+            bits: 0x1400ffff,                // Same as genesis
             nonce: 0,
         };
-        
+
         let block = Block {
             header: block_header.clone(),
             transactions: vec![Transaction {
@@ -101,30 +110,33 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
                 inputs: bllvm_protocol::tx_inputs![],
                 outputs: bllvm_protocol::tx_outputs![],
                 lock_time: 0,
-            }].into_boxed_slice(),
+            }]
+            .into_boxed_slice(),
         };
-        
+
         // Calculate block hash
         let block_bytes = bincode::serialize(&block.header)?;
         let first_hash = Sha256::digest(&block_bytes);
         let block_hash = Sha256::digest(&first_hash);
         let mut block_hash_array = [0u8; 32];
         block_hash_array.copy_from_slice(&block_hash);
-        
+
         // Store block
         storage.blocks().store_block(&block)?;
         storage.blocks().store_height(i, &block_hash_array)?;
         storage.blocks().store_recent_header(i, &block.header)?;
-        
+
         // Update for next iteration
         prev_hash = block_hash_array;
         prev_timestamp = block_header.timestamp;
         prev_header = block_header.clone();
-        
+
         // Update chain tip
-        storage.chain().update_tip(&block_hash_array, &block_header, i)?;
+        storage
+            .chain()
+            .update_tip(&block_hash_array, &block_header, i)?;
     }
-    
+
     Ok(())
 }
 
@@ -348,7 +360,7 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
     // Using a simple coinbase transaction structure
     let tx = Transaction {
         version: 1,
-          inputs: bllvm_protocol::tx_inputs![bllvm_protocol::types::TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![bllvm_protocol::types::TransactionInput {
             prevout: bllvm_protocol::types::OutPoint {
                 hash: [0u8; 32],
                 index: 0xffffffff,
@@ -356,7 +368,7 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
             script_sig: vec![0x03, 0x00, 0x00, 0x00], // Minimal coinbase script
             sequence: 0xffffffff,
         }],
-          outputs: bllvm_protocol::tx_outputs![bllvm_protocol::types::TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![bllvm_protocol::types::TransactionOutput {
             value: 5000000000,
             script_pubkey: vec![
                 0x41, 0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6,
