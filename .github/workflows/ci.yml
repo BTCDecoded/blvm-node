@@ -1,4 +1,4 @@
-name: CI (Enhanced Caching)
+name: CI
 
 on:
   push:
