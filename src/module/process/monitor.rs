@@ -101,9 +101,11 @@ impl ModuleProcessMonitor {
                     };
 
                     // Send heartbeat with timeout
-                    let heartbeat_result =
-                        tokio::time::timeout(Duration::from_secs(2), client.request(heartbeat_request))
-                            .await;
+                    let heartbeat_result = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        client.request(heartbeat_request),
+                    )
+                    .await;
 
                     match heartbeat_result {
                         Ok(Ok(_)) => {
@@ -130,7 +132,10 @@ impl ModuleProcessMonitor {
             #[cfg(not(unix))]
             {
                 // IPC not available on Windows - skip heartbeat check
-                debug!("Module {} heartbeat check skipped (Windows - IPC not available)", module_name);
+                debug!(
+                    "Module {} heartbeat check skipped (Windows - IPC not available)",
+                    module_name
+                );
             }
 
             // Loop continues to next iteration
@@ -247,7 +252,9 @@ impl ModuleProcessMonitor {
             {
                 if let Some(client) = process.client_mut() {
                     // Check heartbeat via IPC with short timeout
-                    use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
+                    use crate::module::ipc::protocol::{
+                        MessageType, RequestMessage, RequestPayload,
+                    };
                     use tokio::time::timeout;
 
                     let heartbeat_request = RequestMessage {

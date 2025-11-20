@@ -62,10 +62,7 @@ impl RetryConfig {
 }
 
 /// Retry an operation with exponential backoff
-pub async fn retry_with_backoff<F, T, E>(
-    config: &RetryConfig,
-    mut operation: F,
-) -> Result<T, E>
+pub async fn retry_with_backoff<F, T, E>(config: &RetryConfig, mut operation: F) -> Result<T, E>
 where
     F: FnMut() -> Result<T, E>,
     E: std::fmt::Display,
@@ -88,9 +85,7 @@ where
                     );
                     sleep(delay).await;
                     delay = std::cmp::min(
-                        Duration::from_secs_f64(
-                            delay.as_secs_f64() * config.backoff_multiplier,
-                        ),
+                        Duration::from_secs_f64(delay.as_secs_f64() * config.backoff_multiplier),
                         config.max_delay,
                     );
                 }
@@ -129,9 +124,7 @@ where
                     );
                     sleep(delay).await;
                     delay = std::cmp::min(
-                        Duration::from_secs_f64(
-                            delay.as_secs_f64() * config.backoff_multiplier,
-                        ),
+                        Duration::from_secs_f64(delay.as_secs_f64() * config.backoff_multiplier),
                         config.max_delay,
                     );
                 }
@@ -180,9 +173,7 @@ where
                     );
                     sleep(delay).await;
                     delay = std::cmp::min(
-                        Duration::from_secs_f64(
-                            delay.as_secs_f64() * config.backoff_multiplier,
-                        ),
+                        Duration::from_secs_f64(delay.as_secs_f64() * config.backoff_multiplier),
                         config.max_delay,
                     );
                 }
@@ -192,4 +183,3 @@ where
 
     Err(last_error.expect("Should have at least one error"))
 }
-

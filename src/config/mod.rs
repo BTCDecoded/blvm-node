@@ -448,7 +448,7 @@ fn default_false() -> bool {
 }
 
 fn default_fee_forwarding_percentage() -> u8 {
-    0  // Default: no forwarding (opt-in)
+    0 // Default: no forwarding (opt-in)
 }
 
 impl Default for FeeForwardingConfig {
@@ -564,7 +564,7 @@ impl NodeConfig {
     /// Load configuration from file (supports JSON and TOML)
     pub fn from_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        
+
         if path.extension().and_then(|s| s.to_str()) == Some("toml") {
             // Try TOML
             let config: NodeConfig = toml::from_str(&content)

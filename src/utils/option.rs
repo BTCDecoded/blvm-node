@@ -66,4 +66,3 @@ where
 {
     opt.or_else(f)
 }
-

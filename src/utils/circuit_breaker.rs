@@ -169,4 +169,3 @@ impl Default for CircuitBreaker {
         Self::new(5, Duration::from_secs(60))
     }
 }
-

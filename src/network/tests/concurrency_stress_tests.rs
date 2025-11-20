@@ -17,9 +17,7 @@ use tokio::time::timeout;
 /// without deadlocking (using tokio::sync::Mutex)
 #[tokio::test]
 async fn test_concurrent_mutex_access() {
-    let manager = Arc::new(NetworkManager::new(
-        "127.0.0.1:8333".parse().unwrap(),
-    ));
+    let manager = Arc::new(NetworkManager::new("127.0.0.1:8333".parse().unwrap()));
 
     // Spawn multiple tasks that all try to access peer_manager simultaneously
     let mut handles = vec![];
@@ -46,9 +44,7 @@ async fn test_concurrent_mutex_access() {
 /// Test that locks are not held across await points
 #[tokio::test]
 async fn test_no_lock_held_across_await() {
-    let manager = Arc::new(NetworkManager::new(
-        "127.0.0.1:8333".parse().unwrap(),
-    ));
+    let manager = Arc::new(NetworkManager::new("127.0.0.1:8333".parse().unwrap()));
 
     // This test verifies that we can await async operations
     // without holding locks, preventing deadlocks
@@ -59,10 +55,10 @@ async fn test_no_lock_held_across_await() {
             let _pm = manager_clone.peer_manager().await;
             // Lock is dropped here before await
         }
-        
+
         // Now we can await without holding the lock
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         // Acquire lock again
         let _pm = manager_clone.peer_manager().await;
         drop(_pm); // Explicitly drop
@@ -76,9 +72,7 @@ async fn test_no_lock_held_across_await() {
 /// Test lock ordering to prevent deadlocks
 #[tokio::test]
 async fn test_lock_ordering() {
-    let manager = Arc::new(NetworkManager::new(
-        "127.0.0.1:8333".parse().unwrap(),
-    ));
+    let manager = Arc::new(NetworkManager::new("127.0.0.1:8333".parse().unwrap()));
 
     // Test that we always acquire locks in the same order
     // This prevents deadlocks when multiple locks are needed
@@ -97,9 +91,7 @@ async fn test_lock_ordering() {
 /// Stress test: Many concurrent operations
 #[tokio::test]
 async fn test_concurrent_operations_stress() {
-    let manager = Arc::new(NetworkManager::new(
-        "127.0.0.1:8333".parse().unwrap(),
-    ));
+    let manager = Arc::new(NetworkManager::new("127.0.0.1:8333".parse().unwrap()));
 
     // Spawn many concurrent operations
     let mut handles = vec![];
@@ -111,7 +103,7 @@ async fn test_concurrent_operations_stress() {
                 let _pm = manager_clone.peer_manager().await;
                 tokio::time::sleep(Duration::from_millis(1)).await;
             } // Lock dropped
-            // Access another lock (simplified - actual stats method may vary)
+              // Access another lock (simplified - actual stats method may vary)
             let _bytes_sent = *manager_clone.bytes_sent.lock().await;
         });
         handles.push(handle);
@@ -127,9 +119,7 @@ async fn test_concurrent_operations_stress() {
 /// Test that rate limiting works correctly under concurrent load
 #[tokio::test]
 async fn test_concurrent_rate_limiting() {
-    let manager = Arc::new(NetworkManager::new(
-        "127.0.0.1:8333".parse().unwrap(),
-    ));
+    let manager = Arc::new(NetworkManager::new("127.0.0.1:8333".parse().unwrap()));
 
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
@@ -156,9 +146,7 @@ async fn test_concurrent_rate_limiting() {
 /// Test timeout handling for lock acquisition
 #[tokio::test]
 async fn test_lock_timeout() {
-    let manager = Arc::new(NetworkManager::new(
-        "127.0.0.1:8333".parse().unwrap(),
-    ));
+    let manager = Arc::new(NetworkManager::new("127.0.0.1:8333".parse().unwrap()));
 
     // Hold lock for a while
     let manager_clone = Arc::clone(&manager);
@@ -174,8 +162,9 @@ async fn test_lock_timeout() {
         // that it doesn't block forever
         let result = timeout(Duration::from_millis(100), async {
             manager_clone2.peer_manager().await
-        }).await;
-        
+        })
+        .await;
+
         // Should eventually succeed (after first task releases)
         assert!(result.is_ok(), "Lock should be acquired eventually");
     });
@@ -186,9 +175,7 @@ async fn test_lock_timeout() {
 /// Test that peer addition/removal is thread-safe
 #[tokio::test]
 async fn test_concurrent_peer_operations() {
-    let manager = Arc::new(NetworkManager::new(
-        "127.0.0.1:8333".parse().unwrap(),
-    ));
+    let manager = Arc::new(NetworkManager::new("127.0.0.1:8333".parse().unwrap()));
 
     // Spawn tasks that add and remove peers concurrently
     let mut handles = vec![];
@@ -217,9 +204,7 @@ async fn test_concurrent_peer_operations() {
 #[tokio::test]
 async fn test_concurrent_message_processing() {
     let (_tx, mut rx): (mpsc::UnboundedSender<()>, _) = mpsc::unbounded_channel();
-    let manager = Arc::new(NetworkManager::new(
-        "127.0.0.1:8333".parse().unwrap(),
-    ));
+    let manager = Arc::new(NetworkManager::new("127.0.0.1:8333".parse().unwrap()));
 
     // Send many messages concurrently
     let manager_clone = Arc::clone(&manager);
@@ -247,4 +232,3 @@ async fn test_concurrent_message_processing() {
     assert!(sender_result.is_ok(), "Sender should complete");
     assert!(receiver_result.is_ok(), "Receiver should complete");
 }
-

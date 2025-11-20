@@ -6,6 +6,7 @@
 use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::{RpcError, RpcResult};
 use crate::storage::Storage;
+use crate::utils::current_timestamp;
 use bllvm_protocol::mining::BlockTemplate;
 use bllvm_protocol::serialization::deserialize_block_with_witnesses;
 use bllvm_protocol::serialization::serialize_transaction;
@@ -18,7 +19,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::{debug, warn};
-use crate::utils::current_timestamp;
 
 /// Mining RPC methods with dependencies
 pub struct MiningRpc {

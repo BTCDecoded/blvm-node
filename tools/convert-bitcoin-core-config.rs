@@ -17,9 +17,16 @@ impl Args {
     fn parse() -> Self {
         let mut args = std::env::args().skip(1);
         let input = args.next().expect("Input file required").into();
-        let output = args.next().unwrap_or_else(|| "config.toml".to_string()).into();
+        let output = args
+            .next()
+            .unwrap_or_else(|| "config.toml".to_string())
+            .into();
         let verbose = args.any(|a| a == "-v" || a == "--verbose");
-        Self { input, output, verbose }
+        Self {
+            input,
+            output,
+            verbose,
+        }
     }
 }
 
@@ -29,7 +36,7 @@ struct BitcoinCoreConfig {
     network: Option<String>,
     testnet: bool,
     regtest: bool,
-    
+
     // RPC
     rpc_port: Option<u16>,
     rpc_bind: Option<String>,
@@ -37,7 +44,7 @@ struct BitcoinCoreConfig {
     rpc_user: Option<String>,
     rpc_password: Option<String>,
     rpc_auth: Vec<String>,
-    
+
     // Network connections
     max_connections: Option<usize>,
     listen: bool,
@@ -49,12 +56,12 @@ struct BitcoinCoreConfig {
     addnode: Vec<String>,
     connect: Vec<String>,
     discover: Option<bool>,
-    
+
     // Server
     server: bool,
     rpc_workqueue: Option<usize>,
     rpc_threads: Option<usize>,
-    
+
     // Logging
     daemon: bool,
     printtoconsole: bool,
@@ -69,19 +76,19 @@ struct BitcoinCoreConfig {
 fn parse_bitcoin_conf(path: &PathBuf) -> std::io::Result<BitcoinCoreConfig> {
     let content = fs::read_to_string(path)?;
     let mut config = BitcoinCoreConfig::default();
-    
+
     for line in content.lines() {
         // Remove comments
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
-        
+
         // Parse key=value
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim().to_lowercase();
             let value = value.trim();
-            
+
             match key.as_str() {
                 // Network
                 "testnet" => {
@@ -101,7 +108,7 @@ fn parse_bitcoin_conf(path: &PathBuf) -> std::io::Result<BitcoinCoreConfig> {
                         config.network = Some("bitcoin-v1".to_string());
                     }
                 }
-                
+
                 // RPC
                 "rpcport" => {
                     if let Ok(port) = value.parse() {
@@ -123,7 +130,7 @@ fn parse_bitcoin_conf(path: &PathBuf) -> std::io::Result<BitcoinCoreConfig> {
                 "rpcauth" => {
                     config.rpc_auth.push(value.to_string());
                 }
-                
+
                 // Network connections
                 "maxconnections" => {
                     if let Ok(max) = value.parse() {
@@ -157,7 +164,7 @@ fn parse_bitcoin_conf(path: &PathBuf) -> std::io::Result<BitcoinCoreConfig> {
                 "discover" => {
                     config.discover = Some(value == "1" || value == "true");
                 }
-                
+
                 // Server
                 "server" => {
                     config.server = value == "1" || value == "true";
@@ -172,7 +179,7 @@ fn parse_bitcoin_conf(path: &PathBuf) -> std::io::Result<BitcoinCoreConfig> {
                         config.rpc_threads = Some(threads);
                     }
                 }
-                
+
                 // Logging
                 "daemon" => {
                     config.daemon = value == "1" || value == "true";
@@ -198,37 +205,42 @@ fn parse_bitcoin_conf(path: &PathBuf) -> std::io::Result<BitcoinCoreConfig> {
                 "loglevel" => {
                     config.loglevel = Some(value.to_string());
                 }
-                
+
                 _ => {
                     // Unknown option - ignore
                 }
             }
         }
     }
-    
+
     Ok(config)
 }
 
 fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> String {
     let mut toml = String::new();
-    
+
     toml.push_str("# bllvm-node configuration\n");
-    toml.push_str(&format!("# Converted from Bitcoin Core: {}\n", input_path.display()));
-    toml.push_str(&format!("# Generated: {}\n", 
+    toml.push_str(&format!(
+        "# Converted from Bitcoin Core: {}\n",
+        input_path.display()
+    ));
+    toml.push_str(&format!(
+        "# Generated: {}\n",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs()));
+            .as_secs()
+    ));
     toml.push_str("\n");
     toml.push_str("# NOTE: Data directories are NOT converted - configure separately\n");
     toml.push_str("\n");
-    
+
     // Network configuration
     toml.push_str("[network]\n");
     if let Some(ref network) = config.network {
         toml.push_str(&format!("protocol_version = \"{}\"\n", network));
     }
-    
+
     // Listen address
     if let Some(ref bind) = config.bind {
         let port = if config.testnet {
@@ -249,17 +261,17 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
         };
         toml.push_str(&format!("listen_addr = \"0.0.0.0:{}\"\n", port));
     }
-    
+
     // Max peers
     if let Some(max) = config.max_connections {
         toml.push_str(&format!("max_peers = {}\n", max));
     }
-    
+
     // Persistent peers
     let mut persistent_peers = Vec::new();
     persistent_peers.extend_from_slice(&config.addnode);
     persistent_peers.extend_from_slice(&config.connect);
-    
+
     if !persistent_peers.is_empty() {
         toml.push_str("\n");
         toml.push_str("# Persistent peers (from addnode/connect)\n");
@@ -281,20 +293,20 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
         }
         toml.push_str("]\n");
     }
-    
+
     // RPC configuration
     if config.rpc_port.is_some() || config.rpc_user.is_some() || !config.rpc_auth.is_empty() {
         toml.push_str("\n");
         toml.push_str("[rpc_auth]\n");
-        
+
         if let Some(port) = config.rpc_port {
             toml.push_str(&format!("port = {}\n", port));
         }
-        
+
         if let Some(ref bind) = config.rpc_bind {
             toml.push_str(&format!("bind = \"{}\"\n", bind));
         }
-        
+
         if let (Some(ref user), Some(ref password)) = (&config.rpc_user, &config.rpc_password) {
             toml.push_str("# Basic auth (user/password)\n");
             toml.push_str(&format!("username = \"{}\"\n", user));
@@ -306,7 +318,7 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
                 toml.push_str(&format!("# Original: rpcauth={}\n", auth));
             }
         }
-        
+
         if !config.rpc_allowip.is_empty() {
             toml.push_str("allowed_ips = [\n");
             for ip in &config.rpc_allowip {
@@ -315,14 +327,14 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
             toml.push_str("]\n");
         }
     }
-    
+
     // Transport preference
     toml.push_str("\n");
     toml.push_str("[transport_preference]\n");
     toml.push_str("prefer_tcp = true\n");
     toml.push_str("prefer_quinn = false\n");
     toml.push_str("prefer_iroh = false\n");
-    
+
     // Network timing
     toml.push_str("\n");
     toml.push_str("[network_timing]\n");
@@ -331,19 +343,19 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
     } else {
         toml.push_str("target_peer_count = 8\n");
     }
-    
+
     toml.push_str("\n");
     toml.push_str("# Additional notes:\n");
     toml.push_str("# - Data directories are NOT converted (configure separately)\n");
     toml.push_str("# - Some Bitcoin Core options may not have direct equivalents\n");
     toml.push_str("# - Review and adjust settings as needed\n");
-    
+
     toml
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    
+
     if !args.input.exists() {
         eprintln!("Error: Input file '{}' not found", args.input.display());
         eprintln!();
@@ -351,21 +363,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Converts Bitcoin Core bitcoin.conf to bllvm-node config.toml");
         std::process::exit(1);
     }
-    
+
     if args.verbose {
         eprintln!("Reading Bitcoin Core config from: {}", args.input.display());
     }
-    
+
     let bitcoin_config = parse_bitcoin_conf(&args.input)?;
-    
+
     if args.verbose {
         eprintln!("Generating bllvm-node config...");
     }
-    
+
     let toml_config = generate_toml_config(&bitcoin_config, &args.input);
-    
+
     fs::write(&args.output, toml_config)?;
-    
+
     println!("✓ Configuration converted successfully!");
     println!("  Input:  {}", args.input.display());
     println!("  Output: {}", args.output.display());
@@ -374,7 +386,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Data directories are NOT converted");
     println!("  - Review the generated config and adjust as needed");
     println!("  - Some options may need manual configuration");
-    
+
     Ok(())
 }
-

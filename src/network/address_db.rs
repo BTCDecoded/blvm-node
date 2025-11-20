@@ -19,11 +19,11 @@ use iroh::PublicKey;
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| {
-                tracing::warn!("System time error, using fallback timestamp");
-                std::time::Duration::from_secs(0)
-            })
-            .as_secs()
+        .unwrap_or_else(|_| {
+            tracing::warn!("System time error, using fallback timestamp");
+            std::time::Duration::from_secs(0)
+        })
+        .as_secs()
 }
 
 /// Address entry with metadata
@@ -631,8 +631,8 @@ mod tests {
     #[cfg(feature = "iroh")]
     #[test]
     fn test_add_iroh_address() {
-        use iroh::{SecretKey, PublicKey};
         use getrandom::getrandom;
+        use iroh::{PublicKey, SecretKey};
         let mut db = AddressDatabase::new(100);
 
         // Generate a valid Ed25519 key for testing using getrandom to avoid RNG version conflicts
@@ -652,8 +652,8 @@ mod tests {
     #[cfg(feature = "iroh")]
     #[test]
     fn test_get_fresh_iroh_addresses() {
-        use iroh::{SecretKey, PublicKey};
         use getrandom::getrandom;
+        use iroh::{PublicKey, SecretKey};
         let mut db = AddressDatabase::new(100);
 
         // Generate valid Ed25519 keys for testing using getrandom to avoid RNG version conflicts

@@ -47,7 +47,10 @@ where
     T: PartialOrd + std::fmt::Display,
 {
     if value < min || value > max {
-        Err(format!("{} must be between {} and {}, got {}", name, min, max, value))
+        Err(format!(
+            "{} must be between {} and {}, got {}",
+            name, min, max, value
+        ))
     } else {
         Ok(())
     }
@@ -70,4 +73,3 @@ pub fn ensure_not_empty<T>(value: &[T], name: &str) -> Result<(), String> {
 pub fn ensure_some<T>(value: Option<T>, name: &str) -> Result<T, String> {
     value.ok_or_else(|| format!("{} must be set", name))
 }
-

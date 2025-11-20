@@ -30,4 +30,3 @@ pub fn current_timestamp_duration() -> std::time::Duration {
             std::time::Duration::from_secs(0)
         })
 }
-

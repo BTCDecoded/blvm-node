@@ -2,20 +2,20 @@
 //!
 //! Implements blockchain-related JSON-RPC methods for querying blockchain state.
 
+use crate::rpc::errors::RpcError;
 use crate::storage::Storage;
 use anyhow::Result;
 use bllvm_protocol::BlockHeader;
 use serde_json::{json, Number, Value};
 use std::sync::Arc;
 use tracing::{debug, warn};
-use crate::rpc::errors::RpcError;
 
 const ZERO_HASH_STR: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Helper function to decode a 32-byte hash from hex string
 fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
-    let hash_bytes = hex::decode(hex)
-        .map_err(|e| RpcError::invalid_params(format!("Invalid hash: {}", e)))?;
+    let hash_bytes =
+        hex::decode(hex).map_err(|e| RpcError::invalid_params(format!("Invalid hash: {}", e)))?;
     if hash_bytes.len() != 32 {
         return Err(RpcError::invalid_params("Invalid hash length"));
     }
@@ -154,7 +154,6 @@ impl BlockchainRpc {
     ///
     /// Includes softfork information based on feature flags from protocol-engine
     pub async fn get_blockchain_info(&self) -> Result<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getblockchaininfo");
 
@@ -173,16 +172,16 @@ impl BlockchainRpc {
 
         if let Some(ref storage) = self.storage {
             use std::time::{Duration, Instant};
-            
+
             thread_local! {
-                static CACHED_TIP_HASH_HEX: std::cell::RefCell<(Option<String>, [u8; 32], Instant, Option<u64>)> = 
+                static CACHED_TIP_HASH_HEX: std::cell::RefCell<(Option<String>, [u8; 32], Instant, Option<u64>)> =
                     std::cell::RefCell::new((None, [0u8; 32], Instant::now(), None));
             }
-            
+
             let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
             let height = storage.chain().get_height()?.unwrap_or(0);
             let block_count = storage.blocks().block_count().unwrap_or(0);
-            
+
             let best_hash_hex = {
                 let should_refresh = CACHED_TIP_HASH_HEX.with(|c| {
                     let cache = c.borrow();
@@ -191,20 +190,21 @@ impl BlockchainRpc {
                         || cache.2.elapsed() >= Duration::from_secs(1)
                         || cache.3 != Some(height)
                 });
-                
+
                 if should_refresh {
                     let hex_str = hex::encode(best_hash);
                     CACHED_TIP_HASH_HEX.with(|c| {
                         let mut cache = c.borrow_mut();
-                        *cache = (Some(hex_str.clone()), best_hash, Instant::now(), Some(height));
+                        *cache = (
+                            Some(hex_str.clone()),
+                            best_hash,
+                            Instant::now(),
+                            Some(height),
+                        );
                     });
-                    CACHED_TIP_HASH_HEX.with(|c| {
-                        c.borrow().0.as_ref().unwrap().clone()
-                    })
+                    CACHED_TIP_HASH_HEX.with(|c| c.borrow().0.as_ref().unwrap().clone())
                 } else {
-                    CACHED_TIP_HASH_HEX.with(|c| {
-                        c.borrow().0.as_ref().unwrap().clone()
-                    })
+                    CACHED_TIP_HASH_HEX.with(|c| c.borrow().0.as_ref().unwrap().clone())
                 }
             };
 
@@ -222,8 +222,8 @@ impl BlockchainRpc {
                 0
             };
 
-            
-            let chainwork = storage.chain()
+            let chainwork = storage
+                .chain()
                 .get_chainwork(&best_hash)?
                 .unwrap_or_else(|| {
                     // Fallback: calculate total work if cache miss
@@ -308,11 +308,11 @@ impl BlockchainRpc {
                 return Err(anyhow::anyhow!("Invalid hash: {}", e));
             }
         };
-        
+
         if hash_bytes.len() != 32 {
             return Err(anyhow::anyhow!("Invalid hash length"));
         }
-        
+
         let mut hash_array = [0u8; 32];
         hash_array.copy_from_slice(&hash_bytes);
 
@@ -325,8 +325,11 @@ impl BlockchainRpc {
                     let storage = storage.clone();
                     let hash_array = hash_array;
                     move || storage.blocks().get_block(&hash_array)
-                }).await
-            }).await {
+                })
+                .await
+            })
+            .await
+            {
                 Ok(Ok(Ok(Some(block)))) => {
                     // Block found - return it
                     // TODO: Format block according to verbosity parameter
@@ -412,20 +415,20 @@ impl BlockchainRpc {
             if let Ok(Some(header)) = storage.blocks().get_header(&hash_array) {
                 if verbose {
                     use std::time::{Duration, Instant};
-                    
+
                     thread_local! {
-                        static CACHED_TIP_HEIGHT: std::cell::RefCell<(Option<u64>, Instant)> = 
+                        static CACHED_TIP_HEIGHT: std::cell::RefCell<(Option<u64>, Instant)> =
                             std::cell::RefCell::new((None, Instant::now()));
                     }
-                    
+
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
-                    
+
                     let tip_height = {
                         let should_refresh = CACHED_TIP_HEIGHT.with(|c| {
                             let cache = c.borrow();
                             cache.0.is_none() || cache.1.elapsed() >= Duration::from_secs(1)
                         });
-                        
+
                         if should_refresh {
                             let height = storage.chain().get_height()?.unwrap_or(0);
                             CACHED_TIP_HEIGHT.with(|c| {
@@ -456,8 +459,8 @@ impl BlockchainRpc {
                     // Calculate difficulty
                     let difficulty = Self::calculate_difficulty(header.bits);
 
-                    
-                    let n_tx = storage.blocks()
+                    let n_tx = storage
+                        .blocks()
                         .get_block_metadata(&hash_array)?
                         .map(|m| m.n_tx as usize)
                         .unwrap_or(0);
@@ -472,15 +475,13 @@ impl BlockchainRpc {
                             .map(|hash| hex::encode(hash))
                     });
 
-                    
                     let chainwork = if let Some(_height) = block_height {
                         // O(1) lookup instead of O(n) calculation!
-                        storage.chain()
+                        storage
+                            .chain()
                             .get_chainwork(&hash_array)?
                             .map(|cw| Self::format_chainwork(cw))
-                            .unwrap_or_else(|| {
-                                ZERO_HASH_STR.to_string()
-                            })
+                            .unwrap_or_else(|| ZERO_HASH_STR.to_string())
                     } else {
                         ZERO_HASH_STR.to_string()
                     };
@@ -539,20 +540,19 @@ impl BlockchainRpc {
     ///
     /// Params: []
     pub async fn get_best_block_hash(&self) -> Result<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getbestblockhash");
 
         if let Some(ref storage) = self.storage {
             use std::time::{Duration, Instant};
-            
+
             thread_local! {
-                static CACHED_TIP_HASH_HEX: std::cell::RefCell<(Option<String>, [u8; 32], Instant, Option<u64>)> = 
+                static CACHED_TIP_HASH_HEX: std::cell::RefCell<(Option<String>, [u8; 32], Instant, Option<u64>)> =
                     std::cell::RefCell::new((None, [0u8; 32], Instant::now(), None));
             }
-            
+
             let current_height = storage.chain().get_height()?.unwrap_or(0);
-            
+
             if let Ok(Some(hash)) = storage.chain().get_tip_hash() {
                 let should_refresh = CACHED_TIP_HASH_HEX.with(|c| {
                     let cache = c.borrow();
@@ -561,12 +561,17 @@ impl BlockchainRpc {
                         || cache.2.elapsed() >= Duration::from_secs(1)
                         || cache.3 != Some(current_height)
                 });
-                
+
                 if should_refresh {
                     let hex_str = hex::encode(hash);
                     CACHED_TIP_HASH_HEX.with(|c| {
                         let mut cache = c.borrow_mut();
-                        *cache = (Some(hex_str.clone()), hash, Instant::now(), Some(current_height));
+                        *cache = (
+                            Some(hex_str.clone()),
+                            hash,
+                            Instant::now(),
+                            Some(current_height),
+                        );
                     });
                     Ok(Value::String(hex_str))
                 } else {
@@ -587,16 +592,14 @@ impl BlockchainRpc {
     ///
     /// Params: []
     pub async fn get_block_count(&self) -> Result<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getblockcount");
 
         if let Some(ref storage) = self.storage {
             let height = storage.chain().get_height()?.unwrap_or(0);
-            
+
             Ok(Value::Number(Number::from(height)))
         } else {
-            
             Ok(Value::Number(Number::from(0)))
         }
     }
@@ -605,25 +608,23 @@ impl BlockchainRpc {
     ///
     /// Params: []
     pub async fn get_difficulty(&self) -> Result<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getdifficulty");
 
         use std::time::{Duration, Instant};
 
         if let Some(ref storage) = self.storage {
-            
             thread_local! {
-                static CACHED_DIFFICULTY: std::cell::RefCell<(Option<f64>, Instant, Option<u64>)> = 
+                static CACHED_DIFFICULTY: std::cell::RefCell<(Option<f64>, Instant, Option<u64>)> =
                     std::cell::RefCell::new((None, Instant::now(), None));
             }
 
             // Check current height for cache invalidation
             let current_height = storage.chain().get_height()?.unwrap_or(0);
-            
+
             let should_refresh = CACHED_DIFFICULTY.with(|c| {
                 let cache = c.borrow();
-                cache.0.is_none() 
+                cache.0.is_none()
                     || cache.1.elapsed() >= Duration::from_secs(1)
                     || cache.2 != Some(current_height)
             });
@@ -631,14 +632,16 @@ impl BlockchainRpc {
             if should_refresh {
                 if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
                     let difficulty = Self::calculate_difficulty(tip_header.bits);
-                    
+
                     // Cache the result
                     CACHED_DIFFICULTY.with(|c| {
                         let mut cache = c.borrow_mut();
                         *cache = (Some(difficulty), Instant::now(), Some(current_height));
                     });
-                    
-                    Ok(Value::Number(Number::from_f64(difficulty).unwrap_or_else(|| Number::from(1))))
+
+                    Ok(Value::Number(
+                        Number::from_f64(difficulty).unwrap_or_else(|| Number::from(1)),
+                    ))
                 } else {
                     Ok(Value::Number(Number::from_f64(1.0).unwrap()))
                 }
@@ -646,7 +649,9 @@ impl BlockchainRpc {
                 // Return cached value
                 CACHED_DIFFICULTY.with(|c| {
                     let cache = c.borrow();
-                    Ok(Value::Number(Number::from_f64(cache.0.unwrap_or(1.0)).unwrap_or_else(|| Number::from(1))))
+                    Ok(Value::Number(
+                        Number::from_f64(cache.0.unwrap_or(1.0)).unwrap_or_else(|| Number::from(1)),
+                    ))
                 })
             }
         } else {
@@ -666,8 +671,7 @@ impl BlockchainRpc {
                 let hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
                 (h, hash)
             };
-            
-            
+
             if let Ok(Some(stats)) = storage.chain().get_latest_utxo_stats() {
                 // Use cached stats - much faster than loading entire UTXO set!
                 Ok(json!({
@@ -809,8 +813,9 @@ impl BlockchainRpc {
                         // Check level 2: Verify merkle root
                         if check_level >= 2 {
                             use bllvm_protocol::mining::calculate_merkle_root;
-                            
-                            if let Ok(calculated_root) = calculate_merkle_root(&block.transactions) {
+
+                            if let Ok(calculated_root) = calculate_merkle_root(&block.transactions)
+                            {
                                 if calculated_root != block.header.merkle_root {
                                     errors.push(format!(
                                         "Block at height {} has incorrect merkle root",
@@ -837,7 +842,6 @@ impl BlockchainRpc {
             }
 
             if errors.is_empty() {
-                
                 Ok(Value::Bool(true))
             } else {
                 Ok(json!({
@@ -857,7 +861,6 @@ impl BlockchainRpc {
     /// Returns information about all known chain tips.
     /// Params: [] (no parameters)
     pub async fn get_chain_tips(&self) -> Result<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getchaintips");
 
@@ -867,7 +870,7 @@ impl BlockchainRpc {
                 let height = storage.chain().get_height()?.unwrap_or(0);
                 (hash, height)
             };
-            
+
             // Get all chain tips (including forks)
             // Usually 1-2 tips, but pre-allocate for potential forks
             let mut tips = Vec::with_capacity(4);
@@ -909,7 +912,6 @@ impl BlockchainRpc {
     ///
     /// Params: ["nblocks"] (optional, default: 1 month of blocks)
     pub async fn get_chain_tx_stats(&self, params: &Value) -> Result<Value> {
-        
         #[cfg(debug_assertions)]
         debug!("RPC: getchaintxstats");
 
@@ -937,25 +939,25 @@ impl BlockchainRpc {
             };
 
             let range_size = (tip_height - start_height + 1) as usize;
-            
+
             // Use headers instead of full blocks (much faster - headers are ~80 bytes vs MB for blocks)
             let mut timestamps = Vec::with_capacity(range_size);
             let mut tx_counts = Vec::with_capacity(range_size);
 
             for height in start_height..=tip_height {
                 if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
-                    
                     if let Ok(Some(header)) = storage.blocks().get_header(&hash) {
                         timestamps.push(header.timestamp);
-                        
+
                         // Try to get TX count from metadata (if available), otherwise use header-only fallback
-                        let n_tx = storage.blocks()
+                        let n_tx = storage
+                            .blocks()
                             .get_block_metadata(&hash)
                             .ok()
                             .flatten()
                             .map(|m| m.n_tx as u64)
                             .unwrap_or(0); // Fallback: 0 if metadata not available
-                        
+
                         tx_counts.push(n_tx);
                     }
                 }
@@ -1056,19 +1058,18 @@ impl BlockchainRpc {
 
             if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
                 let tx_count = block.transactions.len();
-                
+
                 let block_size = {
                     let serialized_size = bincode::serialize(&block).map(|b| b.len()).unwrap_or(0);
-                    storage.blocks()
+                    storage
+                        .blocks()
                         .get_block_metadata(&block_hash)
                         .ok()
                         .flatten()
-                        .map(|_m| {
-                            serialized_size
-                        })
+                        .map(|_m| serialized_size)
                         .unwrap_or(serialized_size)
                 };
-                
+
                 let block_weight = block_size; // Simplified - would calculate weight properly
 
                 // Get block height
@@ -1271,8 +1272,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Block hash parameter required"))?;
 
-        let hash = decode_hash32(blockhash)
-            .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+        let hash =
+            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
             // Mark block as invalid
@@ -1286,7 +1287,6 @@ impl BlockchainRpc {
                 }
             }
 
-            
             Ok(Value::Null)
         } else {
             // Graceful degradation: return informative error instead of failing silently
@@ -1307,8 +1307,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| anyhow::anyhow!("Block hash parameter required"))?;
 
-        let hash = decode_hash32(blockhash)
-            .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+        let hash =
+            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
             // Remove from invalid blocks set
@@ -1317,7 +1317,6 @@ impl BlockchainRpc {
             // If this block is now valid, it may be reconsidered for chain inclusion
             // The node will handle this on next block processing
 
-            
             Ok(Value::Null)
         } else {
             // Graceful degradation: return informative error instead of failing silently
@@ -1384,8 +1383,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_u64())
             .map(|t| tokio::time::Duration::from_secs(t));
 
-        let hash = decode_hash32(blockhash)
-            .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+        let hash =
+            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         // Note: This requires async notification infrastructure
         // For now, check if block exists immediately
@@ -1471,8 +1470,8 @@ impl BlockchainRpc {
             return Err(anyhow::anyhow!("Only filter type 0 (Basic) is supported"));
         }
 
-        let hash = decode_hash32(blockhash)
-            .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+        let hash =
+            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
             // Get block from storage

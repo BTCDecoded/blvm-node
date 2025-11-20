@@ -148,7 +148,3 @@ mod kani_proofs {
         }
     }
 }
-
-
-
-

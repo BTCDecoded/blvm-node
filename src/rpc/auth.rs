@@ -330,17 +330,14 @@ impl RpcAuthManager {
         let mut method_limiters = self.method_rate_limiters.lock().await;
 
         // Check if there's a custom rate limit for this method
-        let (burst, rate) = method_limits
-            .get(method_name)
-            .copied()
-            .unwrap_or_else(|| {
-                // Default per-method limits (more restrictive for expensive methods)
-                match method_name {
-                    "getblock" | "getblockheader" | "getrawtransaction" => (20, 2), // Expensive queries
-                    "sendrawtransaction" | "submitblock" => (10, 1), // Write operations
-                    _ => (100, 10), // Default for other methods
-                }
-            });
+        let (burst, rate) = method_limits.get(method_name).copied().unwrap_or_else(|| {
+            // Default per-method limits (more restrictive for expensive methods)
+            match method_name {
+                "getblock" | "getblockheader" | "getrawtransaction" => (20, 2), // Expensive queries
+                "sendrawtransaction" | "submitblock" => (10, 1),                // Write operations
+                _ => (100, 10), // Default for other methods
+            }
+        });
 
         // Get or create rate limiter for this method
         let limiter = method_limiters

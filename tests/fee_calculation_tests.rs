@@ -25,12 +25,12 @@ fn test_calculate_transaction_fee() {
     // Create transaction with 1 input and 1 output
     let tx = Transaction {
         version: 1,
-          inputs: bllvm_protocol::tx_inputs![bllvm_protocol::TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![bllvm_protocol::TransactionInput {
             prevout: outpoint.clone(),
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-          outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
             value: 99_000_000, // 0.99 BTC (0.01 BTC fee)
             script_pubkey: vec![0x76, 0xa9, 0x14],
         }],
@@ -62,12 +62,12 @@ fn test_calculate_transaction_fee_zero_fee() {
     // Transaction with same input and output (no fee)
     let tx = Transaction {
         version: 1,
-          inputs: bllvm_protocol::tx_inputs![bllvm_protocol::TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![bllvm_protocol::TransactionInput {
             prevout: outpoint.clone(),
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-          outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
             value: 100_000_000,
             script_pubkey: vec![],
         }],
@@ -91,12 +91,12 @@ fn test_calculate_transaction_fee_missing_utxo() {
 
     let tx = Transaction {
         version: 1,
-          inputs: bllvm_protocol::tx_inputs![bllvm_protocol::TransactionInput {
+        inputs: bllvm_protocol::tx_inputs![bllvm_protocol::TransactionInput {
             prevout: outpoint,
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-          outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
+        outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
             value: 50_000_000,
             script_pubkey: vec![],
         }],
