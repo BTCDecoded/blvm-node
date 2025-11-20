@@ -81,6 +81,8 @@ async-trait = "=0.1.75"
 bitflags = "2.4"
 
 # Memory allocator optimization (not in bllvm-consensus to maintain Kani compatibility)
+# Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
 # System calls for process sandboxing (Unix)
