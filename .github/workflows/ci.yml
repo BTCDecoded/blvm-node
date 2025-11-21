@@ -515,9 +515,11 @@ jobs:
         run: |
           # Auto-increment patch version from Cargo.toml
           # Extract only the package version (first version = after [package])
-          CURRENT=$(awk '/^\[package\]/,/^\[/ {if (/^version = /) {gsub(/^version = |"/, ""); print; exit}}' Cargo.toml)
+          CURRENT=$(grep -A 10 '^\[package\]' Cargo.toml | grep '^version = ' | head -1 | sed -E 's/^version = "([^"]+)".*/\1/')
           if [ -z "$CURRENT" ]; then
             echo "❌ Could not determine current version from Cargo.toml"
+            echo "Debug: Looking for version in [package] section"
+            grep -A 10 '^\[package\]' Cargo.toml | head -10
             exit 1
           fi
           
