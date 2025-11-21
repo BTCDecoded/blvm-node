@@ -488,5 +488,169 @@ jobs:
           if [ -d "./target" ] && [ "$TARGET_CACHE_DIR" != "" ]; then
             rsync -a --delete ./target/ "$TARGET_CACHE_DIR/" || true
           fi
+
+  release:
+    name: Release
+    needs: build
+    runs-on: [self-hosted, linux, x64]
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      !contains(github.event.head_commit.message, '[skip release]')
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      
+      - name: Determine version
+        id: version
+        run: |
+          # Auto-increment patch version from Cargo.toml
+          CURRENT=$(grep -E '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ -z "$CURRENT" ]; then
+            echo "❌ Could not determine current version from Cargo.toml"
+            exit 1
+          fi
+          
+          # Increment patch version (X.Y.Z -> X.Y.(Z+1))
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          PATCH=$((PATCH + 1))
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          
+          # Remove 'v' prefix if present
+          VERSION=$(echo "$VERSION" | sed 's/^v//')
+          VERSION_TAG="v${VERSION}"
+          
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version_tag=${VERSION_TAG}" >> $GITHUB_OUTPUT
+          echo "Releasing version: ${VERSION_TAG}"
+      
+      - name: Get latest bllvm-protocol version from crates.io
+        id: protocol-version
+        run: |
+          PROTOCOL_VER=$(cargo search bllvm-protocol --limit 1 2>/dev/null | head -1 | sed -E 's/^bllvm-protocol = "([^"]+)".*/\1/' || echo "")
+          if [ -z "$PROTOCOL_VER" ]; then
+            echo "❌ bllvm-protocol not found on crates.io. It must be published first."
+            exit 1
+          fi
+          echo "version=${PROTOCOL_VER}" >> $GITHUB_OUTPUT
+          echo "Using bllvm-protocol version: ${PROTOCOL_VER}"
+      
+      - name: Update Cargo.toml to use crates.io dependencies
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PROTOCOL_VER="${{ steps.protocol-version.outputs.version }}"
+          
+          # Update version
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          
+          # Update bllvm-protocol dependency to use crates.io version
+          sed -i 's|bllvm-protocol = { path = "\.\./bllvm-protocol"|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
+          
+          echo "Updated Cargo.toml:"
+          echo "  version: ${VERSION}"
+          echo "  bllvm-protocol: ${PROTOCOL_VER}"
+          grep -E "^(version|bllvm-protocol)" Cargo.toml
+      
+      - name: Check for crates.io token
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "⚠️  CARGO_REGISTRY_TOKEN not set, skipping crate publication"
+            echo "   Set CARGO_REGISTRY_TOKEN secret to enable crate publishing"
+            exit 0
+          fi
+      
+      - name: Configure cargo for crates.io
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: |
+          cargo login "${CARGO_REGISTRY_TOKEN}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Verify package
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: |
+          cargo package --list
+      
+      - name: Dry-run publish
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: |
+          cargo publish --dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Check if version already exists
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        id: check-version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
+          if cargo search "$CRATE_NAME" --limit 1 2>/dev/null | grep -q "v${VERSION}"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Publish to crates.io
+        if: |
+          env.CARGO_REGISTRY_TOKEN != '' &&
+          steps.check-version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
+          echo "Publishing ${CRATE_NAME} v${VERSION} to crates.io..."
+          cargo publish --token "${CARGO_REGISTRY_TOKEN}"
+          echo "✅ Successfully published ${CRATE_NAME} v${VERSION}"
+          echo "Waiting 30 seconds for crates.io to index..."
+          sleep 30
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Create git tag
+        run: |
+          VERSION_TAG="${{ steps.version.outputs.version_tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check if tag already exists
+          if git rev-parse "$VERSION_TAG" >/dev/null 2>&1; then
+            echo "⚠️  Tag ${VERSION_TAG} already exists, skipping tag creation"
+          else
+            git tag -a "$VERSION_TAG" -m "Release ${VERSION_TAG}"
+            git push origin "$VERSION_TAG"
+            echo "✅ Created and pushed tag ${VERSION_TAG}"
+          fi
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version_tag }}
+          name: Release ${{ steps.version.outputs.version_tag }}
+          body: |
+            ## ${{ steps.version.outputs.version_tag }}
+            
+            Automated release of bllvm-node.
+            
+            **Published to crates.io**: ${{ steps.check-version.outputs.exists == 'false' && '✅ Yes' || '⚠️  Already exists or skipped' }}
+            
+            ### Changes
+            See [commit history](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }})
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
