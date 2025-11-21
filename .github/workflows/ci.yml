@@ -360,6 +360,7 @@ jobs:
 
   security:
     name: Security
+    needs: setup
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
@@ -386,7 +387,7 @@ jobs:
 
   build:
     name: Build
-    needs: setup
+    needs: [setup, test, clippy, fmt, docs, security]
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
