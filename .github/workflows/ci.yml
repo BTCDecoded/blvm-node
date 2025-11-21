@@ -514,9 +514,18 @@ jobs:
         id: version
         run: |
           # Auto-increment patch version from Cargo.toml
-          CURRENT=$(grep -E '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          # Extract only the package version (first version = after [package])
+          CURRENT=$(awk '/^\[package\]/,/^\[/ {if (/^version = /) {gsub(/^version = |"/, ""); print; exit}}' Cargo.toml)
           if [ -z "$CURRENT" ]; then
             echo "❌ Could not determine current version from Cargo.toml"
+            exit 1
+          fi
+          
+          echo "Current version: ${CURRENT}"
+          
+          # Validate version format (should be X.Y.Z)
+          if ! echo "$CURRENT" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "❌ Invalid version format: ${CURRENT} (expected X.Y.Z)"
             exit 1
           fi
           
@@ -524,16 +533,20 @@ jobs:
           MAJOR=$(echo "$CURRENT" | cut -d. -f1)
           MINOR=$(echo "$CURRENT" | cut -d. -f2)
           PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          
+          # Validate components are numeric
+          if ! [[ "$MAJOR" =~ ^[0-9]+$ ]] || ! [[ "$MINOR" =~ ^[0-9]+$ ]] || ! [[ "$PATCH" =~ ^[0-9]+$ ]]; then
+            echo "❌ Version components must be numeric: ${MAJOR}.${MINOR}.${PATCH}"
+            exit 1
+          fi
+          
           PATCH=$((PATCH + 1))
           VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          
-          # Remove 'v' prefix if present
-          VERSION=$(echo "$VERSION" | sed 's/^v//')
           VERSION_TAG="v${VERSION}"
           
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "version_tag=${VERSION_TAG}" >> $GITHUB_OUTPUT
-          echo "Releasing version: ${VERSION_TAG}"
+          echo "✅ Releasing version: ${VERSION_TAG}"
       
       - name: Get latest bllvm-protocol version from crates.io
         id: protocol-version
