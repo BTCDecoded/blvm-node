@@ -752,28 +752,87 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
-          if cargo search "$CRATE_NAME" --limit 1 2>/dev/null | grep -q "v${VERSION}"; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
+          
+          echo "Checking if ${CRATE_NAME} v${VERSION} already exists on crates.io..."
+          
+          # Use crates.io API to check if version exists (more reliable than cargo search)
+          # The API returns versions in the "versions" array
+          API_RESPONSE=$(curl -s "https://crates.io/api/v1/crates/${CRATE_NAME}/versions" 2>/dev/null || echo "")
+          
+          if [ -z "$API_RESPONSE" ] || echo "$API_RESPONSE" | grep -q '"detail"'; then
+            echo "⚠️  Could not check crates.io API (crate may not exist yet), using cargo search as fallback"
+            # Fallback to cargo search - check all versions
+            if cargo search "$CRATE_NAME" --limit 100 2>/dev/null | grep -qE "\"${CRATE_NAME}\".*\"${VERSION}\""; then
+              echo "exists=true" >> $GITHUB_OUTPUT
+              echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
+            else
+              echo "exists=false" >> $GITHUB_OUTPUT
+              echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
+            fi
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
+            # Parse JSON to check if version exists (using jq if available, or grep as fallback)
+            if command -v jq &> /dev/null; then
+              VERSION_EXISTS=$(echo "$API_RESPONSE" | jq -r ".versions[] | select(.num == \"${VERSION}\") | .num" | head -1)
+              if [ "$VERSION_EXISTS" = "$VERSION" ]; then
+                echo "exists=true" >> $GITHUB_OUTPUT
+                echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
+              else
+                echo "exists=false" >> $GITHUB_OUTPUT
+                echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
+              fi
+            else
+              # Fallback: grep for version in JSON
+              if echo "$API_RESPONSE" | grep -q "\"num\":\"${VERSION}\""; then
+                echo "exists=true" >> $GITHUB_OUTPUT
+                echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
+              else
+                echo "exists=false" >> $GITHUB_OUTPUT
+                echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
+              fi
+            fi
           fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       
       - name: Publish to crates.io
-        if: |
-          env.CARGO_REGISTRY_TOKEN != '' &&
-          steps.check-version.outputs.exists == 'false'
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        id: publish
+        continue-on-error: true
         run: |
+          set +e
           VERSION="${{ steps.version.outputs.version }}"
           CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
+          
+          # Skip if version already exists
+          if [ "${{ steps.check-version.outputs.exists }}" = "true" ]; then
+            echo "⚠️  Version ${VERSION} already exists on crates.io, skipping publish"
+            echo "published=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
           echo "Publishing ${CRATE_NAME} v${VERSION} to crates.io..."
-          cargo publish --token "${CARGO_REGISTRY_TOKEN}"
-          echo "✅ Successfully published ${CRATE_NAME} v${VERSION}"
-          echo "Waiting 30 seconds for crates.io to index..."
-          sleep 30
+          PUBLISH_OUTPUT=$(cargo publish --token "${CARGO_REGISTRY_TOKEN}" 2>&1)
+          PUBLISH_EXIT_CODE=$?
+          
+          if [ $PUBLISH_EXIT_CODE -eq 0 ]; then
+            echo "✅ Successfully published ${CRATE_NAME} v${VERSION}"
+            echo "published=true" >> $GITHUB_OUTPUT
+            echo "Waiting 30 seconds for crates.io to index..."
+            sleep 30
+          else
+            # Check if error is due to version already existing
+            if echo "$PUBLISH_OUTPUT" | grep -q "already exists"; then
+              echo "⚠️  Version ${VERSION} already exists on crates.io (detected during publish)"
+              echo "published=false" >> $GITHUB_OUTPUT
+              exit 0
+            else
+              echo "❌ Failed to publish ${CRATE_NAME} v${VERSION}"
+              echo "Error output:"
+              echo "$PUBLISH_OUTPUT"
+              echo "published=false" >> $GITHUB_OUTPUT
+              exit $PUBLISH_EXIT_CODE
+            fi
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       
@@ -883,7 +942,7 @@ jobs:
             
             Automated release of bllvm-node.
             
-            **Published to crates.io**: ${{ steps.check-version.outputs.exists == 'false' && '✅ Yes' || '⚠️  Already exists or skipped' }}
+            **Published to crates.io**: ${{ steps.publish.outputs.published == 'true' && '✅ Yes' || (steps.check-version.outputs.exists == 'true' && '⚠️  Already exists' || '❌ Failed or skipped') }}
             
             ### Changes
             See [commit history](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }})
