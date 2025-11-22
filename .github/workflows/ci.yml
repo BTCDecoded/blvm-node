@@ -480,7 +480,7 @@ jobs:
   build:
     name: Build
     needs: [setup, test, clippy, fmt, docs, security]
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, Linux, X64, builds]
     steps:
       - uses: actions/checkout@v4
       
