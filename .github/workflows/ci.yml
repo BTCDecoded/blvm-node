@@ -116,6 +116,7 @@ jobs:
     name: Test
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
     steps:
       - name: Check if tests should be skipped
         id: skip_check
