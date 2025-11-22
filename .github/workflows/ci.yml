@@ -711,8 +711,14 @@ jobs:
           # Add -unverified suffix if verification is skipped
           # Add -unverified suffix if verification OR tests are skipped
           # (untested counts as unverified)
-          SKIP_VERIFICATION="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true' }}"
-          SKIP_TESTS="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true' }}"
+          # Check if we're in workflow_dispatch mode
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SKIP_VERIFICATION="${{ github.event.inputs.skip_verification }}"
+            SKIP_TESTS="${{ github.event.inputs.skip_tests }}"
+          else
+            SKIP_VERIFICATION="false"
+            SKIP_TESTS="false"
+          fi
           
           if [ "$SKIP_VERIFICATION" = "true" ] || [ "$SKIP_TESTS" = "true" ]; then
             VERSION_TAG="v${VERSION}-unverified"
