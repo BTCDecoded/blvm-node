@@ -10,6 +10,12 @@ on:
   repository_dispatch:
     types: [build-chain, upstream-changed]
   workflow_dispatch:
+    inputs:
+      skip_verification:
+        description: 'Skip Kani verification and attestation steps'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -313,21 +319,43 @@ jobs:
     needs: setup
     runs-on: [self-hosted, Linux, X64, perf]
     steps:
+      - name: Check if verification should be skipped
+        id: skip_check
+        run: |
+          SKIP="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true' }}"
+          if [ "$SKIP" = "true" ]; then
+            echo "⚠️  Verification skipped via workflow input"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Skip verification
+        if: steps.skip_check.outputs.skip == 'true'
+        run: |
+          echo "✅ Verification step skipped (unverified release)"
+          exit 0
+      
       - uses: actions/checkout@v4
+        if: steps.skip_check.outputs.skip != 'true'
       
       - name: Checkout bllvm-protocol dependency
+        if: steps.skip_check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
       - name: Checkout consensus
+        if: steps.skip_check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
           path: _temp-consensus-proof
       
       - name: Move dependencies to parent directory
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
@@ -335,6 +363,7 @@ jobs:
           mv _temp-consensus-proof ../bllvm-consensus
       
       - name: Cache
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
@@ -342,6 +371,7 @@ jobs:
           echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
       
       - name: Restore registry
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/registry"
@@ -349,6 +379,7 @@ jobs:
           fi
       
       - name: Restore git
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/git"
@@ -356,11 +387,13 @@ jobs:
           fi
       
       - name: Install Rust
+        if: steps.skip_check.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
       
       - name: Verify Kani is available
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           echo "Checking for Kani model checker..."
           # Check if kani is available (should be pre-installed on runner)
@@ -379,6 +412,7 @@ jobs:
           fi
       
       - name: Run Kani proofs
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           echo "🔍 Running Kani formal verification (72 proofs)..."
           echo "Note: Running proofs in parallel and filtering verbose CBMC output"
@@ -636,11 +670,19 @@ jobs:
           
           PATCH=$((PATCH + 1))
           VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          VERSION_TAG="v${VERSION}"
+          
+          # Add -unverified suffix if verification is skipped
+          SKIP_VERIFICATION="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true' }}"
+          if [ "$SKIP_VERIFICATION" = "true" ]; then
+            VERSION_TAG="v${VERSION}-unverified"
+            echo "⚠️  Releasing UNVERIFIED version: ${VERSION_TAG}"
+          else
+            VERSION_TAG="v${VERSION}"
+            echo "✅ Releasing version: ${VERSION_TAG}"
+          fi
           
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "version_tag=${VERSION_TAG}" >> $GITHUB_OUTPUT
-          echo "✅ Releasing version: ${VERSION_TAG}"
       
       - name: Get latest bllvm-protocol version from crates.io
         id: protocol-version
@@ -763,6 +805,7 @@ jobs:
           done
       
       - name: Collect build metadata for attestation
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true') }}
         id: metadata
         run: |
           # Get toolchain versions
@@ -791,6 +834,7 @@ jobs:
           echo "  Cargo.lock hash: $CARGO_LOCK_HASH"
       
       - name: Create build attestation
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true') }}
         id: attestation
         run: |
           # Create predicate JSON file
@@ -805,6 +849,7 @@ jobs:
           cat predicate.json
       
       - name: Attest build provenance
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true') }}
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: "bllvm-node"
