@@ -515,6 +515,7 @@ jobs:
     name: Build
     needs: [setup, test, clippy, fmt, docs, security]
     runs-on: [self-hosted, Linux, X64, builds]
+    if: github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       
@@ -620,7 +621,7 @@ jobs:
     needs: build
     runs-on: [self-hosted, Linux, X64, builds]
     if: |
-      github.event_name == 'push' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
       !contains(github.event.head_commit.message, '[skip release]')
     permissions:
