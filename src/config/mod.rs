@@ -346,6 +346,10 @@ pub struct NodeConfig {
     /// Fee forwarding configuration (for governance contributions)
     pub fee_forwarding: Option<FeeForwardingConfig>,
 
+    /// ZMQ notification configuration
+    #[cfg(feature = "zmq")]
+    pub zmq: Option<ZmqConfig>,
+
     /// Logging configuration
     pub logging: Option<LoggingConfig>,
 }
@@ -1265,6 +1269,10 @@ impl Default for PeerRateLimitingConfig {
         }
     }
 }
+
+    /// ZMQ notification configuration
+    #[cfg(feature = "zmq")]
+    pub use crate::zmq::ZmqConfig;
 
 /// Logging configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
