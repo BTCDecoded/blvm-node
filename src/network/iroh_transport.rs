@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 #[cfg(feature = "iroh")]
 use tokio::io::AsyncReadExt;
 #[cfg(feature = "iroh")]
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// Iroh transport implementation
 ///

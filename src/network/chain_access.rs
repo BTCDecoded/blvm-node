@@ -55,11 +55,11 @@ impl ChainStateAccess for NodeChainAccess {
         }
         // Try txindex (confirmed transactions)
         if let Ok(Some(tx)) = self.txindex.get_transaction(hash) {
-            return Some(ChainObject::Transaction(tx));
+            return Some(ChainObject::Transaction(Box::new(tx)));
         }
         // Try mempool (unconfirmed transactions)
         if let Some(tx) = self.mempool.get_transaction(hash) {
-            return Some(ChainObject::Transaction(tx));
+            return Some(ChainObject::Transaction(Box::new(tx)));
         }
         None
     }

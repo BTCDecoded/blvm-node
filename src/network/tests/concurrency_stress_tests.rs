@@ -6,7 +6,7 @@
 //! - Concurrent access patterns
 //! - Timeout handling
 
-use crate::network::{NetworkManager, NetworkMessage};
+use crate::network::NetworkManager;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

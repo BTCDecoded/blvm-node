@@ -11,6 +11,8 @@ use crate::utils::current_timestamp;
 use bllvm_protocol::{Block, Hash};
 use std::collections::HashMap;
 use tracing::debug;
+#[cfg(feature = "dandelion")]
+use tracing::info;
 
 /// Relay manager
 pub struct RelayManager {

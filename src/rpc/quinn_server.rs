@@ -6,13 +6,11 @@
 #[cfg(feature = "quinn")]
 use anyhow::Result;
 #[cfg(feature = "quinn")]
-use serde_json::{json, Value};
-#[cfg(feature = "quinn")]
 use std::net::SocketAddr;
 #[cfg(feature = "quinn")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "quinn")]
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "quinn")]
 use super::server;
@@ -36,13 +34,14 @@ impl QuinnRpcServer {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .map_err(|e| anyhow::anyhow!("Failed to generate certificate: {}", e))?;
 
-        // Convert to formats expected by quinn 0.10
+        // Convert to formats expected by quinn 0.11
         let cert_der = cert.serialize_der()?;
         let key_der = cert.serialize_private_key_der();
 
-        // quinn 0.10 uses rustls 0.21 types
-        let certs = vec![rustls::Certificate(cert_der)];
-        let key = rustls::PrivateKey(key_der);
+        // quinn 0.11 uses pki_types
+        use quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        let certs = vec![CertificateDer::from(cert_der)];
+        let key = PrivateKeyDer::Pkcs8(key_der.into());
 
         let server_config = quinn::ServerConfig::with_single_cert(certs, key)?;
         let endpoint = quinn::Endpoint::server(server_config, self.addr)?;
@@ -88,7 +87,7 @@ impl QuinnRpcServer {
                         Ok(Some(n)) => buffer.extend_from_slice(&temp_buf[..n]),
                         Err(e) => {
                             warn!("Error reading from QUIC stream: {}", e);
-                            let _ = send.finish().await;
+                            let _ = send.finish();
                             return;
                         }
                     }
@@ -97,12 +96,12 @@ impl QuinnRpcServer {
                     Ok(req) if !req.is_empty() => req,
                     Ok(_) => {
                         warn!("Empty QUIC RPC request");
-                        let _ = send.finish().await;
+                        let _ = send.finish();
                         return;
                     }
                     Err(e) => {
                         warn!("Invalid UTF-8 in QUIC RPC request: {}", e);
-                        let _ = send.finish().await;
+                        let _ = send.finish();
                         return;
                     }
                 };
@@ -118,7 +117,7 @@ impl QuinnRpcServer {
                 }
 
                 // Finish the stream
-                if let Err(e) = send.finish().await {
+                if let Err(e) = send.finish() {
                     warn!("Failed to finish QUIC stream: {}", e);
                 }
             });

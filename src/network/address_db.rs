@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn test_add_iroh_address() {
         use getrandom::getrandom;
-        use iroh::{PublicKey, SecretKey};
+        use iroh::SecretKey;
         let mut db = AddressDatabase::new(100);
 
         // Generate a valid Ed25519 key for testing using getrandom to avoid RNG version conflicts
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn test_get_fresh_iroh_addresses() {
         use getrandom::getrandom;
-        use iroh::{PublicKey, SecretKey};
+        use iroh::SecretKey;
         let mut db = AddressDatabase::new(100);
 
         // Generate valid Ed25519 keys for testing using getrandom to avoid RNG version conflicts

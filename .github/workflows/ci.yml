@@ -304,6 +304,88 @@ jobs:
       - name: Run clippy
         run: cargo clippy -- -D warnings
 
+  verify:
+    name: Verify
+    needs: setup
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Checkout bllvm-protocol dependency
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-protocol
+          path: _temp-protocol-engine
+      
+      - name: Checkout consensus
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/bllvm-consensus
+          path: _temp-consensus-proof
+      
+      - name: Move dependencies to parent directory
+        run: |
+          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+          mv _temp-protocol-engine ../bllvm-protocol
+          mv _temp-consensus-proof ../bllvm-consensus
+      
+      - name: Cache
+        run: |
+          CACHE_ROOT="/tmp/runner-cache"
+          CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
+          echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
+          echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
+      
+      - name: Restore registry
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/registry"
+            rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
+          fi
+      
+      - name: Restore git
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/git"
+            rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
+          fi
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      
+      - name: Verify Kani is available
+        run: |
+          echo "Checking for Kani model checker..."
+          # Check if kani is available (should be pre-installed on runner)
+          if command -v kani &> /dev/null; then
+            echo "✅ Found kani command: $(which kani)"
+            kani --version || echo "Version check failed, but kani exists"
+          elif command -v cargo &> /dev/null && cargo kani --version &> /dev/null; then
+            echo "✅ Found cargo kani subcommand"
+            cargo kani --version
+          else
+            echo "❌ Kani not found on runner"
+            echo "PATH: $PATH"
+            echo "Please ensure Kani is installed on the runner"
+            echo "Install with: curl -fsSL https://model-checking.github.io/kani/install.sh | sh -s -- -y"
+            exit 1
+          fi
+      
+      - name: Run Kani proofs
+        run: |
+          echo "🔍 Running Kani formal verification..."
+          # Use cargo kani to automatically find and run all proofs in the crate
+          # cargo kani will discover all #[kani::proof] functions
+          cargo kani --features verify || {
+            echo "❌ Kani verification failed"
+            echo "This is critical for node correctness - review proofs before release"
+            exit 1
+          }
+          echo "✅ All Kani proofs verified successfully"
+
   fmt:
     name: Format
     needs: setup
@@ -641,6 +723,34 @@ jobs:
           sleep 30
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Verify published crate is available
+        if: |
+          env.CARGO_REGISTRY_TOKEN != '' &&
+          steps.check-version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
+          echo "Verifying ${CRATE_NAME} v${VERSION} is available on crates.io..."
+          
+          # Try to fetch the crate info
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if cargo search "$CRATE_NAME" --limit 1 2>/dev/null | grep -q "v${VERSION}"; then
+              echo "✅ ${CRATE_NAME} v${VERSION} is now available on crates.io"
+              echo "📦 Crate page: https://crates.io/crates/${CRATE_NAME}/${VERSION}"
+              break
+            else
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "⏳ Waiting for crates.io to index (attempt $RETRY_COUNT/$MAX_RETRIES)..."
+                sleep 10
+              else
+                echo "⚠️  ${CRATE_NAME} v${VERSION} not yet visible on crates.io (may take a few minutes)"
+              fi
+            fi
+          done
       
       - name: Create git tag
         run: |

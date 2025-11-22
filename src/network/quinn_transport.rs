@@ -61,13 +61,14 @@ impl Transport for QuinnTransport {
         // Create server config with self-signed cert
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .map_err(|e| anyhow::anyhow!("Failed to generate certificate: {}", e))?;
-        // Convert to formats expected by quinn 0.10
+        // Convert to formats expected by quinn 0.11
         let cert_der = cert.serialize_der()?;
         let key_der = cert.serialize_private_key_der();
 
-        // quinn 0.10 uses rustls 0.21 types
-        let certs = vec![rustls::Certificate(cert_der)];
-        let key = rustls::PrivateKey(key_der);
+        // quinn 0.11 uses pki_types
+        use quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        let certs = vec![CertificateDer::from(cert_der)];
+        let key = PrivateKeyDer::Pkcs8(key_der.into());
 
         let server_config = quinn::ServerConfig::with_single_cert(certs, key)?;
 

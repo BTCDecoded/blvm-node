@@ -917,7 +917,13 @@ impl NetworkManager {
                             // Extract SocketAddr from TransportAddr::Tcp
                             let socket_addr = match transport_addr {
                                 TransportAddr::Tcp(addr) => addr,
-                                _ => {
+                                #[cfg(feature = "quinn")]
+                                TransportAddr::Quinn(_) => {
+                                    error!("Unexpected transport address type for TCP listener");
+                                    continue;
+                                }
+                                #[cfg(feature = "iroh")]
+                                TransportAddr::Iroh(_) => {
                                     error!("Unexpected transport address type for TCP listener");
                                     continue;
                                 }
@@ -1043,9 +1049,8 @@ impl NetworkManager {
                                             // Auto-ban the IP using configured ban duration
                                             let ban_duration =
                                                 dos_protection.ban_duration_seconds();
-                                            let unban_timestamp = current_timestamp()
-                                                + ban_duration.as_secs()
-                                                + ban_duration;
+                                            let unban_timestamp =
+                                                current_timestamp() + ban_duration;
                                             let mut ban_list_guard = ban_list.write().await;
                                             ban_list_guard.insert(socket_addr, unban_timestamp);
                                         }

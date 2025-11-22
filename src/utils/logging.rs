@@ -237,8 +237,24 @@ mod tests {
 
     #[test]
     fn test_logging_initialization() {
-        // This test just verifies the functions compile and can be called
-        // Actual initialization would conflict with other tests
-        // In real usage, these are called once at startup
+        // Test that logging functions exist and have correct signatures
+        // We can't actually call init_logging() because tracing_subscriber
+        // can only be initialized once per process, and other tests may have
+        // already initialized it. Instead, we verify the functions compile
+        // and can be referenced.
+
+        // Verify function signatures exist
+        let _init_logging_fn: fn(Option<&str>) = init_logging;
+        let _init_module_logging_fn: fn(&str, Option<&str>) = init_module_logging;
+        let _init_logging_from_config_fn: fn(Option<&crate::config::LoggingConfig>) =
+            init_logging_from_config;
+
+        #[cfg(feature = "json-logging")]
+        {
+            let _init_json_logging_fn: fn(Option<&str>) = init_json_logging;
+        }
+
+        // If we can reference the functions, they compile correctly
+        // This test will fail if function signatures change
     }
 }
