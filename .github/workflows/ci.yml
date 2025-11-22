@@ -762,6 +762,56 @@ jobs:
             fi
           done
       
+      - name: Collect build metadata for attestation
+        id: metadata
+        run: |
+          # Get toolchain versions
+          RUSTC_VERSION=$(rustc --version | cut -d' ' -f2)
+          CARGO_VERSION=$(cargo --version | cut -d' ' -f2)
+          
+          # Hash Cargo.lock
+          CARGO_LOCK_HASH=$(sha256sum Cargo.lock | cut -d' ' -f1)
+          
+          # Check if debug assertions are enabled (check Cargo.toml or build flags)
+          DEBUG_ASSERTIONS="false"
+          if grep -q "debug-assertions = true" Cargo.toml 2>/dev/null; then
+            DEBUG_ASSERTIONS="true"
+          fi
+          
+          # Output metadata
+          echo "debug_assertions_enabled=$DEBUG_ASSERTIONS" >> $GITHUB_OUTPUT
+          echo "rustc_version=$RUSTC_VERSION" >> $GITHUB_OUTPUT
+          echo "cargo_version=$CARGO_VERSION" >> $GITHUB_OUTPUT
+          echo "cargo_lock_hash=$CARGO_LOCK_HASH" >> $GITHUB_OUTPUT
+          
+          echo "📋 Build Metadata:"
+          echo "  Debug assertions: $DEBUG_ASSERTIONS"
+          echo "  rustc version: $RUSTC_VERSION"
+          echo "  cargo version: $CARGO_VERSION"
+          echo "  Cargo.lock hash: $CARGO_LOCK_HASH"
+      
+      - name: Create build attestation
+        id: attestation
+        run: |
+          # Create predicate JSON file
+          cat > predicate.json << EOF
+          {
+            "debug_assertions_enabled": ${{ steps.metadata.outputs.debug_assertions_enabled == 'true' && 'true' || 'false' }},
+            "rustc_version": "${{ steps.metadata.outputs.rustc_version }}",
+            "cargo_version": "${{ steps.metadata.outputs.cargo_version }}",
+            "cargo_lock_hash": "${{ steps.metadata.outputs.cargo_lock_hash }}"
+          }
+          EOF
+          cat predicate.json
+      
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: "bllvm-node"
+          subject-digest: "sha256:${{ steps.metadata.outputs.cargo_lock_hash }}"
+          predicate-type: "https://bllvm.dev/predicate/v1"
+          predicate-file: predicate.json
+      
       - name: Create git tag
         run: |
           VERSION_TAG="${{ steps.version.outputs.version_tag }}"
