@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_tests:
+        description: 'Skip test execution and coverage steps'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -112,21 +117,42 @@ jobs:
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
     steps:
+      - name: Check if tests should be skipped
+        id: skip_check
+        run: |
+          SKIP="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true' }}"
+          if [ "$SKIP" = "true" ]; then
+            echo "⚠️  Tests skipped via workflow input"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Skip tests message
+        if: steps.skip_check.outputs.skip == 'true'
+        run: |
+          echo "✅ Test step skipped (untested release)"
+          exit 0
+      
       - uses: actions/checkout@v4
+        if: steps.skip_check.outputs.skip != 'true'
       
       - name: Checkout bllvm-protocol dependency
+        if: steps.skip_check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
       - name: Checkout consensus
+        if: steps.skip_check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
           path: _temp-consensus-proof
       
       - name: Move dependencies to parent directory
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
@@ -134,6 +160,7 @@ jobs:
           mv _temp-consensus-proof ../bllvm-consensus
       
       - name: Cache
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
@@ -146,6 +173,7 @@ jobs:
           echo "PROTOCOL_TARGET_DIR=$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY" >> $GITHUB_ENV
       
       - name: Restore registry
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/registry"
@@ -155,6 +183,7 @@ jobs:
           fi
       
       - name: Restore git
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/git"
@@ -164,6 +193,7 @@ jobs:
           fi
       
       - name: Restore consensus
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$CONSENSUS_TARGET_DIR" ] && [ "$(ls -A $CONSENSUS_TARGET_DIR 2>/dev/null)" ]; then
             mkdir -p ../bllvm-consensus/target
@@ -173,6 +203,7 @@ jobs:
           fi
       
       - name: Restore bllvm-protocol build artifacts
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$PROTOCOL_TARGET_DIR" ] && [ "$(ls -A $PROTOCOL_TARGET_DIR 2>/dev/null)" ]; then
             mkdir -p ../bllvm-protocol/target
@@ -182,6 +213,7 @@ jobs:
           fi
       
       - name: Restore target
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
             rsync -a --delete "$TARGET_CACHE_DIR/" ./target/ || true
@@ -190,11 +222,13 @@ jobs:
           fi
       
       - name: Install Rust
+        if: steps.skip_check.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
       
       - name: Run tests
+        if: steps.skip_check.outputs.skip != 'true'
         run: |
           # Run tests in parallel (default) with all features
           # Use --lib --bins --tests to ensure all test types run
@@ -673,12 +707,25 @@ jobs:
           VERSION="${MAJOR}.${MINOR}.${PATCH}"
           
           # Add -unverified suffix if verification is skipped
+          # Add suffixes based on what was skipped
           SKIP_VERIFICATION="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true' }}"
+          SKIP_TESTS="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true' }}"
+          
+          VERSION_TAG="v${VERSION}"
+          SUFFIXES=""
+          
           if [ "$SKIP_VERIFICATION" = "true" ]; then
-            VERSION_TAG="v${VERSION}-unverified"
-            echo "⚠️  Releasing UNVERIFIED version: ${VERSION_TAG}"
+            SUFFIXES="${SUFFIXES}-unverified"
+          fi
+          
+          if [ "$SKIP_TESTS" = "true" ]; then
+            SUFFIXES="${SUFFIXES}-untested"
+          fi
+          
+          if [ -n "$SUFFIXES" ]; then
+            VERSION_TAG="v${VERSION}${SUFFIXES}"
+            echo "⚠️  Releasing version with skipped steps: ${VERSION_TAG}"
           else
-            VERSION_TAG="v${VERSION}"
             echo "✅ Releasing version: ${VERSION_TAG}"
           fi
           
@@ -894,7 +941,7 @@ jobs:
           echo "  Cargo.lock hash: $CARGO_LOCK_HASH"
       
       - name: Create build attestation
-        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true') }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && (github.event.inputs.skip_verification == 'true' || github.event.inputs.skip_tests == 'true')) }}
         id: attestation
         run: |
           # Create predicate JSON file
@@ -909,7 +956,7 @@ jobs:
           cat predicate.json
       
       - name: Attest build provenance
-        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true') }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && (github.event.inputs.skip_verification == 'true' || github.event.inputs.skip_tests == 'true')) }}
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: "bllvm-node"
