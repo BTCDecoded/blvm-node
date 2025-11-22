@@ -352,6 +352,7 @@ jobs:
     name: Verify
     needs: setup
     runs-on: [self-hosted, Linux, X64, perf]
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verification != 'true' }}
     steps:
       - name: Check if verification should be skipped
         id: skip_check
