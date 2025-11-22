@@ -384,9 +384,9 @@ jobs:
           echo "Note: Running proofs in parallel and filtering verbose CBMC output"
           # Use cargo kani to automatically find and run all proofs in the crate
           # cargo kani will discover all #[kani::proof] functions
-          # Run in parallel with -j (uses all available CPU cores)
+          # Run in parallel with --jobs (uses minimal parallelism to avoid OOM)
           # Use terse output format and filter noisy CBMC messages
-          cargo kani --features verify --output-format terse -j 2>&1 | grep -v "aborting path on assume(false)" || {
+          cargo kani --features verify --output-format terse --jobs 2 2>&1 | grep -v "aborting path on assume(false)" || {
             EXIT_CODE=${PIPESTATUS[0]}
             if [ $EXIT_CODE -ne 0 ]; then
               echo "❌ Kani verification failed"
