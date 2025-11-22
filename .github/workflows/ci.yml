@@ -707,25 +707,16 @@ jobs:
           VERSION="${MAJOR}.${MINOR}.${PATCH}"
           
           # Add -unverified suffix if verification is skipped
-          # Add suffixes based on what was skipped
+          # Add -unverified suffix if verification OR tests are skipped
+          # (untested counts as unverified)
           SKIP_VERIFICATION="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true' }}"
           SKIP_TESTS="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true' }}"
           
-          VERSION_TAG="v${VERSION}"
-          SUFFIXES=""
-          
-          if [ "$SKIP_VERIFICATION" = "true" ]; then
-            SUFFIXES="${SUFFIXES}-unverified"
-          fi
-          
-          if [ "$SKIP_TESTS" = "true" ]; then
-            SUFFIXES="${SUFFIXES}-untested"
-          fi
-          
-          if [ -n "$SUFFIXES" ]; then
-            VERSION_TAG="v${VERSION}${SUFFIXES}"
-            echo "⚠️  Releasing version with skipped steps: ${VERSION_TAG}"
+          if [ "$SKIP_VERIFICATION" = "true" ] || [ "$SKIP_TESTS" = "true" ]; then
+            VERSION_TAG="v${VERSION}-unverified"
+            echo "⚠️  Releasing UNVERIFIED version: ${VERSION_TAG}"
           else
+            VERSION_TAG="v${VERSION}"
             echo "✅ Releasing version: ${VERSION_TAG}"
           fi
           
