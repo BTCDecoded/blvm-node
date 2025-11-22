@@ -39,6 +39,8 @@ pub mod storage;
 pub mod utils;
 #[cfg(feature = "production")]
 pub mod validation;
+#[cfg(feature = "zmq")]
+pub mod zmq;
 
 // Re-export config module
 pub use config::*;
