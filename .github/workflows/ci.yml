@@ -903,7 +903,7 @@ jobs:
           done
       
       - name: Collect build metadata for attestation
-        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
         id: metadata
         run: |
           # Get toolchain versions
