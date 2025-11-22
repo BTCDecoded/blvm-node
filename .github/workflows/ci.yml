@@ -932,7 +932,7 @@ jobs:
           echo "  Cargo.lock hash: $CARGO_LOCK_HASH"
       
       - name: Create build attestation
-        if: ${{ !(github.event_name == 'workflow_dispatch' && (github.event.inputs.skip_verification == 'true' || github.event.inputs.skip_tests == 'true')) }}
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
         id: attestation
         run: |
           # Create predicate JSON file
@@ -947,7 +947,7 @@ jobs:
           cat predicate.json
       
       - name: Attest build provenance
-        if: ${{ !(github.event_name == 'workflow_dispatch' && (github.event.inputs.skip_verification == 'true' || github.event.inputs.skip_tests == 'true')) }}
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: "bllvm-node"
