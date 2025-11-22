@@ -35,6 +35,11 @@ jobs:
   setup:
     name: Setup
     runs-on: [self-hosted, Linux, X64, builds]
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]')))
     outputs:
       cache-key: ${{ steps.setup-cache.outputs.cache-key }}
       consensus-cache-key: ${{ steps.setup-cache.outputs.consensus-cache-key }}
@@ -116,7 +121,12 @@ jobs:
     name: Test
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
     steps:
       - name: Check if tests should be skipped
         id: skip_check
@@ -297,6 +307,11 @@ jobs:
     name: Clippy
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]')))
     steps:
       - uses: actions/checkout@v4
       
@@ -353,7 +368,12 @@ jobs:
     name: Verify
     needs: setup
     runs-on: [self-hosted, Linux, X64, perf]
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verification != 'true' }}
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verification != 'true' }}
     steps:
       - name: Check if verification should be skipped
         id: skip_check
@@ -470,6 +490,11 @@ jobs:
     name: Format
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]')))
     steps:
       - uses: actions/checkout@v4
       
@@ -486,6 +511,11 @@ jobs:
     name: Docs
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]')))
     steps:
       - uses: actions/checkout@v4
       
@@ -524,6 +554,11 @@ jobs:
     name: Security
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]')))
     steps:
       - uses: actions/checkout@v4
       
@@ -551,7 +586,12 @@ jobs:
     name: Build
     needs: [setup, test, clippy, fmt, docs, security]
     runs-on: [self-hosted, Linux, X64, builds]
-    if: github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
+    if: |
+      (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]')))
     steps:
       - uses: actions/checkout@v4
       
@@ -659,7 +699,11 @@ jobs:
     if: |
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
-      !contains(github.event.head_commit.message, '[skip release]')
+      (github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]') &&
+        !contains(github.event.head_commit.message, '[skip release]')))
     permissions:
       contents: write
       id-token: write
@@ -954,14 +998,22 @@ jobs:
           EOF
           cat predicate.json
       
+      - name: Upload build metadata
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata
+          path: predicate.json
+          retention-days: 365
+      
       - name: Attest build provenance
         if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: "bllvm-node"
           subject-digest: "sha256:${{ steps.metadata.outputs.cargo_lock_hash }}"
-          predicate-type: "https://bllvm.dev/predicate/v1"
-          predicate-file: predicate.json
+          push-to-registry: false
+          show-summary: true
       
       - name: Create git tag
         run: |
