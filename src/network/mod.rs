@@ -134,7 +134,7 @@ impl PeerManager {
     pub fn peer_socket_addresses(&self) -> Vec<SocketAddr> {
         self.peers
             .keys()
-            .filter_map(|addr| {
+            .flat_map(|addr| {
                 match addr {
                     TransportAddr::Tcp(sock) => Some(*sock),
                     #[cfg(feature = "quinn")]
