@@ -104,22 +104,15 @@ impl Peer {
         tokio::spawn(async move {
             let mut send_rx = send_rx;
 
-            loop {
-                match send_rx.recv().await {
-                    Some(data) => {
-                        let mut conn_guard = conn_write.lock().await;
-                        match conn_guard.send(&data).await {
-                            Ok(_) => {
-                                debug!("Sent {} bytes to peer", data.len());
-                            }
-                            Err(e) => {
-                                warn!("Peer write error: {}", e);
-                                break; // Connection closed
-                            }
-                        }
+            while let Some(data) = send_rx.recv().await {
+                let mut conn_guard = conn_write.lock().await;
+                match conn_guard.send(&data).await {
+                    Ok(_) => {
+                        debug!("Sent {} bytes to peer", data.len());
                     }
-                    None => {
-                        break; // Channel closed
+                    Err(e) => {
+                        warn!("Peer write error: {}", e);
+                        break; // Connection closed
                     }
                 }
             }
