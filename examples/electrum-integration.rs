@@ -7,8 +7,6 @@
 //! with the generated config.toml file.
 
 use bllvm_node::config::NodeConfig;
-use bllvm_protocol::ProtocolVersion;
-use std::net::SocketAddr;
 
 fn main() -> anyhow::Result<()> {
     println!("bllvm-node Electrum Integration Configuration");

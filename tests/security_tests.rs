@@ -4,8 +4,6 @@
 
 use bllvm_node::network::*;
 use std::net::SocketAddr;
-use std::time::Duration;
-use tokio::time::sleep;
 
 #[tokio::test]
 async fn test_message_size_validation() {

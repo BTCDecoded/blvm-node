@@ -537,11 +537,7 @@ impl MiningRpc {
                     }
                 }
                 let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-                if input_total > output_total {
-                    input_total - output_total
-                } else {
-                    0
-                }
+                input_total.saturating_sub(output_total)
             } else {
                 0
             }

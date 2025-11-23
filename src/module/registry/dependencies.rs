@@ -87,7 +87,7 @@ impl ModuleDependencies {
             for dep in deps {
                 graph
                     .entry(dep.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(module.clone());
                 *in_degree.get_mut(module).unwrap() += 1;
             }

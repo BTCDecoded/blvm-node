@@ -49,7 +49,7 @@ impl ModuleProcessSpawner {
         // Get resource limits from config or use defaults
         let limits_config = resource_limits_config
             .cloned()
-            .unwrap_or_else(|| crate::config::ModuleResourceLimitsConfig::default());
+            .unwrap_or_else(crate::config::ModuleResourceLimitsConfig::default);
 
         // Initialize sandboxes with config
         let sandbox_config = SandboxConfig::with_resource_limits(&data_dir_path, &limits_config);

@@ -321,7 +321,7 @@ impl ChainState {
 
     /// Check if chain is initialized
     pub fn is_initialized(&self) -> Result<bool> {
-        Ok(self.chain_info.contains_key(b"current")?)
+        self.chain_info.contains_key(b"current")
     }
 
     /// Store UTXO set statistics for a block
@@ -538,7 +538,7 @@ impl ChainState {
 
     /// Check if a block is marked as invalid
     pub fn is_invalid(&self, hash: &Hash) -> Result<bool> {
-        Ok(self.invalid_blocks.contains_key(hash.as_slice())?)
+        self.invalid_blocks.contains_key(hash.as_slice())
     }
 
     /// Get all invalid block hashes

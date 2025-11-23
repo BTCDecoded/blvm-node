@@ -3,7 +3,6 @@
 //! This tool converts Bitcoin Core configuration files to bllvm-node format.
 //! Data directories are NOT converted (as requested).
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -231,9 +230,9 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
             .unwrap()
             .as_secs()
     ));
-    toml.push_str("\n");
+    toml.push('\n');
     toml.push_str("# NOTE: Data directories are NOT converted - configure separately\n");
-    toml.push_str("\n");
+    toml.push('\n');
 
     // Network configuration
     toml.push_str("[network]\n");
@@ -273,7 +272,7 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
     persistent_peers.extend_from_slice(&config.connect);
 
     if !persistent_peers.is_empty() {
-        toml.push_str("\n");
+        toml.push('\n');
         toml.push_str("# Persistent peers (from addnode/connect)\n");
         toml.push_str("persistent_peers = [\n");
         for peer in &persistent_peers {
@@ -296,7 +295,7 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
 
     // RPC configuration
     if config.rpc_port.is_some() || config.rpc_user.is_some() || !config.rpc_auth.is_empty() {
-        toml.push_str("\n");
+        toml.push('\n');
         toml.push_str("[rpc_auth]\n");
 
         if let Some(port) = config.rpc_port {
@@ -329,14 +328,14 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
     }
 
     // Transport preference
-    toml.push_str("\n");
+    toml.push('\n');
     toml.push_str("[transport_preference]\n");
     toml.push_str("prefer_tcp = true\n");
     toml.push_str("prefer_quinn = false\n");
     toml.push_str("prefer_iroh = false\n");
 
     // Network timing
-    toml.push_str("\n");
+    toml.push('\n');
     toml.push_str("[network_timing]\n");
     if let Some(max) = config.max_connections {
         toml.push_str(&format!("target_peer_count = {}\n", max));
@@ -344,7 +343,7 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> Str
         toml.push_str("target_peer_count = 8\n");
     }
 
-    toml.push_str("\n");
+    toml.push('\n');
     toml.push_str("# Additional notes:\n");
     toml.push_str("# - Data directories are NOT converted (configure separately)\n");
     toml.push_str("# - Some Bitcoin Core options may not have direct equivalents\n");

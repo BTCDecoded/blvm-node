@@ -41,6 +41,12 @@ pub struct TransactionSelector {
     min_fee_rate: u64,
 }
 
+impl Default for TransactionSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransactionSelector {
     /// Create a new transaction selector
     pub fn new() -> Self {
@@ -160,6 +166,12 @@ pub struct MiningStats {
     pub total_hashrate: f64,
     pub average_block_time: f64,
     pub last_block_time: Option<u64>,
+}
+
+impl Default for MiningEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MiningEngine {
@@ -726,6 +738,12 @@ pub struct MockMempoolProvider {
     prioritized_transactions: Vec<(Transaction, u64)>,
 }
 
+impl Default for MockMempoolProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockMempoolProvider {
     pub fn new() -> Self {
         Self {
@@ -760,7 +778,7 @@ impl MockMempoolProvider {
     fn calculate_fee_rate(&self, tx: &Transaction) -> u64 {
         // Simplified fee rate calculation - make it vary by version
         let total_output_value: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-        let total_input_value = total_output_value + (tx.version as u64 * 1000); // Mock input value varies by version
+        let total_input_value = total_output_value + (tx.version * 1000); // Mock input value varies by version
         let fee = total_input_value - total_output_value;
         let size = tx.inputs.len() * 148 + tx.outputs.len() * 34 + 10;
         if size == 0 {

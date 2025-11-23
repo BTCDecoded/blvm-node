@@ -51,6 +51,12 @@ pub struct TestTransactionBuilder {
     lock_time: u64,
 }
 
+impl Default for TestTransactionBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestTransactionBuilder {
     pub fn new() -> Self {
         Self {
@@ -101,6 +107,12 @@ impl TestTransactionBuilder {
 pub struct TestBlockBuilder {
     header: BlockHeader,
     transactions: Vec<Transaction>,
+}
+
+impl Default for TestBlockBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestBlockBuilder {
@@ -183,6 +195,12 @@ impl TestBlockBuilder {
 
 pub struct TestUtxoSetBuilder {
     utxos: HashMap<OutPoint, TransactionOutput>,
+}
+
+impl Default for TestUtxoSetBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestUtxoSetBuilder {

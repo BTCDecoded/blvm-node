@@ -96,7 +96,7 @@ pub fn calculate_tx_hash(tx: &Transaction) -> Hash {
 
     // Double SHA256
     let hash1 = Sha256::digest(&data);
-    let hash2 = Sha256::digest(&hash1);
+    let hash2 = Sha256::digest(hash1);
 
     let mut result = [0u8; 32];
     result.copy_from_slice(&hash2);
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn test_should_prefer_compact_blocks_tcp() {
         // TCP: compact blocks optional, not preferred by default
-        assert_eq!(should_prefer_compact_blocks(TransportType::Tcp), false);
+        assert!(!should_prefer_compact_blocks(TransportType::Tcp));
     }
 
     #[cfg(feature = "quinn")]
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn test_is_quic_transport_tcp() {
         // TCP is not QUIC
-        assert_eq!(is_quic_transport(TransportType::Tcp), false);
+        assert!(!is_quic_transport(TransportType::Tcp));
     }
 
     #[cfg(feature = "quinn")]

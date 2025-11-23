@@ -4,11 +4,10 @@ use bllvm_node::node::mempool::MempoolManager;
 use bllvm_node::rpc::mining::MiningRpc;
 use bllvm_node::storage::Storage;
 use bllvm_protocol::serialization::serialize_transaction;
-use bllvm_protocol::{BlockHeader, Natural, OutPoint, Transaction, UtxoSet, UTXO};
+use bllvm_protocol::{BlockHeader, OutPoint, Transaction, UTXO};
 use std::sync::Arc;
 use tempfile::TempDir;
 // Sha256 not needed directly in tests
-use bllvm_protocol::mining::BlockTemplate;
 mod common;
 use common::*;
 
@@ -69,7 +68,7 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
     // Calculate genesis block hash
     let genesis_bytes = bincode::serialize(&genesis_block.header)?;
     let first_hash = Sha256::digest(&genesis_bytes);
-    let genesis_hash = Sha256::digest(&first_hash);
+    let genesis_hash = Sha256::digest(first_hash);
     let mut genesis_hash_array = [0u8; 32];
     genesis_hash_array.copy_from_slice(&genesis_hash);
 
@@ -117,7 +116,7 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
         // Calculate block hash
         let block_bytes = bincode::serialize(&block.header)?;
         let first_hash = Sha256::digest(&block_bytes);
-        let block_hash = Sha256::digest(&first_hash);
+        let block_hash = Sha256::digest(first_hash);
         let mut block_hash_array = [0u8; 32];
         block_hash_array.copy_from_slice(&block_hash);
 

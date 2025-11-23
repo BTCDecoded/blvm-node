@@ -67,7 +67,7 @@ async fn test_inventory_manager() {
 
     // Test adding inventory
     let hash = [1u8; 32];
-    let items = vec![bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = [bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
 
     inventory.add_inventory("peer1", &items[..]).unwrap();
     assert_eq!(inventory.inventory_count(), 1);
@@ -146,7 +146,7 @@ async fn test_peer_state_transitions() {
     let local_addr = listener.local_addr().unwrap();
     let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
 
-    let mut peer = Peer::new(stream, addr, tx);
+    let peer = Peer::new(stream, addr, tx);
 
     // Test initial state
     assert!(peer.is_connected());
@@ -183,7 +183,7 @@ async fn test_peer_address_handling() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_peer_tracking() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let mut manager = NetworkManager::new(addr);
+    let manager = NetworkManager::new(addr);
 
     // Test adding multiple peers
     let peer_addrs: Vec<SocketAddr> = vec![
@@ -339,12 +339,12 @@ async fn test_inventory_manager_operations() {
     let hash1 = random_hash();
     let hash2 = random_hash();
 
-    let items1 = vec![bllvm_node::network::protocol::InventoryItem {
+    let items1 = [bllvm_node::network::protocol::InventoryItem {
         inv_type: 1, // MSG_TX
         hash: hash1,
     }];
 
-    let items2 = vec![bllvm_node::network::protocol::InventoryItem {
+    let items2 = [bllvm_node::network::protocol::InventoryItem {
         inv_type: 2, // MSG_BLOCK
         hash: hash2,
     }];
@@ -362,7 +362,7 @@ async fn test_inventory_peer_tracking() {
     let mut inventory = InventoryManager::new();
 
     let hash = random_hash();
-    let items = vec![bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = [bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
 
     // Add inventory from multiple peers
     inventory.add_inventory("peer1", &items[..]).unwrap();
@@ -381,7 +381,7 @@ async fn test_inventory_request_handling() {
     let mut inventory = InventoryManager::new();
 
     let hash = random_hash();
-    let items = vec![bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = [bllvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
 
     inventory.add_inventory("peer1", &items[..]).unwrap();
 
@@ -458,14 +458,12 @@ async fn test_relay_policy_enforcement() {
 
 #[tokio::test]
 async fn test_relay_peer_selection() {
-    let mut relay = RelayManager::new();
+    let relay = RelayManager::new();
 
     let hash = random_hash();
-    let peers = vec![
-        "peer1".to_string(),
+    let peers = ["peer1".to_string(),
         "peer2".to_string(),
-        "peer3".to_string(),
-    ];
+        "peer3".to_string()];
 
     // Test peer selection for relay
     // Test select_peers_for_relay (simplified - actual method may not exist)

@@ -209,7 +209,7 @@ impl RpcManager {
         ));
 
         // Create server with or without authentication
-        let server = if let (Some(ref storage), Some(ref mempool)) =
+        let server = if let (Some(storage), Some(mempool)) =
             (self.storage.as_ref(), self.mempool.as_ref())
         {
             let blockchain = arc_new(blockchain::BlockchainRpc::with_dependencies(arc_clone(
@@ -217,7 +217,7 @@ impl RpcManager {
             )));
             let mempool_rpc = arc_new(mempool::MempoolRpc::with_dependencies(
                 arc_clone(mempool),
-                arc_clone(&storage),
+                arc_clone(storage),
             ));
             let rawtx_rpc = arc_new(rawtx::RawTxRpc::with_dependencies(
                 arc_clone(storage),

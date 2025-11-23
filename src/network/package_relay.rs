@@ -112,10 +112,10 @@ impl PackageId {
         // Hash all transactions in order (placeholder: serialize structure)
         // Full implementation should hash txids
         for tx in transactions {
-            hasher.update(&tx.version.to_le_bytes());
-            hasher.update(&(tx.inputs.len() as u64).to_le_bytes());
-            hasher.update(&(tx.outputs.len() as u64).to_le_bytes());
-            hasher.update(&tx.lock_time.to_le_bytes());
+            hasher.update(tx.version.to_le_bytes());
+            hasher.update((tx.inputs.len() as u64).to_le_bytes());
+            hasher.update((tx.outputs.len() as u64).to_le_bytes());
+            hasher.update(tx.lock_time.to_le_bytes());
         }
 
         let hash_bytes = hasher.finalize();
@@ -124,7 +124,7 @@ impl PackageId {
 
         // Double hash for package ID
         let mut hasher2 = Sha256::new();
-        hasher2.update(&package_hash);
+        hasher2.update(package_hash);
         let final_hash = hasher2.finalize();
         let mut final_package_hash = [0u8; 32];
         final_package_hash.copy_from_slice(&final_hash);
@@ -155,11 +155,11 @@ impl TransactionPackage {
         let mut hasher = sha2::Sha256::new();
         for tx in &transactions {
             let txid = calculate_txid(tx);
-            hasher.update(&txid);
+            hasher.update(txid);
         }
         let first = hasher.finalize();
         let mut hasher2 = sha2::Sha256::new();
-        hasher2.update(&first);
+        hasher2.update(first);
         let final_bytes = hasher2.finalize();
         let mut pkg_hash = [0u8; 32];
         pkg_hash.copy_from_slice(&final_bytes);
@@ -178,11 +178,7 @@ impl TransactionPackage {
                         .map(|utxo| utxo.value as u64)
                         .sum();
                     let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-                    if input_total > output_total {
-                        input_total - output_total
-                    } else {
-                        0
-                    }
+                    input_total.saturating_sub(output_total)
                 })
                 .sum()
         } else {
@@ -315,7 +311,7 @@ impl PackageRelay {
     ) -> Result<PackageId, PackageError> {
         // Validate package
         self.validate_package(&package)
-            .map_err(|reason| PackageError::ValidationFailed(reason))?;
+            .map_err(PackageError::ValidationFailed)?;
 
         let package_id = package.package_id;
         let tx_count = package.transactions.len();

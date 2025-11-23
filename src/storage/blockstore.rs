@@ -256,7 +256,7 @@ impl BlockStore {
 
     /// Check if a block exists
     pub fn has_block(&self, hash: &Hash) -> Result<bool> {
-        Ok(self.blocks.contains_key(hash.as_slice())?)
+        self.blocks.contains_key(hash.as_slice())
     }
 
     /// Get total number of blocks stored
@@ -319,6 +319,6 @@ impl BlockStore {
 
     /// Check if a block body exists (not just header)
     pub fn has_block_body(&self, hash: &Hash) -> Result<bool> {
-        Ok(self.blocks.contains_key(hash.as_slice())?)
+        self.blocks.contains_key(hash.as_slice())
     }
 }

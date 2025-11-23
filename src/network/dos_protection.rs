@@ -37,7 +37,7 @@ impl ConnectionRateLimiter {
         // Clean up old entries outside the time window
         let cutoff = now.saturating_sub(self.window_seconds);
 
-        let attempts = self.connection_attempts.entry(ip).or_insert_with(Vec::new);
+        let attempts = self.connection_attempts.entry(ip).or_default();
         attempts.retain(|&timestamp| timestamp > cutoff);
 
         // Check if we're within the limit
@@ -104,6 +104,12 @@ pub struct DosProtectionMetrics {
     pub active_connection_limit_hits: u64,
     /// Total resource exhaustion events
     pub resource_exhaustion_events: u64,
+}
+
+impl Default for ResourceMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResourceMetrics {

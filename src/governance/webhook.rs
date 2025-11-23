@@ -123,7 +123,7 @@ impl GovernanceWebhookClient {
 
         // Double SHA256
         let first_hash = Sha256::digest(&header_data);
-        let second_hash = Sha256::digest(&first_hash);
+        let second_hash = Sha256::digest(first_hash);
 
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&second_hash);

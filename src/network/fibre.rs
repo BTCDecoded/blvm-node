@@ -127,7 +127,7 @@ impl FibreRelay {
         hasher.update(&header_bytes);
         let first_hash = hasher.finalize();
         let mut hasher2 = sha2::Sha256::new();
-        hasher2.update(&first_hash);
+        hasher2.update(first_hash);
         let hash_bytes = hasher2.finalize();
         let mut block_hash = [0u8; 32];
         block_hash.copy_from_slice(&hash_bytes);

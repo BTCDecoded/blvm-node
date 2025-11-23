@@ -1,9 +1,7 @@
 //! Tests for peer statistics tracking
 
 use bllvm_node::network::peer::Peer;
-use bllvm_node::network::NetworkMessage;
 use std::net::SocketAddr;
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 #[tokio::test]

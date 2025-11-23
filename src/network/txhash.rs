@@ -15,7 +15,7 @@ pub fn calculate_txid(tx: &Transaction) -> Hash {
     let first = hasher.finalize();
 
     let mut hasher2 = Sha256::new();
-    hasher2.update(&first);
+    hasher2.update(first);
     let final_bytes = hasher2.finalize();
 
     let mut out = [0u8; 32];
@@ -31,7 +31,7 @@ pub fn calculate_block_header_hash(header: &BlockHeader) -> Hash {
     let first = hasher.finalize();
 
     let mut hasher2 = Sha256::new();
-    hasher2.update(&first);
+    hasher2.update(first);
     let final_bytes = hasher2.finalize();
 
     let mut out = [0u8; 32];

@@ -472,7 +472,7 @@ impl BlockchainRpc {
                             .get_hash_by_height(h + 1)
                             .ok()
                             .flatten()
-                            .map(|hash| hex::encode(hash))
+                            .map(hex::encode)
                     });
 
                     let chainwork = if let Some(_height) = block_height {
@@ -480,7 +480,7 @@ impl BlockchainRpc {
                         storage
                             .chain()
                             .get_chainwork(&hash_array)?
-                            .map(|cw| Self::format_chainwork(cw))
+                            .map(Self::format_chainwork)
                             .unwrap_or_else(|| ZERO_HASH_STR.to_string())
                     } else {
                         ZERO_HASH_STR.to_string()
@@ -496,7 +496,7 @@ impl BlockchainRpc {
                         "time": header.timestamp,
                         "mediantime": mediantime,
                         "nonce": header.nonce as u32,
-                        "bits": hex::encode(&header.bits.to_le_bytes()),
+                        "bits": hex::encode(header.bits.to_le_bytes()),
                         "difficulty": difficulty,
                         "chainwork": chainwork,
                         "nTx": n_tx,
@@ -511,28 +511,26 @@ impl BlockchainRpc {
             } else {
                 Err(anyhow::anyhow!("Block not found"))
             }
+        } else if verbose {
+            Ok(json!({
+                "hash": hash,
+                "confirmations": 0,
+                "height": 0,
+                "version": 1,
+                "versionHex": "00000001",
+                "merkleroot": "0000000000000000000000000000000000000000000000000000000000000000",
+                "time": 1231006505,
+                "mediantime": 1231006505,
+                "nonce": 0,
+                "bits": "1d00ffff",
+                "difficulty": 1.0,
+                "chainwork": "0000000000000000000000000000000000000000000000000000000000000000",
+                "nTx": 0,
+                "previousblockhash": null,
+                "nextblockhash": null
+            }))
         } else {
-            if verbose {
-                Ok(json!({
-                    "hash": hash,
-                    "confirmations": 0,
-                    "height": 0,
-                    "version": 1,
-                    "versionHex": "00000001",
-                    "merkleroot": "0000000000000000000000000000000000000000000000000000000000000000",
-                    "time": 1231006505,
-                    "mediantime": 1231006505,
-                    "nonce": 0,
-                    "bits": "1d00ffff",
-                    "difficulty": 1.0,
-                    "chainwork": "0000000000000000000000000000000000000000000000000000000000000000",
-                    "nTx": 0,
-                    "previousblockhash": null,
-                    "nextblockhash": null
-                }))
-            } else {
-                Ok(json!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"))
-            }
+            Ok(json!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"))
         }
     }
 
@@ -747,11 +745,7 @@ impl BlockchainRpc {
             }
 
             // Start from genesis or from (tip_height - num_blocks)
-            let start_height = if tip_height > num_blocks {
-                tip_height - num_blocks
-            } else {
-                0
-            };
+            let start_height = tip_height.saturating_sub(num_blocks);
 
             let mut errors = Vec::new();
             let utxo_set = storage
@@ -1341,7 +1335,7 @@ impl BlockchainRpc {
         let _timeout = params
             .get(0)
             .and_then(|p| p.as_u64())
-            .map(|t| tokio::time::Duration::from_secs(t));
+            .map(tokio::time::Duration::from_secs);
 
         if let Some(ref storage) = self.storage {
             if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
@@ -1381,7 +1375,7 @@ impl BlockchainRpc {
         let _timeout = params
             .get(1)
             .and_then(|p| p.as_u64())
-            .map(|t| tokio::time::Duration::from_secs(t));
+            .map(tokio::time::Duration::from_secs);
 
         let hash =
             decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
@@ -1426,7 +1420,7 @@ impl BlockchainRpc {
         let _timeout = params
             .get(1)
             .and_then(|p| p.as_u64())
-            .map(|t| tokio::time::Duration::from_secs(t));
+            .map(tokio::time::Duration::from_secs);
         if let Some(ref storage) = self.storage {
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
             if height <= tip_height {

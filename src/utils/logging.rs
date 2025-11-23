@@ -75,7 +75,7 @@ pub fn init_logging(filter: Option<&str>) {
             fmt::layer()
                 .with_target(true) // Include module path - useful for debugging
                 .with_thread_ids(false) // Disable by default (can be noisy)
-                .with_ansi(!std::env::var("NO_COLOR").is_ok()), // Respect NO_COLOR standard
+                .with_ansi(std::env::var("NO_COLOR").is_err()), // Respect NO_COLOR standard
         )
         .with(env_filter)
         .init();
@@ -116,7 +116,7 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
     // If RUST_LOG is not set, use config filter or default
     if std::env::var("RUST_LOG").is_err() {
         env_filter = filter
-            .map(|f| EnvFilter::new(f))
+            .map(EnvFilter::new)
             .unwrap_or_else(|| EnvFilter::new(&default_filter));
     }
     // If RUST_LOG is set, it takes precedence (standard practice)
@@ -131,7 +131,7 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
             fmt::layer()
                 .with_target(true) // Include module path - useful for module debugging
                 .with_thread_ids(false) // Disable by default
-                .with_ansi(!std::env::var("NO_COLOR").is_ok()), // Respect NO_COLOR standard
+                .with_ansi(std::env::var("NO_COLOR").is_err()), // Respect NO_COLOR standard
         )
         .with(env_filter)
         .init();
@@ -187,8 +187,7 @@ pub fn init_json_logging(filter: Option<&str>) {
     // - Standard structured logging practice
     tracing_subscriber::registry()
         .with(
-            fmt::layer()
-                .with_target(true), // Include module path in JSON
+            fmt::layer().with_target(true), // Include module path in JSON
         )
         .with(env_filter)
         .init();

@@ -915,19 +915,7 @@ impl NetworkManager {
                     match tcp_listener.accept().await {
                         Ok((conn, transport_addr)) => {
                             // Extract SocketAddr from TransportAddr::Tcp
-                            let socket_addr = match transport_addr {
-                                TransportAddr::Tcp(addr) => addr,
-                                #[cfg(feature = "quinn")]
-                                TransportAddr::Quinn(_) => {
-                                    error!("Unexpected transport address type for TCP listener");
-                                    continue;
-                                }
-                                #[cfg(feature = "iroh")]
-                                TransportAddr::Iroh(_) => {
-                                    error!("Unexpected transport address type for TCP listener");
-                                    continue;
-                                }
-                            };
+                            let TransportAddr::Tcp(socket_addr) = transport_addr;
                             info!("New TCP connection from {:?}", socket_addr);
 
                             // Check DoS protection: connection rate limiting
@@ -1493,8 +1481,8 @@ impl NetworkManager {
                             for ip in ips_to_ban {
                                 // Convert IpAddr to SocketAddr (use port 0 as placeholder)
                                 let socket_addr = std::net::SocketAddr::new(ip, 0);
-                                if !ban_list_guard.contains_key(&socket_addr) {
-                                    ban_list_guard.insert(socket_addr, unban_timestamp);
+                                if let std::collections::hash_map::Entry::Vacant(e) = ban_list_guard.entry(socket_addr) {
+                                    e.insert(unban_timestamp);
                                     warn!("Auto-banned IP {} for connection rate violations (unban at {})", ip, unban_timestamp);
                                 }
                             }
@@ -2551,7 +2539,7 @@ impl NetworkManager {
         }
 
         // Process with protocol layer if dependencies are available
-        if let (Some(ref protocol_engine), Some(ref storage), Some(ref mempool_manager)) = (
+        if let (Some(protocol_engine), Some(storage), Some(mempool_manager)) = (
             self.protocol_engine.as_ref(),
             self.storage.as_ref(),
             self.mempool_manager.as_ref(),
@@ -2585,7 +2573,7 @@ impl NetworkManager {
                 let mut peer_states = self.peer_states.write().await;
                 let peer_state = peer_states
                     .entry(peer_addr)
-                    .or_insert_with(|| bllvm_protocol::network::PeerState::new());
+                    .or_insert_with(bllvm_protocol::network::PeerState::new);
 
                 // Process message (synchronous, no await points)
                 use bllvm_protocol::network::{process_network_message, ChainStateAccess};
@@ -3322,11 +3310,9 @@ impl NetworkManager {
         );
 
         // Verify hash if full list provided
-        if msg.is_full {
-            if !verify_ban_list_hash(&msg.ban_entries, &msg.ban_list_hash) {
-                warn!("Ban list hash verification failed from {}", peer_addr);
-                return Ok(()); // Silently ignore invalid ban lists
-            }
+        if msg.is_full && !verify_ban_list_hash(&msg.ban_entries, &msg.ban_list_hash) {
+            warn!("Ban list hash verification failed from {}", peer_addr);
+            return Ok(()); // Silently ignore invalid ban lists
         }
 
         // If hash-only, we can't merge (would need to request full list)
@@ -3526,7 +3512,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_manager_add_peer() {
-        let mut manager = PeerManager::new(2);
+        let manager = PeerManager::new(2);
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         // Create a mock peer without requiring network connection
         let (_tx, _rx): (mpsc::UnboundedSender<NetworkMessage>, _) = mpsc::unbounded_channel();
@@ -3540,7 +3526,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_manager_max_peers() {
-        let mut manager = PeerManager::new(1);
+        let manager = PeerManager::new(1);
         let _addr1: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let _addr2: std::net::SocketAddr = "127.0.0.1:8081".parse().unwrap();
 
@@ -3570,7 +3556,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_manager_get_peer() {
-        let mut manager = PeerManager::new(10);
+        let manager = PeerManager::new(10);
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
         // Test manager logic without creating real peers
@@ -3584,7 +3570,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_manager_peer_addresses() {
-        let mut manager = PeerManager::new(10);
+        let manager = PeerManager::new(10);
         let _addr1: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let _addr2: std::net::SocketAddr = "127.0.0.1:8081".parse().unwrap();
 
@@ -3631,7 +3617,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_peer_count() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let mut manager = NetworkManager::new(addr);
+        let manager = NetworkManager::new(addr);
 
         // Test manager logic without creating real peers
         assert_eq!(manager.peer_count(), 0);
@@ -3640,7 +3626,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_peer_addresses() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let mut manager = NetworkManager::new(addr);
+        let manager = NetworkManager::new(addr);
 
         // Test manager logic without creating real peers
         assert_eq!(manager.peer_count(), 0);
@@ -3653,7 +3639,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_broadcast() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let mut manager = NetworkManager::new(addr);
+        let manager = NetworkManager::new(addr);
 
         // Test manager logic without creating real peers
         assert_eq!(manager.peer_count(), 0);
@@ -3667,7 +3653,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_network_manager_send_to_peer() {
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let mut manager = NetworkManager::new(addr);
+        let manager = NetworkManager::new(addr);
 
         // Test manager logic without creating real peers
         assert_eq!(manager.peer_count(), 0);

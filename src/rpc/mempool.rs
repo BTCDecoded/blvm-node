@@ -101,7 +101,7 @@ impl MempoolRpc {
             if verbose {
                 let mut result = serde_json::Map::new();
 
-                let utxo_set = if let (Some(_mempool), Some(ref storage)) =
+                let utxo_set = if let (Some(_mempool), Some(storage)) =
                     (self.mempool.as_ref(), self.storage.as_ref())
                 {
                     Some(storage.utxos().get_all_utxos().unwrap_or_default())
@@ -117,7 +117,7 @@ impl MempoolRpc {
 
                     result.insert(txid_hex, json!({
                         "size": size,
-                        "fee": if let (Some(ref mempool), Some(ref utxo_set)) = (self.mempool.as_ref(), utxo_set.as_ref()) {
+                        "fee": if let (Some(mempool), Some(utxo_set)) = (self.mempool.as_ref(), utxo_set.as_ref()) {
                             let fee_satoshis = mempool.calculate_transaction_fee(&tx, utxo_set);
                             fee_satoshis as f64 / 100_000_000.0
                         } else {
@@ -155,36 +155,34 @@ impl MempoolRpc {
                     .collect();
                 Ok(json!(txids))
             }
+        } else if verbose {
+            Ok(json!({
+                "0000000000000000000000000000000000000000000000000000000000000000": {
+                    "size": 250,
+                    "fee": 0.00001000,
+                    "modifiedfee": 0.00001000,
+                    "time": 1231006505,
+                    "height": 0,
+                    "descendantcount": 1,
+                    "descendantsize": 250,
+                    "descendantfees": 0.00001000,
+                    "ancestorcount": 1,
+                    "ancestorsize": 250,
+                    "ancestorfees": 0.00001000,
+                    "wtxid": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "fees": {
+                        "base": 0.00001000,
+                        "modified": 0.00001000,
+                        "ancestor": 0.00001000,
+                        "descendant": 0.00001000
+                    },
+                    "depends": [],
+                    "spentby": [],
+                    "bip125-replaceable": false
+                }
+            }))
         } else {
-            if verbose {
-                Ok(json!({
-                    "0000000000000000000000000000000000000000000000000000000000000000": {
-                        "size": 250,
-                        "fee": 0.00001000,
-                        "modifiedfee": 0.00001000,
-                        "time": 1231006505,
-                        "height": 0,
-                        "descendantcount": 1,
-                        "descendantsize": 250,
-                        "descendantfees": 0.00001000,
-                        "ancestorcount": 1,
-                        "ancestorsize": 250,
-                        "ancestorfees": 0.00001000,
-                        "wtxid": "0000000000000000000000000000000000000000000000000000000000000000",
-                        "fees": {
-                            "base": 0.00001000,
-                            "modified": 0.00001000,
-                            "ancestor": 0.00001000,
-                            "descendant": 0.00001000
-                        },
-                        "depends": [],
-                        "spentby": [],
-                        "bip125-replaceable": false
-                    }
-                }))
-            } else {
-                Ok(json!([]))
-            }
+            Ok(json!([]))
         }
     }
 
@@ -286,15 +284,13 @@ impl MempoolRpc {
                 Ok(json!(result))
             } else {
                 // Return just transaction IDs
-                let txids: Vec<String> = ancestors.iter().map(|h| hex::encode(h)).collect();
+                let txids: Vec<String> = ancestors.iter().map(hex::encode).collect();
                 Ok(json!(txids))
             }
+        } else if verbose {
+            Ok(json!({}))
         } else {
-            if verbose {
-                Ok(json!({}))
-            } else {
-                Ok(json!([]))
-            }
+            Ok(json!([]))
         }
     }
 
@@ -393,15 +389,13 @@ impl MempoolRpc {
                 Ok(json!(result))
             } else {
                 // Return just transaction IDs
-                let txids: Vec<String> = descendants.iter().map(|h| hex::encode(h)).collect();
+                let txids: Vec<String> = descendants.iter().map(hex::encode).collect();
                 Ok(json!(txids))
             }
+        } else if verbose {
+            Ok(json!({}))
         } else {
-            if verbose {
-                Ok(json!({}))
-            } else {
-                Ok(json!([]))
-            }
+            Ok(json!([]))
         }
     }
 
@@ -475,8 +469,8 @@ impl MempoolRpc {
                         "ancestor": fee,
                         "descendant": fee
                     },
-                    "depends": ancestors.iter().map(|h| hex::encode(h)).collect::<Vec<_>>(),
-                    "spentby": descendants.iter().map(|h| hex::encode(h)).collect::<Vec<_>>(),
+                    "depends": ancestors.iter().map(hex::encode).collect::<Vec<_>>(),
+                    "spentby": descendants.iter().map(hex::encode).collect::<Vec<_>>(),
                     "bip125-replaceable": false
                 }))
             } else {
@@ -505,11 +499,8 @@ impl MempoolRpc {
                 for ancestor_tx in transactions {
                     let ancestor_hash = calculate_tx_id(&ancestor_tx);
                     for (idx, _output) in ancestor_tx.outputs.iter().enumerate() {
-                        if input.prevout.hash == ancestor_hash && input.prevout.index == idx as u64
-                        {
-                            if !ancestors.contains(&ancestor_hash) {
-                                ancestors.push(ancestor_hash);
-                            }
+                        if input.prevout.hash == ancestor_hash && input.prevout.index == idx as u64 && !ancestors.contains(&ancestor_hash) {
+                            ancestors.push(ancestor_hash);
                         }
                     }
                 }

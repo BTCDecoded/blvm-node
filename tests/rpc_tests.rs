@@ -4,7 +4,6 @@ use bllvm_node::rpc::*;
 use std::net::SocketAddr;
 use tokio::time::{timeout, Duration};
 mod common;
-use common::*;
 
 #[tokio::test]
 async fn test_rpc_manager_creation() {

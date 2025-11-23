@@ -174,7 +174,7 @@ fn test_block_store_retrieval_by_height() {
     for i in 0..5 {
         let block = TestBlockBuilder::new()
             .set_prev_hash(if i == 0 { [0u8; 32] } else { random_hash() })
-            .set_timestamp((1234567890 + i as u64) as u32)
+            .set_timestamp((1234567890 + i) as u32)
             .add_coinbase_transaction(p2pkh_script(random_hash20()))
             .build();
 
@@ -704,12 +704,12 @@ async fn test_utxostore_concurrent_operations() {
     assert_eq!(utxostore.utxo_count().unwrap(), utxo1.len() + utxo2.len());
 
     // Test concurrent retrieval
-    for (outpoint, _) in &utxo1 {
+    for outpoint in utxo1.keys() {
         let retrieved = utxostore.get_utxo(outpoint).unwrap();
         assert!(retrieved.is_some());
     }
 
-    for (outpoint, _) in &utxo2 {
+    for outpoint in utxo2.keys() {
         let retrieved = utxostore.get_utxo(outpoint).unwrap();
         assert!(retrieved.is_some());
     }

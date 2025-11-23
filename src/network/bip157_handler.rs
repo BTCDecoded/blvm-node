@@ -26,7 +26,7 @@ pub fn handle_getcfilters(
 
     let mut responses = Vec::new();
 
-    if let Some(ref storage) = storage {
+    if let Some(storage) = storage {
         // Get current height to determine stop height
         let current_height = storage.chain().get_height()?.unwrap_or(0) as u32;
         let start_height = request.start_height;
@@ -114,7 +114,7 @@ pub fn handle_getcfheaders(
     // Get previous filter header
     let prev_header = filter_service
         .get_prev_filter_header(request.start_height)
-        .unwrap_or_else(|| {
+        .unwrap_or({
             // Genesis filter header (all zeros)
             bllvm_protocol::bip157::FilterHeader {
                 filter_hash: [0u8; 32],

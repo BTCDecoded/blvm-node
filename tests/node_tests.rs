@@ -219,7 +219,7 @@ async fn test_node_startup_shutdown() {
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let rpc_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let mut node = Node::new(
+    let node = Node::new(
         temp_dir.path().to_str().unwrap(),
         network_addr,
         rpc_addr,
@@ -240,7 +240,7 @@ async fn test_node_startup_shutdown() {
 
 #[tokio::test]
 async fn test_sync_coordinator_operations() {
-    let mut sync = sync::SyncCoordinator::new();
+    let sync = sync::SyncCoordinator::new();
 
     // Test initial state - SyncCoordinator doesn't expose state() directly
     // We can test progress and is_synced instead
@@ -254,7 +254,7 @@ async fn test_sync_coordinator_operations() {
 
 #[tokio::test]
 async fn test_sync_coordinator_error_handling() {
-    let mut sync = sync::SyncCoordinator::new();
+    let sync = sync::SyncCoordinator::new();
 
     // Test error state
     let error_msg = "Connection failed".to_string();
@@ -265,7 +265,7 @@ async fn test_sync_coordinator_error_handling() {
 
 #[tokio::test]
 async fn test_sync_coordinator_peer_selection() {
-    let mut sync = sync::SyncCoordinator::new();
+    let sync = sync::SyncCoordinator::new();
 
     // Test peer selection for sync
     let peers = vec![
@@ -287,7 +287,7 @@ async fn test_sync_coordinator_peer_selection() {
 
 #[tokio::test]
 async fn test_sync_coordinator_stalled_detection() {
-    let mut sync = sync::SyncCoordinator::new();
+    let sync = sync::SyncCoordinator::new();
 
     // Test stalled sync detection
     // Test sync state (simplified - actual method may not exist)
@@ -457,7 +457,7 @@ async fn test_mining_coordinator_operations() {
 async fn test_mining_coordinator_block_template() {
     use std::sync::Arc;
     let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
-    let mut miner = miner::MiningCoordinator::new(mempool, None);
+    let miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test block template creation
     // Test create_block_template (simplified - actual method may not exist)
@@ -474,7 +474,7 @@ async fn test_mining_coordinator_block_template() {
 async fn test_mining_coordinator_transaction_selection() {
     use std::sync::Arc;
     let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
-    let mut miner = miner::MiningCoordinator::new(mempool, None);
+    let miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test transaction selection for mining
     let transactions = vec![
@@ -495,7 +495,7 @@ async fn test_mining_coordinator_transaction_selection() {
 async fn test_mining_coordinator_fee_optimization() {
     use std::sync::Arc;
     let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
-    let mut miner = miner::MiningCoordinator::new(mempool, None);
+    let miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test fee optimization
     let transactions = vec![
@@ -554,7 +554,7 @@ async fn test_mining_coordinator_mining_state() {
 
 #[tokio::test]
 async fn test_sync_mempool_interaction() {
-    let mut sync = sync::SyncCoordinator::new();
+    let sync = sync::SyncCoordinator::new();
     let mut mempool = mempool::MempoolManager::new();
 
     // Test interaction between sync and mempool
@@ -598,7 +598,7 @@ async fn test_full_node_coordination() {
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let rpc_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let mut node = Node::new(
+    let node = Node::new(
         temp_dir.path().to_str().unwrap(),
         network_addr,
         rpc_addr,

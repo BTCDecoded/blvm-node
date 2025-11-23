@@ -1,6 +1,6 @@
 //! Tests for BIP158 implementation
 
-use bllvm_protocol::bip158::{build_block_filter, match_filter, CompactBlockFilter};
+use bllvm_protocol::bip158::{build_block_filter, match_filter};
 use bllvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 
 #[test]

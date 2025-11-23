@@ -190,7 +190,7 @@ pub async fn handle_get_filtered_block(
     // Generate transaction indices (positions of filtered transactions in original block)
     let mut transaction_indices = Vec::new();
     let filtered_txids: std::collections::HashSet<_> =
-        filtered_txs.iter().map(|tx| calculate_txid(tx)).collect();
+        filtered_txs.iter().map(calculate_txid).collect();
     for (original_idx, tx) in block.transactions.iter().enumerate() {
         let txid = calculate_txid(tx);
         if filtered_txids.contains(&txid) {
@@ -241,7 +241,7 @@ pub async fn handle_get_filtered_block(
 
     // Generate BIP158 filter if requested and service available
     let bip158_filter = if message.include_bip158_filter {
-        filter_service.and_then(|_fs| {
+        filter_service.and({
             // Try to get filter from service
             // Note: This would require BlockFilterService to have a get_filter method
             // For now, return None as placeholder

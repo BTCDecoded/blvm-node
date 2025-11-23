@@ -1,8 +1,6 @@
 //! Tests for module process sharing
 
 use bllvm_node::module::process::monitor::ModuleProcessMonitor;
-use bllvm_node::module::process::spawner::{ModuleProcess, ModuleProcessSpawner};
-use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 

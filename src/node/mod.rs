@@ -358,7 +358,7 @@ impl Node {
             // To disable: either don't configure endpoints, or build without --features zmq
             #[cfg(feature = "zmq")]
             let zmq_publisher =
-                if let Some(ref zmq_config) = self.config.as_ref().and_then(|c| c.zmq.as_ref()) {
+                if let Some(zmq_config) = self.config.as_ref().and_then(|c| c.zmq.as_ref()) {
                     if zmq_config.is_enabled() {
                         match crate::zmq::ZmqPublisher::new(zmq_config) {
                             Ok(publisher) => {
@@ -482,7 +482,7 @@ impl Node {
                 info!("Processing block from network");
                 let blocks_arc = self.storage.blocks();
                 match self.sync_coordinator.process_block(
-                    &*blocks_arc,
+                    &blocks_arc,
                     &block_data,
                     current_height,
                     &mut utxo_set,
@@ -530,7 +530,7 @@ impl Node {
                             if let Err(e) = self
                                 .storage
                                 .chain()
-                                .calculate_and_cache_network_hashrate(current_height, &*blocks_arc)
+                                .calculate_and_cache_network_hashrate(current_height, &blocks_arc)
                             {
                                 warn!("Failed to update network hashrate cache: {}", e);
                             }
@@ -808,8 +808,6 @@ impl Node {
                             if prune_to_height > 0 && prune_to_height < current_height {
                                 match tokio::task::spawn_blocking({
                                     let pruning_manager = Arc::clone(&pruning_manager);
-                                    let prune_to_height = prune_to_height;
-                                    let current_height = current_height;
                                     move || {
                                         pruning_manager.prune_to_height(
                                             prune_to_height,
@@ -905,7 +903,7 @@ impl Node {
 
     /// Get protocol engine
     pub fn protocol(&self) -> &BitcoinProtocolEngine {
-        &*self.protocol
+        &self.protocol
     }
 
     /// Get storage

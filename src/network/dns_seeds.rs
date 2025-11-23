@@ -40,7 +40,7 @@ pub async fn resolve_dns_seeds(
     let mut addresses = Vec::new();
 
     for seed in seeds {
-        match resolve_dns_seed(*seed, port).await {
+        match resolve_dns_seed(seed, port).await {
             Ok(mut addrs) => {
                 info!("Resolved {} addresses from DNS seed: {}", addrs.len(), seed);
                 addresses.append(&mut addrs);

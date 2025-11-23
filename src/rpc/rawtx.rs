@@ -72,7 +72,7 @@ impl RawTxRpc {
         let tx_bytes = hex::decode(&hex_string)
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
-        if let (Some(ref storage), Some(ref mempool)) =
+        if let (Some(storage), Some(mempool)) =
             (self.storage.as_ref(), self.mempool.as_ref())
         {
             use bllvm_protocol::serialization::transaction::deserialize_transaction;
@@ -377,23 +377,21 @@ impl RawTxRpc {
             } else {
                 Err(RpcError::invalid_params("Transaction not found"))
             }
+        } else if verbose {
+            Ok(json!({
+                "txid": txid,
+                "hash": txid,
+                "version": 1,
+                "size": 250,
+                "vsize": 250,
+                "weight": 1000,
+                "locktime": 0,
+                "vin": [],
+                "vout": [],
+                "hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"
+            }))
         } else {
-            if verbose {
-                Ok(json!({
-                    "txid": txid,
-                    "hash": txid,
-                    "version": 1,
-                    "size": 250,
-                    "vsize": 250,
-                    "weight": 1000,
-                    "locktime": 0,
-                    "vin": [],
-                    "vout": [],
-                    "hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"
-                }))
-            } else {
-                Ok(json!("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"))
-            }
+            Ok(json!("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"))
         }
     }
 
@@ -426,7 +424,7 @@ impl RawTxRpc {
         use bllvm_protocol::OutPoint;
         let outpoint = OutPoint {
             hash: txid_array,
-            index: n as u64,
+            index: n,
         };
 
         if let Some(ref storage) = self.storage {
@@ -543,7 +541,7 @@ impl RawTxRpc {
                         })
                         .unwrap_or(0);
 
-                    return Ok(json!({
+                    Ok(json!({
                         "bestblock": hex::encode(best_hash),
                         "confirmations": confirmations,
                         "value": utxo.value as f64 / 100_000_000.0,
@@ -555,16 +553,16 @@ impl RawTxRpc {
                             "addresses": []
                         },
                         "coinbase": false
-                    }));
+                    }))
                 }
                 Ok(Ok(Ok(None))) | Ok(Ok(Err(_))) | Ok(Err(_)) => {
                     // UTXO not found or error - return null (normal case)
-                    return Ok(Value::Null);
+                    Ok(Value::Null)
                 }
                 Err(_) => {
                     // Timeout - log and return null (graceful degradation)
                     warn!("Timeout getting UTXO from storage");
-                    return Ok(Value::Null);
+                    Ok(Value::Null)
                 }
             }
         } else {
@@ -587,7 +585,7 @@ impl RawTxRpc {
         }
 
         // Calculate all transaction hashes
-        let tx_hashes: Vec<[u8; 32]> = transactions.iter().map(|tx| calculate_tx_id(tx)).collect();
+        let tx_hashes: Vec<[u8; 32]> = transactions.iter().map(calculate_tx_id).collect();
 
         let mut proof = Vec::new();
         let mut current_level = tx_hashes.clone();

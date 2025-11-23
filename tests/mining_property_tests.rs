@@ -8,7 +8,6 @@ use bllvm_node::storage::Storage;
 use bllvm_protocol::serialization::serialize_transaction;
 use bllvm_protocol::types::{BlockHeader, OutPoint, TransactionInput, TransactionOutput};
 use bllvm_protocol::Transaction;
-use hex;
 use proptest::prelude::*;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -114,7 +113,7 @@ proptest! {
         let outputs: Vec<TransactionOutput> = (0..outputs_count)
             .map(|i| TransactionOutput {
                 value: (i as i64) * 1000,
-                script_pubkey: vec![0x76; (i % 50) as usize], // Variable length scripts
+                script_pubkey: vec![0x76; (i % 50)], // Variable length scripts
             })
             .collect();
 
@@ -398,12 +397,12 @@ proptest! {
         let hash1 = {
             let h1 = Sha256::digest(&tx_bytes);
             let h2 = Sha256::digest(h1);
-            hex::encode(&h2)
+            hex::encode(h2)
         };
         let hash2 = {
             let h1 = Sha256::digest(&tx_bytes_clone);
             let h2 = Sha256::digest(h1);
-            hex::encode(&h2)
+            hex::encode(h2)
         };
 
         prop_assert_eq!(hash1, hash2);

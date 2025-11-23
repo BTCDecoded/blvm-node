@@ -209,7 +209,7 @@ mod tests {
         let listener = transport.listen(addr).await;
         assert!(listener.is_ok());
 
-        if let Ok(mut listener) = listener {
+        if let Ok(listener) = listener {
             let local_addr = listener.local_addr();
             assert!(local_addr.is_ok());
         }

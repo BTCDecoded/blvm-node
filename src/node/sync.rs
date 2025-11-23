@@ -41,6 +41,12 @@ pub struct SyncStateMachine {
     error_message: Option<String>,
 }
 
+impl Default for SyncStateMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SyncStateMachine {
     /// Create a new sync state machine
     pub fn new() -> Self {
@@ -263,6 +269,12 @@ impl SyncCoordinator {
     }
 }
 
+impl Default for BlockProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockProvider {
     /// Create a new block provider
     pub fn new() -> Self {
@@ -333,6 +345,12 @@ pub struct MockBlockProvider {
     headers: HashMap<[u8; 32], BlockHeader>,
     best_header: Option<BlockHeader>,
     block_count: u64,
+}
+
+impl Default for MockBlockProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockBlockProvider {

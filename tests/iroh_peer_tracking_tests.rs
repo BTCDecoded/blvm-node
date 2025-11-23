@@ -1,12 +1,12 @@
 //! Tests for Iroh peer tracking with TransportAddr
 
 use bllvm_node::network::transport::TransportAddr;
-use bllvm_node::network::{NetworkManager, PeerManager};
+use bllvm_node::network::PeerManager;
 use std::net::SocketAddr;
 
 #[test]
 fn test_peer_manager_transport_addr() {
-    let mut manager = PeerManager::new(10);
+    let manager = PeerManager::new(10);
 
     let addr1: SocketAddr = "127.0.0.1:8333".parse().unwrap();
     let addr2: SocketAddr = "127.0.0.1:8334".parse().unwrap();
@@ -30,7 +30,7 @@ fn test_peer_manager_transport_addr() {
 
 #[test]
 fn test_find_transport_addr_by_socket() {
-    let mut manager = PeerManager::new(10);
+    let manager = PeerManager::new(10);
 
     let addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
     let tcp_addr = TransportAddr::Tcp(addr);
@@ -45,7 +45,7 @@ fn test_find_transport_addr_by_socket() {
 
 #[test]
 fn test_peer_socket_addresses() {
-    let mut manager = PeerManager::new(10);
+    let manager = PeerManager::new(10);
 
     let addr1: SocketAddr = "127.0.0.1:8333".parse().unwrap();
     let addr2: SocketAddr = "127.0.0.1:8334".parse().unwrap();

@@ -145,7 +145,7 @@ impl MempoolManager {
             .write()
             .unwrap()
             .entry(Reverse(fee_rate))
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(tx_hash);
 
         Ok(true)
@@ -246,11 +246,7 @@ impl MempoolManager {
             let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
 
             // Calculate fee
-            let fee = if input_total > output_total {
-                input_total - output_total
-            } else {
-                0
-            };
+            let fee = input_total.saturating_sub(output_total);
 
             // Calculate transaction size
             let size = self.estimate_transaction_size(tx);
@@ -269,7 +265,7 @@ impl MempoolManager {
             let mut fee_index = self.fee_index.write().unwrap();
             fee_index
                 .entry(Reverse(fee_rate))
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(*tx_hash);
         }
     }
@@ -296,11 +292,7 @@ impl MempoolManager {
         let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
 
         // Fee is difference (inputs - outputs)
-        if input_total > output_total {
-            input_total - output_total
-        } else {
-            0
-        }
+        input_total.saturating_sub(output_total)
     }
 
     /// Estimate transaction size in vbytes
