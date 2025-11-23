@@ -215,7 +215,7 @@ fn parse_bitcoin_conf(path: &PathBuf) -> std::io::Result<BitcoinCoreConfig> {
     Ok(config)
 }
 
-fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &PathBuf) -> String {
+fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &std::path::Path) -> String {
     let mut toml = String::new();
 
     toml.push_str("# bllvm-node configuration\n");
