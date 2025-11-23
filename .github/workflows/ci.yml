@@ -820,8 +820,8 @@ jobs:
       
       - name: Note: Cargo.toml changes are temporary for publishing only
         run: |
-          echo "⚠️  Cargo.toml has been modified with crates.io versions for publishing"
-          echo "   These changes are NOT committed - source code keeps local path dependencies for dev"
+          echo "NOTE: Cargo.toml has been modified with crates.io versions for publishing"
+          echo "These changes are NOT committed - source code keeps local path dependencies for dev"
       
       - name: Check for crates.io token
         run: |
