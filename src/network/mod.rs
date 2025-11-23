@@ -901,7 +901,7 @@ impl NetworkManager {
 
         // Start listening on TCP if allowed
         if self.transport_preference.allows_tcp() {
-            let tcp_listener = self.tcp_transport.listen(listen_addr).await?;
+            let mut tcp_listener = self.tcp_transport.listen(listen_addr).await?;
             info!("TCP listener started on {}", listen_addr);
 
             // Start TCP accept loop
