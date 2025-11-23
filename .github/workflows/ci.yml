@@ -238,12 +238,45 @@ jobs:
         with:
           toolchain: 1.88.0
       
-      - name: Run tests
+      - name: Run tests with coverage
         if: steps.skip_check.outputs.skip != 'true'
         run: |
-          # Run tests in parallel (default) with all features
+          # Ensure cargo bin is in PATH (fixes exit code 127)
+          export PATH="$HOME/.cargo/bin:$PATH"
+          
+          # Verify cargo is available
+          if ! command -v cargo &> /dev/null; then
+            echo "ERROR: cargo not found in PATH"
+            echo "PATH: $PATH"
+            exit 1
+          fi
+          
+          # Install tarpaulin with error checking
+          if ! cargo install cargo-tarpaulin --version 0.27.0; then
+            echo "ERROR: Failed to install cargo-tarpaulin"
+            exit 1
+          fi
+          
+          # Verify tarpaulin is available
+          if ! command -v cargo-tarpaulin &> /dev/null; then
+            echo "ERROR: cargo-tarpaulin not found after installation"
+            echo "PATH: $PATH"
+            echo "Cargo bin dir: $HOME/.cargo/bin"
+            ls -la $HOME/.cargo/bin/ || true
+            exit 1
+          fi
+          
+          # Run tests with coverage in one step
           # Use --lib --bins --tests to ensure all test types run
-          cargo test --lib --bins --tests --all-features
+          # Use --skip-clean to reuse cached build artifacts, --timeout to prevent hangs
+          # --all-features for complete coverage
+          cargo tarpaulin --lib --bins --tests --all-features --out xml --output-dir coverage --skip-clean --timeout 120
+      
+      - name: Upload coverage to Codecov
+        if: steps.skip_check.outputs.skip != 'true'
+        uses: codecov/codecov-action@v3
+        with:
+          file: coverage/cobertura.xml
       
       - name: Cache registry
         if: always()
@@ -280,40 +313,6 @@ jobs:
             rsync -a --delete ./target/ "$TARGET_CACHE_DIR/" || true
           fi
       
-      - name: Run tests with coverage
-        run: |
-          # Ensure cargo bin is in PATH (fixes exit code 127)
-          export PATH="$HOME/.cargo/bin:$PATH"
-          
-          # Verify cargo is available
-          if ! command -v cargo &> /dev/null; then
-            echo "ERROR: cargo not found in PATH"
-            echo "PATH: $PATH"
-            exit 1
-          fi
-          
-          # Install tarpaulin with error checking
-          if ! cargo install cargo-tarpaulin --version 0.27.0; then
-            echo "ERROR: Failed to install cargo-tarpaulin"
-            exit 1
-          fi
-          
-          # Verify tarpaulin is available
-          if ! command -v cargo-tarpaulin &> /dev/null; then
-            echo "ERROR: cargo-tarpaulin not found after installation"
-            echo "PATH: $PATH"
-            echo "Cargo bin dir: $HOME/.cargo/bin"
-            ls -la $HOME/.cargo/bin/ || true
-            exit 1
-          fi
-          
-          # Use --skip-clean to avoid rebuilding, --timeout to prevent hangs
-          cargo tarpaulin --out xml --output-dir coverage --skip-clean --timeout 120
-      
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          file: coverage/cobertura.xml
       
       - name: Cleanup
         if: always()
