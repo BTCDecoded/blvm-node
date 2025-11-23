@@ -44,7 +44,7 @@ pub async fn handle_get_utxo_set(
     let utxo_count = utxo_set.len() as u64;
 
     // Calculate total supply (for future use)
-    let _total_supply: u64 = utxo_set.values().map(|utxo| utxo.value as u64).sum();
+    let total_supply: u64 = utxo_set.values().map(|utxo| utxo.value as u64).sum();
 
     // Build Merkle tree from UTXO set
     #[cfg(feature = "utxo-commitments")]
@@ -161,7 +161,7 @@ pub async fn handle_get_filtered_block(
         Vec<bllvm_protocol::Transaction>,
         crate::network::protocol::SpamSummary,
     ) = (
-        block.transactions.clone(),
+        block.transactions.to_vec(),
         crate::network::protocol::SpamSummary {
             filtered_count: 0,
             filtered_size: 0,

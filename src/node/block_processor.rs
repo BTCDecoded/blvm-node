@@ -7,7 +7,19 @@ use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use bllvm_protocol::block::connect_block;
 use bllvm_protocol::serialization::deserialize_block_with_witnesses;
-use bllvm_protocol::{segwit::Witness, Block, BlockHeader, UtxoSet, ValidationResult};
+use bllvm_protocol::types::Network;
+use bllvm_protocol::{
+    segwit::Witness, Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult,
+};
+
+/// Convert ProtocolVersion to Network type
+pub fn protocol_version_to_network(version: ProtocolVersion) -> Network {
+    match version {
+        ProtocolVersion::BitcoinV1 => Network::Mainnet,
+        ProtocolVersion::Testnet3 => Network::Testnet,
+        ProtocolVersion::Regtest => Network::Regtest,
+    }
+}
 
 /// Parse a block from Bitcoin wire format and extract witness data
 pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Witness>)> {
@@ -69,6 +81,7 @@ pub fn validate_block_with_context(
     witnesses: &[Witness],
     utxo_set: &mut UtxoSet,
     height: u64,
+    network: Network,
 ) -> Result<ValidationResult> {
     // Get recent headers for median time-past
     let recent_headers = blockstore
@@ -83,6 +96,7 @@ pub fn validate_block_with_context(
         utxo_set.clone(),
         height,
         recent_headers.as_deref(),
+        network,
     )?;
 
     // Update UTXO set if valid

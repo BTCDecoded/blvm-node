@@ -1225,9 +1225,9 @@ impl BlockchainRpc {
                     crate::config::PruningMode::Normal { .. } => "normal",
                     #[cfg(feature = "utxo-commitments")]
                     crate::config::PruningMode::Aggressive { .. } => "aggressive",
+                    crate::config::PruningMode::Custom { .. } => "custom",
                     #[cfg(not(feature = "utxo-commitments"))]
                     _ => "unknown", // Fallback for Aggressive if feature not enabled
-                    crate::config::PruningMode::Custom { .. } => "custom",
                 };
 
                 Ok(json!({

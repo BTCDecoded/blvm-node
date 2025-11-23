@@ -13,6 +13,7 @@
 use anyhow::Result;
 use bllvm_protocol::block::connect_block;
 use bllvm_protocol::segwit::Witness;
+use bllvm_protocol::types::Network;
 use bllvm_protocol::{Block, UtxoSet, ValidationResult};
 
 /// Block validation context
@@ -48,6 +49,7 @@ impl ParallelBlockValidator {
     pub fn validate_block(
         &self,
         context: &BlockValidationContext,
+        network: Network,
     ) -> Result<(ValidationResult, UtxoSet)> {
         // Create empty witnesses for each transaction
         let witnesses: Vec<Witness> = context
@@ -62,6 +64,7 @@ impl ParallelBlockValidator {
             context.prev_utxo_set.clone(),
             context.height,
             None, // No recent headers for single block validation
+            network,
         )
         .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
     }
@@ -78,11 +81,12 @@ impl ParallelBlockValidator {
         &self,
         contexts: &[BlockValidationContext],
         depth_from_tip: usize,
+        network: Network,
     ) -> Result<Vec<(ValidationResult, UtxoSet)>> {
         // Only use parallel validation if blocks are deep enough from tip
         if depth_from_tip <= self.max_parallel_depth {
             // Too close to tip - validate sequentially for safety
-            return self.validate_blocks_sequential(contexts);
+            return self.validate_blocks_sequential(contexts, network);
         }
 
         // Validate blocks in parallel (if production feature enabled)
@@ -106,6 +110,7 @@ impl ParallelBlockValidator {
                         context.prev_utxo_set.clone(),
                         context.height,
                         None, // No recent headers for parallel validation
+                        network,
                     )
                     .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
                 })
@@ -131,6 +136,7 @@ impl ParallelBlockValidator {
                         context.prev_utxo_set.clone(),
                         context.height,
                         None, // No recent headers for parallel validation
+                        network,
                     )
                     .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
                 })
@@ -149,6 +155,7 @@ impl ParallelBlockValidator {
     pub fn validate_blocks_sequential(
         &self,
         contexts: &[BlockValidationContext],
+        network: Network,
     ) -> Result<Vec<(ValidationResult, UtxoSet)>> {
         let mut results = Vec::new();
 
@@ -166,6 +173,7 @@ impl ParallelBlockValidator {
                 context.prev_utxo_set.clone(),
                 context.height,
                 None, // No recent headers for sequential validation
+                network,
             )
             .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))?;
             results.push(result);
@@ -181,16 +189,17 @@ impl ParallelBlockValidator {
         &self,
         contexts: &[BlockValidationContext],
         depth_from_tip: usize,
+        network: Network,
     ) -> Result<Vec<(ValidationResult, UtxoSet)>> {
         #[cfg(feature = "production")]
         {
             if depth_from_tip > self.max_parallel_depth {
-                return self.validate_blocks_parallel(contexts, depth_from_tip);
+                return self.validate_blocks_parallel(contexts, depth_from_tip, network);
             }
         }
 
         // Sequential validation (default or when too close to tip)
-        self.validate_blocks_sequential(contexts)
+        self.validate_blocks_sequential(contexts, network)
     }
 }
 
@@ -218,7 +227,7 @@ mod tests {
     fn test_sequential_validation() {
         let validator = ParallelBlockValidator::default();
         let contexts = vec![]; // Empty contexts
-        let results = validator.validate_blocks_sequential(&contexts);
+        let results = validator.validate_blocks_sequential(&contexts, Network::Mainnet);
         assert!(results.is_ok());
     }
 }

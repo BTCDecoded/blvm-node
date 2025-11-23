@@ -19,16 +19,17 @@ mod tests {
                 bits: 0x1d00ffff,
                 nonce: 0,
             },
-            transactions: vec![],
+            transactions: vec![].into_boxed_slice(),
         }
     }
 
     fn create_test_transaction() -> Transaction {
+        use bllvm_protocol::{tx_inputs, tx_outputs};
         Transaction {
             version: 1,
-            inputs: vec![],
-            outputs: vec![],
-            locktime: 0,
+            inputs: tx_inputs![],
+            outputs: tx_outputs![],
+            lock_time: 0,
         }
     }
 
@@ -83,7 +84,7 @@ mod tests {
         let (topic, data) = result.unwrap();
         assert_eq!(topic.as_str(), Some("hashblock"));
         assert_eq!(data.len(), 32);
-        assert_eq!(data.as_slice(), &block_hash.as_slice());
+        assert_eq!(data.as_ref() as &[u8], block_hash.as_slice());
     }
 
     #[tokio::test]
@@ -123,7 +124,7 @@ mod tests {
         let (topic, data) = result.unwrap();
         assert_eq!(topic.as_str(), Some("hashtx"));
         assert_eq!(data.len(), 32);
-        assert_eq!(data.as_slice(), &tx_hash.as_slice());
+        assert_eq!(data.as_ref() as &[u8], tx_hash.as_slice());
     }
 
     #[tokio::test]
@@ -243,8 +244,9 @@ mod tests {
         let (topic, data) = result.unwrap();
         assert_eq!(topic.as_str(), Some("sequence"));
         assert_eq!(data.len(), 33); // 1 byte type + 32 bytes hash
-        assert_eq!(data[0], 0x01); // Mempool entry
-        assert_eq!(data[1..], tx_hash.as_slice());
+        let data_bytes: &[u8] = data.as_ref();
+        assert_eq!(data_bytes[0], 0x01); // Mempool entry
+        assert_eq!(&data_bytes[1..], tx_hash.as_slice());
     }
 
     #[tokio::test]

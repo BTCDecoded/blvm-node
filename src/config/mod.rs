@@ -424,6 +424,8 @@ impl Default for NodeConfig {
             request_timeouts: None,
             module_resource_limits: None,
             fee_forwarding: None,
+            #[cfg(feature = "zmq")]
+            zmq: None,
             logging: None,
         }
     }

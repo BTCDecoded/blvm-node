@@ -11,7 +11,7 @@ use bincode;
 use bllvm_protocol::{Block, Hash, Transaction};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "zmq")]
 use zmq::{Context as ZmqContext, Socket, PUB};

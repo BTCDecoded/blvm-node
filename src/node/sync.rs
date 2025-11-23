@@ -4,14 +4,14 @@
 //! and chain reorganization.
 
 use crate::node::block_processor::{
-    parse_block_from_wire, prepare_block_validation_context, store_block_with_context,
-    validate_block_with_context,
+    parse_block_from_wire, prepare_block_validation_context, protocol_version_to_network,
+    store_block_with_context, validate_block_with_context,
 };
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
-use bllvm_protocol::{Block, BlockHeader, UtxoSet, ValidationResult};
+use bllvm_protocol::{Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -185,6 +185,7 @@ impl SyncCoordinator {
         block_data: &[u8],
         current_height: u64,
         utxo_set: &mut UtxoSet,
+        protocol_version: ProtocolVersion,
         metrics: Option<Arc<MetricsCollector>>,
         profiler: Option<Arc<PerformanceProfiler>>,
     ) -> Result<bool> {
@@ -216,12 +217,14 @@ impl SyncCoordinator {
         }
 
         // Validate block with witness data and headers
+        let network = protocol_version_to_network(protocol_version);
         let validation_result = validate_block_with_context(
             blockstore,
             &block,
             witnesses_to_use,
             utxo_set,
             current_height,
+            network,
         )?;
 
         let processing_time = start_time.elapsed();

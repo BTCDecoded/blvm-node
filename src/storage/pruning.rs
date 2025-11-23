@@ -303,10 +303,10 @@ impl PruningManager {
                 *min_recent_blocks,
             )?,
             PruningMode::Aggressive {
-                keep_from_height,
-                keep_commitments,
-                keep_filtered_blocks,
-                min_blocks,
+                keep_from_height: _,
+                keep_commitments: _,
+                keep_filtered_blocks: _,
+                min_blocks: _,
             } => {
                 #[cfg(feature = "utxo-commitments")]
                 {

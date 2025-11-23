@@ -31,11 +31,12 @@ pub struct ModuleApiHub {
 
 /// Audit entry for tracking module API usage
 #[derive(Debug, Clone)]
-struct AuditEntry {
-    module_id: String,
-    api_call: String,
-    timestamp: u64,
-    success: bool,
+#[allow(dead_code)] // Fields are used by external consumers of the API
+pub struct AuditEntry {
+    pub module_id: String,
+    pub api_call: String,
+    pub timestamp: u64,
+    pub success: bool,
 }
 
 impl ModuleApiHub {

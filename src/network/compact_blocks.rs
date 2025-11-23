@@ -350,8 +350,6 @@ pub fn recommended_compact_block_version(transport_type: TransportType) -> u64 {
         TransportType::Quinn => 2, // Version 2 for QUIC (better prefilled optimization)
         #[cfg(feature = "iroh")]
         TransportType::Iroh => 2, // Version 2 for Iroh (NAT traversal benefits from optimization)
-        #[cfg(not(any(feature = "quinn", feature = "iroh")))]
-        TransportType::Tcp => 1,
     }
 }
 
