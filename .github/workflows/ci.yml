@@ -398,7 +398,7 @@ jobs:
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
-      ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verification != 'true' }}
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verification != 'true')
     steps:
       - name: Check if verification should be skipped
         id: skip_check
