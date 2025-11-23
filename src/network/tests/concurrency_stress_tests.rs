@@ -182,7 +182,8 @@ async fn test_concurrent_peer_operations() {
     for i in 0..10 {
         let manager_clone = Arc::clone(&manager);
         let handle = tokio::spawn(async move {
-            let _addr: SocketAddr = format!("127.0.0.1:{}", 8080 + i).parse().unwrap();
+            let port = 8080 + i;
+            let _addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
             // Try to get peer count (read operation)
             let _count = {
                 let pm = manager_clone.peer_manager().await;
@@ -210,7 +211,8 @@ async fn test_concurrent_message_processing() {
     let manager_clone = Arc::clone(&manager);
     let sender_task = tokio::spawn(async move {
         for i in 0..100 {
-            let addr: SocketAddr = format!("127.0.0.1:{}", 8080 + (i % 10)).parse().unwrap();
+            let port = 8080 + (i % 10);
+            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
             let _ = manager_clone.send_to_peer(addr, vec![0u8; 10]).await;
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
