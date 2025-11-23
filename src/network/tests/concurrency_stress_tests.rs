@@ -169,7 +169,7 @@ async fn test_lock_timeout() {
         assert!(result.is_ok(), "Lock should be acquired eventually");
     });
 
-    tokio::join!(long_task, timeout_task);
+    let _ = tokio::join!(long_task, timeout_task);
 }
 
 /// Test that peer addition/removal is thread-safe
