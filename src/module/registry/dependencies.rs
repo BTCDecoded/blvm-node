@@ -51,8 +51,7 @@ impl ModuleDependencies {
 
         if !missing.is_empty() {
             return Err(ModuleError::DependencyMissing(format!(
-                "Missing dependencies: {:?}",
-                missing
+                "Missing dependencies: {missing:?}"
             )));
         }
 

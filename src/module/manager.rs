@@ -151,8 +151,7 @@ impl ModuleManager {
         // Check if module already loaded
         if modules.contains_key(module_name) {
             return Err(ModuleError::OperationError(format!(
-                "Module {} is already loaded",
-                module_name
+                "Module {module_name} is already loaded"
             )));
         }
 

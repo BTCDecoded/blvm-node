@@ -46,8 +46,7 @@ impl NetworkSandbox {
                 operation
             );
             return Err(ModuleError::OperationError(format!(
-                "Network access denied: modules cannot make network connections. Operation: {}",
-                operation
+                "Network access denied: modules cannot make network connections. Operation: {operation}"
             )));
         }
 
@@ -74,8 +73,7 @@ impl NetworkSandbox {
                     endpoint
                 );
                 return Err(ModuleError::OperationError(format!(
-                    "Endpoint not allowed: {} (not in allowed list)",
-                    endpoint
+                    "Endpoint not allowed: {endpoint} (not in allowed list)"
                 )));
             }
         }

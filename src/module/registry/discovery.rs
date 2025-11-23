@@ -148,8 +148,7 @@ impl ModuleDiscovery {
         }
 
         Err(ModuleError::ModuleNotFound(format!(
-            "Module binary not found for entry_point: {} in {:?}",
-            entry_point, module_dir
+            "Module binary not found for entry_point: {entry_point} in {module_dir:?}"
         )))
     }
 
@@ -160,8 +159,7 @@ impl ModuleDiscovery {
 
         if !manifest_path.exists() {
             return Err(ModuleError::ModuleNotFound(format!(
-                "Module {} not found (no module.toml in {:?})",
-                module_name, module_dir
+                "Module {module_name} not found (no module.toml in {module_dir:?})"
             )));
         }
 

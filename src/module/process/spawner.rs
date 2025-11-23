@@ -80,18 +80,14 @@ impl ModuleProcessSpawner {
         // Verify binary exists
         if !binary_path.exists() {
             return Err(ModuleError::ModuleNotFound(format!(
-                "Module binary not found: {:?}",
-                binary_path
+                "Module binary not found: {binary_path:?}"
             )));
         }
 
         // Create module data directory
         let module_data_dir = self.data_dir.join(module_name);
         std::fs::create_dir_all(&module_data_dir).map_err(|e| {
-            ModuleError::InitializationError(format!(
-                "Failed to create module data directory: {}",
-                e
-            ))
+            ModuleError::InitializationError(format!("Failed to create module data directory: {e}"))
         })?;
 
         // Validate data directory is within sandbox
@@ -170,8 +166,7 @@ impl ModuleProcessSpawner {
             }
             Ok(Err(e)) => {
                 return Err(ModuleError::InitializationError(format!(
-                    "Failed to wait for module socket: {}",
-                    e
+                    "Failed to wait for module socket: {e}"
                 )));
             }
             Err(_) => {
