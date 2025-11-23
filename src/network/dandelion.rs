@@ -273,7 +273,7 @@ impl<C: Clock> DandelionRelay<C> {
             let current_peer = state.current_peer.clone();
             // drop mutable borrow of state before borrowing self mutably again
             // Update stem path for current peer
-            drop(state);
+            let _ = state;
             self.update_stem_path(&current_peer, available_peers);
             if let Some(state2) = self.stem_txs.get_mut(&tx_hash) {
                 if let Some(path) = self.stem_paths.get(&current_peer) {
