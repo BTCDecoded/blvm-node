@@ -199,8 +199,9 @@ codegen-units = 16
 
 # Local development: Uncomment the [patch.crates-io] section below to use local path dependencies
 # This allows you to develop against local changes in bllvm-protocol without publishing
-# [patch.crates-io]
-# bllvm-protocol = { path = "../bllvm-protocol", package = "bllvm-protocol" }
+[patch.crates-io]
+bllvm-protocol = { path = "../bllvm-protocol", package = "bllvm-protocol" }
+bllvm-consensus = { path = "../bllvm-consensus", package = "bllvm-consensus" }
 
 # Examples
 [[example]]
