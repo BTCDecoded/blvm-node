@@ -77,9 +77,9 @@ impl From<SocketAddr> for TransportAddr {
 impl std::fmt::Display for TransportAddr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TransportAddr::Tcp(addr) => write!(f, "{}", addr),
+            TransportAddr::Tcp(addr) => write!(f, "{addr}"),
             #[cfg(feature = "quinn")]
-            TransportAddr::Quinn(addr) => write!(f, "quinn://{}", addr),
+            TransportAddr::Quinn(addr) => write!(f, "quinn://{addr}"),
             #[cfg(feature = "iroh")]
             TransportAddr::Iroh(pubkey) => write!(f, "iroh://{}", hex::encode(&pubkey[..8])),
         }
