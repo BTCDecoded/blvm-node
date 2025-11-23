@@ -217,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tcp_transport_connect_invalid_addr() {
-        let _transport = TcpTransport::new();
+        let transport = TcpTransport::new();
 
         // Try to connect with non-TCP address (if Iroh feature enabled)
         #[cfg(feature = "iroh")]
