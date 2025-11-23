@@ -34,7 +34,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 ///
 /// # Arguments
 /// * `filter` - Optional log filter from config (e.g., "info", "debug", "bllvm_node=debug,network=trace")
-///              If None, uses RUST_LOG environment variable or defaults to "info"
+///  If None, uses RUST_LOG environment variable or defaults to "info"
 ///
 /// # Example
 /// ```rust
@@ -93,8 +93,8 @@ pub fn init_logging(filter: Option<&str>) {
 /// # Arguments
 /// * `module_name` - Name of the module (e.g., "lightning", "lnbits")
 /// * `filter` - Optional log filter from config. If None, uses:
-///              - RUST_LOG if set (standard, takes precedence)
-///              - Otherwise: "{module_name}=info,bllvm_node::module=debug"
+///  - RUST_LOG if set (standard, takes precedence)
+///  - Otherwise: "{module_name}=info,bllvm_node::module=debug"
 ///
 /// # Example
 /// ```rust

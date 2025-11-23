@@ -164,7 +164,7 @@ mod tests {
         let (topic, _data) = result.unwrap();
         assert_eq!(topic.as_str(), Some("rawblock"));
         // Data should contain serialized block
-        assert!(_data.len() > 0);
+        assert!(!_data.is_empty());
     }
 
     #[tokio::test]
@@ -204,7 +204,7 @@ mod tests {
         let (topic, _data) = result.unwrap();
         assert_eq!(topic.as_str(), Some("rawtx"));
         // Data should contain serialized transaction
-        assert!(_data.len() > 0);
+        assert!(!_data.is_empty());
     }
 
     #[tokio::test]

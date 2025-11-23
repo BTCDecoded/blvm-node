@@ -221,7 +221,7 @@ async fn test_concurrent_message_processing() {
     // Process messages (simplified - actual processing is more complex)
     let receiver_task = tokio::spawn(async move {
         let mut count = 0;
-        while let Ok(_) = timeout(Duration::from_millis(100), rx.recv()).await {
+        while (timeout(Duration::from_millis(100), rx.recv()).await).is_ok() {
             count += 1;
             if count >= 100 {
                 break;

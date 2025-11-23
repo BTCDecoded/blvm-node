@@ -95,7 +95,7 @@ impl ManifestValidator {
         }
 
         // Must start with alphanumeric
-        if !name.chars().next().map_or(false, |c| c.is_alphanumeric()) {
+        if !name.chars().next().is_some_and(|c| c.is_alphanumeric()) {
             return false;
         }
 

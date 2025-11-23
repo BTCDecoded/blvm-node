@@ -78,7 +78,7 @@ impl ModuleTestFixture {
         let manifest = ModuleManifest {
             name: name.to_string(),
             version: version.to_string(),
-            description: Some(format!("Test module: {}", name)),
+            description: Some(format!("Test module: {name}")),
             author: Some("Test".to_string()),
             capabilities: vec!["read_blockchain".to_string()],
             dependencies: HashMap::new(),
@@ -94,7 +94,7 @@ impl ModuleTestFixture {
     
     /// Create a test module context
     pub fn create_test_context(&self, module_id: &str) -> ModuleContext {
-        let socket_path = self.socket_dir.join(format!("{}.sock", module_id));
+        let socket_path = self.socket_dir.join(format!("{module_id}.sock"));
         
         ModuleContext::new(
             module_id.to_string(),
@@ -166,7 +166,7 @@ where
         sleep(interval).await;
     }
     
-    Err(format!("Condition not met within {} seconds", timeout_secs))
+    Err(format!("Condition not met within {timeout_secs} seconds"))
 }
 
 /// Wait for file to exist
