@@ -43,8 +43,14 @@ pub async fn handle_get_utxo_set(
     let utxo_set = storage.utxos().get_all_utxos()?;
     let utxo_count = utxo_set.len() as u64;
 
-    // Calculate total supply (for future use)
-    let total_supply: u64 = utxo_set.values().map(|utxo| utxo.value as u64).sum();
+    // Get block hash and height
+    let block_height = message.height;
+    let block_hash = if block_height == 0 || message.block_hash == [0; 32] {
+        // Use current tip if not specified
+        storage.chain().get_tip_hash()?.unwrap_or([0; 32])
+    } else {
+        message.block_hash
+    };
 
     // Build Merkle tree from UTXO set
     #[cfg(feature = "utxo-commitments")]
@@ -58,26 +64,21 @@ pub async fn handle_get_utxo_set(
             .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
     }
 
-    // Get block hash and height
-    let block_height = message.height;
-    let block_hash = if block_height == 0 || message.block_hash == [0; 32] {
-        // Use current tip if not specified
-        storage.chain().get_tip_hash()?.unwrap_or([0; 32])
-    } else {
-        message.block_hash
-    };
-
     // Generate commitment
     #[cfg(feature = "utxo-commitments")]
     let commitment = utxo_tree.generate_commitment(block_hash, block_height);
 
     #[cfg(not(feature = "utxo-commitments"))]
-    let commitment = crate::network::protocol::UTXOCommitment {
-        merkle_root: [0; 32],
-        total_supply,
-        utxo_count,
-        block_height,
-        block_hash,
+    let commitment = {
+        // Calculate total supply (only needed when utxo-commitments feature is disabled)
+        let total_supply: u64 = utxo_set.values().map(|utxo| utxo.value as u64).sum();
+        crate::network::protocol::UTXOCommitment {
+            merkle_root: [0; 32],
+            total_supply,
+            utxo_count,
+            block_height,
+            block_hash,
+        }
     };
 
     // Generate request_id (use hash of message as ID since GetUTXOSetMessage doesn't have one)
