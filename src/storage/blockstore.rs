@@ -144,13 +144,12 @@ impl BlockStore {
         let mut current_height: Option<u64> = None;
         let mut items: Vec<_> = self.height_index.iter().collect();
         items.reverse();
-        for item in items {
-            if let Ok((height_bytes, _hash)) = item {
-                let mut height_bytes_array = [0u8; 8];
-                height_bytes_array.copy_from_slice(&height_bytes);
-                current_height = Some(u64::from_be_bytes(height_bytes_array));
-                break;
-            }
+        for item in items.into_iter().flatten() {
+            let (height_bytes, _hash) = item;
+            let mut height_bytes_array = [0u8; 8];
+            height_bytes_array.copy_from_slice(&height_bytes);
+            current_height = Some(u64::from_be_bytes(height_bytes_array));
+            break;
         }
 
         if let Some(mut height) = current_height {

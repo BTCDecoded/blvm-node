@@ -149,6 +149,7 @@ impl BitcoinUri {
     }
 
     /// Convert to BIP21 URI string
+    #[allow(clippy::inherent_to_string_shadow_display)]
     pub fn to_string(&self) -> String {
         let mut uri = format!("bitcoin:{}", self.address);
         let mut params = Vec::new();

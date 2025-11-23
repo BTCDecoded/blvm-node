@@ -22,6 +22,13 @@
 
 // Allow dead code - many fields/functions are part of the API or for future use
 #![allow(dead_code)]
+// Allow design-level clippy warnings that would require significant refactoring
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::arc_with_non_send_sync)]
+#![allow(clippy::module_inception)]
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::inherent_to_string_shadow_display)]
 
 // Memory allocator optimization using mimalloc (faster than default allocator)
 // Note: Only in reference-node, not consensus-proof, to maintain Kani compatibility

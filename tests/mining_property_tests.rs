@@ -113,7 +113,7 @@ proptest! {
         let outputs: Vec<TransactionOutput> = (0..outputs_count)
             .map(|i| TransactionOutput {
                 value: (i as i64) * 1000,
-                script_pubkey: vec![0x76; (i % 50)], // Variable length scripts
+                script_pubkey: vec![0x76; i % 50], // Variable length scripts
             })
             .collect();
 

@@ -437,7 +437,7 @@ impl MempoolManager {
             file.read_exact(&mut tx_bytes)?;
 
             let tx = deserialize_transaction(&tx_bytes)?;
-            let _ = self.add_transaction(tx);
+            drop(self.add_transaction(tx));
         }
 
         Ok(())

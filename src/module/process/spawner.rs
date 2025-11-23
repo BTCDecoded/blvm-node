@@ -249,11 +249,7 @@ impl ModuleProcess {
 
     /// Check if process is still running
     pub fn is_running(&mut self) -> bool {
-        if let Ok(Some(_)) = self.process.try_wait() {
-            false
-        } else {
-            true
-        }
+        !matches!(self.process.try_wait(), Ok(Some(_)))
     }
 
     /// Wait for process to exit

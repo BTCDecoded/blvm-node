@@ -35,7 +35,7 @@ async fn quic_rpc_getblockchaininfo_smoke() {
     // Send JSON-RPC request
     let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
     send.write_all(request.as_bytes()).await.expect("write");
-    send.finish().await.expect("finish");
+    send.finish().expect("finish");
 
     // Read response (quinn 0.10: read() returns Result<Option<usize>, ReadError>)
     let mut response_bytes = Vec::new();
