@@ -34,7 +34,7 @@ mod kani_proofs {
             prev_block_hash: prev_hash,
             merkle_root: kani::any(),
             timestamp: kani::any(),
-            bits,
+            bits: bits as u64,
             nonce: kani::any(),
         }
     }
