@@ -126,44 +126,23 @@ jobs:
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
-      ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
-      - name: Check if tests should be skipped
-        id: skip_check
-        run: |
-          SKIP="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true' }}"
-          if [ "$SKIP" = "true" ]; then
-            echo "⚠️  Tests skipped via workflow input"
-            echo "skip=true" >> $GITHUB_OUTPUT
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Skip tests message
-        if: steps.skip_check.outputs.skip == 'true'
-        run: |
-          echo "✅ Test step skipped (untested release)"
-          exit 0
-      
       - uses: actions/checkout@v4
-        if: steps.skip_check.outputs.skip != 'true'
       
       - name: Checkout bllvm-protocol dependency
-        if: steps.skip_check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
       - name: Checkout consensus
-        if: steps.skip_check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
           path: _temp-consensus-proof
       
       - name: Move dependencies to parent directory
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
@@ -171,7 +150,6 @@ jobs:
           mv _temp-consensus-proof ../bllvm-consensus
       
       - name: Cache
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
@@ -184,7 +162,6 @@ jobs:
           echo "PROTOCOL_TARGET_DIR=$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY" >> $GITHUB_ENV
       
       - name: Restore registry
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/registry"
@@ -194,7 +171,6 @@ jobs:
           fi
       
       - name: Restore git
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/git"
@@ -204,7 +180,6 @@ jobs:
           fi
       
       - name: Restore consensus
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$CONSENSUS_TARGET_DIR" ] && [ "$(ls -A $CONSENSUS_TARGET_DIR 2>/dev/null)" ]; then
             mkdir -p ../bllvm-consensus/target
@@ -214,7 +189,6 @@ jobs:
           fi
       
       - name: Restore bllvm-protocol build artifacts
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$PROTOCOL_TARGET_DIR" ] && [ "$(ls -A $PROTOCOL_TARGET_DIR 2>/dev/null)" ]; then
             mkdir -p ../bllvm-protocol/target
@@ -224,7 +198,6 @@ jobs:
           fi
       
       - name: Restore target
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
             rsync -a --delete "$TARGET_CACHE_DIR/" ./target/ || true
@@ -233,13 +206,11 @@ jobs:
           fi
       
       - name: Install Rust
-        if: steps.skip_check.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
       
       - name: Run tests with coverage
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           # Ensure cargo bin is in PATH (fixes exit code 127)
           export PATH="$HOME/.cargo/bin:$PATH"
@@ -273,7 +244,6 @@ jobs:
           cargo tarpaulin --lib --bins --tests --all-features --out xml --output-dir coverage --skip-clean --timeout 120
       
       - name: Upload coverage to Codecov
-        if: steps.skip_check.outputs.skip != 'true'
         uses: codecov/codecov-action@v3
         with:
           file: coverage/cobertura.xml
