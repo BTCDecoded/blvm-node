@@ -622,6 +622,7 @@ jobs:
       - fmt
       - docs
       - security
+      - verify
     runs-on: [self-hosted, Linux, X64, builds]
     if: |
       always() &&
@@ -634,7 +635,8 @@ jobs:
       ((github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true') ||
        (needs.test.result == 'success' && needs.clippy.result == 'success' && 
         needs.fmt.result == 'success' && needs.docs.result == 'success' && 
-        needs.security.result == 'success'))
+        needs.security.result == 'success')) &&
+      (needs.verify.result == 'skipped' || needs.verify.result == 'success')
     steps:
       - uses: actions/checkout@v4
       
