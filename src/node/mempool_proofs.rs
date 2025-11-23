@@ -346,8 +346,9 @@ mod kani_proofs {
         // Create UTXO set
         let mut utxo_set: UtxoSet = HashMap::new();
         for input in &tx.inputs {
-            let input_value = kani::any::<u64>();
-            kani::assume(input_value <= 21_000_000_000_000u64);
+            let input_value: i64 = kani::any();
+            kani::assume(input_value >= 0);
+            kani::assume(input_value <= 21_000_000_000_000i64);
 
             utxo_set.insert(
                 input.prevout.clone(),

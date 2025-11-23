@@ -23,6 +23,17 @@ mod kani_proofs {
         pub const COMPLEX_HASH: u32 = 10;
     }
 
+    /// Helper to create bounded Vec<u8> for Kani proofs
+    fn create_bounded_data(max_len: usize) -> Vec<u8> {
+        let len: usize = kani::any();
+        kani::assume(len <= max_len);
+        let mut result = Vec::new();
+        for _i in 0..len {
+            result.push(kani::any());
+        }
+        result
+    }
+
     /// Verify double SHA256 determinism
     ///
     /// Mathematical Specification:
@@ -30,8 +41,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_HASH)]
     fn verify_double_sha256_determinism() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash1 = hashing::double_sha256(&data);
         let hash2 = hashing::double_sha256(&data);
@@ -47,8 +57,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_HASH)]
     fn verify_double_sha256_length() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash = hashing::double_sha256(&data);
 
@@ -63,8 +72,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_HASH)]
     fn verify_double_sha256_differs_from_single() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let double_hash = hashing::double_sha256(&data);
         let single_hash = hashing::sha256(&data);
@@ -83,8 +91,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_HASH)]
     fn verify_sha256_determinism() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash1 = hashing::sha256(&data);
         let hash2 = hashing::sha256(&data);
@@ -100,8 +107,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_HASH)]
     fn verify_sha256_length() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash = hashing::sha256(&data);
 
@@ -116,8 +122,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::COMPLEX_HASH)]
     fn verify_hash160_length() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash = hashing::hash160(&data);
 
@@ -132,8 +137,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::COMPLEX_HASH)]
     fn verify_hash160_determinism() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash1 = hashing::hash160(&data);
         let hash2 = hashing::hash160(&data);
@@ -149,8 +153,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::COMPLEX_HASH)]
     fn verify_hash160_composition() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash160_result = hashing::hash160(&data);
 
@@ -171,8 +174,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_HASH)]
     fn verify_ripemd160_length() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash = hashing::ripemd160(&data);
 
@@ -187,8 +189,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_HASH)]
     fn verify_ripemd160_determinism() {
-        let data = kani::any::<Vec<u8>>();
-        kani::assume(data.len() <= proof_limits::MAX_DATA_SIZE_FOR_PROOF);
+        let data = create_bounded_data(proof_limits::MAX_DATA_SIZE_FOR_PROOF);
 
         let hash1 = hashing::ripemd160(&data);
         let hash2 = hashing::ripemd160(&data);
