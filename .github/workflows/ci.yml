@@ -801,6 +801,57 @@ jobs:
           PATCH=$((PATCH + 1))
           VERSION="${MAJOR}.${MINOR}.${PATCH}"
           
+          # Check if version already exists and increment until we find a free one
+          CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
+          MAX_ATTEMPTS=10
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            echo "Checking if ${CRATE_NAME} v${VERSION} already exists on crates.io..."
+            
+            # Use crates.io API to check if version exists
+            API_RESPONSE=$(curl -s --max-time 10 "https://crates.io/api/v1/crates/${CRATE_NAME}/versions" 2>/dev/null || echo "")
+            
+            VERSION_EXISTS="false"
+            if [ -n "$API_RESPONSE" ] && ! echo "$API_RESPONSE" | grep -q '"detail"'; then
+              # Parse JSON to check if version exists
+              if command -v jq &> /dev/null; then
+                EXISTS_CHECK=$(echo "$API_RESPONSE" | jq -r ".versions[] | select(.num == \"${VERSION}\") | .num" | head -1)
+                if [ "$EXISTS_CHECK" = "$VERSION" ]; then
+                  VERSION_EXISTS="true"
+                fi
+              else
+                # Fallback: grep for version in JSON
+                if echo "$API_RESPONSE" | grep -q "\"num\":\"${VERSION}\""; then
+                  VERSION_EXISTS="true"
+                fi
+              fi
+            else
+              # Fallback to cargo search if API fails
+              if cargo search "$CRATE_NAME" --limit 100 2>/dev/null | grep -qE "\"${CRATE_NAME}\".*\"${VERSION}\""; then
+                VERSION_EXISTS="true"
+              fi
+            fi
+            
+            if [ "$VERSION_EXISTS" = "true" ]; then
+              echo "⚠️  Version ${VERSION} already exists, incrementing..."
+              MAJOR=$(echo "$VERSION" | cut -d. -f1)
+              MINOR=$(echo "$VERSION" | cut -d. -f2)
+              PATCH=$(echo "$VERSION" | cut -d. -f3)
+              PATCH=$((PATCH + 1))
+              VERSION="${MAJOR}.${MINOR}.${PATCH}"
+              ATTEMPT=$((ATTEMPT + 1))
+            else
+              echo "✅ Version ${VERSION} is available"
+              break
+            fi
+          done
+          
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "❌ Failed to find available version after ${MAX_ATTEMPTS} attempts"
+            exit 1
+          fi
+          
           # Add -unverified suffix if verification is skipped
           # Add -unverified suffix if verification OR tests are skipped
           # (untested counts as unverified)
