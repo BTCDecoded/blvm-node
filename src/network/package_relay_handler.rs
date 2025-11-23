@@ -58,7 +58,7 @@ pub fn handle_pkgtxn(
         return Ok(Some(PkgTxnRejectMessage {
             package_id: msg.package_id.clone(),
             reason: reason as u8,
-            reason_text: Some(format!("{:?}", reason)),
+            reason_text: Some(format!("{reason:?}")),
         }));
     }
 
