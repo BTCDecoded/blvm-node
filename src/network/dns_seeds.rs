@@ -70,8 +70,7 @@ async fn resolve_dns_seed(seed: &str, port: u16) -> Result<Vec<NetworkAddress>, 
         .await
         .map_err(|_| format!("DNS lookup timeout for {seed}"))?;
 
-    let socket_addrs =
-        lookup_result.map_err(|e| format!("DNS lookup failed for {seed}: {e}"))?;
+    let socket_addrs = lookup_result.map_err(|e| format!("DNS lookup failed for {seed}: {e}"))?;
 
     // Convert SocketAddr to NetworkAddress
     let mut addresses = Vec::new();
