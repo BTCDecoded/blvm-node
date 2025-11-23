@@ -303,20 +303,20 @@ impl PruningManager {
                 *min_recent_blocks,
             )?,
             PruningMode::Aggressive {
-                keep_from_height: _,
-                keep_commitments: _,
-                keep_filtered_blocks: _,
-                min_blocks: _,
+                keep_from_height,
+                keep_commitments,
+                keep_filtered_blocks,
+                min_blocks,
             } => {
                 #[cfg(feature = "utxo-commitments")]
                 {
                     self.prune_aggressive(
                         prune_to_height,
                         current_height,
-                        *keep_from_height,
-                        *keep_commitments,
-                        *keep_filtered_blocks,
-                        *min_blocks,
+                        keep_from_height,
+                        keep_commitments,
+                        keep_filtered_blocks,
+                        min_blocks,
                     )?
                 }
                 #[cfg(not(feature = "utxo-commitments"))]
@@ -492,7 +492,7 @@ impl PruningManager {
         keep_headers: bool,
         keep_bodies_from_height: u64,
         keep_commitments: bool,
-        _keep_filters: bool,
+        keep_filters: bool,
         keep_filtered_blocks: bool,
         keep_witnesses: bool,
         _keep_tx_index: bool,
@@ -745,6 +745,7 @@ impl PruningManager {
                     let (validation_result, new_utxo_set) = connect_block(
                         &block, &witnesses, utxo_set, height,
                         None, // No recent headers needed for historical replay
+                        bllvm_protocol::types::Network::Mainnet,
                     )?;
 
                     // Check validation result

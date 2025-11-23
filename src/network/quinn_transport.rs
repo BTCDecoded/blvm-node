@@ -175,7 +175,7 @@ impl TransportConnection for QuinnConnection {
 
         // Write data
         stream.write_all(data).await?;
-        stream.finish().await?;
+        stream.finish()?;
 
         Ok(())
     }

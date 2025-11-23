@@ -200,9 +200,11 @@ impl AddressDatabase {
             }
             IpAddr::V6(ipv6) => {
                 // Check for localhost, unspecified, unique local, link-local, and multicast
+                // Note: is_unicast_link_local() is unstable, so we check manually
+                // Link-local addresses are in fe80::/10 range (fe80:: to febf::)
                 ipv6.is_loopback()
                     || ipv6.is_unspecified()
-                    || ipv6.is_unicast_link_local()
+                    || (ipv6.octets()[0] == 0xfe && (ipv6.octets()[1] & 0xc0) == 0x80) // Link-local (fe80::/10)
                     || ipv6.octets()[0] == 0xfc || ipv6.octets()[0] == 0xfd // Unique local (fc00::/7)
                     || ipv6.octets()[0] == 0xff // Multicast (ff00::/8)
             }
