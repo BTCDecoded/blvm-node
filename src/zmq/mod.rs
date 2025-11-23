@@ -22,4 +22,3 @@ pub use publisher::{ZmqConfig, ZmqPublisher};
 
 #[cfg(all(test, feature = "zmq"))]
 mod tests;
-

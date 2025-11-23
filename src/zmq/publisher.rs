@@ -51,7 +51,11 @@ impl ZmqPublisher {
 
         // Create sockets for enabled notification types
         let hashblock_socket = if let Some(ref endpoint) = config.hashblock {
-            Some(Arc::new(Self::create_socket(&context, endpoint, "hashblock")?))
+            Some(Arc::new(Self::create_socket(
+                &context,
+                endpoint,
+                "hashblock",
+            )?))
         } else {
             None
         };
@@ -63,7 +67,9 @@ impl ZmqPublisher {
         };
 
         let rawblock_socket = if let Some(ref endpoint) = config.rawblock {
-            Some(Arc::new(Self::create_socket(&context, endpoint, "rawblock")?))
+            Some(Arc::new(Self::create_socket(
+                &context, endpoint, "rawblock",
+            )?))
         } else {
             None
         };
@@ -75,7 +81,9 @@ impl ZmqPublisher {
         };
 
         let sequence_socket = if let Some(ref endpoint) = config.sequence {
-            Some(Arc::new(Self::create_socket(&context, endpoint, "sequence")?))
+            Some(Arc::new(Self::create_socket(
+                &context, endpoint, "sequence",
+            )?))
         } else {
             None
         };
@@ -94,9 +102,9 @@ impl ZmqPublisher {
     /// Create and bind a ZMQ PUB socket
     fn create_socket(context: &ZmqContext, endpoint: &str, topic: &str) -> Result<Socket> {
         let socket = context.socket(PUB)?;
-        socket.bind(endpoint).with_context(|| {
-            format!("Failed to bind ZMQ socket for {} to {}", topic, endpoint)
-        })?;
+        socket
+            .bind(endpoint)
+            .with_context(|| format!("Failed to bind ZMQ socket for {} to {}", topic, endpoint))?;
         info!("ZMQ {} socket bound to {}", topic, endpoint);
         Ok(socket)
     }
@@ -136,7 +144,10 @@ impl ZmqPublisher {
             let block_data = bincode::serialize(block)?;
             socket.send("rawblock", zmq::SNDMORE)?;
             socket.send(&block_data, 0)?;
-            debug!("Published rawblock notification: {} bytes", block_data.len());
+            debug!(
+                "Published rawblock notification: {} bytes",
+                block_data.len()
+            );
         }
         Ok(())
     }
@@ -313,4 +324,3 @@ impl ZmqPublisher {
         Ok(())
     }
 }
-

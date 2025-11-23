@@ -229,10 +229,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Publish notification (mempool entry)
-        publisher
-            .publish_sequence(&tx_hash, true)
-            .await
-            .unwrap();
+        publisher.publish_sequence(&tx_hash, true).await.unwrap();
 
         // Receive notification
         let result = timeout(Duration::from_secs(1), async {
@@ -312,4 +309,3 @@ mod tests {
         assert!(raw_result.is_ok());
     }
 }
-

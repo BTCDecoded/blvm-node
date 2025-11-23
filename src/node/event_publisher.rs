@@ -8,9 +8,9 @@ use tracing::{debug, warn};
 use crate::module::api::events::EventManager;
 use crate::module::ipc::protocol::EventPayload;
 use crate::module::traits::EventType;
-use crate::{Block, Hash, Transaction};
 #[cfg(feature = "zmq")]
 use crate::zmq::ZmqPublisher;
+use crate::{Block, Hash, Transaction};
 
 /// Event publisher that publishes node events to modules and ZMQ
 pub struct EventPublisher {
@@ -31,7 +31,10 @@ impl EventPublisher {
 
     /// Create a new event publisher with ZMQ support
     #[cfg(feature = "zmq")]
-    pub fn with_zmq(event_manager: Arc<EventManager>, zmq_publisher: Option<Arc<ZmqPublisher>>) -> Self {
+    pub fn with_zmq(
+        event_manager: Arc<EventManager>,
+        zmq_publisher: Option<Arc<ZmqPublisher>>,
+    ) -> Self {
         Self {
             event_manager,
             zmq_publisher,
@@ -101,10 +104,7 @@ impl EventPublisher {
         // Publish to ZMQ (if enabled)
         #[cfg(feature = "zmq")]
         if let Some(ref zmq) = self.zmq_publisher {
-            if let Err(e) = zmq
-                .publish_transaction(tx, tx_hash, is_mempool_entry)
-                .await
-            {
+            if let Err(e) = zmq.publish_transaction(tx, tx_hash, is_mempool_entry).await {
                 warn!("Failed to publish ZMQ transaction notification: {}", e);
             }
         }

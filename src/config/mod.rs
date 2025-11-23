@@ -1270,9 +1270,9 @@ impl Default for PeerRateLimitingConfig {
     }
 }
 
-    /// ZMQ notification configuration
-    #[cfg(feature = "zmq")]
-    pub use crate::zmq::ZmqConfig;
+/// ZMQ notification configuration
+#[cfg(feature = "zmq")]
+pub use crate::zmq::ZmqConfig;
 
 /// Logging configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -352,12 +352,14 @@ impl Node {
 
             // Create event publisher for this node
             let event_manager = module_manager.event_manager();
-            
+
             // Initialize ZMQ publisher if configured
             // Note: ZMQ is enabled by default, but only initializes if endpoints are configured.
             // To disable: either don't configure endpoints, or build without --features zmq
             #[cfg(feature = "zmq")]
-            let zmq_publisher = if let Some(ref zmq_config) = self.config.as_ref().and_then(|c| c.zmq.as_ref()) {
+            let zmq_publisher = if let Some(ref zmq_config) =
+                self.config.as_ref().and_then(|c| c.zmq.as_ref())
+            {
                 if zmq_config.is_enabled() {
                     match crate::zmq::ZmqPublisher::new(zmq_config) {
                         Ok(publisher) => {
@@ -370,19 +372,24 @@ impl Node {
                         }
                     }
                 } else {
-                    debug!("ZMQ configured but no endpoints enabled - ZMQ publisher not initialized");
+                    debug!(
+                        "ZMQ configured but no endpoints enabled - ZMQ publisher not initialized"
+                    );
                     None
                 }
             } else {
                 debug!("No ZMQ configuration provided - ZMQ publisher not initialized");
                 None
             };
-            
+
             #[cfg(not(feature = "zmq"))]
             let zmq_publisher = None;
-            
+
             #[cfg(feature = "zmq")]
-            self.event_publisher = Some(EventPublisher::with_zmq(Arc::clone(event_manager), zmq_publisher));
+            self.event_publisher = Some(EventPublisher::with_zmq(
+                Arc::clone(event_manager),
+                zmq_publisher,
+            ));
             #[cfg(not(feature = "zmq"))]
             self.event_publisher = Some(EventPublisher::new(Arc::clone(event_manager)));
             info!("Event publisher initialized");

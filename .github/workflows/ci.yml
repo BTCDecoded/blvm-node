@@ -282,7 +282,31 @@ jobs:
       
       - name: Run tests with coverage
         run: |
-          cargo install cargo-tarpaulin --version 0.27.0
+          # Ensure cargo bin is in PATH (fixes exit code 127)
+          export PATH="$HOME/.cargo/bin:$PATH"
+          
+          # Verify cargo is available
+          if ! command -v cargo &> /dev/null; then
+            echo "ERROR: cargo not found in PATH"
+            echo "PATH: $PATH"
+            exit 1
+          fi
+          
+          # Install tarpaulin with error checking
+          if ! cargo install cargo-tarpaulin --version 0.27.0; then
+            echo "ERROR: Failed to install cargo-tarpaulin"
+            exit 1
+          fi
+          
+          # Verify tarpaulin is available
+          if ! command -v cargo-tarpaulin &> /dev/null; then
+            echo "ERROR: cargo-tarpaulin not found after installation"
+            echo "PATH: $PATH"
+            echo "Cargo bin dir: $HOME/.cargo/bin"
+            ls -la $HOME/.cargo/bin/ || true
+            exit 1
+          fi
+          
           # Use --skip-clean to avoid rebuilding, --timeout to prevent hangs
           cargo tarpaulin --out xml --output-dir coverage --skip-clean --timeout 120
       
@@ -572,7 +596,10 @@ jobs:
           toolchain: 1.88.0
       
       - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.21.0 --locked
+        run: |
+          # Ensure cargo bin is in PATH (fixes exit code 127)
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install cargo-audit --version 0.21.0 --locked
       
       - name: Run security audit
         run: |
