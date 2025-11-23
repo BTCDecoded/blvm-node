@@ -8,7 +8,7 @@ on:
   release:
     types: [published]
   repository_dispatch:
-    types: [build-chain, upstream-changed]
+    types: [upstream-changed]
   workflow_dispatch:
     inputs:
       skip_verification:
