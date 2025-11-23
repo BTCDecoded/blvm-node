@@ -38,7 +38,7 @@ mod kani_proofs {
             inputs.push(TransactionInput {
                 prevout: OutPoint {
                     hash: kani::any(),
-                    index: i as u32,
+                    index: i as u64,
                 },
                 script_sig: vec![0u8; 25],
                 sequence: 0xffffffff,
@@ -47,16 +47,18 @@ mod kani_proofs {
 
         let mut outputs = Vec::new();
         for _ in 0..output_count {
+            let value: i64 = kani::any();
+            kani::assume(value >= 0);
             outputs.push(TransactionOutput {
-                value: kani::any::<u64>(),
+                value,
                 script_pubkey: vec![0u8; 25],
             });
         }
 
         Transaction {
             version: 1,
-            inputs,
-            outputs,
+            inputs: inputs.into(),
+            outputs: outputs.into(),
             lock_time: 0,
         }
     }
@@ -224,9 +226,10 @@ mod kani_proofs {
         let mut expected_input_total = 0u64;
 
         for (i, input) in tx.inputs.iter().enumerate() {
-            let input_value = kani::any::<u64>();
-            kani::assume(input_value <= 21_000_000_000_000u64); // Max Bitcoin supply
-            expected_input_total += input_value;
+            let input_value: i64 = kani::any();
+            kani::assume(input_value >= 0);
+            kani::assume(input_value <= 21_000_000_000_000i64); // Max Bitcoin supply
+            expected_input_total += input_value as u64;
 
             utxo_set.insert(
                 input.prevout.clone(),
@@ -239,7 +242,7 @@ mod kani_proofs {
         }
 
         // Calculate expected fee
-        let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
+        let output_total: u64 = tx.outputs.iter().map(|out| out.value.max(0) as u64).sum();
         let expected_fee = if expected_input_total > output_total {
             expected_input_total - output_total
         } else {

@@ -298,7 +298,7 @@ impl MempoolManager {
     /// Estimate transaction size in vbytes
     ///
     /// Simplified estimation - in production, would use actual serialized size
-    fn estimate_transaction_size(&self, tx: &Transaction) -> usize {
+    pub fn estimate_transaction_size(&self, tx: &Transaction) -> usize {
         // Base transaction size: version (4) + locktime (4) = 8 bytes
         let mut size = 8;
 
