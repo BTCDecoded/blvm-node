@@ -929,7 +929,7 @@ impl NetworkManager {
                                     error!("Unexpected transport address type for TCP listener");
                                     continue;
                                 }
-                                #[cfg(not(all(feature = "quinn", feature = "iroh")))]
+                                #[cfg(not(any(feature = "quinn", feature = "iroh")))]
                                 _ => {
                                     error!("Unexpected transport address type for TCP listener");
                                     continue;
@@ -1710,7 +1710,7 @@ impl NetworkManager {
                     });
 
                     // Limit concurrent reconnection attempts to 3
-                    if queue.len() > 0 {
+                    if !queue.is_empty() {
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     }
                 }

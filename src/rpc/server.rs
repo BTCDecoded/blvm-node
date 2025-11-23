@@ -996,25 +996,20 @@ mod tests {
 
         // Spawn server task using hyper
         let server_handle = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, addr)) => {
-                        let peer_addr = addr;
-                        let server_clone = server.clone();
-                        tokio::spawn(async move {
-                            let io = TokioIo::new(stream);
-                            let service = service_fn(move |req| {
-                                RpcServer::handle_http_request_with_server(
-                                    server_clone.clone(),
-                                    req,
-                                    peer_addr,
-                                )
-                            });
-                            let _ = http1::Builder::new().serve_connection(io, service).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, addr)) = listener.accept().await {
+                let peer_addr = addr;
+                let server_clone = server.clone();
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(move |req| {
+                        RpcServer::handle_http_request_with_server(
+                            server_clone.clone(),
+                            req,
+                            peer_addr,
+                        )
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
             }
         });
 
