@@ -461,9 +461,11 @@ async fn test_relay_peer_selection() {
     let relay = RelayManager::new();
 
     let hash = random_hash();
-    let peers = ["peer1".to_string(),
+    let peers = [
+        "peer1".to_string(),
         "peer2".to_string(),
-        "peer3".to_string()];
+        "peer3".to_string(),
+    ];
 
     // Test peer selection for relay
     // Test select_peers_for_relay (simplified - actual method may not exist)

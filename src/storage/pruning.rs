@@ -322,7 +322,12 @@ impl PruningManager {
                 #[cfg(not(feature = "utxo-commitments"))]
                 {
                     // Suppress unused variable warnings when feature is disabled
-                    let _ = (keep_from_height, keep_commitments, keep_filtered_blocks, min_blocks);
+                    let _ = (
+                        keep_from_height,
+                        keep_commitments,
+                        keep_filtered_blocks,
+                        min_blocks,
+                    );
                     return Err(anyhow!(
                         "Aggressive pruning requires utxo-commitments feature"
                     ));

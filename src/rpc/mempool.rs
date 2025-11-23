@@ -499,7 +499,10 @@ impl MempoolRpc {
                 for ancestor_tx in transactions {
                     let ancestor_hash = calculate_tx_id(&ancestor_tx);
                     for (idx, _output) in ancestor_tx.outputs.iter().enumerate() {
-                        if input.prevout.hash == ancestor_hash && input.prevout.index == idx as u64 && !ancestors.contains(&ancestor_hash) {
+                        if input.prevout.hash == ancestor_hash
+                            && input.prevout.index == idx as u64
+                            && !ancestors.contains(&ancestor_hash)
+                        {
                             ancestors.push(ancestor_hash);
                         }
                     }
