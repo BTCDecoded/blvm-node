@@ -27,7 +27,7 @@ impl ModuleIpcClient {
     pub async fn connect<P: AsRef<Path>>(socket_path: P) -> Result<Self, ModuleError> {
         let stream = UnixStream::connect(socket_path.as_ref())
             .await
-            .map_err(|e| ModuleError::IpcError(format!("Failed to connect to socket: {}", e)))?;
+            .map_err(|e| ModuleError::IpcError(format!("Failed to connect to socket: {e}")))?;
 
         let (read_half, write_half) = tokio::io::split(stream);
 
@@ -58,7 +58,7 @@ impl ModuleIpcClient {
         self.writer
             .send(bytes::Bytes::from(bytes))
             .await
-            .map_err(|e| ModuleError::IpcError(format!("Failed to send request: {}", e)))?;
+            .map_err(|e| ModuleError::IpcError(format!("Failed to send request: {e}")))?;
 
         debug!("Sent request with correlation_id={}", correlation_id);
 
@@ -70,7 +70,7 @@ impl ModuleIpcClient {
             .ok_or_else(|| {
                 ModuleError::IpcError("Connection closed while waiting for response".to_string())
             })?
-            .map_err(|e| ModuleError::IpcError(format!("Failed to read response: {}", e)))?;
+            .map_err(|e| ModuleError::IpcError(format!("Failed to read response: {e}")))?;
 
         // Deserialize response
         let message: ModuleMessage = bincode::deserialize(&response_bytes)
@@ -114,7 +114,7 @@ impl ModuleIpcClient {
                             }
                         }
                     }
-                    Some(Err(e)) => Err(ModuleError::IpcError(format!("Failed to read event: {}", e))),
+                    Some(Err(e)) => Err(ModuleError::IpcError(format!("Failed to read event: {e}"))),
                     None => Ok(None),
                 }
             }

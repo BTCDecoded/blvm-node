@@ -90,8 +90,7 @@ impl ModuleApiHub {
             // Verify module_id matches
             if handshake_id != module_id {
                 return Err(ModuleError::OperationError(format!(
-                    "Handshake module_id mismatch: expected {}, got {}",
-                    module_id, handshake_id
+                    "Handshake module_id mismatch: expected {module_id}, got {handshake_id}"
                 )));
             }
 

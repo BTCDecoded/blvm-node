@@ -46,7 +46,7 @@ where
 {
     let mut results = Vec::new();
     for (i, op) in operations.into_iter().enumerate() {
-        let ctx = format!("{} (operation {})", context, i);
+        let ctx = format!("{context} (operation {i})");
         results.push(ignore_error(op, &ctx).await);
     }
     results

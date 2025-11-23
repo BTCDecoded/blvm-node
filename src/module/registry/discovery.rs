@@ -45,7 +45,7 @@ impl ModuleDiscovery {
                 self.modules_dir
             );
             fs::create_dir_all(&self.modules_dir).map_err(|e| {
-                ModuleError::OperationError(format!("Failed to create modules directory: {}", e))
+                ModuleError::OperationError(format!("Failed to create modules directory: {e}"))
             })?;
             return Ok(Vec::new());
         }
@@ -54,12 +54,12 @@ impl ModuleDiscovery {
 
         // Scan directory for module subdirectories
         let entries = fs::read_dir(&self.modules_dir).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to read modules directory: {}", e))
+            ModuleError::OperationError(format!("Failed to read modules directory: {e}"))
         })?;
 
         for entry in entries {
             let entry = entry.map_err(|e| {
-                ModuleError::OperationError(format!("Failed to read directory entry: {}", e))
+                ModuleError::OperationError(format!("Failed to read directory entry: {e}"))
             })?;
 
             let path = entry.path();

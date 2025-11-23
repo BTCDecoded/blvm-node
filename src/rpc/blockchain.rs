@@ -15,7 +15,7 @@ const ZERO_HASH_STR: &str = "000000000000000000000000000000000000000000000000000
 /// Helper function to decode a 32-byte hash from hex string
 fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
     let hash_bytes =
-        hex::decode(hex).map_err(|e| RpcError::invalid_params(format!("Invalid hash: {}", e)))?;
+        hex::decode(hex).map_err(|e| RpcError::invalid_params(format!("Invalid hash: {e}")))?;
     if hash_bytes.len() != 32 {
         return Err(RpcError::invalid_params("Invalid hash length"));
     }

@@ -37,7 +37,7 @@ pub fn validate_string_param(
     let value = params
         .get(index)
         .and_then(|p| p.as_str())
-        .ok_or_else(|| RpcError::invalid_params(format!("Missing {} parameter", param_name)))?;
+        .ok_or_else(|| RpcError::invalid_params(format!("Missing {param_name} parameter")))?;
 
     let max_len = max_length.unwrap_or(MAX_STRING_LENGTH);
     if value.len() > max_len {
@@ -113,10 +113,10 @@ where
     let value = params
         .get(index)
         .and_then(|p| p.as_u64())
-        .ok_or_else(|| RpcError::invalid_params(format!("Missing {} parameter", param_name)))?;
+        .ok_or_else(|| RpcError::invalid_params(format!("Missing {param_name} parameter")))?;
 
     let typed_value = T::try_from(value).map_err(|e| {
-        RpcError::invalid_params(format!("Invalid {} value: {} ({})", param_name, value, e))
+        RpcError::invalid_params(format!("Invalid {param_name} value: {value} ({e})"))
     })?;
 
     if let Some(min_val) = min {
@@ -156,7 +156,7 @@ where
     if let Some(value) = params.get(index).and_then(|p| p.as_u64()) {
         // Validate the extracted value against bounds
         let typed_value = T::try_from(value)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid {}: {}", param_name, e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Invalid {param_name}: {e}")))?;
 
         if let Some(min_val) = min {
             if typed_value < min_val {
@@ -191,7 +191,7 @@ pub fn validate_bool_param(
     params
         .get(index)
         .and_then(|p| p.as_bool())
-        .ok_or_else(|| RpcError::invalid_params(format!("Missing {} parameter", param_name)))
+        .ok_or_else(|| RpcError::invalid_params(format!("Missing {param_name} parameter")))
 }
 
 /// Validate and extract an optional boolean parameter

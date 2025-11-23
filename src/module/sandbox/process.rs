@@ -291,7 +291,7 @@ impl ProcessSandbox {
             if let Some(pid) = pid {
                 // Read resource usage from /proc/<pid>/stat (Linux-specific)
                 // For cross-platform support, we'd need platform-specific implementations
-                let proc_stat_path = format!("/proc/{}/stat", pid);
+                let proc_stat_path = format!("/proc/{pid}/stat");
                 if let Ok(stat_content) = std::fs::read_to_string(&proc_stat_path) {
                     let fields: Vec<&str> = stat_content.split_whitespace().collect();
                     if fields.len() >= 24 {
@@ -315,7 +315,7 @@ impl ProcessSandbox {
                         let cpu_percent = 0.0;
 
                         // Count file descriptors from /proc/<pid>/fd
-                        let fd_count = std::fs::read_dir(format!("/proc/{}/fd", pid))
+                        let fd_count = std::fs::read_dir(format!("/proc/{pid}/fd"))
                             .map(|dir| dir.count() as u32)
                             .unwrap_or(0);
 

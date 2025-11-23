@@ -33,7 +33,7 @@ impl FileSystemSandbox {
 
         // Resolve path to absolute (handles symlinks, relative paths, etc.)
         let canonical = path.canonicalize().map_err(|e| {
-            ModuleError::OperationError(format!("Failed to canonicalize path {:?}: {}", path, e))
+            ModuleError::OperationError(format!("Failed to canonicalize path {path:?}: {e}"))
         })?;
 
         // Check if path is within allowed directory

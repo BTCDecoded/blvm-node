@@ -61,7 +61,7 @@ where
 /// Returns `Ok(())` if value is not empty, error otherwise.
 pub fn ensure_not_empty<T>(value: &[T], name: &str) -> Result<(), String> {
     if value.is_empty() {
-        Err(format!("{} must not be empty", name))
+        Err(format!("{name} must not be empty"))
     } else {
         Ok(())
     }
@@ -71,5 +71,5 @@ pub fn ensure_not_empty<T>(value: &[T], name: &str) -> Result<(), String> {
 ///
 /// Returns `Ok(value)` if Some, error if None.
 pub fn ensure_some<T>(value: Option<T>, name: &str) -> Result<T, String> {
-    value.ok_or_else(|| format!("{} must be set", name))
+    value.ok_or_else(|| format!("{name} must be set"))
 }

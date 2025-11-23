@@ -100,7 +100,7 @@ impl ModuleProcessSpawner {
         }
 
         // Create IPC socket path
-        let socket_path = self.socket_dir.join(format!("{}.sock", module_name));
+        let socket_path = self.socket_dir.join(format!("{module_name}.sock"));
 
         // Spawn the process
         let mut command = Command::new(binary_path);
@@ -118,7 +118,10 @@ impl ModuleProcessSpawner {
 
         // Add module config as environment variables
         for (key, value) in &context.config {
-            command.env(format!("MODULE_CONFIG_{}", key.to_uppercase()), value);
+            command.env(
+                format!("MODULE_CONFIG_{}", key.to_uppercase().as_str()),
+                value,
+            );
         }
 
         debug!(
@@ -127,7 +130,7 @@ impl ModuleProcessSpawner {
         );
 
         let child = command.spawn().map_err(|e| {
-            ModuleError::InitializationError(format!("Failed to spawn module process: {}", e))
+            ModuleError::InitializationError(format!("Failed to spawn module process: {e}"))
         })?;
 
         // Apply resource limits if sandbox is configured
@@ -180,7 +183,7 @@ impl ModuleProcessSpawner {
         #[cfg(unix)]
         {
             let client = Some(ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
-                ModuleError::IpcError(format!("Failed to connect to module IPC: {}", e))
+                ModuleError::IpcError(format!("Failed to connect to module IPC: {e}"))
             })?);
 
             Ok(ModuleProcess {
@@ -257,7 +260,7 @@ impl ModuleProcess {
         self.process
             .wait()
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to wait for process: {}", e)))
+            .map_err(|e| ModuleError::OperationError(format!("Failed to wait for process: {e}")))
             .map(Some)
     }
 

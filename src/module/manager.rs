@@ -157,11 +157,8 @@ impl ModuleManager {
         }
 
         // Create module context
-        let module_id = format!("{}_{}", module_name, uuid::Uuid::new_v4());
-        let socket_path = self
-            .spawner
-            .socket_dir
-            .join(format!("{}.sock", module_name));
+        let module_id = format!("{module_name}_{}", uuid::Uuid::new_v4());
+        let socket_path = self.spawner.socket_dir.join(format!("{module_name}.sock"));
         let data_dir = self.spawner.data_dir.join(module_name);
 
         let context = ModuleContext::new(

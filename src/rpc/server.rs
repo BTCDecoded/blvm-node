@@ -366,7 +366,7 @@ impl RpcServer {
             if !auth_manager.check_method_rate_limit(&method_name).await {
                 return Ok(Self::http_error_response(
                     StatusCode::TOO_MANY_REQUESTS,
-                    &format!("Method '{}' rate limit exceeded", method_name),
+                    &format!("Method '{method_name}' rate limit exceeded"),
                 ));
             }
         }
@@ -588,13 +588,13 @@ impl RpcServer {
         if let Some(memory) = metrics.system.memory_usage_bytes {
             output.push_str("# HELP bllvm_system_memory_usage_bytes Memory usage in bytes\n");
             output.push_str("# TYPE bllvm_system_memory_usage_bytes gauge\n");
-            output.push_str(&format!("bllvm_system_memory_usage_bytes {}\n", memory));
+            output.push_str(&format!("bllvm_system_memory_usage_bytes {memory}\n"));
         }
 
         if let Some(cpu) = metrics.system.cpu_usage_percent {
             output.push_str("# HELP bllvm_system_cpu_usage_percent CPU usage percentage\n");
             output.push_str("# TYPE bllvm_system_cpu_usage_percent gauge\n");
-            output.push_str(&format!("bllvm_system_cpu_usage_percent {}\n", cpu));
+            output.push_str(&format!("bllvm_system_cpu_usage_percent {cpu}\n"));
         }
 
         // DoS protection metrics

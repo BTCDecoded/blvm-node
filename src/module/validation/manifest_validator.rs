@@ -149,7 +149,7 @@ impl ManifestValidator {
 
         for cap in capabilities {
             if parse_permission_string(cap).is_none() {
-                errors.push(format!("Unknown capability: {}", cap));
+                errors.push(format!("Unknown capability: {cap}"));
             }
         }
 
@@ -170,7 +170,7 @@ impl ManifestValidator {
         for (dep_name, dep_version) in dependencies {
             // Validate dependency name format
             if !self.is_valid_name(dep_name) {
-                errors.push(format!("Invalid dependency name: {}", dep_name));
+                errors.push(format!("Invalid dependency name: {dep_name}"));
             }
 
             // Validate dependency version format (can be version range)

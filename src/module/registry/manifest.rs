@@ -35,11 +35,11 @@ impl ModuleManifest {
     /// Load manifest from file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ModuleError> {
         let contents = std::fs::read_to_string(path.as_ref()).map_err(|e| {
-            ModuleError::InvalidManifest(format!("Failed to read manifest file: {}", e))
+            ModuleError::InvalidManifest(format!("Failed to read manifest file: {e}"))
         })?;
 
         let manifest: ModuleManifest = toml::from_str(&contents).map_err(|e| {
-            ModuleError::InvalidManifest(format!("Failed to parse manifest TOML: {}", e))
+            ModuleError::InvalidManifest(format!("Failed to parse manifest TOML: {e}"))
         })?;
 
         // Validate required fields

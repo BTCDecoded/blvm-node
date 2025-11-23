@@ -104,7 +104,7 @@ impl ZmqPublisher {
         let socket = context.socket(PUB)?;
         socket
             .bind(endpoint)
-            .with_context(|| format!("Failed to bind ZMQ socket for {} to {}", topic, endpoint))?;
+            .with_context(|| format!("Failed to bind ZMQ socket for {topic} to {endpoint}"))?;
         info!("ZMQ {} socket bound to {}", topic, endpoint);
         Ok(socket)
     }

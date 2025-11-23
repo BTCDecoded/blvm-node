@@ -58,7 +58,7 @@ impl ModuleDependencies {
 
         // Topological sort to determine load order
         let load_order = Self::topological_sort(&dependencies).map_err(|e| {
-            ModuleError::DependencyMissing(format!("Circular dependency detected: {}", e))
+            ModuleError::DependencyMissing(format!("Circular dependency detected: {e}"))
         })?;
 
         debug!("Dependency resolution complete: {:?}", load_order);
