@@ -930,6 +930,7 @@ impl NetworkManager {
                                     continue;
                                 }
                                 #[cfg(not(any(feature = "quinn", feature = "iroh")))]
+                                #[allow(unreachable_patterns)]
                                 _ => {
                                     error!("Unexpected transport address type for TCP listener");
                                     continue;

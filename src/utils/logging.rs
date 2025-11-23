@@ -93,8 +93,8 @@ pub fn init_logging(filter: Option<&str>) {
 /// # Arguments
 /// * `module_name` - Name of the module (e.g., "lightning", "lnbits")
 /// * `filter` - Optional log filter from config. If None, uses:
-///  - RUST_LOG if set (standard, takes precedence)
-///  - Otherwise: "{module_name}=info,bllvm_node::module=debug"
+///              - RUST_LOG if set (standard, takes precedence)
+///              - Otherwise: "{module_name}=info,bllvm_node::module=debug"
 ///
 /// # Example
 /// ```rust
