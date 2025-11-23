@@ -393,6 +393,7 @@ jobs:
     name: Verify
     needs: setup
     runs-on: [self-hosted, Linux, X64, perf]
+    timeout-minutes: 360  # 6 hours for all proofs
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -400,81 +401,33 @@ jobs:
         !contains(github.event.head_commit.message, '[no ci]'))) &&
       (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verification != 'true')
     steps:
-      - name: Check if verification should be skipped
-        id: skip_check
-        run: |
-          SKIP="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verification == 'true' }}"
-          if [ "$SKIP" = "true" ]; then
-            echo "⚠️  Verification skipped via workflow input"
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Skip verification
-        if: steps.skip_check.outputs.skip == 'true'
-        run: |
-          echo "✅ Verification step skipped (unverified release)"
-          exit 0
-      
       - uses: actions/checkout@v4
-        if: steps.skip_check.outputs.skip != 'true'
       
       - name: Checkout bllvm-protocol dependency
-        if: steps.skip_check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
       - name: Checkout consensus
-        if: steps.skip_check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
           path: _temp-consensus-proof
       
       - name: Move dependencies to parent directory
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
       
-      - name: Cache
-        if: steps.skip_check.outputs.skip != 'true'
-        run: |
-          CACHE_ROOT="/tmp/runner-cache"
-          CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
-          echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
-          echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
-      
-      - name: Restore registry
-        if: steps.skip_check.outputs.skip != 'true'
-        run: |
-          if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
-            mkdir -p "$HOME/.cargo/registry"
-            rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
-          fi
-      
-      - name: Restore git
-        if: steps.skip_check.outputs.skip != 'true'
-        run: |
-          if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
-            mkdir -p "$HOME/.cargo/git"
-            rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
-          fi
-      
       - name: Install Rust
-        if: steps.skip_check.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88.0
       
       - name: Verify Kani is available
-        if: steps.skip_check.outputs.skip != 'true'
         run: |
           echo "Checking for Kani model checker..."
           # Check if kani is available (should be pre-installed on runner)
@@ -492,24 +445,181 @@ jobs:
             exit 1
           fi
       
-      - name: Run Kani proofs
-        if: steps.skip_check.outputs.skip != 'true'
+      - name: Determine proof tier
+        id: proof_tier
         run: |
-          echo "🔍 Running Kani formal verification (72 proofs)..."
-          echo "Note: Running proofs in parallel and filtering verbose CBMC output"
-          # Use cargo kani to automatically find and run all proofs in the crate
-          # cargo kani will discover all #[kani::proof] functions
-          # Run in parallel with --jobs (uses minimal parallelism to avoid OOM)
-          # Use terse output format and filter noisy CBMC messages
-          cargo kani --features verify --output-format terse --jobs 2 2>&1 | grep -v "aborting path on assume(false)" || {
-            EXIT_CODE=${PIPESTATUS[0]}
-            if [ $EXIT_CODE -ne 0 ]; then
-              echo "❌ Kani verification failed"
+          # Determine which proofs to run based on event type
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PRs: Fast + Medium proofs
+            echo "tier=fast_medium" >> $GITHUB_OUTPUT
+            echo "description=Fast + Medium proofs" >> $GITHUB_OUTPUT
+            echo "unwind_max=9" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            # Push to main: All proofs
+            echo "tier=all" >> $GITHUB_OUTPUT
+            echo "description=All proofs" >> $GITHUB_OUTPUT
+            echo "unwind_max=999" >> $GITHUB_OUTPUT
+          else
+            # Other pushes: Fast proofs only
+            echo "tier=fast" >> $GITHUB_OUTPUT
+            echo "description=Fast proofs only" >> $GITHUB_OUTPUT
+            echo "unwind_max=3" >> $GITHUB_OUTPUT
+          fi
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Tier: ${{ steps.proof_tier.outputs.tier }}"
+          echo "Description: ${{ steps.proof_tier.outputs.description }}"
+      
+      - name: Run Kani proofs (Fast - every push)
+        if: steps.proof_tier.outputs.tier == 'fast'
+        run: |
+          echo "⚡ Running Kani proofs - Fast tier (unwind <= 3)..."
+          echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
+          # Get list of fast proofs
+          FAST_PROOFS=$(python3 scripts/get_proofs_by_tier.py fast)
+          PROOF_COUNT=$(echo "$FAST_PROOFS" | wc -w)
+          echo "Found $PROOF_COUNT fast proofs to run"
+          TEMP_OUTPUT=$(mktemp)
+          KANI_OUTPUT_FILE="kani_output.txt"
+          trap "rm -f $TEMP_OUTPUT" EXIT
+          set +e
+          # Build harness filter arguments
+          HARNESS_ARGS=""
+          for proof in $FAST_PROOFS; do
+            HARNESS_ARGS="$HARNESS_ARGS --harness $proof"
+          done
+          cargo kani --features verify --output-format terse --solver cadical --jobs 2 $HARNESS_ARGS 2>&1 | tee "$KANI_OUTPUT_FILE" | grep -v "aborting path on assume(false)" | tee "$TEMP_OUTPUT"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          if [ $EXIT_CODE -ne 0 ]; then
+            if [ $EXIT_CODE -eq 143 ]; then
+              echo "⚠️  Fast Kani proofs were terminated (exit code 143 = SIGTERM)"
+              echo "This usually means the job timed out or was killed due to resource limits"
+              echo "Consider running proofs in smaller batches or increasing timeout"
+              exit $EXIT_CODE
+            else
+              echo "❌ Fast Kani proofs failed (exit code: $EXIT_CODE)"
+              exit $EXIT_CODE
+            fi
+          fi
+          echo "✅ Fast proofs verified successfully"
+          # Hash the Kani output for attestation (only on main branch)
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            KANI_OUTPUT_HASH=$(sha256sum "$KANI_OUTPUT_FILE" | cut -d' ' -f1)
+            echo "kani_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_ENV
+            echo "kani_verified=true" >> $GITHUB_ENV
+            echo "kani_proofs=$PROOF_COUNT" >> $GITHUB_ENV
+            echo "Kani output hash: $KANI_OUTPUT_HASH"
+          fi
+      
+      - name: Upload Kani output for attestation (Fast)
+        if: steps.proof_tier.outputs.tier == 'fast' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-attestation-data
+          path: kani_output.txt
+          retention-days: 90
+      
+      - name: Run Kani proofs (Fast + Medium - PRs)
+        if: steps.proof_tier.outputs.tier == 'fast_medium'
+        run: |
+          echo "🔍 Running Kani proofs - Fast + Medium tier (unwind <= 9)..."
+          echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
+          # Get list of fast + medium proofs
+          FAST_MEDIUM_PROOFS=$(python3 scripts/get_proofs_by_tier.py fast_medium)
+          PROOF_COUNT=$(echo "$FAST_MEDIUM_PROOFS" | wc -w)
+          echo "Found $PROOF_COUNT fast + medium proofs to run"
+          TEMP_OUTPUT=$(mktemp)
+          KANI_OUTPUT_FILE="kani_output.txt"
+          trap "rm -f $TEMP_OUTPUT" EXIT
+          set +e
+          # Build harness filter arguments
+          HARNESS_ARGS=""
+          for proof in $FAST_MEDIUM_PROOFS; do
+            HARNESS_ARGS="$HARNESS_ARGS --harness $proof"
+          done
+          cargo kani --features verify --output-format terse --solver cadical --jobs 2 $HARNESS_ARGS 2>&1 | tee "$KANI_OUTPUT_FILE" | grep -v "aborting path on assume(false)" | tee "$TEMP_OUTPUT"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          if [ $EXIT_CODE -ne 0 ]; then
+            if [ $EXIT_CODE -eq 143 ]; then
+              echo "⚠️  Fast + Medium Kani proofs were terminated (exit code 143 = SIGTERM)"
+              echo "This usually means the job timed out or was killed due to resource limits"
+              echo "Consider running proofs in smaller batches or increasing timeout"
+              exit $EXIT_CODE
+            else
+              echo "❌ Fast + Medium Kani proofs failed (exit code: $EXIT_CODE)"
+              exit $EXIT_CODE
+            fi
+          fi
+          echo "✅ Fast + Medium proofs verified successfully"
+          # Hash the Kani output for attestation (only on main branch)
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            KANI_OUTPUT_HASH=$(sha256sum "$KANI_OUTPUT_FILE" | cut -d' ' -f1)
+            echo "kani_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_ENV
+            echo "kani_verified=true" >> $GITHUB_ENV
+            echo "kani_proofs=$PROOF_COUNT" >> $GITHUB_ENV
+            echo "Kani output hash: $KANI_OUTPUT_HASH"
+          fi
+      
+      - name: Upload Kani output for attestation (Fast + Medium)
+        if: steps.proof_tier.outputs.tier == 'fast_medium' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-attestation-data
+          path: kani_output.txt
+          retention-days: 90
+      
+      - name: Run Kani proofs (All - main branch)
+        if: steps.proof_tier.outputs.tier == 'all'
+        timeout-minutes: 360  # 6 hours - all proofs can take 4-6 hours
+        run: |
+          echo "🐌 Running Kani proofs - All tier (all unwind bounds)..."
+          echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
+          echo "This includes slow proofs (unwind >= 10) which take significantly longer"
+          echo "Expected duration: 4-6 hours for all proofs"
+          echo "Job timeout: 360 minutes (6 hours)"
+          TEMP_OUTPUT=$(mktemp)
+          KANI_OUTPUT_FILE="kani_output.txt"
+          trap "rm -f $TEMP_OUTPUT" EXIT
+          set +e
+          # Run all proofs (no filter) and save full output
+          # Note: This can take 4-6 hours for all proofs
+          cargo kani --features verify --output-format terse --solver cadical --jobs 2 2>&1 | tee "$KANI_OUTPUT_FILE" | grep -v "aborting path on assume(false)" | tee "$TEMP_OUTPUT"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          if [ $EXIT_CODE -ne 0 ]; then
+            if [ $EXIT_CODE -eq 143 ]; then
+              echo "⚠️  All Kani proofs were terminated (exit code 143 = SIGTERM)"
+              echo "This usually means the job timed out or was killed due to resource limits"
+              echo "The 'all' tier can take 4-6 hours to complete"
+              echo "Consider:"
+              echo "  1. Increasing the job timeout (currently 360 minutes)"
+              echo "  2. Running proofs in smaller batches"
+              echo "  3. Using a runner with more memory/CPU"
+              echo "  4. Running only fast+medium proofs for PRs"
+              exit $EXIT_CODE
+            else
+              echo "❌ All Kani proofs failed (exit code: $EXIT_CODE)"
               echo "This is critical for node correctness - review proofs before release"
               exit $EXIT_CODE
             fi
-          }
+          fi
           echo "✅ All Kani proofs verified successfully"
+          # Hash the Kani output for attestation
+          KANI_OUTPUT_HASH=$(sha256sum "$KANI_OUTPUT_FILE" | cut -d' ' -f1)
+          echo "kani_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_ENV
+          echo "kani_verified=true" >> $GITHUB_ENV
+          echo "kani_proofs=72" >> $GITHUB_ENV
+          echo "Kani output hash: $KANI_OUTPUT_HASH"
+      
+      - name: Upload Kani output for attestation
+        if: steps.proof_tier.outputs.tier == 'all' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-attestation-data
+          path: kani_output.txt
+          retention-days: 90
 
   fmt:
     name: Format
