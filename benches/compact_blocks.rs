@@ -1,17 +1,17 @@
-use bllvm_consensus::{Block, BlockHeader, Transaction, TransactionOutput};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use reference_node::network::compact_blocks::{
+use bllvm_node::network::compact_blocks::{
     calculate_short_tx_id, calculate_tx_hash, create_compact_block,
     recommended_compact_block_version, should_prefer_compact_blocks,
 };
-use reference_node::network::transport::TransportType;
+use bllvm_node::network::transport::TransportType;
+use bllvm_protocol::{tx_inputs, tx_outputs, Block, BlockHeader, Transaction, TransactionOutput};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::collections::HashSet;
 
 fn create_test_block() -> Block {
     let mut transactions = vec![Transaction {
         version: 1,
-        inputs: vec![],
-        outputs: vec![TransactionOutput {
+        inputs: tx_inputs![],
+        outputs: tx_outputs![TransactionOutput {
             value: 5000000000,
             script_pubkey: vec![0x51],
         }],
@@ -22,8 +22,8 @@ fn create_test_block() -> Block {
     for _ in 0..10 {
         transactions.push(Transaction {
             version: 1,
-            inputs: vec![],
-            outputs: vec![TransactionOutput {
+            inputs: tx_inputs![],
+            outputs: tx_outputs![TransactionOutput {
                 value: 100000000,
                 script_pubkey: vec![0x51],
             }],
@@ -40,7 +40,7 @@ fn create_test_block() -> Block {
             bits: 0x1d00ffff,
             nonce: 12345,
         },
-        transactions,
+        transactions: transactions.into_boxed_slice(),
     }
 }
 
