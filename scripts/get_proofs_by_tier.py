@@ -33,10 +33,31 @@ for root, dirs, files in os.walk('src'):
                                                 if unwind_match:
                                                     unwind = int(unwind_match.group(1))
                                                     break
-                                                # Also check for unwind_bounds constants (these are typically fast)
+                                                # Also check for unwind_bounds constants
                                                 if 'unwind_bounds::' in lines[k]:
-                                                    # Assume constants are fast/medium, treat as fast for now
-                                                    unwind = 3
+                                                    # Parse constant name to estimate tier
+                                                    const_match = re.search(r'unwind_bounds::(\w+)', lines[k])
+                                                    if const_match:
+                                                        const_name = const_match.group(1).upper()
+                                                        # Categorize based on constant name patterns
+                                                        if 'SIMPLE' in const_name and ('HASH' in const_name or 'UTXO' in const_name):
+                                                            # SIMPLE_HASH, SIMPLE_UTXO are typically 3 (fast)
+                                                            unwind = 3
+                                                        elif 'HEADER' in const_name or 'CHECKSUM' in const_name:
+                                                            # HEADER_PARSING, CHECKSUM are typically 3 (fast)
+                                                            unwind = 3
+                                                        elif 'SIMPLE' in const_name and ('MESSAGE' in const_name or 'STATE' in const_name or 'RPC' in const_name or 'MEMPOOL' in const_name):
+                                                            # SIMPLE_MESSAGE, SIMPLE_STATE, SIMPLE_RPC, SIMPLE_MEMPOOL are typically 5 (medium)
+                                                            unwind = 5
+                                                        elif 'COMPLEX' in const_name:
+                                                            # COMPLEX_MESSAGE, COMPLEX_STATE, COMPLEX_RPC, COMPLEX_HASH, COMPLEX_UTXO, COMPLEX_MEMPOOL are typically 10+ (slow)
+                                                            unwind = 10
+                                                        elif 'UTXO_SET' in const_name:
+                                                            # UTXO_SET is 15 (slow)
+                                                            unwind = 15
+                                                        else:
+                                                            # Default to fast for unknown constants
+                                                            unwind = 3
                                                     break
                                         
                                         if unwind is None:
