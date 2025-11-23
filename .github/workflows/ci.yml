@@ -737,16 +737,22 @@ jobs:
 
   release:
     name: Release
-    needs: build
+    needs: [build, test, clippy, fmt, docs, security]
     runs-on: [self-hosted, Linux, X64, builds]
     if: |
+      always() &&
+      needs.build.result == 'success' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
       (github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]') &&
-        !contains(github.event.head_commit.message, '[skip release]')))
+        !contains(github.event.head_commit.message, '[skip release]'))) &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true') ||
+       (needs.test.result == 'success' && needs.clippy.result == 'success' && 
+        needs.fmt.result == 'success' && needs.docs.result == 'success' && 
+        needs.security.result == 'success'))
     permissions:
       contents: write
       id-token: write
