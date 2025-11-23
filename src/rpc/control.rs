@@ -64,8 +64,7 @@ impl ControlRpc {
         if let Some(ref shutdown_fn) = self.node_shutdown {
             if let Err(e) = shutdown_fn() {
                 return Err(RpcError::internal_error(format!(
-                    "Failed to shutdown node: {}",
-                    e
+                    "Failed to shutdown node: {e}"
                 )));
             }
         }

@@ -48,8 +48,7 @@ where
 {
     if value < min || value > max {
         Err(format!(
-            "{} must be between {} and {}, got {}",
-            name, min, max, value
+            "{name} must be between {min} and {max}, got {value}"
         ))
     } else {
         Ok(())

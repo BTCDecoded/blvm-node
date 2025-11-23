@@ -1054,8 +1054,7 @@ mod tests {
         // Verify HTTP response (hyper uses lowercase headers)
         assert!(
             response_str.contains("HTTP/1.1 200 OK") || response_str.contains("200 OK"),
-            "Response: {}",
-            response_str
+            "Response: {response_str}"
         );
         assert!(
             response_str.contains("content-type: application/json")
@@ -1336,10 +1335,7 @@ mod tests {
         ];
 
         for method in methods {
-            let request = format!(
-                r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
-                method
-            );
+            let request = format!(r#"{{"jsonrpc":"2.0","method":"{method}","params":[],"id":1}}"#);
             let response_str = RpcServer::process_request(&request).await;
             let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -1359,10 +1355,7 @@ mod tests {
         let methods = vec!["getnetworkinfo", "getpeerinfo"];
 
         for method in methods {
-            let request = format!(
-                r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
-                method
-            );
+            let request = format!(r#"{{"jsonrpc":"2.0","method":"{method}","params":[],"id":1}}"#);
             let response_str = RpcServer::process_request(&request).await;
             let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -1377,10 +1370,7 @@ mod tests {
         let methods = vec!["getmininginfo", "getblocktemplate"];
 
         for method in methods {
-            let request = format!(
-                r#"{{"jsonrpc":"2.0","method":"{}","params":[],"id":1}}"#,
-                method
-            );
+            let request = format!(r#"{{"jsonrpc":"2.0","method":"{method}","params":[],"id":1}}"#);
             let response_str = RpcServer::process_request(&request).await;
             let response: Value = serde_json::from_str(&response_str).unwrap();
 
