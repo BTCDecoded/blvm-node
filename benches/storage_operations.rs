@@ -1,6 +1,6 @@
-use bllvm_consensus::{Block, BlockHeader, Transaction, TransactionOutput};
+use bllvm_node::storage::Storage;
+use bllvm_protocol::{tx_inputs, tx_outputs, Block, BlockHeader, Transaction, TransactionOutput};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use reference_node::storage::Storage;
 use tempfile::TempDir;
 
 fn create_test_block() -> Block {
@@ -15,13 +15,14 @@ fn create_test_block() -> Block {
         },
         transactions: vec![Transaction {
             version: 1,
-            inputs: vec![],
-            outputs: vec![TransactionOutput {
+            inputs: tx_inputs![],
+            outputs: tx_outputs![TransactionOutput {
                 value: 5000000000,
                 script_pubkey: vec![0x51],
             }],
             lock_time: 0,
-        }],
+        }]
+        .into_boxed_slice(),
     }
 }
 

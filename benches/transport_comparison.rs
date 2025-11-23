@@ -1,6 +1,6 @@
-use bllvm_consensus::{Block, BlockHeader, Transaction, TransactionOutput};
+use bllvm_node::network::compact_blocks::create_compact_block;
+use bllvm_protocol::{tx_inputs, tx_outputs, Block, BlockHeader, Transaction, TransactionOutput};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use reference_node::network::compact_blocks::create_compact_block;
 use std::collections::HashSet;
 
 fn create_test_block_with_txs(tx_count: usize) -> Block {
@@ -16,14 +16,15 @@ fn create_test_block_with_txs(tx_count: usize) -> Block {
         transactions: (0..tx_count)
             .map(|i| Transaction {
                 version: 1,
-                inputs: vec![],
-                outputs: vec![TransactionOutput {
+                inputs: tx_inputs![],
+                outputs: tx_outputs![TransactionOutput {
                     value: 5000000000 + i as i64,
                     script_pubkey: vec![0x51],
                 }],
                 lock_time: 0,
             })
-            .collect(),
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
     }
 }
 
