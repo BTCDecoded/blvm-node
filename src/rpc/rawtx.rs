@@ -185,7 +185,7 @@ impl RawTxRpc {
 
         use bllvm_protocol::serialization::transaction::deserialize_transaction;
         let tx = deserialize_transaction(&tx_bytes)
-            .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {e}")))?;
 
         use bllvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(&tx);
@@ -259,7 +259,7 @@ impl RawTxRpc {
 
         use bllvm_protocol::serialization::transaction::deserialize_transaction;
         let tx = deserialize_transaction(&tx_bytes)
-            .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {}", e)))?;
+            .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {e}")))?;
 
         use bllvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(&tx);
@@ -785,7 +785,7 @@ impl RawTxRpc {
 
             // Get block
             let blockhash_bytes = hex::decode(blockhash)
-                .map_err(|e| RpcError::invalid_params(format!("Invalid blockhash: {}", e)))?;
+                .map_err(|e| RpcError::invalid_params(format!("Invalid blockhash: {e}")))?;
             if blockhash_bytes.len() != 32 {
                 return Err(RpcError::invalid_params("Invalid blockhash length"));
             }

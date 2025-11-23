@@ -917,8 +917,24 @@ impl NetworkManager {
                             // Extract SocketAddr from TransportAddr::Tcp
                             // In TCP listener context, we should only get TCP addresses
                             // TcpListener::accept() always returns TransportAddr::Tcp
-                            #[allow(irrefutable_let_patterns)]
-                            let TransportAddr::Tcp(socket_addr) = transport_addr;
+                            let socket_addr = match transport_addr {
+                                TransportAddr::Tcp(addr) => addr,
+                                #[cfg(feature = "quinn")]
+                                TransportAddr::Quinn(_) => {
+                                    error!("Unexpected transport address type for TCP listener");
+                                    continue;
+                                }
+                                #[cfg(feature = "iroh")]
+                                TransportAddr::Iroh(_) => {
+                                    error!("Unexpected transport address type for TCP listener");
+                                    continue;
+                                }
+                                #[cfg(not(all(feature = "quinn", feature = "iroh")))]
+                                _ => {
+                                    error!("Unexpected transport address type for TCP listener");
+                                    continue;
+                                }
+                            };
                             info!("New TCP connection from {:?}", socket_addr);
 
                             // Check DoS protection: connection rate limiting
@@ -3511,6 +3527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_manager_creation() {
+        let _addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let manager = PeerManager::new(10);
         assert_eq!(manager.peer_count(), 0);
         assert!(manager.can_accept_peer());
@@ -3519,7 +3536,7 @@ mod tests {
     #[tokio::test]
     async fn test_peer_manager_add_peer() {
         let manager = PeerManager::new(2);
-        let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let _addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
         // Create a mock peer without requiring network connection
         let (_tx, _rx): (mpsc::UnboundedSender<NetworkMessage>, _) = mpsc::unbounded_channel();
 

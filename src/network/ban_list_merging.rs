@@ -42,7 +42,7 @@ pub fn merge_ban_lists(ban_lists: Vec<&BanListMessage>) -> Vec<BanEntry> {
                         existing.reason = existing
                             .reason
                             .as_ref()
-                            .map(|r| format!("{}; {}", r, reason))
+                            .map(|r| format!("{r}; {reason}"))
                             .or_else(|| Some(reason.clone()));
                     }
                 }

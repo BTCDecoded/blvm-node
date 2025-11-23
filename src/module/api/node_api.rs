@@ -63,7 +63,7 @@ impl NodeAPI for NodeApiImpl {
                 storage
                     .blocks()
                     .get_block(&hash)
-                    .map_err(|e| ModuleError::OperationError(format!("Failed to get block: {}", e)))
+                    .map_err(|e| ModuleError::OperationError(format!("Failed to get block: {e}")))
             }
         })
         .await
@@ -77,7 +77,7 @@ impl NodeAPI for NodeApiImpl {
             let hash = *hash;
             move || {
                 storage.blocks().get_header(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get block header: {}", e))
+                    ModuleError::OperationError(format!("Failed to get block header: {e}"))
                 })
             }
         })
@@ -92,7 +92,7 @@ impl NodeAPI for NodeApiImpl {
             let hash = *hash;
             move || {
                 storage.transactions().get_transaction(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get transaction: {}", e))
+                    ModuleError::OperationError(format!("Failed to get transaction: {e}"))
                 })
             }
         })
@@ -108,8 +108,7 @@ impl NodeAPI for NodeApiImpl {
             move || {
                 storage.transactions().has_transaction(&hash).map_err(|e| {
                     ModuleError::OperationError(format!(
-                        "Failed to check transaction existence: {}",
-                        e
+                        "Failed to check transaction existence: {e}"
                     ))
                 })
             }
@@ -127,7 +126,7 @@ impl NodeAPI for NodeApiImpl {
                     .chain()
                     .get_height()
                     .map_err(|e| {
-                        ModuleError::OperationError(format!("Failed to get block height: {}", e))
+                        ModuleError::OperationError(format!("Failed to get block height: {e}"))
                     })?
                     .ok_or_else(|| {
                         ModuleError::OperationError("Chain not yet initialized".to_string())
@@ -147,7 +146,7 @@ impl NodeAPI for NodeApiImpl {
                     .chain()
                     .get_tip_hash()
                     .map_err(|e| {
-                        ModuleError::OperationError(format!("Failed to get chain tip: {}", e))
+                        ModuleError::OperationError(format!("Failed to get chain tip: {e}"))
                     })?
                     .ok_or_else(|| {
                         ModuleError::OperationError("Chain not yet initialized".to_string())
@@ -168,7 +167,7 @@ impl NodeAPI for NodeApiImpl {
                 storage
                     .utxos()
                     .get_utxo(&outpoint_clone)
-                    .map_err(|e| ModuleError::OperationError(format!("Failed to get UTXO: {}", e)))
+                    .map_err(|e| ModuleError::OperationError(format!("Failed to get UTXO: {e}")))
             }
         })
         .await

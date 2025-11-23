@@ -88,7 +88,7 @@ impl ModuleLoader {
                             // Nested tables become dot-notation keys
                             let mut result = Vec::new();
                             for (subkey, subvalue) in map {
-                                result.push(format!("{}.{}", key, subkey));
+                                result.push(format!("{key}.{subkey}"));
                                 result.push(subvalue.to_string());
                             }
                             result.join(",")
@@ -102,9 +102,8 @@ impl ModuleLoader {
         }
 
         // If TOML parsing failed, try simple key=value format
-        let contents = std::fs::read_to_string(&config_path).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to read config file: {}", e))
-        })?;
+        let contents = std::fs::read_to_string(&config_path)
+            .map_err(|e| ModuleError::OperationError(format!("Failed to read config file: {e}")))?;
 
         let mut config = HashMap::new();
         for line in contents.lines() {
@@ -159,7 +158,7 @@ impl ModuleLoader {
                     let new_prefix = if prefix.is_empty() {
                         key.clone()
                     } else {
-                        format!("{}.{}", prefix, key)
+                        format!("{prefix}.{key}")
                     };
                     Self::flatten_toml_value(new_prefix, val, result);
                 }

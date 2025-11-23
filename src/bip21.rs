@@ -155,7 +155,7 @@ impl BitcoinUri {
         let mut params = Vec::new();
 
         if let Some(amt) = self.amount {
-            params.push(format!("amount={}", amt));
+            params.push(format!("amount={amt}"));
         }
 
         if let Some(ref lbl) = self.label {
@@ -407,7 +407,7 @@ fn url_decode(encoded: &str) -> Result<String, Bip21Error> {
             let hex1 = chars.next().ok_or(Bip21Error::InvalidParameter)?;
             let hex2 = chars.next().ok_or(Bip21Error::InvalidParameter)?;
 
-            let hex_str = format!("{}{}", hex1, hex2);
+            let hex_str = format!("{hex1}{hex2}");
             let byte =
                 u8::from_str_radix(&hex_str, 16).map_err(|_| Bip21Error::InvalidParameter)?;
 
@@ -458,7 +458,7 @@ fn url_encode(s: &str) -> String {
                 } else {
                     // Encode as UTF-8 bytes
                     for byte in ch.to_string().as_bytes() {
-                        encoded.push_str(&format!("%{:02X}", byte));
+                        encoded.push_str(&format!("%{byte:02X}"));
                     }
                 }
             }

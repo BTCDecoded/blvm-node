@@ -62,16 +62,16 @@ pub async fn resolve_dns_seeds(
 /// Resolve a single DNS seed
 async fn resolve_dns_seed(seed: &str, port: u16) -> Result<Vec<NetworkAddress>, String> {
     // Create hostname:port string for DNS lookup
-    let hostname = format!("{}:{}", seed, port);
+    let hostname = format!("{seed}:{port}");
 
     // Perform DNS lookup with timeout
     let timeout = Duration::from_secs(5);
     let lookup_result = tokio::time::timeout(timeout, lookup_host(&hostname))
         .await
-        .map_err(|_| format!("DNS lookup timeout for {}", seed))?;
+        .map_err(|_| format!("DNS lookup timeout for {seed}"))?;
 
     let socket_addrs =
-        lookup_result.map_err(|e| format!("DNS lookup failed for {}: {}", seed, e))?;
+        lookup_result.map_err(|e| format!("DNS lookup failed for {seed}: {e}"))?;
 
     // Convert SocketAddr to NetworkAddress
     let mut addresses = Vec::new();

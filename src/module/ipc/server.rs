@@ -77,20 +77,19 @@ impl ModuleIpcServer {
     ) -> Result<(), ModuleError> {
         // Remove existing socket file if it exists
         if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path).map_err(|e| {
-                ModuleError::IpcError(format!("Failed to remove old socket: {}", e))
-            })?;
+            std::fs::remove_file(&self.socket_path)
+                .map_err(|e| ModuleError::IpcError(format!("Failed to remove old socket: {e}")))?;
         }
 
         // Create parent directory if needed
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                ModuleError::IpcError(format!("Failed to create socket directory: {}", e))
+                ModuleError::IpcError(format!("Failed to create socket directory: {e}"))
             })?;
         }
 
         let listener = UnixListener::bind(&self.socket_path)
-            .map_err(|e| ModuleError::IpcError(format!("Failed to bind socket: {}", e)))?;
+            .map_err(|e| ModuleError::IpcError(format!("Failed to bind socket: {e}")))?;
 
         info!("Module IPC server listening on {:?}", self.socket_path);
 
@@ -155,8 +154,7 @@ impl ModuleIpcServer {
                                 .await
                                 .map_err(|e| {
                                     ModuleError::IpcError(format!(
-                                        "Failed to send handshake ack: {}",
-                                        e
+                                        "Failed to send handshake ack: {e}"
                                     ))
                                 })?;
 
@@ -169,7 +167,7 @@ impl ModuleIpcServer {
                                 .unwrap()
                                 .as_nanos();
                             let connection_count = self.connections.len();
-                            format!("module_{}_{}", connection_count, timestamp)
+                            format!("module_{connection_count}_{timestamp}")
                         }
                     }
                     _ => {
@@ -181,8 +179,7 @@ impl ModuleIpcServer {
             }
             Some(Err(e)) => {
                 return Err(ModuleError::IpcError(format!(
-                    "Failed to read handshake: {}",
-                    e
+                    "Failed to read handshake: {e}"
                 )));
             }
             None => {
@@ -361,7 +358,7 @@ impl ModuleIpcServer {
                 // Send response through outgoing channel
                 if let Some(tx) = &connection.outgoing_tx {
                     tx.send(bytes::Bytes::from(response_bytes)).map_err(|e| {
-                        ModuleError::IpcError(format!("Failed to send response: {}", e))
+                        ModuleError::IpcError(format!("Failed to send response: {e}"))
                     })?;
                 }
             }
