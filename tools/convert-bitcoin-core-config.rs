@@ -237,7 +237,7 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &std::path::Path
     // Network configuration
     toml.push_str("[network]\n");
     if let Some(ref network) = config.network {
-        toml.push_str(&format!("protocol_version = \"{}\"\n", network));
+        toml.push_str(&format!("protocol_version = \"{network}\"\n"));
     }
 
     // Listen address
@@ -249,7 +249,7 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &std::path::Path
         } else {
             "8333"
         };
-        toml.push_str(&format!("listen_addr = \"{}:{}\"\n", bind, port));
+        toml.push_str(&format!("listen_addr = \"{bind}:{port}\"\n"));
     } else if config.listen {
         let port = if config.testnet {
             "18333"
@@ -258,12 +258,12 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &std::path::Path
         } else {
             "8333"
         };
-        toml.push_str(&format!("listen_addr = \"0.0.0.0:{}\"\n", port));
+        toml.push_str(&format!("listen_addr = \"0.0.0.0:{port}\"\n"));
     }
 
     // Max peers
     if let Some(max) = config.max_connections {
-        toml.push_str(&format!("max_peers = {}\n", max));
+        toml.push_str(&format!("max_peers = {max}\n"));
     }
 
     // Persistent peers
@@ -284,11 +284,11 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &std::path::Path
                 } else {
                     "8333"
                 };
-                format!("{}:{}", peer, port)
+                format!("{peer}:{port}")
             } else {
                 peer.clone()
             };
-            toml.push_str(&format!("  \"{}\",\n", peer_with_port));
+            toml.push_str(&format!("  \"{peer_with_port}\",\n"));
         }
         toml.push_str("]\n");
     }
@@ -299,29 +299,29 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &std::path::Path
         toml.push_str("[rpc_auth]\n");
 
         if let Some(port) = config.rpc_port {
-            toml.push_str(&format!("port = {}\n", port));
+            toml.push_str(&format!("port = {port}\n"));
         }
 
         if let Some(ref bind) = config.rpc_bind {
-            toml.push_str(&format!("bind = \"{}\"\n", bind));
+            toml.push_str(&format!("bind = \"{bind}\"\n"));
         }
 
         if let (Some(ref user), Some(ref password)) = (&config.rpc_user, &config.rpc_password) {
             toml.push_str("# Basic auth (user/password)\n");
-            toml.push_str(&format!("username = \"{}\"\n", user));
-            toml.push_str(&format!("password = \"{}\"\n", password));
+            toml.push_str(&format!("username = \"{user}\"\n"));
+            toml.push_str(&format!("password = \"{password}\"\n"));
         } else if !config.rpc_auth.is_empty() {
             toml.push_str("# RPC auth (rpcauth format)\n");
             toml.push_str("# Note: rpcauth format needs manual conversion\n");
             for auth in &config.rpc_auth {
-                toml.push_str(&format!("# Original: rpcauth={}\n", auth));
+                toml.push_str(&format!("# Original: rpcauth={auth}\n"));
             }
         }
 
         if !config.rpc_allowip.is_empty() {
             toml.push_str("allowed_ips = [\n");
             for ip in &config.rpc_allowip {
-                toml.push_str(&format!("  \"{}\",\n", ip));
+                toml.push_str(&format!("  \"{ip}\",\n"));
             }
             toml.push_str("]\n");
         }
@@ -338,7 +338,7 @@ fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &std::path::Path
     toml.push('\n');
     toml.push_str("[network_timing]\n");
     if let Some(max) = config.max_connections {
-        toml.push_str(&format!("target_peer_count = {}\n", max));
+        toml.push_str(&format!("target_peer_count = {max}\n"));
     } else {
         toml.push_str("target_peer_count = 8\n");
     }
