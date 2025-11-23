@@ -176,8 +176,7 @@ impl ManifestValidator {
             // Validate dependency version format (can be version range)
             if !self.is_valid_version_or_range(dep_version) {
                 errors.push(format!(
-                    "Invalid dependency version format: {} (for dependency: {})",
-                    dep_version, dep_name
+                    "Invalid dependency version format: {dep_version} (for dependency: {dep_name})"
                 ));
             }
         }

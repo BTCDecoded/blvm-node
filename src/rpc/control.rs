@@ -202,8 +202,7 @@ impl ControlRpc {
                 Ok(json!(""))
             }
             _ => Err(RpcError::invalid_params(format!(
-                "Invalid mode: {}. Must be 'stats' or 'mallocinfo'",
-                mode
+                "Invalid mode: {mode}. Must be 'stats' or 'mallocinfo'"
             ))),
         }
     }

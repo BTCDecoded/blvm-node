@@ -148,14 +148,12 @@ impl RawTxRpc {
                 }
                 Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => {
                     return Err(RpcError::invalid_params(format!(
-                        "Transaction validation failed: {}",
-                        reason
+                        "Transaction validation failed: {reason}"
                     )));
                 }
                 Err(e) => {
                     return Err(RpcError::internal_error(format!(
-                        "Transaction validation error: {}",
-                        e
+                        "Transaction validation error: {e}"
                     )));
                 }
             }

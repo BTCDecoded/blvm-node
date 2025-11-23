@@ -765,10 +765,7 @@ impl BlockchainRpc {
                                 // For now, just continue
                             }
                             Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => {
-                                errors.push(format!(
-                                    "Block at height {} invalid: {}",
-                                    height, reason
-                                ));
+                                errors.push(format!("Block at height {height} invalid: {reason}"));
                                 if check_level >= 4 {
                                     // Level 4: Stop on first error
                                     break;
@@ -776,8 +773,7 @@ impl BlockchainRpc {
                             }
                             Err(e) => {
                                 errors.push(format!(
-                                    "Block at height {} validation error: {}",
-                                    height, e
+                                    "Block at height {height} validation error: {e}"
                                 ));
                                 if check_level >= 4 {
                                     break;
@@ -812,8 +808,7 @@ impl BlockchainRpc {
                             {
                                 if calculated_root != block.header.merkle_root {
                                     errors.push(format!(
-                                        "Block at height {} has incorrect merkle root",
-                                        height
+                                        "Block at height {height} has incorrect merkle root"
                                     ));
                                     if check_level >= 4 {
                                         break;

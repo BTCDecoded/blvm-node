@@ -790,10 +790,7 @@ impl RpcServer {
                     }
                     None => "null".to_string(),
                 };
-                format!(
-                    r#"{{"jsonrpc":"2.0","result":{},"id":{}}}"#,
-                    response_str, id_str
-                )
+                format!(r#"{{"jsonrpc":"2.0","result":{response_str},"id":{id_str}}}"#)
             }
             Err(e) => {
                 serde_json::to_string(&e.to_json(id.cloned())).unwrap_or_else(|_| "{}".to_string())

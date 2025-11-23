@@ -200,8 +200,7 @@ impl MempoolRpc {
             // Arc implements Deref, so we can call methods directly
             if let Err(e) = mempool.save_to_disk(&mempool_path) {
                 return Err(crate::rpc::errors::RpcError::internal_error(format!(
-                    "Failed to save mempool: {}",
-                    e
+                    "Failed to save mempool: {e}"
                 )));
             }
 
@@ -475,8 +474,7 @@ impl MempoolRpc {
                 }))
             } else {
                 Err(crate::rpc::errors::RpcError::invalid_params(format!(
-                    "Transaction {} not found in mempool",
-                    txid
+                    "Transaction {txid} not found in mempool"
                 )))
             }
         } else {

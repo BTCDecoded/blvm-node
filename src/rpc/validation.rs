@@ -122,8 +122,7 @@ where
     if let Some(min_val) = min {
         if typed_value < min_val {
             return Err(RpcError::invalid_params(format!(
-                "{} must be >= {}, got {}",
-                param_name, min_val, typed_value
+                "{param_name} must be >= {min_val}, got {typed_value}"
             )));
         }
     }
@@ -131,8 +130,7 @@ where
     if let Some(max_val) = max {
         if typed_value > max_val {
             return Err(RpcError::invalid_params(format!(
-                "{} must be <= {}, got {}",
-                param_name, max_val, typed_value
+                "{param_name} must be <= {max_val}, got {typed_value}"
             )));
         }
     }
@@ -161,8 +159,7 @@ where
         if let Some(min_val) = min {
             if typed_value < min_val {
                 return Err(RpcError::invalid_params(format!(
-                    "{} must be >= {}",
-                    param_name, min_val
+                    "{param_name} must be >= {min_val}"
                 )));
             }
         }
@@ -170,8 +167,7 @@ where
         if let Some(max_val) = max {
             if typed_value > max_val {
                 return Err(RpcError::invalid_params(format!(
-                    "{} must be <= {}",
-                    param_name, max_val
+                    "{param_name} must be <= {max_val}"
                 )));
             }
         }

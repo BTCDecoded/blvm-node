@@ -218,8 +218,7 @@ impl MiningRpc {
             Err(e) => {
                 warn!("Failed to create block template: {}", e);
                 return Err(RpcError::internal_error(format!(
-                    "Template creation failed: {}",
-                    e
+                    "Template creation failed: {e}"
                 )));
             }
         };
@@ -660,10 +659,9 @@ impl MiningRpc {
                 debug!("Block submitted successfully");
                 Ok(Value::Null)
             }
-            Ok((ValidationResult::Invalid(reason), _)) => Err(RpcError::invalid_params(format!(
-                "Invalid block: {}",
-                reason
-            ))),
+            Ok((ValidationResult::Invalid(reason), _)) => {
+                Err(RpcError::invalid_params(format!("Invalid block: {reason}")))
+            }
             Err(e) => Err(RpcError::internal_error(format!("Validation error: {e}"))),
         }
     }
@@ -686,8 +684,7 @@ impl MiningRpc {
             "unset" | "economical" | "conservative" => {}
             _ => {
                 return Err(RpcError::invalid_params(format!(
-                    "Invalid estimate_mode: {}. Must be 'unset', 'economical', or 'conservative'",
-                    estimate_mode
+                    "Invalid estimate_mode: {estimate_mode}. Must be 'unset', 'economical', or 'conservative'"
                 )))
             }
         }
@@ -783,8 +780,7 @@ impl MiningRpc {
                 Ok(json!(true))
             } else {
                 Err(RpcError::invalid_params(format!(
-                    "Transaction {} not found in mempool",
-                    txid
+                    "Transaction {txid} not found in mempool"
                 )))
             }
         } else {

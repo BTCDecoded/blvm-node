@@ -167,8 +167,7 @@ impl PermissionChecker {
                 module_id, payload, required_permission
             );
             return Err(ModuleError::OperationError(format!(
-                "Permission denied: module {} does not have permission {:?}",
-                module_id, required_permission
+                "Permission denied: module {module_id} does not have permission {required_permission:?}"
             )));
         }
 

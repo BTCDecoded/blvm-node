@@ -231,24 +231,21 @@ impl NetworkRpc {
                     // Try to connect to node once
                     if let Err(e) = network.connect_to_peer(addr).await {
                         return Err(RpcError::internal_error(format!(
-                            "Failed to connect to {}: {}",
-                            addr, e
+                            "Failed to connect to {addr}: {e}"
                         )));
                     }
                     debug!("Connected to node {} (onetry)", addr);
                     Ok(Value::Null)
                 }
                 _ => Err(RpcError::invalid_params(format!(
-                    "Invalid command: {}. Must be 'add', 'remove', or 'onetry'",
-                    command
+                    "Invalid command: {command}. Must be 'add', 'remove', or 'onetry'"
                 ))),
             }
         } else {
             match command {
                 "add" | "remove" | "onetry" => Ok(Value::Null),
                 _ => Err(RpcError::invalid_params(format!(
-                    "Invalid command: {}. Must be 'add', 'remove', or 'onetry'",
-                    command
+                    "Invalid command: {command}. Must be 'add', 'remove', or 'onetry'"
                 ))),
             }
         }
@@ -420,16 +417,14 @@ impl NetworkRpc {
                     Ok(Value::Null)
                 }
                 _ => Err(RpcError::invalid_params(format!(
-                    "Invalid command: {}. Must be 'add' or 'remove'",
-                    command
+                    "Invalid command: {command}. Must be 'add' or 'remove'"
                 ))),
             }
         } else {
             match command {
                 "add" | "remove" => Ok(json!(null)),
                 _ => Err(RpcError::invalid_params(format!(
-                    "Invalid command: {}. Must be 'add' or 'remove'",
-                    command
+                    "Invalid command: {command}. Must be 'add' or 'remove'"
                 ))),
             }
         }
