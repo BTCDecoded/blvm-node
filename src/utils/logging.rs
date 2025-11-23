@@ -188,9 +188,7 @@ pub fn init_json_logging(filter: Option<&str>) {
     tracing_subscriber::registry()
         .with(
             fmt::layer()
-                .with_target(true) // Include module path in JSON
-                .with_current_span(true) // Include current span context
-                .with_span_list(true), // Include span list for full context
+                .with_target(true), // Include module path in JSON
         )
         .with(env_filter)
         .init();

@@ -313,10 +313,10 @@ impl PruningManager {
                     self.prune_aggressive(
                         prune_to_height,
                         current_height,
-                        keep_from_height,
-                        keep_commitments,
-                        keep_filtered_blocks,
-                        min_blocks,
+                        *keep_from_height,
+                        *keep_commitments,
+                        *keep_filtered_blocks,
+                        *min_blocks,
                     )?
                 }
                 #[cfg(not(feature = "utxo-commitments"))]
