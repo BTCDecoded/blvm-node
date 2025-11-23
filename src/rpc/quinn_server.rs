@@ -8,8 +8,6 @@ use anyhow::Result;
 #[cfg(feature = "quinn")]
 use std::net::SocketAddr;
 #[cfg(feature = "quinn")]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(feature = "quinn")]
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "quinn")]

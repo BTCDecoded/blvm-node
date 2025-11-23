@@ -199,7 +199,7 @@ impl RelayManager {
         let dandelion = self.dandelion.as_mut().unwrap();
 
         // Check if already in stem phase
-        if let Some(next_peer) = dandelion.get_stem_peer(&tx_hash) {
+        if let Some(_next_peer) = dandelion.get_stem_peer(&tx_hash) {
             // Already in stem phase, advance
             if dandelion.should_fluff(&tx_hash) {
                 dandelion.transition_to_fluff(tx_hash);

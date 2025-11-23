@@ -253,8 +253,6 @@ impl StratumV2Server {
         connection: &MinerConnection,
         msg: &NewMiningJobMessage,
     ) -> StratumV2Result<()> {
-        use crate::network::transport::TransportConnection;
-
         // Extract channel ID from message
         let channel_id = Some(msg.channel_id);
 

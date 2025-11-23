@@ -17,8 +17,6 @@ use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey};
 #[cfg(feature = "iroh")]
 use std::net::SocketAddr;
 #[cfg(feature = "iroh")]
-use tokio::io::AsyncReadExt;
-#[cfg(feature = "iroh")]
 use tracing::{debug, info};
 
 /// Iroh transport implementation

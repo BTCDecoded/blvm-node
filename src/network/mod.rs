@@ -901,7 +901,7 @@ impl NetworkManager {
 
         // Start listening on TCP if allowed
         if self.transport_preference.allows_tcp() {
-            let mut tcp_listener = self.tcp_transport.listen(listen_addr).await?;
+            let tcp_listener = self.tcp_transport.listen(listen_addr).await?;
             info!("TCP listener started on {}", listen_addr);
 
             // Start TCP accept loop
@@ -915,83 +915,97 @@ impl NetworkManager {
                     match tcp_listener.accept().await {
                         Ok((conn, transport_addr)) => {
                             // Extract SocketAddr from TransportAddr::Tcp
-                            let TransportAddr::Tcp(socket_addr) = transport_addr;
-                            info!("New TCP connection from {:?}", socket_addr);
+                            // In TCP listener context, we should only get TCP addresses
+                            if let TransportAddr::Tcp(socket_addr) = transport_addr {
+                                info!("New TCP connection from {:?}", socket_addr);
 
-                            // Check DoS protection: connection rate limiting
-                            let ip = socket_addr.ip();
-                            if !dos_protection.check_connection(ip).await {
-                                warn!("Connection rate limit exceeded for IP {}, rejecting connection", ip);
+                                // Check DoS protection: connection rate limiting
+                                let ip = socket_addr.ip();
+                                if !dos_protection.check_connection(ip).await {
+                                    warn!("Connection rate limit exceeded for IP {}, rejecting connection", ip);
 
-                                // Check if we should auto-ban
-                                if dos_protection.should_auto_ban(ip).await {
-                                    warn!("Auto-banning IP {} for repeated connection rate violations", ip);
-                                    // Auto-ban the IP using configured ban duration
-                                    let ban_duration = dos_protection.ban_duration_seconds();
-                                    let unban_timestamp = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs()
-                                        + ban_duration;
-                                    let mut ban_list_guard = ban_list.write().await;
-                                    ban_list_guard.insert(socket_addr, unban_timestamp);
+                                    // Check if we should auto-ban
+                                    if dos_protection.should_auto_ban(ip).await {
+                                        warn!("Auto-banning IP {} for repeated connection rate violations", ip);
+                                        // Auto-ban the IP using configured ban duration
+                                        let ban_duration = dos_protection.ban_duration_seconds();
+                                        let unban_timestamp = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs()
+                                            + ban_duration;
+                                        let mut ban_list_guard = ban_list.write().await;
+                                        ban_list_guard.insert(socket_addr, unban_timestamp);
+                                    }
+
+                                    // Close connection immediately
+                                    drop(conn);
+                                    continue;
                                 }
 
-                                // Close connection immediately
-                                drop(conn);
-                                continue;
-                            }
+                                // Check active connection limit
+                                let current_connections = {
+                                    let pm = peer_manager_clone.lock().await;
+                                    pm.peer_count()
+                                };
+                                if !dos_protection
+                                    .check_active_connections(current_connections)
+                                    .await
+                                {
+                                    warn!("Active connection limit exceeded, rejecting connection from {}", socket_addr);
+                                    drop(conn);
+                                    continue;
+                                }
 
-                            // Check active connection limit
-                            let current_connections = {
-                                let pm = peer_manager_clone.lock().await;
-                                pm.peer_count()
-                            };
-                            if !dos_protection
-                                .check_active_connections(current_connections)
-                                .await
-                            {
-                                warn!("Active connection limit exceeded, rejecting connection from {}", socket_addr);
-                                drop(conn);
-                                continue;
-                            }
+                                // Send connection notification
+                                let transport_addr_tcp = TransportAddr::Tcp(socket_addr);
+                                let _ = peer_tx.send(NetworkMessage::PeerConnected(
+                                    transport_addr_tcp.clone(),
+                                ));
 
-                            // Send connection notification
-                            let _ =
-                                peer_tx.send(NetworkMessage::PeerConnected(transport_addr.clone()));
-
-                            // Handle connection in background with graceful error handling
-                            let peer_tx_clone = peer_tx.clone();
-                            use crate::utils::arc_clone;
-                            let peer_manager_for_peer = arc_clone(&peer_manager_clone);
-                            let transport_addr_for_peer = transport_addr.clone();
-                            tokio::spawn(async move {
-                                // Create peer from transport connection
-                                let peer = peer::Peer::from_transport_connection(
-                                    conn,
-                                    socket_addr,
-                                    transport_addr_for_peer.clone(),
-                                    peer_tx_clone.clone(),
-                                );
-
-                                // Add peer to manager (async-safe)
-                                let mut pm = peer_manager_for_peer.lock().await;
-                                if let Err(e) = pm.add_peer(transport_addr_for_peer.clone(), peer) {
-                                    warn!("Failed to add peer {}: {}", socket_addr, e);
-                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                // Handle connection in background with graceful error handling
+                                let peer_tx_clone = peer_tx.clone();
+                                use crate::utils::arc_clone;
+                                let peer_manager_for_peer = arc_clone(&peer_manager_clone);
+                                let transport_addr_for_peer = transport_addr_tcp;
+                                tokio::spawn(async move {
+                                    // Create peer from transport connection
+                                    let peer = peer::Peer::from_transport_connection(
+                                        conn,
+                                        socket_addr,
                                         transport_addr_for_peer.clone(),
-                                    ));
-                                    return;
-                                }
-                                info!(
-                                    "Successfully added peer {} (transport: {:?})",
-                                    socket_addr, transport_addr_for_peer
-                                );
-                                drop(pm); // Explicitly drop lock before continuing
+                                        peer_tx_clone.clone(),
+                                    );
 
-                                // Connection will be cleaned up automatically when read/write tasks exit
-                                // Peer removal happens in process_messages when PeerDisconnected is received
-                            });
+                                    // Add peer to manager (async-safe)
+                                    let mut pm = peer_manager_for_peer.lock().await;
+                                    if let Err(e) =
+                                        pm.add_peer(transport_addr_for_peer.clone(), peer)
+                                    {
+                                        warn!("Failed to add peer {}: {}", socket_addr, e);
+                                        let _ =
+                                            peer_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                                transport_addr_for_peer.clone(),
+                                            ));
+                                        return;
+                                    }
+                                    info!(
+                                        "Successfully added peer {} (transport: {:?})",
+                                        socket_addr, transport_addr_for_peer
+                                    );
+                                    drop(pm); // Explicitly drop lock before continuing
+
+                                    // Connection will be cleaned up automatically when read/write tasks exit
+                                    // Peer removal happens in process_messages when PeerDisconnected is received
+                                });
+                            } else {
+                                // Non-TCP transport address in TCP listener context (shouldn't happen)
+                                warn!(
+                                    "Received non-TCP transport address in TCP listener: {:?}",
+                                    transport_addr
+                                );
+                                drop(conn);
+                            }
                         }
                         Err(e) => {
                             error!("Failed to accept TCP connection: {}", e);
