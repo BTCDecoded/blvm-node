@@ -64,15 +64,13 @@ pub fn validate_hex_string_param(
     // Validate hex format (even length, valid hex chars)
     if hex_string.len() % 2 != 0 {
         return Err(RpcError::invalid_params(format!(
-            "{} must be even-length hex string",
-            param_name
+            "{param_name} must be even-length hex string"
         )));
     }
 
     if !hex_string.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(RpcError::invalid_params(format!(
-            "{} contains invalid hex characters",
-            param_name
+            "{param_name} contains invalid hex characters"
         )));
     }
 
