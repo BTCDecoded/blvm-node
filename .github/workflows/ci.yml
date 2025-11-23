@@ -809,27 +809,52 @@ jobs:
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             echo "Checking if ${CRATE_NAME} v${VERSION} already exists on crates.io..."
             
-            # Use crates.io API to check if version exists
-            API_RESPONSE=$(curl -s --max-time 10 "https://crates.io/api/v1/crates/${CRATE_NAME}/versions" 2>/dev/null || echo "")
+            # Update cargo index first to ensure we have latest data
+            cargo update --dry-run 2>/dev/null || true
             
             VERSION_EXISTS="false"
-            if [ -n "$API_RESPONSE" ] && ! echo "$API_RESPONSE" | grep -q '"detail"'; then
-              # Parse JSON to check if version exists
-              if command -v jq &> /dev/null; then
-                EXISTS_CHECK=$(echo "$API_RESPONSE" | jq -r ".versions[] | select(.num == \"${VERSION}\") | .num" | head -1)
-                if [ "$EXISTS_CHECK" = "$VERSION" ]; then
-                  VERSION_EXISTS="true"
-                fi
-              else
-                # Fallback: grep for version in JSON
-                if echo "$API_RESPONSE" | grep -q "\"num\":\"${VERSION}\""; then
-                  VERSION_EXISTS="true"
+            
+            # Method 1: Check using cargo search with updated index (most reliable for cargo's view)
+            CARGO_SEARCH_OUTPUT=$(cargo search "$CRATE_NAME" --limit 100 2>/dev/null || echo "")
+            if echo "$CARGO_SEARCH_OUTPUT" | grep -qE "\"${CRATE_NAME}\".*\"${VERSION}\""; then
+              VERSION_EXISTS="true"
+              echo "Found via cargo search (with updated index)"
+            else
+              # Method 2: Check using crates.io API
+              API_RESPONSE=$(curl -s --max-time 10 "https://crates.io/api/v1/crates/${CRATE_NAME}/versions" 2>/dev/null || echo "")
+              
+              if [ -n "$API_RESPONSE" ] && ! echo "$API_RESPONSE" | grep -q '"detail"'; then
+                # Parse JSON to check if version exists
+                if command -v jq &> /dev/null; then
+                  EXISTS_CHECK=$(echo "$API_RESPONSE" | jq -r ".versions[] | select(.num == \"${VERSION}\") | .num" | head -1)
+                  if [ "$EXISTS_CHECK" = "$VERSION" ]; then
+                    VERSION_EXISTS="true"
+                    echo "Found via crates.io API"
+                  fi
+                else
+                  # Fallback: grep for version in JSON
+                  if echo "$API_RESPONSE" | grep -q "\"num\":\"${VERSION}\""; then
+                    VERSION_EXISTS="true"
+                    echo "Found via crates.io API (grep)"
+                  fi
                 fi
               fi
-            else
-              # Fallback to cargo search if API fails
-              if cargo search "$CRATE_NAME" --limit 100 2>/dev/null | grep -qE "\"${CRATE_NAME}\".*\"${VERSION}\""; then
-                VERSION_EXISTS="true"
+              
+              # Method 3: If still not found, try a temporary Cargo.toml update and dry-run check
+              # This uses cargo's index directly (same as cargo publish)
+              if [ "$VERSION_EXISTS" = "false" ]; then
+                # Save original Cargo.toml
+                cp Cargo.toml Cargo.toml.bak
+                # Temporarily update version for dry-run check
+                sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+                DRY_RUN_OUTPUT=$(cargo publish --dry-run --allow-dirty 2>&1 || true)
+                # Restore original Cargo.toml
+                mv Cargo.toml.bak Cargo.toml
+                
+                if echo "$DRY_RUN_OUTPUT" | grep -qiE "(already exists|already been uploaded|already exists on crates.io)"; then
+                  VERSION_EXISTS="true"
+                  echo "Found via cargo publish dry-run (cargo index check)"
+                fi
               fi
             fi
             
