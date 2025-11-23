@@ -72,9 +72,7 @@ impl RawTxRpc {
         let tx_bytes = hex::decode(&hex_string)
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
-        if let (Some(storage), Some(mempool)) =
-            (self.storage.as_ref(), self.mempool.as_ref())
-        {
+        if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
             use bllvm_protocol::serialization::transaction::deserialize_transaction;
             let tx = deserialize_transaction(&tx_bytes).map_err(|e| {
                 RpcError::invalid_params(format!("Failed to parse transaction: {e}"))

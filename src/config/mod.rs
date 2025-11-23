@@ -432,8 +432,7 @@ impl Default for NodeConfig {
 }
 
 /// Fee forwarding configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeeForwardingConfig {
     /// Enable fee forwarding to Commons address
     #[serde(default = "default_false")]
@@ -457,7 +456,6 @@ fn default_false() -> bool {
 fn default_fee_forwarding_percentage() -> u8 {
     0 // Default: no forwarding (opt-in)
 }
-
 
 /// Ban list sharing configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1268,8 +1266,7 @@ impl Default for PeerRateLimitingConfig {
 pub use crate::zmq::ZmqConfig;
 
 /// Logging configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LoggingConfig {
     /// Log level filter (e.g., "info", "debug", "bllvm_node=debug,network=trace")
     /// If not set, uses RUST_LOG environment variable or defaults to "info"
@@ -1280,4 +1277,3 @@ pub struct LoggingConfig {
     #[serde(default)]
     pub json_format: bool,
 }
-

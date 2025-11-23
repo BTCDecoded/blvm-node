@@ -1481,7 +1481,9 @@ impl NetworkManager {
                             for ip in ips_to_ban {
                                 // Convert IpAddr to SocketAddr (use port 0 as placeholder)
                                 let socket_addr = std::net::SocketAddr::new(ip, 0);
-                                if let std::collections::hash_map::Entry::Vacant(e) = ban_list_guard.entry(socket_addr) {
+                                if let std::collections::hash_map::Entry::Vacant(e) =
+                                    ban_list_guard.entry(socket_addr)
+                                {
                                     e.insert(unban_timestamp);
                                     warn!("Auto-banned IP {} for connection rate violations (unban at {})", ip, unban_timestamp);
                                 }

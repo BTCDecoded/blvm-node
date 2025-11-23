@@ -85,10 +85,7 @@ impl ModuleDependencies {
         // Build reverse graph and calculate in-degrees
         for (module, deps) in dependencies {
             for dep in deps {
-                graph
-                    .entry(dep.clone())
-                    .or_default()
-                    .push(module.clone());
+                graph.entry(dep.clone()).or_default().push(module.clone());
                 *in_degree.get_mut(module).unwrap() += 1;
             }
         }

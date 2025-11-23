@@ -27,6 +27,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// Allow dead code - many fields/functions are part of the API or for future use
+#[allow(dead_code)]
 pub mod bip21;
 pub mod config;
 #[cfg(feature = "governance")]
