@@ -11,7 +11,8 @@
 #[cfg(kani)]
 mod kani_proofs {
     use crate::storage::kani_helpers::kani_mocks::MockDatabase;
-    use crate::storage::kani_helpers::{proof_limits, unwind_bounds};
+    use crate::storage::kani_helpers::proof_limits;
+    use crate::storage::kani_helpers::unwind_bounds;
     use crate::storage::utxostore::UtxoStore;
     use bllvm_protocol::{OutPoint, UTXO};
     use kani::*;
