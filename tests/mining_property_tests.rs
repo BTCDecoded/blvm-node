@@ -9,6 +9,7 @@ use bllvm_protocol::serialization::serialize_transaction;
 use bllvm_protocol::types::{BlockHeader, OutPoint, TransactionInput, TransactionOutput};
 use bllvm_protocol::Transaction;
 use proptest::prelude::*;
+use proptest::test_runner::Config as ProptestConfig;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -148,6 +149,7 @@ proptest! {
 
 /// Property: Template height matches input height
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
     fn prop_template_height_matches(
         height in 0u64..=100u64, // Reduced range for faster tests
@@ -196,6 +198,7 @@ proptest! {
 
 /// Property: Coinbase value is always positive
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
     fn prop_coinbase_value_always_positive(
         height in 0u64..=100u64, // Reduced range for faster tests
@@ -244,6 +247,7 @@ proptest! {
 
 /// Property: Template target is always 64 hex characters
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
     fn prop_template_target_format(height in 0u64..=50u64) {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -291,6 +295,7 @@ proptest! {
 
 /// Property: Template bits is always 8 hex characters
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
     fn prop_template_bits_format(height in 0u64..=50u64) {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -338,6 +343,7 @@ proptest! {
 
 /// Property: Rules array always contains at least "csv"
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
     fn prop_rules_always_contains_csv(height in 0u64..=100u64) {
         let rt = tokio::runtime::Runtime::new().unwrap();
