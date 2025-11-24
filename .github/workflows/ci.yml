@@ -356,7 +356,7 @@ jobs:
           components: clippy
       
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --lib --bins -- -D warnings
 
   verify:
     name: Verify
