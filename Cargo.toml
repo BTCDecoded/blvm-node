@@ -23,7 +23,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 # Protocol abstraction layer - Use published crate from crates.io
 # This transitively provides bllvm-consensus, so we only need this one dependency
 # For local development, uncomment the [patch.crates-io] section below
-bllvm-protocol = "0.1.3"
+bllvm-protocol = { path = "../bllvm-protocol" }
 
 # Storage layer - EXACT VERSIONS for security
 sled = { version = "=0.34.7", optional = true }
