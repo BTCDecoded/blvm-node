@@ -1005,10 +1005,32 @@ jobs:
           sed -i 's|bllvm-protocol = { path = "\.\./bllvm-protocol"[^}]*}|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
           sed -i 's|^bllvm-protocol = "[^"]*"|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
           
+          # Remove [patch.crates-io] section entirely for releases (use published crates from crates.io)
+          # This ensures we use published versions, not local path dependencies
+          if grep -q "^\[patch\.crates-io\]" Cargo.toml; then
+            # Find the line numbers for the patch section
+            PATCH_START=$(grep -n "^\[patch\.crates-io\]" Cargo.toml | cut -d: -f1)
+            # Find the next section (starts with [)
+            NEXT_SECTION=$(awk -v start="$PATCH_START" 'NR > start && /^\[/ {print NR; exit}' Cargo.toml)
+            if [ -z "$NEXT_SECTION" ]; then
+              # No next section, remove to end of file
+              sed -i "${PATCH_START},\$d" Cargo.toml
+            else
+              # Remove up to (but not including) the next section
+              sed -i "${PATCH_START},$((NEXT_SECTION-1))d" Cargo.toml
+            fi
+            echo "✅ Removed [patch.crates-io] section - using published crates"
+          fi
+          
           echo "Updated Cargo.toml:"
           echo "  version: ${VERSION}"
           echo "  bllvm-protocol: ${PROTOCOL_VER}"
-          grep -E "^(version|bllvm-protocol)" Cargo.toml
+          echo ""
+          echo "Dependencies section:"
+          grep -A 2 "^\[dependencies\]" Cargo.toml | head -5
+          echo ""
+          echo "Patch section check:"
+          grep -A 5 "^\[patch\.crates-io\]" Cargo.toml || echo "  ✅ [patch.crates-io] removed - using published crates from crates.io"
       
       - name: Check for crates.io token
         run: |
