@@ -324,6 +324,9 @@ pub struct NodeConfig {
     /// Network relay configuration
     pub relay: Option<RelayConfig>,
 
+    /// FIBRE (Fast Internet Bitcoin Relay Engine) configuration
+    pub fibre: Option<bllvm_protocol::fibre::FibreConfig>,
+
     /// Address database configuration
     pub address_database: Option<AddressDatabaseConfig>,
 
@@ -416,6 +419,7 @@ impl Default for NodeConfig {
             enable_self_advertisement: true,
             dos_protection: None,
             relay: None,
+            fibre: None,
             address_database: None,
             #[cfg(feature = "dandelion")]
             dandelion: None,
