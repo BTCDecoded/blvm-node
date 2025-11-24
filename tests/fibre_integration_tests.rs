@@ -1,6 +1,6 @@
 //! Integration tests for FIBRE (Fast Internet Bitcoin Relay Engine)
 
-use bllvm_node::network::fibre::{FibreRelay, FibreError};
+use bllvm_node::network::fibre::{FibreError, FibreRelay};
 use bllvm_node::network::{NetworkManager, NetworkMessage};
 use bllvm_protocol::{Block, BlockHeader};
 use std::net::SocketAddr;
@@ -26,11 +26,11 @@ fn create_test_block() -> Block {
 async fn test_fibre_relay_encode_decode_cycle() {
     let mut relay = FibreRelay::new();
     let block = create_test_block();
-    
+
     // Encode block
     let encoded = relay.encode_block(block.clone()).unwrap();
     assert!(encoded.chunk_count > 0);
-    
+
     // Verify we can get it from cache
     let cached = relay.get_encoded_block(&encoded.block_hash);
     assert!(cached.is_some());
@@ -41,14 +41,14 @@ async fn test_fibre_relay_encode_decode_cycle() {
 async fn test_fibre_peer_registration() {
     let mut relay = FibreRelay::new();
     let udp_addr: SocketAddr = "127.0.0.1:8334".parse().unwrap();
-    
+
     relay.register_fibre_peer("peer1".to_string(), Some(udp_addr));
     relay.register_fibre_peer("peer2".to_string(), None);
-    
+
     assert!(relay.is_fibre_peer("peer1"));
     assert!(relay.is_fibre_peer("peer2"));
     assert!(!relay.is_fibre_peer("peer3"));
-    
+
     let peers = relay.get_fibre_peers();
     assert_eq!(peers.len(), 2);
 }
@@ -57,11 +57,11 @@ async fn test_fibre_peer_registration() {
 async fn test_fibre_block_assembly() {
     let mut relay = FibreRelay::new();
     let block = create_test_block();
-    
+
     // Encode block
     let encoded = relay.encode_block(block.clone()).unwrap();
     assert!(encoded.chunk_count > 0);
-    
+
     // Note: Full block assembly test requires access to chunks which are private
     // This is tested at the unit test level. Integration test verifies encoding works.
 }
@@ -69,8 +69,13 @@ async fn test_fibre_block_assembly() {
 #[tokio::test]
 async fn test_fibre_network_manager_integration() {
     let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let mut network = NetworkManager::with_config(listen_addr, 10, bllvm_node::network::transport::TransportPreference::TCP_ONLY, None);
-    
+    let mut network = NetworkManager::with_config(
+        listen_addr,
+        10,
+        bllvm_node::network::transport::TransportPreference::TCP_ONLY,
+        None,
+    );
+
     // Initialize FIBRE
     let config = bllvm_protocol::fibre::FibreConfig {
         enabled: true,
@@ -79,17 +84,17 @@ async fn test_fibre_network_manager_integration() {
         max_retries: 3,
         max_assemblies: 10,
     };
-    
+
     // Create a test config with FIBRE enabled
     let mut node_config = bllvm_node::config::NodeConfig::default();
     node_config.fibre = Some(config);
-    
+
     // Initialize FIBRE
     network.initialize_fibre(Some(&node_config)).await.unwrap();
-    
+
     // Verify FIBRE relay is initialized
     assert!(network.fibre_relay().is_some());
-    
+
     // Test block broadcasting
     let block = create_test_block();
     // This will fail if no peers, but that's okay for integration test
@@ -99,11 +104,11 @@ async fn test_fibre_network_manager_integration() {
 #[tokio::test]
 async fn test_fibre_chunk_serialization_roundtrip() {
     use bllvm_protocol::fibre::{FecChunk, FIBRE_MAGIC};
-    
+
     // Create chunk manually (since new() is not public, we'll use deserialize after creating raw data)
     let block_hash = [0x42; 32];
     let data = vec![1, 2, 3, 4, 5];
-    
+
     // Create a valid serialized chunk manually for testing
     let mut packet = Vec::new();
     packet.extend_from_slice(&FIBRE_MAGIC);
@@ -118,7 +123,7 @@ async fn test_fibre_chunk_serialization_roundtrip() {
     packet.extend_from_slice(&data);
     let checksum = crc32fast::hash(&packet);
     packet.extend_from_slice(&checksum.to_be_bytes());
-    
+
     // Deserialize
     let chunk = FecChunk::deserialize(&packet).unwrap();
     assert_eq!(chunk.index, 0);
@@ -127,9 +132,8 @@ async fn test_fibre_chunk_serialization_roundtrip() {
     assert_eq!(chunk.data, data);
     assert_eq!(chunk.block_hash, block_hash);
     assert_eq!(chunk.sequence, 12345);
-    
+
     // Serialize back
     let reserialized = chunk.serialize().unwrap();
     assert_eq!(reserialized, packet);
 }
-

@@ -523,25 +523,28 @@ impl NetworkManager {
         self.mempool_manager = Some(mempool_manager);
         self
     }
-    
+
     /// Initialize FIBRE relay (if enabled in config)
-    pub async fn initialize_fibre(&mut self, config: Option<&crate::config::NodeConfig>) -> Result<()> {
+    pub async fn initialize_fibre(
+        &mut self,
+        config: Option<&crate::config::NodeConfig>,
+    ) -> Result<()> {
         let default_config = bllvm_protocol::fibre::FibreConfig::default();
         let fibre_config = config
             .and_then(|c| c.fibre.as_ref())
             .unwrap_or(&default_config);
-        
+
         if !fibre_config.enabled {
             debug!("FIBRE relay disabled in configuration");
             return Ok(());
         }
-        
+
         // Create FIBRE relay
         let mut fibre_relay = fibre::FibreRelay::with_config(fibre_config.clone());
-        
+
         // Set message channel for assembled blocks
         fibre_relay.set_message_sender(self.peer_tx.clone());
-        
+
         // Initialize UDP transport (use listen_addr + 1 for UDP port, or default)
         let udp_addr = config
             .and_then(|c| c.listen_addr)
@@ -550,42 +553,49 @@ impl NetworkManager {
                 SocketAddr::new(addr.ip(), port)
             })
             .unwrap_or_else(|| "0.0.0.0:8334".parse().unwrap()); // Default FIBRE port
-        
+
         // Initialize UDP and start receiver
-        let chunk_rx = fibre_relay.initialize_udp(udp_addr).await
+        let chunk_rx = fibre_relay
+            .initialize_udp(udp_addr)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize FIBRE UDP: {}", e))?;
-        
+
         // Start chunk processor
         let fibre_relay_arc = Arc::new(Mutex::new(fibre_relay));
         fibre::start_chunk_processor(fibre_relay_arc.clone(), chunk_rx);
-        
+
         self.fibre_relay = Some(fibre_relay_arc);
-        
+
         info!("FIBRE relay initialized on UDP {}", udp_addr);
         Ok(())
     }
-    
+
     /// Get FIBRE relay (if initialized)
     pub fn fibre_relay(&self) -> Option<Arc<Mutex<fibre::FibreRelay>>> {
         self.fibre_relay.clone()
     }
-    
+
     /// Broadcast block via FIBRE to all FIBRE-capable peers
     pub async fn broadcast_block_via_fibre(&self, block: &bllvm_protocol::Block) -> Result<()> {
         if let Some(fibre_relay) = &self.fibre_relay {
             // Encode block (need to clone for encoding)
             let encoded = {
                 let mut relay = fibre_relay.lock().await;
-                relay.encode_block(block.clone())
+                relay
+                    .encode_block(block.clone())
                     .map_err(|e| anyhow::anyhow!("FIBRE encoding failed: {}", e))?
             };
-            
+
             // Get peer list and send (separate lock scope)
             let peer_ids: Vec<String> = {
                 let relay = fibre_relay.lock().await;
-                relay.get_fibre_peers().iter().map(|p| p.peer_id.clone()).collect()
+                relay
+                    .get_fibre_peers()
+                    .iter()
+                    .map(|p| p.peer_id.clone())
+                    .collect()
             };
-            
+
             // Send to all FIBRE peers
             for peer_id in peer_ids {
                 let mut relay = fibre_relay.lock().await;
@@ -595,7 +605,7 @@ impl NetworkManager {
                     debug!("Sent block via FIBRE to {}", peer_id);
                 }
             }
-            
+
             Ok(())
         } else {
             // FIBRE not initialized, skip
@@ -616,7 +626,7 @@ impl NetworkManager {
     pub fn transport_preference(&self) -> TransportPreference {
         self.transport_preference
     }
-    
+
     /// Get message channel sender (for FIBRE and other integrations)
     pub fn message_sender(&self) -> mpsc::UnboundedSender<NetworkMessage> {
         self.peer_tx.clone()
@@ -2685,15 +2695,19 @@ impl NetworkManager {
                     if let Some(fibre_relay) = &self.fibre_relay {
                         let mut relay = fibre_relay.lock().await;
                         // Use peer_addr as peer_id (could be improved with proper peer IDs)
-                        let peer_id = format!("{}", peer_addr);
+                        let peer_id = format!("{peer_addr}");
                         // UDP address is same IP, port + 1 (or use addr_from if available)
-                        let udp_addr = SocketAddr::new(peer_addr.ip(), peer_addr.port().saturating_add(1));
+                        let udp_addr =
+                            SocketAddr::new(peer_addr.ip(), peer_addr.port().saturating_add(1));
                         relay.register_fibre_peer(peer_id, Some(udp_addr));
-                        debug!("Registered FIBRE-capable peer: {} (UDP: {})", peer_addr, udp_addr);
+                        debug!(
+                            "Registered FIBRE-capable peer: {} (UDP: {})",
+                            peer_addr, udp_addr
+                        );
                     }
                 }
             }
-            
+
             // Process message with protocol layer - lock peer_states only during synchronous processing
             let response = {
                 let mut peer_states = self.peer_states.write().await;
