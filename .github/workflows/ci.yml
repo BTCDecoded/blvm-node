@@ -294,35 +294,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Checkout bllvm-protocol dependency
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/bllvm-protocol
-          path: _temp-protocol-engine
-      
-      - name: Checkout consensus
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/bllvm-consensus
-          path: _temp-consensus-proof
-      
-      - name: Move dependencies to parent directory
-        run: |
-          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
-          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
-          mv _temp-protocol-engine ../bllvm-protocol
-          mv _temp-consensus-proof ../bllvm-consensus
-      
-      - name: Setup local dependencies for build
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml << EOF
-          [patch.crates-io]
-          bllvm-protocol = { path = "../bllvm-protocol" }
-          bllvm-consensus = { path = "../bllvm-consensus" }
-          EOF
-          echo "✅ Created .cargo/config.toml for local dependency builds"
-      
       - name: Cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
@@ -724,46 +695,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Checkout bllvm-protocol dependency
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/bllvm-protocol
-          path: _temp-protocol-engine
-      
-      - name: Checkout consensus
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/bllvm-consensus
-          path: _temp-consensus-proof
-      
-      - name: Move dependencies to parent directory
-        run: |
-          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
-          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
-          mv _temp-protocol-engine ../bllvm-protocol
-          mv _temp-consensus-proof ../bllvm-consensus
-      
-      - name: Setup local dependencies for build
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml << EOF
-          [patch.crates-io]
-          bllvm-protocol = { path = "../bllvm-protocol" }
-          bllvm-consensus = { path = "../bllvm-consensus" }
-          EOF
-          echo "✅ Created .cargo/config.toml for local dependency builds"
-      
       - name: Cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
-          CONSENSUS_CACHE_KEY="${{ needs.setup.outputs.consensus-cache-key }}"
-          PROTOCOL_CACHE_KEY="${{ needs.setup.outputs.protocol-cache-key }}"
           
           echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
           echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
-          echo "CONSENSUS_TARGET_DIR=$CACHE_ROOT/bllvm-consensus-target/$CONSENSUS_CACHE_KEY" >> $GITHUB_ENV
-          echo "PROTOCOL_TARGET_DIR=$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY" >> $GITHUB_ENV
       
       - name: Restore registry
         run: |
@@ -777,20 +715,6 @@ jobs:
           if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
             mkdir -p "$HOME/.cargo/git"
             rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
-          fi
-      
-      - name: Restore consensus
-        run: |
-          if [ -d "$CONSENSUS_TARGET_DIR" ] && [ "$(ls -A $CONSENSUS_TARGET_DIR 2>/dev/null)" ]; then
-            mkdir -p ../bllvm-consensus/target
-            rsync -a --delete "$CONSENSUS_TARGET_DIR/" ../bllvm-consensus/target/ || true
-          fi
-      
-      - name: Restore bllvm-protocol build artifacts
-        run: |
-          if [ -d "$PROTOCOL_TARGET_DIR" ] && [ "$(ls -A $PROTOCOL_TARGET_DIR 2>/dev/null)" ]; then
-            mkdir -p ../bllvm-protocol/target
-            rsync -a --delete "$PROTOCOL_TARGET_DIR/" ../bllvm-protocol/target/ || true
           fi
       
       - name: Restore target
@@ -809,20 +733,6 @@ jobs:
       
       - name: Build tests
         run: cargo test --no-run --release --all-features
-      
-      - name: Cache consensus
-        if: always()
-        run: |
-          if [ -d "../bllvm-consensus/target" ] && [ "$CONSENSUS_TARGET_DIR" != "" ]; then
-            rsync -a --delete ../bllvm-consensus/target/ "$CONSENSUS_TARGET_DIR/" || true
-          fi
-      
-      - name: Cache bllvm-protocol build artifacts
-        if: always()
-        run: |
-          if [ -d "../bllvm-protocol/target" ] && [ "$PROTOCOL_TARGET_DIR" != "" ]; then
-            rsync -a --delete ../bllvm-protocol/target/ "$PROTOCOL_TARGET_DIR/" || true
-          fi
       
       - name: Cache target
         if: always()
