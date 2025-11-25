@@ -8,7 +8,9 @@
 #[cfg(feature = "dandelion")]
 use super::dandelion::DandelionRelay;
 use crate::utils::current_timestamp;
-use bllvm_protocol::{Block, Hash};
+use bllvm_protocol::Hash;
+#[cfg(feature = "fibre")]
+use bllvm_protocol::Block;
 use std::collections::HashMap;
 use tracing::debug;
 #[cfg(feature = "dandelion")]

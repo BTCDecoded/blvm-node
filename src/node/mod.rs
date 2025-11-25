@@ -359,29 +359,30 @@ impl Node {
             self.event_publisher = {
                 #[cfg(feature = "zmq")]
                 {
-                    let zmq_publisher =
-                        if let Some(zmq_config) = self.config.as_ref().and_then(|c| c.zmq.as_ref()) {
-                            if zmq_config.is_enabled() {
-                                match crate::zmq::ZmqPublisher::new(zmq_config) {
-                                    Ok(publisher) => {
-                                        info!("ZMQ publisher initialized");
-                                        Some(Arc::new(publisher))
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to initialize ZMQ publisher: {}", e);
-                                        None
-                                    }
+                    let zmq_publisher = if let Some(zmq_config) =
+                        self.config.as_ref().and_then(|c| c.zmq.as_ref())
+                    {
+                        if zmq_config.is_enabled() {
+                            match crate::zmq::ZmqPublisher::new(zmq_config) {
+                                Ok(publisher) => {
+                                    info!("ZMQ publisher initialized");
+                                    Some(Arc::new(publisher))
                                 }
-                            } else {
-                                debug!(
-                                    "ZMQ configured but no endpoints enabled - ZMQ publisher not initialized"
-                                );
-                                None
+                                Err(e) => {
+                                    warn!("Failed to initialize ZMQ publisher: {}", e);
+                                    None
+                                }
                             }
                         } else {
-                            debug!("No ZMQ configuration provided - ZMQ publisher not initialized");
+                            debug!(
+                                    "ZMQ configured but no endpoints enabled - ZMQ publisher not initialized"
+                                );
                             None
-                        };
+                        }
+                    } else {
+                        debug!("No ZMQ configuration provided - ZMQ publisher not initialized");
+                        None
+                    };
                     Some(EventPublisher::with_zmq(
                         Arc::clone(event_manager),
                         zmq_publisher,
