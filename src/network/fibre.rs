@@ -7,6 +7,9 @@ use bllvm_protocol::fibre::{
     FecChunk, FibreCapabilities, FibreConfig, FibreProtocolError, FIBRE_MAGIC,
 };
 use bllvm_protocol::{Block, Hash};
+
+// Re-export FibreConfig for use in config module
+pub use bllvm_protocol::fibre::FibreConfig;
 use reed_solomon_erasure::{galois_8::Field, ReedSolomon};
 use sha2::Digest;
 use std::collections::HashMap;
@@ -354,7 +357,7 @@ impl UdpTransport {
 
                 // Retry chunks
                 for (peer_addr, pending) in to_retry {
-                    let packet = match pending.chunk.serialize() {
+                    let packet: Vec<u8> = match pending.chunk.serialize() {
                         Ok(p) => p,
                         Err(e) => {
                             warn!(

@@ -2,6 +2,8 @@
 //!
 //! Handles configuration loading, validation, and transport selection.
 
+#[cfg(feature = "fibre")]
+use crate::network::fibre;
 use crate::network::transport::TransportPreference;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -326,7 +328,7 @@ pub struct NodeConfig {
 
     /// FIBRE (Fast Internet Bitcoin Relay Engine) configuration
     #[cfg(feature = "fibre")]
-    pub fibre: Option<bllvm_protocol::fibre::FibreConfig>,
+    pub fibre: Option<fibre::FibreConfig>,
 
     /// Address database configuration
     pub address_database: Option<AddressDatabaseConfig>,
