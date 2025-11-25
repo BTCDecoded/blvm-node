@@ -132,46 +132,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Checkout bllvm-protocol dependency
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/bllvm-protocol
-          path: _temp-protocol-engine
-      
-      - name: Checkout consensus
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/bllvm-consensus
-          path: _temp-consensus-proof
-      
-      - name: Move dependencies to parent directory
+      - name: Cleanup any leftover dependency directories
         run: |
+          # Remove any leftover dependency directories from previous jobs
           if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
-          mv _temp-protocol-engine ../bllvm-protocol
-          mv _temp-consensus-proof ../bllvm-consensus
-      
-      - name: Setup local dependencies for build
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml << EOF
-          [patch.crates-io]
-          bllvm-protocol = { path = "../bllvm-protocol" }
-          bllvm-consensus = { path = "../bllvm-consensus" }
-          EOF
-          echo "✅ Created .cargo/config.toml for local dependency builds"
+          # Also remove any .cargo/config.toml that might have been left behind
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
       
       - name: Cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           CACHE_KEY="${{ needs.setup.outputs.cache-key }}"
-          CONSENSUS_CACHE_KEY="${{ needs.setup.outputs.consensus-cache-key }}"
-          PROTOCOL_CACHE_KEY="${{ needs.setup.outputs.protocol-cache-key }}"
           
           echo "CARGO_CACHE_DIR=$CACHE_ROOT/cargo/$CACHE_KEY" >> $GITHUB_ENV
           echo "TARGET_CACHE_DIR=$CACHE_ROOT/target/$CACHE_KEY" >> $GITHUB_ENV
-          echo "CONSENSUS_TARGET_DIR=$CACHE_ROOT/bllvm-consensus-target/$CONSENSUS_CACHE_KEY" >> $GITHUB_ENV
-          echo "PROTOCOL_TARGET_DIR=$CACHE_ROOT/bllvm-protocol-target/$PROTOCOL_CACHE_KEY" >> $GITHUB_ENV
       
       - name: Restore registry
         run: |
