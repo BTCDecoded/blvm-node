@@ -1005,21 +1005,15 @@ jobs:
           sed -i 's|bllvm-protocol = { path = "\.\./bllvm-protocol"[^}]*}|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
           sed -i 's|^bllvm-protocol = "[^"]*"|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
           
-          # Remove [patch.crates-io] section entirely for releases (use published crates from crates.io)
-          # This ensures we use published versions, not local path dependencies
+          # Comment out [patch.crates-io] section for releases (use published crates from crates.io)
+          # Note: cargo publish automatically ignores patch sections, but we comment it out here
+          # to ensure the build works (local paths won't exist since we don't checkout repos)
           if grep -q "^\[patch\.crates-io\]" Cargo.toml; then
-            # Find the line numbers for the patch section
-            PATCH_START=$(grep -n "^\[patch\.crates-io\]" Cargo.toml | cut -d: -f1)
-            # Find the next section (starts with [)
-            NEXT_SECTION=$(awk -v start="$PATCH_START" 'NR > start && /^\[/ {print NR; exit}' Cargo.toml)
-            if [ -z "$NEXT_SECTION" ]; then
-              # No next section, remove to end of file
-              sed -i "${PATCH_START},\$d" Cargo.toml
-            else
-              # Remove up to (but not including) the next section
-              sed -i "${PATCH_START},$((NEXT_SECTION-1))d" Cargo.toml
-            fi
-            echo "✅ Removed [patch.crates-io] section - using published crates"
+            # Comment out the patch section header and entries
+            sed -i 's/^\[patch\.crates-io\]/# [patch.crates-io]  # Commented out for release - using published crates/' Cargo.toml
+            sed -i '/^bllvm-protocol = { path = "\.\.\/bllvm-protocol"/s/^/# /' Cargo.toml
+            sed -i '/^bllvm-consensus = { path = "\.\.\/bllvm-consensus"/s/^/# /' Cargo.toml
+            echo "✅ Commented out [patch.crates-io] section - using published crates"
           fi
           
           echo "Updated Cargo.toml:"
@@ -1030,7 +1024,7 @@ jobs:
           grep -A 2 "^\[dependencies\]" Cargo.toml | head -5
           echo ""
           echo "Patch section check:"
-          grep -A 5 "^\[patch\.crates-io\]" Cargo.toml || echo "  ✅ [patch.crates-io] removed - using published crates from crates.io"
+          grep -A 5 "^# \[patch\.crates-io\]" Cargo.toml || echo "  ✅ [patch.crates-io] commented out - using published crates from crates.io"
       
       - name: Check for crates.io token
         run: |
