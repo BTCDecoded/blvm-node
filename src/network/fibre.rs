@@ -2,6 +2,11 @@
 //!
 //! This module provides FIBRE transport implementation (UDP, FEC encoding, peer management).
 //! Protocol definitions (packet format, types) are in bllvm-protocol.
+//!
+//! Note: This entire module is gated behind the `fibre` feature flag.
+//! The `fibre` feature requires local dependencies (bllvm-protocol with fibre module).
+
+#![cfg(feature = "fibre")]
 
 use bllvm_protocol::fibre::{FecChunk, FibreCapabilities, FibreProtocolError, FIBRE_MAGIC};
 use bllvm_protocol::{Block, Hash};
