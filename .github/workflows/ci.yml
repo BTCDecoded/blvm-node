@@ -55,44 +55,27 @@ jobs:
 
       - uses: actions/checkout@v4
       
-      - name: Checkout bllvm-protocol dependency
+      - name: Checkout bllvm-protocol dependency (for cache key generation)
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-protocol
           path: _temp-protocol-engine
       
-      - name: Checkout consensus
+      - name: Checkout consensus (for cache key generation)
         uses: actions/checkout@v4
         with:
           repository: BTCDecoded/bllvm-consensus
           path: _temp-consensus-proof
-      
-      - name: Move dependencies to parent directory
-        run: |
-          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
-          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
-          mv _temp-protocol-engine ../bllvm-protocol
-          mv _temp-consensus-proof ../bllvm-consensus
-      
-      - name: Setup local dependencies for build
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml << EOF
-          [patch.crates-io]
-          bllvm-protocol = { path = "../bllvm-protocol" }
-          bllvm-consensus = { path = "../bllvm-consensus" }
-          EOF
-          echo "✅ Created .cargo/config.toml for local dependency builds"
       
       - name: Cache
         id: setup-cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           
-          # Generate cache keys from Cargo.lock hashes
+          # Generate cache keys from Cargo.lock hashes (using temp directories)
           DEPS_KEY=$(sha256sum Cargo.lock | cut -d' ' -f1)
-          CONSENSUS_DEPS_KEY=$(sha256sum ../bllvm-consensus/Cargo.lock | cut -d' ' -f1)
-          PROTOCOL_DEPS_KEY=$(sha256sum ../bllvm-protocol/Cargo.lock | cut -d' ' -f1)
+          CONSENSUS_DEPS_KEY=$(sha256sum _temp-consensus-proof/Cargo.lock | cut -d' ' -f1)
+          PROTOCOL_DEPS_KEY=$(sha256sum _temp-protocol-engine/Cargo.lock | cut -d' ' -f1)
           
           # Include toolchain version in cache key
           TOOLCHAIN=$(grep -E '^channel|rust-version' rust-toolchain.toml Cargo.toml 2>/dev/null | head -1 | sha256sum | cut -d' ' -f1 || echo "1.88.0")
@@ -117,6 +100,15 @@ jobs:
           echo "protocol-cache-key=$PROTOCOL_CACHE_KEY" >> $GITHUB_OUTPUT
           
           mkdir -p "$CARGO_CACHE_DIR"/{registry,git} "$TARGET_CACHE_DIR" "$CONSENSUS_TARGET_DIR" "$PROTOCOL_TARGET_DIR"
+      
+      - name: Cleanup temp dependencies
+        if: always()
+        run: |
+          # Remove temp directories to prevent them from being used by other jobs
+          rm -rf _temp-protocol-engine _temp-consensus-proof
+          # Also clean up any existing parent directory dependencies (from previous runs)
+          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
           
           echo "  - Main: ${CACHE_KEY:0:16}..."
           echo "  - Consensus: ${CONSENSUS_CACHE_KEY:0:16}..."
