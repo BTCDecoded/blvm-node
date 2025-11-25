@@ -199,24 +199,6 @@ jobs:
             echo "💿 No Cargo git cache found"
           fi
       
-      - name: Restore consensus
-        run: |
-          if [ -d "$CONSENSUS_TARGET_DIR" ] && [ "$(ls -A $CONSENSUS_TARGET_DIR 2>/dev/null)" ]; then
-            mkdir -p ../bllvm-consensus/target
-            rsync -a --delete "$CONSENSUS_TARGET_DIR/" ../bllvm-consensus/target/ || true
-          else
-            echo "💿 No bllvm-consensus target cache found"
-          fi
-      
-      - name: Restore bllvm-protocol build artifacts
-        run: |
-          if [ -d "$PROTOCOL_TARGET_DIR" ] && [ "$(ls -A $PROTOCOL_TARGET_DIR 2>/dev/null)" ]; then
-            mkdir -p ../bllvm-protocol/target
-            rsync -a --delete "$PROTOCOL_TARGET_DIR/" ../bllvm-protocol/target/ || true
-          else
-            echo "💿 No bllvm-protocol target cache found"
-          fi
-      
       - name: Restore target
         run: |
           if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
@@ -282,27 +264,12 @@ jobs:
             rsync -a --delete "$HOME/.cargo/git/" "$CARGO_CACHE_DIR/git/" || true
           fi
       
-      - name: Cache consensus
-        if: always()
-        run: |
-          if [ -d "../bllvm-consensus/target" ] && [ "$CONSENSUS_TARGET_DIR" != "" ]; then
-            rsync -a --delete ../bllvm-consensus/target/ "$CONSENSUS_TARGET_DIR/" || true
-          fi
-      
-      - name: Cache bllvm-protocol build artifacts
-        if: always()
-        run: |
-          if [ -d "../bllvm-protocol/target" ] && [ "$PROTOCOL_TARGET_DIR" != "" ]; then
-            rsync -a --delete ../bllvm-protocol/target/ "$PROTOCOL_TARGET_DIR/" || true
-          fi
-      
       - name: Cache target
         if: always()
         run: |
           if [ -d "./target" ] && [ "$TARGET_CACHE_DIR" != "" ]; then
             rsync -a --delete ./target/ "$TARGET_CACHE_DIR/" || true
           fi
-      
       
       - name: Cleanup
         if: always()
@@ -313,8 +280,6 @@ jobs:
           find "$CACHE_ROOT/cargo" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -5 | xargs rm -rf 2>/dev/null || true
           # Keep last 3 target caches (larger)
           find "$CACHE_ROOT/target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
-          find "$CACHE_ROOT/bllvm-consensus-target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
-          find "$CACHE_ROOT/bllvm-protocol-target" -maxdepth 1 -type d -mtime +1 2>/dev/null | head -n -3 | xargs rm -rf 2>/dev/null || true
 
   clippy:
     name: Clippy
