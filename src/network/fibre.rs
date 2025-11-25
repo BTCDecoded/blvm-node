@@ -3,9 +3,7 @@
 //! This module provides FIBRE transport implementation (UDP, FEC encoding, peer management).
 //! Protocol definitions (packet format, types) are in bllvm-protocol.
 
-use bllvm_protocol::fibre::{
-    FecChunk, FibreCapabilities, FibreConfig, FibreProtocolError, FIBRE_MAGIC,
-};
+use bllvm_protocol::fibre::{FecChunk, FibreCapabilities, FibreProtocolError, FIBRE_MAGIC};
 use bllvm_protocol::{Block, Hash};
 
 // Re-export FibreConfig for use in config module
