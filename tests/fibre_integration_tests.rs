@@ -1,5 +1,7 @@
 //! Integration tests for FIBRE (Fast Internet Bitcoin Relay Engine)
 
+#![cfg(feature = "fibre")]
+
 use bllvm_node::network::fibre::{FibreError, FibreRelay};
 use bllvm_node::network::{NetworkManager, NetworkMessage};
 use bllvm_protocol::{Block, BlockHeader};
