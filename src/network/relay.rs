@@ -269,6 +269,7 @@ impl RelayManager {
 
     /// Try to prioritize block relay via FIBRE (if available)
     /// Returns true if FIBRE encoding path executed (send is transport-dependent)
+    #[cfg(feature = "fibre")]
     pub fn prioritize_block_via_fibre(
         &mut self,
         fibre: &mut crate::network::fibre::FibreRelay,
@@ -361,9 +362,11 @@ pub struct RelayStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "fibre")]
     use crate::network::fibre::FibreRelay;
 
     #[test]
+    #[cfg(feature = "fibre")]
     fn test_prioritize_block_via_fibre_encodes() {
         let mut relay = RelayManager::new();
         let mut fibre = FibreRelay::new();

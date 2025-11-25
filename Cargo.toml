@@ -138,6 +138,8 @@ stratum-v2 = []
 bip158 = []
 # Signature operations counting
 sigop = []
+# FIBRE (Fast Internet Bitcoin Relay Engine) - requires bllvm-protocol with fibre module
+fibre = []
 # System information for memory stats
 sysinfo = ["dep:sysinfo"]
 # Storage backends
