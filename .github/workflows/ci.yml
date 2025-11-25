@@ -74,6 +74,16 @@ jobs:
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
       
+      - name: Setup local dependencies for build
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << EOF
+          [patch.crates-io]
+          bllvm-protocol = { path = "../bllvm-protocol" }
+          bllvm-consensus = { path = "../bllvm-consensus" }
+          EOF
+          echo "✅ Created .cargo/config.toml for local dependency builds"
+      
       - name: Cache
         id: setup-cache
         run: |
@@ -148,6 +158,16 @@ jobs:
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
+      
+      - name: Setup local dependencies for build
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << EOF
+          [patch.crates-io]
+          bllvm-protocol = { path = "../bllvm-protocol" }
+          bllvm-consensus = { path = "../bllvm-consensus" }
+          EOF
+          echo "✅ Created .cargo/config.toml for local dependency builds"
       
       - name: Cache
         run: |
@@ -328,6 +348,16 @@ jobs:
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
       
+      - name: Setup local dependencies for build
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << EOF
+          [patch.crates-io]
+          bllvm-protocol = { path = "../bllvm-protocol" }
+          bllvm-consensus = { path = "../bllvm-consensus" }
+          EOF
+          echo "✅ Created .cargo/config.toml for local dependency builds"
+      
       - name: Cache
         run: |
           CACHE_ROOT="/tmp/runner-cache"
@@ -390,6 +420,16 @@ jobs:
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
+      
+      - name: Setup local dependencies for build
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << EOF
+          [patch.crates-io]
+          bllvm-protocol = { path = "../bllvm-protocol" }
+          bllvm-consensus = { path = "../bllvm-consensus" }
+          EOF
+          echo "✅ Created .cargo/config.toml for local dependency builds"
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -737,6 +777,16 @@ jobs:
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
+      
+      - name: Setup local dependencies for build
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << EOF
+          [patch.crates-io]
+          bllvm-protocol = { path = "../bllvm-protocol" }
+          bllvm-consensus = { path = "../bllvm-consensus" }
+          EOF
+          echo "✅ Created .cargo/config.toml for local dependency builds"
       
       - name: Cache
         run: |
