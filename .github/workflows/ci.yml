@@ -992,39 +992,42 @@ jobs:
           echo "version=${PROTOCOL_VER}" >> $GITHUB_OUTPUT
           echo "Using bllvm-protocol version: ${PROTOCOL_VER}"
       
-      - name: Update Cargo.toml to use crates.io dependencies
+      - name: Prepare release Cargo.toml
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           PROTOCOL_VER="${{ steps.protocol-version.outputs.version }}"
           
-          # Update version
-          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          # Create a temporary Cargo.toml for release (don't modify source file)
+          cp Cargo.toml Cargo.toml.release
+          
+          # Update version in the release copy
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml.release
           
           # Update bllvm-protocol dependency to use latest crates.io version
-          # Handle both path dependencies (for backwards compatibility) and version strings
-          sed -i 's|bllvm-protocol = { path = "\.\./bllvm-protocol"[^}]*}|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
-          sed -i 's|^bllvm-protocol = "[^"]*"|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
+          sed -i 's|bllvm-protocol = { path = "\.\./bllvm-protocol"[^}]*}|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml.release
+          sed -i 's|^bllvm-protocol = "[^"]*"|bllvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml.release
           
-          # Comment out [patch.crates-io] section for releases (use published crates from crates.io)
-          # Note: cargo publish automatically ignores patch sections, but we comment it out here
-          # to ensure the build works (local paths won't exist since we don't checkout repos)
-          if grep -q "^\[patch\.crates-io\]" Cargo.toml; then
-            # Comment out the patch section header and entries
-            sed -i 's/^\[patch\.crates-io\]/# [patch.crates-io]  # Commented out for release - using published crates/' Cargo.toml
-            sed -i '/^bllvm-protocol = { path = "\.\.\/bllvm-protocol"/s/^/# /' Cargo.toml
-            sed -i '/^bllvm-consensus = { path = "\.\.\/bllvm-consensus"/s/^/# /' Cargo.toml
-            echo "✅ Commented out [patch.crates-io] section - using published crates"
+          # Remove [patch.crates-io] section from release copy (use published crates)
+          if grep -q "^\[patch\.crates-io\]" Cargo.toml.release; then
+            PATCH_START=$(grep -n "^\[patch\.crates-io\]" Cargo.toml.release | cut -d: -f1)
+            NEXT_SECTION=$(awk -v start="$PATCH_START" 'NR > start && /^\[/ {print NR; exit}' Cargo.toml.release)
+            if [ -z "$NEXT_SECTION" ]; then
+              sed -i "${PATCH_START},\$d" Cargo.toml.release
+            else
+              sed -i "${PATCH_START},$((NEXT_SECTION-1))d" Cargo.toml.release
+            fi
+            echo "✅ Removed [patch.crates-io] section from release Cargo.toml"
           fi
           
-          echo "Updated Cargo.toml:"
+          echo "Release Cargo.toml prepared:"
           echo "  version: ${VERSION}"
           echo "  bllvm-protocol: ${PROTOCOL_VER}"
           echo ""
           echo "Dependencies section:"
-          grep -A 2 "^\[dependencies\]" Cargo.toml | head -5
+          grep -A 2 "^\[dependencies\]" Cargo.toml.release | head -5
           echo ""
           echo "Patch section check:"
-          grep -A 5 "^# \[patch\.crates-io\]" Cargo.toml || echo "  ✅ [patch.crates-io] commented out - using published crates from crates.io"
+          grep -A 5 "^\[patch\.crates-io\]" Cargo.toml.release || echo "  ✅ [patch.crates-io] removed - using published crates"
       
       - name: Check for crates.io token
         run: |
@@ -1040,6 +1043,13 @@ jobs:
           cargo login "${CARGO_REGISTRY_TOKEN}"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Use release Cargo.toml
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: |
+          # Replace Cargo.toml with the release version (temporary, just for this job)
+          mv Cargo.toml.release Cargo.toml
+          echo "✅ Using release Cargo.toml (patch section removed, using published crates)"
       
       - name: Verify package
         if: env.CARGO_REGISTRY_TOKEN != ''
