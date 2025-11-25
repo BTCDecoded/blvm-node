@@ -43,6 +43,7 @@ pub mod bip70_handler;
 // Privacy and Performance Enhancements
 #[cfg(feature = "dandelion")]
 pub mod dandelion; // Dandelion++ privacy-preserving transaction relay
+#[cfg(feature = "fibre")]
 pub mod fibre; // FIBRE-style Fast Relay Network
 pub mod package_relay; // BIP 331 Package Relay
 pub mod package_relay_handler; // BIP 331 handlers
@@ -330,6 +331,7 @@ pub struct NetworkManager {
     /// Mempool manager for transaction access
     mempool_manager: Option<Arc<MempoolManager>>,
     /// FIBRE relay manager (for fast block relay)
+    #[cfg(feature = "fibre")]
     fibre_relay: Option<Arc<Mutex<fibre::FibreRelay>>>,
     /// Peer state storage (per-connection state)
     /// Read-heavy: many reads to check peer state, fewer writes when updating state
@@ -488,6 +490,7 @@ impl NetworkManager {
             protocol_engine: None,
             storage: None,
             mempool_manager: None,
+            #[cfg(feature = "fibre")]
             fibre_relay: None,
             peer_states: Arc::new(RwLock::new(HashMap::new())),
             persistent_peers: Arc::new(Mutex::new(HashSet::new())),
@@ -525,6 +528,7 @@ impl NetworkManager {
     }
 
     /// Initialize FIBRE relay (if enabled in config)
+    #[cfg(feature = "fibre")]
     pub async fn initialize_fibre(
         &mut self,
         config: Option<&crate::config::NodeConfig>,
@@ -571,11 +575,13 @@ impl NetworkManager {
     }
 
     /// Get FIBRE relay (if initialized)
+    #[cfg(feature = "fibre")]
     pub fn fibre_relay(&self) -> Option<Arc<Mutex<fibre::FibreRelay>>> {
         self.fibre_relay.clone()
     }
 
     /// Broadcast block via FIBRE to all FIBRE-capable peers
+    #[cfg(feature = "fibre")]
     pub async fn broadcast_block_via_fibre(&self, block: &bllvm_protocol::Block) -> Result<()> {
         if let Some(fibre_relay) = &self.fibre_relay {
             // Encode block (need to clone for encoding)
@@ -2692,6 +2698,7 @@ impl NetworkManager {
             if let ProtocolMessage::Version(version_msg) = &parsed {
                 if version_msg.supports_fibre() {
                     // Register FIBRE-capable peer
+                    #[cfg(feature = "fibre")]
                     if let Some(fibre_relay) = &self.fibre_relay {
                         let mut relay = fibre_relay.lock().await;
                         // Use peer_addr as peer_id (could be improved with proper peer IDs)
@@ -2704,6 +2711,10 @@ impl NetworkManager {
                             "Registered FIBRE-capable peer: {} (UDP: {})",
                             peer_addr, udp_addr
                         );
+                    }
+                    #[cfg(not(feature = "fibre"))]
+                    {
+                        debug!("FIBRE feature not enabled, skipping peer registration");
                     }
                 }
             }
