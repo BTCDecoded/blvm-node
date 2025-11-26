@@ -12,7 +12,7 @@
 use crate::node::mempool::MempoolManager;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
-use crate::rpc::errors::{RpcError, RpcResult};
+use crate::rpc::errors::{RpcError, RpcErrorCode, RpcResult};
 use crate::storage::Storage;
 use hex;
 use serde_json::{json, Value};
@@ -69,21 +69,40 @@ impl RawTxRpc {
             Some(crate::rpc::validation::MAX_HEX_STRING_LENGTH),
         )?;
 
-        let tx_bytes = hex::decode(&hex_string)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
+        let tx_bytes = hex::decode(&hex_string).map_err(|e| {
+            RpcError::invalid_params_with_fields(
+                format!("Invalid hex string: {e}"),
+                vec![("hexstring", &format!("Invalid hex encoding: {e}"))],
+                Some(json!([
+                    "Hex string must contain only characters 0-9, a-f, A-F",
+                    "Ensure the hex string is complete (even number of characters)"
+                ])),
+            )
+        })?;
 
         if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
             use bllvm_protocol::serialization::transaction::deserialize_transaction;
             let tx = deserialize_transaction(&tx_bytes).map_err(|e| {
-                RpcError::invalid_params(format!("Failed to parse transaction: {e}"))
+                RpcError::invalid_params_with_fields(
+                    format!("Failed to parse transaction: {e}"),
+                    vec![(
+                        "hexstring",
+                        &format!("Transaction deserialization failed: {e}"),
+                    )],
+                    Some(json!([
+                        "Ensure the transaction hex is valid and complete",
+                        "Check that the transaction format matches Bitcoin transaction structure"
+                    ])),
+                )
             })?;
 
             use bllvm_protocol::block::calculate_tx_id;
             let txid = calculate_tx_id(&tx);
+            let txid_hex = hex::encode(txid);
 
             // Check if already in mempool
             if mempool.get_transaction(&txid).is_some() {
-                return Err(RpcError::invalid_params("Transaction already in mempool"));
+                return Err(RpcError::tx_already_in_mempool(&txid_hex));
             }
 
             // Check if in chain
@@ -92,7 +111,18 @@ impl RawTxRpc {
                 .has_transaction(&txid)
                 .unwrap_or(false)
             {
-                return Err(RpcError::invalid_params("Transaction already in chain"));
+                return Err(RpcError::with_data(
+                    RpcErrorCode::TxAlreadyInChain,
+                    format!("Transaction already in chain: {txid_hex}"),
+                    json!({
+                        "txid": txid_hex,
+                        "reason": "already_confirmed",
+                        "suggestions": [
+                            "Transaction has already been confirmed in a block",
+                            "Use getrawtransaction to retrieve the transaction from the blockchain"
+                        ]
+                    }),
+                ));
             }
 
             // Validate transaction using consensus layer
@@ -130,11 +160,25 @@ impl RawTxRpc {
                     // Check if all inputs exist in UTXO set
                     for input in &tx.inputs {
                         if !utxo_set.contains_key(&input.prevout) {
-                            return Err(RpcError::invalid_params(format!(
-                                "Input {}:{} not found in UTXO set",
+                            let prevout_str = format!(
+                                "{}:{}",
                                 hex::encode(input.prevout.hash),
                                 input.prevout.index
-                            )));
+                            );
+                            return Err(RpcError::with_data(
+                                RpcErrorCode::TxMissingInputs,
+                                format!("Input {} not found in UTXO set", prevout_str),
+                                json!({
+                                    "prevout": prevout_str,
+                                    "txid": txid_hex,
+                                    "reason": "missing_input",
+                                    "suggestions": [
+                                        "The referenced output does not exist or has already been spent",
+                                        "Ensure the transaction is spending valid UTXOs",
+                                        "Check that the previous transaction is confirmed"
+                                    ]
+                                }),
+                            ));
                         }
                     }
 
@@ -147,9 +191,19 @@ impl RawTxRpc {
                     );
                 }
                 Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => {
-                    return Err(RpcError::invalid_params(format!(
-                        "Transaction validation failed: {reason}"
-                    )));
+                    return Err(RpcError::tx_rejected_with_context(
+                        format!("Transaction validation failed: {reason}"),
+                        Some(&txid_hex),
+                        Some("validation_failed"),
+                        Some(json!({
+                            "validation_reason": reason,
+                            "suggestions": [
+                                "Review the transaction structure and ensure it follows Bitcoin protocol rules",
+                                "Check that all inputs are valid and outputs are properly formatted",
+                                "Verify that the transaction size and weight are within limits"
+                            ]
+                        })),
+                    ));
                 }
                 Err(e) => {
                     return Err(RpcError::internal_error(format!(
@@ -175,15 +229,34 @@ impl RawTxRpc {
         let hex_string = params
             .get(0)
             .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Missing hexstring parameter"))?;
+            .ok_or_else(|| RpcError::missing_parameter("hexstring", Some("string")))?;
 
         // Decode hex string
-        let tx_bytes = hex::decode(hex_string)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
+        let tx_bytes = hex::decode(hex_string).map_err(|e| {
+            RpcError::invalid_params_with_fields(
+                format!("Invalid hex string: {e}"),
+                vec![("hexstring", &format!("Invalid hex encoding: {e}"))],
+                Some(json!([
+                    "Hex string must contain only characters 0-9, a-f, A-F",
+                    "Ensure the hex string is complete (even number of characters)"
+                ])),
+            )
+        })?;
 
         use bllvm_protocol::serialization::transaction::deserialize_transaction;
-        let tx = deserialize_transaction(&tx_bytes)
-            .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {e}")))?;
+        let tx = deserialize_transaction(&tx_bytes).map_err(|e| {
+            RpcError::invalid_params_with_fields(
+                format!("Failed to parse transaction: {e}"),
+                vec![(
+                    "hexstring",
+                    &format!("Transaction deserialization failed: {e}"),
+                )],
+                Some(json!([
+                    "Ensure the transaction hex is valid and complete",
+                    "Check that the transaction format matches Bitcoin transaction structure"
+                ])),
+            )
+        })?;
 
         use bllvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(&tx);
@@ -822,6 +895,152 @@ impl RawTxRpc {
                 "RPC not initialized with dependencies",
             ))
         }
+    }
+
+    /// Get comprehensive transaction details
+    ///
+    /// Params: ["txid", include_hex (optional, default: false)]
+    /// Returns: Complete transaction information including block info, confirmations, inputs, outputs, fees
+    pub async fn get_transaction_details(&self, params: &Value) -> RpcResult<Value> {
+        debug!("RPC: gettransactiondetails");
+
+        let txid = params
+            .get(0)
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| RpcError::missing_parameter("txid", Some("string (hex)")))?;
+
+        let include_hex = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+
+        let hash_bytes = hex::decode(txid).map_err(|e| {
+            RpcError::invalid_hash_format(
+                txid,
+                Some(32),
+                Some(&format!("Invalid hex encoding: {e}")),
+            )
+        })?;
+        if hash_bytes.len() != 32 {
+            return Err(RpcError::invalid_hash_format(
+                txid,
+                Some(32),
+                Some("Transaction ID must be 64 hex characters (32 bytes)"),
+            ));
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&hash_bytes);
+
+        // Check mempool first
+        if let Some(ref mempool) = self.mempool {
+            if let Some(tx) = mempool.get_transaction(&hash) {
+                use bllvm_protocol::serialization::transaction::serialize_transaction;
+                let size = serialize_transaction(&tx).len();
+                let fee = if let Some(ref storage) = self.storage {
+                    let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
+                    mempool.calculate_transaction_fee(&tx, &utxo_set) as f64 / 100_000_000.0
+                } else {
+                    0.0
+                };
+
+                return Ok(json!({
+                    "txid": txid,
+                    "hash": txid,
+                    "version": tx.version,
+                    "size": size,
+                    "vsize": size,
+                    "weight": size * 4,
+                    "locktime": tx.lock_time,
+                    "vin": tx.inputs.iter().map(|input| json!({
+                        "txid": hex::encode(input.prevout.hash),
+                        "vout": input.prevout.index,
+                        "scriptSig": hex::encode(&input.script_sig),
+                        "sequence": input.sequence
+                    })).collect::<Vec<_>>(),
+                    "vout": tx.outputs.iter().enumerate().map(|(idx, output)| json!({
+                        "value": output.value as f64 / 100_000_000.0,
+                        "n": idx,
+                        "scriptPubKey": {
+                            "asm": hex::encode(&output.script_pubkey),
+                            "hex": hex::encode(&output.script_pubkey),
+                            "type": "nonstandard" // Would need script analysis
+                        }
+                    })).collect::<Vec<_>>(),
+                    "hex": if include_hex { hex::encode(serialize_transaction(&tx)) } else { "".to_string() },
+                    "blockhash": Value::Null,
+                    "confirmations": 0,
+                    "time": 0,
+                    "blocktime": Value::Null,
+                    "fee": fee,
+                    "fee_rate": if size > 0 { fee / (size as f64 / 1000.0) } else { 0.0 }
+                }));
+            }
+        }
+
+        // Check blockchain
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(tx)) = storage.transactions().get_transaction(&hash) {
+                use bllvm_protocol::serialization::transaction::serialize_transaction;
+                let size = serialize_transaction(&tx).len();
+
+                // Get block info if available from transaction metadata
+                let metadata = storage.transactions().get_metadata(&hash).ok().flatten();
+                let block_hash = metadata.map(|m| m.block_hash);
+                let confirmations = if let Some(ref block_hash) = block_hash {
+                    let block_height = storage
+                        .blocks()
+                        .get_height_by_hash(block_hash)
+                        .ok()
+                        .flatten();
+                    let tip_height = storage.chain().get_height().ok().flatten().unwrap_or(0);
+                    block_height
+                        .map(|h| (tip_height.saturating_sub(h) + 1) as u64)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+
+                let block_time = block_hash
+                    .and_then(|bh| storage.blocks().get_header(&bh).ok().flatten())
+                    .map(|h| h.timestamp)
+                    .unwrap_or(0);
+
+                return Ok(json!({
+                    "txid": txid,
+                    "hash": txid,
+                    "version": tx.version,
+                    "size": size,
+                    "vsize": size,
+                    "weight": size * 4,
+                    "locktime": tx.lock_time,
+                    "vin": tx.inputs.iter().map(|input| json!({
+                        "txid": hex::encode(input.prevout.hash),
+                        "vout": input.prevout.index,
+                        "scriptSig": hex::encode(&input.script_sig),
+                        "sequence": input.sequence
+                    })).collect::<Vec<_>>(),
+                    "vout": tx.outputs.iter().enumerate().map(|(idx, output)| json!({
+                        "value": output.value as f64 / 100_000_000.0,
+                        "n": idx,
+                        "scriptPubKey": {
+                            "asm": hex::encode(&output.script_pubkey),
+                            "hex": hex::encode(&output.script_pubkey),
+                            "type": "nonstandard"
+                        }
+                    })).collect::<Vec<_>>(),
+                    "hex": if include_hex { hex::encode(serialize_transaction(&tx)) } else { "".to_string() },
+                    "blockhash": block_hash.map(|h| Value::String(hex::encode(h))).unwrap_or(Value::Null),
+                    "confirmations": confirmations,
+                    "time": block_time,
+                    "blocktime": if block_time > 0 { Some(block_time) } else { None },
+                    "fee": Value::Null, // Would need to calculate from inputs/outputs
+                    "fee_rate": Value::Null
+                }));
+            }
+        }
+
+        Err(RpcError::tx_not_found_with_context(
+            txid,
+            false, // Not in mempool
+            Some("Transaction not found in mempool or blockchain"),
+        ))
     }
 }
 

@@ -75,13 +75,41 @@ impl Node {
         rpc_addr: SocketAddr,
         protocol_version: Option<ProtocolVersion>,
     ) -> Result<Self> {
+        Self::with_storage_config(
+            data_dir,
+            network_addr,
+            rpc_addr,
+            protocol_version,
+            None,
+            None,
+        )
+    }
+
+    /// Create a new node with storage configuration
+    pub fn with_storage_config(
+        data_dir: &str,
+        network_addr: SocketAddr,
+        rpc_addr: SocketAddr,
+        protocol_version: Option<ProtocolVersion>,
+        pruning_config: Option<crate::config::PruningConfig>,
+        indexing_config: Option<crate::config::IndexingConfig>,
+    ) -> Result<Self> {
         info!("Initializing reference-node");
 
         // Initialize components
         let protocol_version = protocol_version.unwrap_or(ProtocolVersion::Regtest);
         let protocol = BitcoinProtocolEngine::new(protocol_version)?;
         let protocol_arc = Arc::new(protocol);
-        let storage = Storage::new(data_dir)?;
+
+        // Create storage with configuration
+        use crate::storage::database::default_backend;
+        let backend = default_backend();
+        let storage = Storage::with_backend_pruning_and_indexing(
+            data_dir,
+            backend,
+            pruning_config,
+            indexing_config,
+        )?;
         let storage_arc = Arc::new(storage);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
 
@@ -161,7 +189,24 @@ impl Node {
         });
 
         self.network = network;
-        self.config = Some(config);
+        self.config = Some(config.clone());
+
+        // Apply RBF and mempool policy configurations to mempool manager
+        // Uses interior mutability so we can set configs even when mempool is in an Arc
+        if let Some(ref rbf_config) = config.rbf {
+            self.mempool_manager
+                .set_rbf_config(Some(rbf_config.clone()));
+            info!("RBF configuration applied: mode={:?}", rbf_config.mode);
+        }
+        if let Some(ref mempool_policy) = config.mempool {
+            self.mempool_manager
+                .set_policy_config(Some(mempool_policy.clone()));
+            info!(
+                "Mempool policy configuration applied: max_mempool_mb={}, eviction_strategy={:?}",
+                mempool_policy.max_mempool_mb, mempool_policy.eviction_strategy
+            );
+        }
+
         #[cfg(feature = "governance")]
         {
             self.governance_webhook = governance_webhook;
@@ -479,6 +524,7 @@ impl Node {
                 let blocks_arc = self.storage.blocks();
                 match self.sync_coordinator.process_block(
                     &blocks_arc,
+                    Some(&self.storage),
                     &block_data,
                     current_height,
                     &mut utxo_set,

@@ -4,6 +4,7 @@
 //! blocks with proper witness data and median time-past.
 
 use crate::storage::blockstore::BlockStore;
+use crate::storage::Storage;
 use anyhow::Result;
 use bllvm_protocol::block::connect_block;
 use bllvm_protocol::serialization::deserialize_block_with_witnesses;
@@ -11,6 +12,7 @@ use bllvm_protocol::types::Network;
 use bllvm_protocol::{
     segwit::Witness, Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult,
 };
+use std::sync::Arc;
 
 /// Convert ProtocolVersion to Network type
 pub fn protocol_version_to_network(version: ProtocolVersion) -> Network {
@@ -49,6 +51,30 @@ pub fn store_block_with_context(
     // Update height index
     let block_hash = blockstore.get_block_hash(block);
     blockstore.store_height(height, &block_hash)?;
+
+    Ok(())
+}
+
+/// Store a block with its witnesses, update recent headers, and index transactions
+/// This is the preferred method when Storage is available for transaction indexing
+pub fn store_block_with_context_and_index(
+    blockstore: &BlockStore,
+    storage: Option<&Arc<Storage>>,
+    block: &Block,
+    witnesses: &[Witness],
+    height: u64,
+) -> Result<()> {
+    // Store block
+    store_block_with_context(blockstore, block, witnesses, height)?;
+
+    // Index transactions if storage is available
+    if let Some(storage) = storage {
+        let block_hash = blockstore.get_block_hash(block);
+        if let Err(e) = storage.index_block(block, &block_hash, height) {
+            // Log error but don't fail block storage if indexing fails
+            tracing::warn!("Failed to index block transactions: {}", e);
+        }
+    }
 
     Ok(())
 }

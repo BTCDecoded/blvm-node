@@ -358,6 +358,12 @@ pub struct NodeConfig {
 
     /// Logging configuration
     pub logging: Option<LoggingConfig>,
+
+    /// Mempool configuration
+    pub mempool: Option<MempoolPolicyConfig>,
+
+    /// RBF (Replace-By-Fee) configuration
+    pub rbf: Option<RbfConfig>,
 }
 
 /// Transport preference configuration (serializable)
@@ -435,6 +441,8 @@ impl Default for NodeConfig {
             #[cfg(feature = "zmq")]
             zmq: None,
             logging: None,
+            mempool: None,
+            rbf: None,
         }
     }
 }
@@ -912,6 +920,10 @@ pub struct StorageConfig {
 
     /// Cache sizes
     pub cache: Option<StorageCacheConfig>,
+
+    /// Transaction indexing configuration
+    #[serde(default)]
+    pub indexing: Option<IndexingConfig>,
 }
 
 /// Database backend configuration
@@ -979,6 +991,74 @@ impl Default for StorageConfig {
             data_dir: "data".to_string(),
             pruning: None,
             cache: None,
+            indexing: None,
+        }
+    }
+}
+
+/// Transaction indexing configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexingConfig {
+    /// Enable address indexing (script_pubkey → transactions)
+    /// Increases disk usage by ~20-30% and slows block processing by 2-3x
+    /// Required for wallet functionality and address-based queries
+    #[serde(default)]
+    pub enable_address_index: bool,
+
+    /// Enable value range indexing (value buckets → transactions)
+    /// Increases disk usage by ~5-10% and slows block processing by ~1.5x
+    /// Useful for querying transactions by output value ranges
+    #[serde(default)]
+    pub enable_value_index: bool,
+
+    /// Indexing strategy: eager (index immediately) or lazy (index on-demand)
+    /// Eager: Better query performance, slower block processing
+    /// Lazy: Faster block processing, slower first query per address
+    #[serde(default = "default_indexing_strategy")]
+    pub strategy: IndexingStrategy,
+
+    /// Maximum number of addresses to index (0 = unlimited)
+    /// Useful for limiting memory/disk usage on resource-constrained systems
+    #[serde(default = "default_max_indexed_addresses")]
+    pub max_indexed_addresses: usize,
+
+    /// Enable index compression (reduces disk usage, increases CPU)
+    #[serde(default)]
+    pub enable_compression: bool,
+
+    /// Background indexing: index in background thread (non-blocking)
+    /// Improves block processing speed but requires async support
+    #[serde(default)]
+    pub background_indexing: bool,
+}
+
+fn default_indexing_strategy() -> IndexingStrategy {
+    IndexingStrategy::Eager
+}
+
+fn default_max_indexed_addresses() -> usize {
+    0 // Unlimited
+}
+
+/// Indexing strategy
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexingStrategy {
+    /// Index transactions immediately during block processing
+    Eager,
+    /// Index transactions on-demand when queried (lazy loading)
+    Lazy,
+}
+
+impl Default for IndexingConfig {
+    fn default() -> Self {
+        Self {
+            enable_address_index: false,
+            enable_value_index: false,
+            strategy: IndexingStrategy::Eager,
+            max_indexed_addresses: 0,
+            enable_compression: false,
+            background_indexing: false,
         }
     }
 }
@@ -1272,6 +1352,296 @@ impl Default for PeerRateLimitingConfig {
 /// ZMQ notification configuration
 #[cfg(feature = "zmq")]
 pub use crate::zmq::ZmqConfig;
+
+/// RBF (Replace-By-Fee) mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RbfMode {
+    /// RBF disabled - no replacements allowed
+    Disabled,
+
+    /// Conservative RBF - strict BIP125 rules with additional safety checks
+    /// - Requires higher fee rate increase (e.g., 2x instead of 1.1x)
+    /// - Longer confirmation wait before allowing replacement
+    /// - Additional validation checks
+    Conservative,
+
+    /// Standard RBF - strict BIP125 compliance (default)
+    /// - Standard fee rate increase requirement
+    /// - Standard absolute fee bump
+    /// - All BIP125 rules enforced
+    Standard,
+
+    /// Aggressive RBF - relaxed rules for miners
+    /// - Lower fee rate increase threshold
+    /// - Faster replacement processing
+    /// - May allow package replacements
+    Aggressive,
+}
+
+/// RBF (Replace-By-Fee) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RbfConfig {
+    /// RBF mode (disabled, conservative, standard, aggressive)
+    #[serde(default = "default_rbf_mode")]
+    pub mode: RbfMode,
+
+    /// Minimum fee rate multiplier for replacement (e.g., 1.1 = 10% increase)
+    /// Conservative: 2.0 (100% increase)
+    /// Standard: 1.1 (10% increase, BIP125 minimum)
+    /// Aggressive: 1.05 (5% increase)
+    #[serde(default = "default_rbf_fee_rate_multiplier")]
+    pub min_fee_rate_multiplier: f64,
+
+    /// Minimum absolute fee bump in satoshis
+    /// Conservative: 5000 sat
+    /// Standard: 1000 sat (BIP125 MIN_RELAY_FEE)
+    /// Aggressive: 500 sat
+    #[serde(default = "default_rbf_min_fee_bump")]
+    pub min_fee_bump_satoshis: u64,
+
+    /// Minimum confirmations before allowing replacement (conservative only)
+    /// 0 = allow immediately
+    #[serde(default = "default_rbf_min_confirmations")]
+    pub min_confirmations: u32,
+
+    /// Allow package replacements (aggressive only)
+    /// Package = parent + child transactions replaced together
+    #[serde(default = "default_rbf_allow_packages")]
+    pub allow_package_replacements: bool,
+
+    /// Maximum number of replacements per transaction
+    /// Prevents replacement spam
+    #[serde(default = "default_rbf_max_replacements")]
+    pub max_replacements_per_tx: u32,
+
+    /// Replacement cooldown period (seconds)
+    /// Prevents rapid-fire replacements
+    #[serde(default = "default_rbf_cooldown_seconds")]
+    pub cooldown_seconds: u64,
+}
+
+fn default_rbf_mode() -> RbfMode {
+    RbfMode::Standard
+}
+
+fn default_rbf_fee_rate_multiplier() -> f64 {
+    1.1 // Standard BIP125 minimum
+}
+
+fn default_rbf_min_fee_bump() -> u64 {
+    1000 // BIP125 MIN_RELAY_FEE
+}
+
+fn default_rbf_min_confirmations() -> u32 {
+    0
+}
+
+fn default_rbf_allow_packages() -> bool {
+    false
+}
+
+fn default_rbf_max_replacements() -> u32 {
+    10
+}
+
+fn default_rbf_cooldown_seconds() -> u64 {
+    60
+}
+
+impl Default for RbfConfig {
+    fn default() -> Self {
+        Self {
+            mode: RbfMode::Standard,
+            min_fee_rate_multiplier: 1.1,
+            min_fee_bump_satoshis: 1000,
+            min_confirmations: 0,
+            allow_package_replacements: false,
+            max_replacements_per_tx: 10,
+            cooldown_seconds: 60,
+        }
+    }
+}
+
+impl RbfConfig {
+    /// Get mode-specific defaults
+    pub fn with_mode(mode: RbfMode) -> Self {
+        match mode {
+            RbfMode::Disabled => Self {
+                mode: RbfMode::Disabled,
+                min_fee_rate_multiplier: f64::INFINITY, // Never allow
+                min_fee_bump_satoshis: u64::MAX,
+                min_confirmations: u32::MAX,
+                allow_package_replacements: false,
+                max_replacements_per_tx: 0,
+                cooldown_seconds: u64::MAX,
+            },
+            RbfMode::Conservative => Self {
+                mode: RbfMode::Conservative,
+                min_fee_rate_multiplier: 2.0,
+                min_fee_bump_satoshis: 5000,
+                min_confirmations: 1,
+                allow_package_replacements: false,
+                max_replacements_per_tx: 3,
+                cooldown_seconds: 300,
+            },
+            RbfMode::Standard => Self::default(),
+            RbfMode::Aggressive => Self {
+                mode: RbfMode::Aggressive,
+                min_fee_rate_multiplier: 1.05,
+                min_fee_bump_satoshis: 500,
+                min_confirmations: 0,
+                allow_package_replacements: true,
+                max_replacements_per_tx: 10,
+                cooldown_seconds: 60,
+            },
+        }
+    }
+}
+
+/// Transaction eviction strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EvictionStrategy {
+    /// Evict lowest fee rate transactions first (Bitcoin Core default)
+    LowestFeeRate,
+
+    /// Evict oldest transactions first (FIFO)
+    OldestFirst,
+
+    /// Evict largest transactions first (to free most space)
+    LargestFirst,
+
+    /// Evict transactions with no descendants first (safest)
+    NoDescendantsFirst,
+
+    /// Hybrid: Combine fee rate and age
+    Hybrid,
+}
+
+/// Mempool policy configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MempoolPolicyConfig {
+    /// Maximum mempool size in megabytes
+    #[serde(default = "default_max_mempool_mb")]
+    pub max_mempool_mb: u64,
+
+    /// Maximum number of transactions in mempool
+    #[serde(default = "default_max_mempool_txs")]
+    pub max_mempool_txs: usize,
+
+    /// Minimum relay fee rate (satoshis per vbyte)
+    #[serde(default = "default_min_relay_fee_rate")]
+    pub min_relay_fee_rate: u64,
+
+    /// Minimum transaction fee (absolute, in satoshis)
+    #[serde(default = "default_min_tx_fee")]
+    pub min_tx_fee: u64,
+
+    /// Incremental relay fee (for fee bumping)
+    #[serde(default = "default_incremental_relay_fee")]
+    pub incremental_relay_fee: u64,
+
+    /// Maximum ancestor count (transaction + all ancestors)
+    #[serde(default = "default_max_ancestor_count")]
+    pub max_ancestor_count: u32,
+
+    /// Maximum ancestor size in vbytes
+    #[serde(default = "default_max_ancestor_size")]
+    pub max_ancestor_size: u64,
+
+    /// Maximum descendant count (transaction + all descendants)
+    #[serde(default = "default_max_descendant_count")]
+    pub max_descendant_count: u32,
+
+    /// Maximum descendant size in vbytes
+    #[serde(default = "default_max_descendant_size")]
+    pub max_descendant_size: u64,
+
+    /// Transaction eviction strategy
+    #[serde(default = "default_eviction_strategy")]
+    pub eviction_strategy: EvictionStrategy,
+
+    /// Mempool expiry time in hours
+    #[serde(default = "default_mempool_expiry_hours")]
+    pub mempool_expiry_hours: u64,
+
+    /// Enable mempool persistence (survives restarts)
+    #[serde(default)]
+    pub persist_mempool: bool,
+
+    /// Mempool persistence file path
+    #[serde(default = "default_mempool_persistence_path")]
+    pub mempool_persistence_path: String,
+}
+
+fn default_max_mempool_mb() -> u64 {
+    300
+}
+
+fn default_max_mempool_txs() -> usize {
+    100_000
+}
+
+fn default_min_relay_fee_rate() -> u64 {
+    1 // 1 sat/vB
+}
+
+fn default_min_tx_fee() -> u64 {
+    1000
+}
+
+fn default_incremental_relay_fee() -> u64 {
+    1000
+}
+
+fn default_max_ancestor_count() -> u32 {
+    25
+}
+
+fn default_max_ancestor_size() -> u64 {
+    101_000 // 101 kB (Bitcoin Core default)
+}
+
+fn default_max_descendant_count() -> u32 {
+    25
+}
+
+fn default_max_descendant_size() -> u64 {
+    101_000 // 101 kB (Bitcoin Core default)
+}
+
+fn default_eviction_strategy() -> EvictionStrategy {
+    EvictionStrategy::LowestFeeRate
+}
+
+fn default_mempool_expiry_hours() -> u64 {
+    336 // 14 days
+}
+
+fn default_mempool_persistence_path() -> String {
+    "data/mempool.dat".to_string()
+}
+
+impl Default for MempoolPolicyConfig {
+    fn default() -> Self {
+        Self {
+            max_mempool_mb: 300,
+            max_mempool_txs: 100_000,
+            min_relay_fee_rate: 1,
+            min_tx_fee: 1000,
+            incremental_relay_fee: 1000,
+            max_ancestor_count: 25,
+            max_ancestor_size: 101_000,
+            max_descendant_count: 25,
+            max_descendant_size: 101_000,
+            eviction_strategy: EvictionStrategy::LowestFeeRate,
+            mempool_expiry_hours: 336,
+            persist_mempool: false,
+            mempool_persistence_path: "data/mempool.dat".to_string(),
+        }
+    }
+}
 
 /// Logging configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -14,10 +14,18 @@ const ZERO_HASH_STR: &str = "000000000000000000000000000000000000000000000000000
 
 /// Helper function to decode a 32-byte hash from hex string
 fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
-    let hash_bytes =
-        hex::decode(hex).map_err(|e| RpcError::invalid_params(format!("Invalid hash: {e}")))?;
+    let hash_bytes = hex::decode(hex).map_err(|e| {
+        RpcError::invalid_hash_format(hex, Some(32), Some(&format!("Invalid hex encoding: {e}")))
+    })?;
     if hash_bytes.len() != 32 {
-        return Err(RpcError::invalid_params("Invalid hash length"));
+        return Err(RpcError::invalid_hash_format(
+            hex,
+            Some(32),
+            Some(&format!(
+                "Hash must be 64 hex characters (32 bytes), got {}",
+                hex.len()
+            )),
+        ));
     }
     let mut hash_array = [0u8; 32];
     hash_array.copy_from_slice(&hash_bytes);
@@ -333,20 +341,20 @@ impl BlockchainRpc {
                 Ok(Ok(Ok(Some(block)))) => {
                     // Block found - calculate all required fields (similar to get_block_header)
                     use std::time::{Duration, Instant};
-                    
+
                     thread_local! {
                         static CACHED_TIP_HEIGHT: std::cell::RefCell<(Option<u64>, Instant)> =
                             std::cell::RefCell::new((None, Instant::now()));
                     }
-                    
+
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
-                    
+
                     let tip_height = {
                         let should_refresh = CACHED_TIP_HEIGHT.with(|c| {
                             let cache = c.borrow();
                             cache.0.is_none() || cache.1.elapsed() >= Duration::from_secs(1)
                         });
-                        
+
                         if should_refresh {
                             let height = storage.chain().get_height()?.unwrap_or(0);
                             CACHED_TIP_HEIGHT.with(|c| {
@@ -358,18 +366,18 @@ impl BlockchainRpc {
                             CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
                         }
                     };
-                    
+
                     let confirmations = block_height
                         .map(|h| Self::calculate_confirmations(h, tip_height))
                         .unwrap_or(0);
-                    
+
                     // Calculate block size
                     let block_size = bincode::serialize(&block).map(|b| b.len()).unwrap_or(0);
-                    
+
                     // Calculate block weight (simplified: size * 4 for non-segwit, proper calculation for segwit)
                     // Proper weight = base_size * 3 + total_size
                     let block_weight = block_size * 4; // Simplified - proper weight calculation would account for witness data
-                    
+
                     // Calculate median time from recent headers
                     let mediantime = if block_height.is_some() {
                         if let Ok(recent_headers) = storage.blocks().get_recent_headers(11) {
@@ -380,19 +388,20 @@ impl BlockchainRpc {
                     } else {
                         block.header.timestamp
                     };
-                    
+
                     // Calculate difficulty
                     let difficulty = Self::calculate_difficulty(block.header.bits);
-                    
+
                     // Get transaction IDs
-                    let tx_ids: Vec<String> = block.transactions
+                    let tx_ids: Vec<String> = block
+                        .transactions
                         .iter()
                         .map(|tx| {
                             let tx_hash = bllvm_protocol::block::calculate_tx_id(tx);
                             hex::encode(tx_hash)
                         })
                         .collect();
-                    
+
                     // Get next block hash
                     let next_blockhash = block_height.and_then(|h| {
                         storage
@@ -402,7 +411,7 @@ impl BlockchainRpc {
                             .flatten()
                             .map(hex::encode)
                     });
-                    
+
                     // Get chainwork
                     let chainwork = if let Some(_height) = block_height {
                         storage
@@ -413,7 +422,7 @@ impl BlockchainRpc {
                     } else {
                         ZERO_HASH_STR.to_string()
                     };
-                    
+
                     return Ok(json!({
                         "hash": hash,
                         "confirmations": confirmations,
@@ -1598,25 +1607,364 @@ impl BlockchainRpc {
     pub async fn get_index_info(&self, _params: &Value) -> Result<Value> {
         debug!("RPC: getindexinfo");
 
-        // Return available indexes
-        // In production, would check which indexes are actually built
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            RpcError::internal_error(
+                "Storage not available. This operation requires storage to be initialized.",
+            )
+        })?;
+
+        // Get index statistics
+        let index_stats = storage
+            .transactions()
+            .get_index_stats()
+            .map_err(|e| RpcError::internal_error(format!("Failed to get index stats: {e}")))?;
+
+        let best_block_height = storage.chain().get_height()?.unwrap_or(0);
+
+        // Return available indexes with statistics
         Ok(json!({
             "txindex": {
                 "synced": true,
-                "best_block_height": if let Some(ref storage) = self.storage {
-                    storage.chain().get_height()?.unwrap_or(0)
-                } else {
-                    0
-                }
+                "best_block_height": best_block_height,
+                "total_transactions": index_stats.total_transactions,
+                "address_index_enabled": index_stats.address_index_enabled,
+                "value_index_enabled": index_stats.value_index_enabled,
+                "indexed_addresses": index_stats.indexed_addresses,
+                "indexed_value_buckets": index_stats.indexed_value_buckets,
             },
             "basic block filter index": {
                 "synced": true,
-                "best_block_height": if let Some(ref storage) = self.storage {
-                    storage.chain().get_height()?.unwrap_or(0)
-                } else {
-                    0
-                }
+                "best_block_height": best_block_height
             }
         }))
+    }
+
+    /// Get transaction IDs for an address
+    ///
+    /// Params: [address (string, hex-encoded script_pubkey)]
+    /// Returns: Array of transaction IDs (hex strings)
+    pub async fn getaddresstxids(&self, params: &Value) -> Result<Value> {
+        debug!("RPC: getaddresstxids");
+
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            RpcError::internal_error(
+                "Storage not available. This operation requires storage to be initialized.",
+            )
+        })?;
+
+        // Parse address parameter
+        let address = params
+            .get(0)
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| RpcError::missing_parameter("address", Some("string")))?;
+
+        // Decode address to script_pubkey (hex-encoded for now)
+        let script_pubkey = hex::decode(address).map_err(|e| {
+            RpcError::invalid_address_format(
+                address,
+                Some(&format!("Invalid hex encoding: {e}")),
+                Some("hex-encoded script pubkey"),
+            )
+        })?;
+
+        // Get transactions for this address
+        let transactions = storage
+            .transactions()
+            .get_transactions_by_address(&script_pubkey)
+            .map_err(|e| RpcError::internal_error(format!("Failed to query address: {e}")))?;
+
+        // Extract transaction IDs
+        let txids: Vec<String> = transactions
+            .iter()
+            .map(|tx| {
+                let tx_hash = bllvm_protocol::block::calculate_tx_id(tx);
+                hex::encode(tx_hash)
+            })
+            .collect();
+
+        Ok(json!(txids))
+    }
+
+    /// Get balance for an address
+    ///
+    /// Params: [address (string, hex-encoded script_pubkey)]
+    /// Returns: Balance information
+    pub async fn getaddressbalance(&self, params: &Value) -> Result<Value> {
+        debug!("RPC: getaddressbalance");
+
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            RpcError::internal_error(
+                "Storage not available. This operation requires storage to be initialized.",
+            )
+        })?;
+
+        // Parse address parameter
+        let address = params
+            .get(0)
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| RpcError::missing_parameter("address", Some("string")))?;
+
+        // Decode address to script_pubkey
+        let script_pubkey = hex::decode(address).map_err(|e| {
+            RpcError::invalid_address_format(
+                address,
+                Some(&format!("Invalid hex encoding: {e}")),
+                Some("hex-encoded script pubkey"),
+            )
+        })?;
+
+        // Get transactions for this address
+        let transactions = storage
+            .transactions()
+            .get_transactions_by_address(&script_pubkey)
+            .map_err(|e| RpcError::internal_error(format!("Failed to query address: {e}")))?;
+
+        // Calculate balance by summing outputs
+        // Note: This is simplified - full balance calculation would need UTXO tracking
+        let mut balance: i64 = 0;
+        for tx in &transactions {
+            for output in &tx.outputs {
+                if output.script_pubkey == script_pubkey {
+                    balance += output.value as i64;
+                }
+            }
+        }
+
+        Ok(json!({
+            "balance": balance,
+            "received": balance, // Simplified
+            "sent": 0, // Would need to track inputs
+        }))
+    }
+
+    /// Get comprehensive blockchain state in a single call
+    ///
+    /// Params: []
+    /// Returns: Combined information from getblockchaininfo, getbestblockhash, getblockcount, getdifficulty
+    pub async fn get_blockchain_state(&self) -> Result<Value> {
+        debug!("RPC: getblockchainstate");
+
+        if let Some(ref storage) = self.storage {
+            let height = storage.chain().get_height()?.unwrap_or(0);
+            let tip_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
+            let tip_header = storage.chain().get_tip_header()?.unwrap_or_else(|| {
+                // Return genesis block header as fallback
+                bllvm_protocol::BlockHeader {
+                    version: 1,
+                    prev_block_hash: [0u8; 32],
+                    merkle_root: [0u8; 32],
+                    timestamp: 1231006505,
+                    bits: 0x1d00ffff,
+                    nonce: 0,
+                }
+            });
+
+            let difficulty = Self::calculate_difficulty(tip_header.bits);
+            let chainwork = storage
+                .chain()
+                .get_chainwork(&tip_hash)?
+                .map(Self::format_chainwork)
+                .unwrap_or_else(|| ZERO_HASH_STR.to_string());
+
+            Ok(json!({
+                "chain": "regtest", // TODO: Get from config
+                "blocks": height,
+                "headers": height,
+                "bestblockhash": hex::encode(tip_hash),
+                "difficulty": difficulty,
+                "mediantime": tip_header.timestamp,
+                "verificationprogress": if height > 0 { 1.0 } else { 0.0 },
+                "initialblockdownload": height == 0,
+                "chainwork": chainwork,
+                "size_on_disk": storage.disk_size().unwrap_or(0),
+                "pruned": false,
+                "softforks": [],
+                "warnings": ""
+            }))
+        } else {
+            Ok(json!({
+                "chain": "regtest",
+                "blocks": 0,
+                "headers": 0,
+                "bestblockhash": ZERO_HASH_STR,
+                "difficulty": 1.0,
+                "mediantime": 0,
+                "verificationprogress": 0.0,
+                "initialblockdownload": true,
+                "chainwork": ZERO_HASH_STR,
+                "size_on_disk": 0,
+                "pruned": false,
+                "softforks": [],
+                "warnings": ""
+            }))
+        }
+    }
+
+    /// Validate a Bitcoin address and return detailed information
+    ///
+    /// Params: ["address"]
+    /// Returns: Address validation result with script type, network, etc.
+    pub async fn validate_address(&self, params: &Value) -> Result<Value> {
+        debug!("RPC: validateaddress");
+
+        let address = params
+            .get(0)
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| RpcError::missing_parameter("address", Some("string")))?;
+
+        // Basic address validation
+        // For now, we'll do simple format checking
+        // In production, this should use a proper address library
+        let is_valid = !address.is_empty() && address.len() <= 100; // Basic sanity check
+
+        // Try to determine address type from prefix
+        let is_p2pkh = address.starts_with('1') && address.len() >= 26 && address.len() <= 35;
+        let is_p2sh = address.starts_with('3') && address.len() >= 26 && address.len() <= 35;
+        let is_bech32 = address.starts_with("bc1")
+            || address.starts_with("tb1")
+            || address.starts_with("bcrt1");
+
+        let script_pubkey_type = if is_p2pkh {
+            "pubkeyhash"
+        } else if is_p2sh {
+            "scripthash"
+        } else if is_bech32 {
+            "witness_v0_keyhash" // Simplified - could be witness_v0_scripthash
+        } else {
+            "nonstandard"
+        };
+
+        Ok(json!({
+            "isvalid": is_valid && (is_p2pkh || is_p2sh || is_bech32),
+            "address": address,
+            "scriptPubKey": if is_valid && (is_p2pkh || is_p2sh || is_bech32) {
+                format!("76a914{}88ac", hex::encode(&address.as_bytes()[1..address.len()-1].to_vec())) // Simplified
+            } else {
+                "".to_string()
+            },
+            "isscript": is_p2sh || is_bech32,
+            "iswitness": is_bech32,
+            "witness_version": if is_bech32 { Some(0) } else { None },
+            "witness_program": if is_bech32 { Some(hex::encode(address.as_bytes())) } else { None },
+            "script_type": if is_valid && (is_p2pkh || is_p2sh || is_bech32) {
+                script_pubkey_type
+            } else {
+                "nonstandard"
+            }
+        }))
+    }
+
+    /// Get comprehensive address information
+    ///
+    /// Params: ["address"]
+    /// Returns: Address balance, transaction count, UTXO count, etc.
+    pub async fn get_address_info(&self, params: &Value) -> Result<Value> {
+        debug!("RPC: getaddressinfo");
+
+        let address = params
+            .get(0)
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| RpcError::missing_parameter("address", Some("string")))?;
+
+        // Decode address to script_pubkey (hex-encoded for now)
+        let script_pubkey = hex::decode(address).map_err(|e| {
+            RpcError::invalid_address_format(
+                address,
+                Some(&format!("Invalid hex encoding: {e}")),
+                Some("hex-encoded script pubkey"),
+            )
+        })?;
+
+        if let Some(ref storage) = self.storage {
+            // Get transactions for this address
+            let transactions = storage
+                .transactions()
+                .get_transactions_by_address(&script_pubkey)
+                .map_err(|e| RpcError::internal_error(format!("Failed to query address: {e}")))?;
+
+            let tx_count = transactions.len();
+
+            // Calculate balance and UTXO count
+            let mut balance: i64 = 0;
+            let mut utxo_count = 0;
+            let mut received: i64 = 0;
+            let mut sent: i64 = 0;
+
+            for tx in &transactions {
+                use bllvm_protocol::block::calculate_tx_id;
+                let txid = calculate_tx_id(tx);
+
+                for (idx, output) in tx.outputs.iter().enumerate() {
+                    if output.script_pubkey == script_pubkey {
+                        received += output.value as i64;
+                        // Check if UTXO is spent
+                        let outpoint = bllvm_protocol::OutPoint {
+                            hash: txid,
+                            index: idx as u64,
+                        };
+                        if storage.utxos().get_utxo(&outpoint).ok().flatten().is_some() {
+                            // UTXO is unspent
+                            balance += output.value as i64;
+                            utxo_count += 1;
+                        } else {
+                            // UTXO is spent
+                            sent += output.value as i64;
+                        }
+                    }
+                }
+            }
+
+            Ok(json!({
+                "address": address,
+                "scriptPubKey": hex::encode(&script_pubkey),
+                "ismine": false,
+                "iswatchonly": false,
+                "isscript": false,
+                "iswitness": false,
+                "witness_version": Value::Null,
+                "witness_program": Value::Null,
+                "script_type": "nonstandard",
+                "pubkey": Value::Null,
+                "embedded": Value::Null,
+                "iscompressed": Value::Null,
+                "label": "",
+                "timestamp": Value::Null,
+                "hdkeypath": Value::Null,
+                "hdseedid": Value::Null,
+                "hdmasterfingerprint": Value::Null,
+                "labels": [],
+                "balance": balance as f64 / 100_000_000.0,
+                "received": received as f64 / 100_000_000.0,
+                "sent": sent as f64 / 100_000_000.0,
+                "tx_count": tx_count,
+                "utxo_count": utxo_count
+            }))
+        } else {
+            Ok(json!({
+                "address": address,
+                "scriptPubKey": hex::encode(&script_pubkey),
+                "ismine": false,
+                "iswatchonly": false,
+                "isscript": false,
+                "iswitness": false,
+                "witness_version": Value::Null,
+                "witness_program": Value::Null,
+                "script_type": "nonstandard",
+                "pubkey": Value::Null,
+                "embedded": Value::Null,
+                "iscompressed": Value::Null,
+                "label": "",
+                "timestamp": Value::Null,
+                "hdkeypath": Value::Null,
+                "hdseedid": Value::Null,
+                "hdmasterfingerprint": Value::Null,
+                "labels": [],
+                "balance": 0.0,
+                "received": 0.0,
+                "sent": 0.0,
+                "tx_count": 0,
+                "utxo_count": 0
+            }))
+        }
     }
 }

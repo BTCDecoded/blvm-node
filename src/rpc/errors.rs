@@ -166,6 +166,269 @@ impl RpcError {
         Self::new(RpcErrorCode::TxRejected, reason)
     }
 
+    /// Transaction rejected with detailed context
+    pub fn tx_rejected_with_context(
+        reason: impl Into<String>,
+        txid: Option<&str>,
+        rejection_code: Option<&str>,
+        details: Option<Value>,
+    ) -> Self {
+        let mut data = json!({});
+
+        if let Some(txid) = txid {
+            data["txid"] = json!(txid);
+        }
+
+        if let Some(code) = rejection_code {
+            data["rejection_code"] = json!(code);
+        }
+
+        if let Some(details) = details {
+            data["details"] = details;
+        }
+
+        Self::with_data(RpcErrorCode::TxRejected, reason, data)
+    }
+
+    /// Transaction rejected due to insufficient fee
+    pub fn tx_rejected_insufficient_fee(
+        txid: Option<&str>,
+        required_fee_rate: f64,
+        provided_fee_rate: f64,
+        required_fee: Option<u64>,
+        provided_fee: Option<u64>,
+    ) -> Self {
+        let mut data = json!({
+            "reason": "insufficient_fee",
+            "required_fee_rate": required_fee_rate,
+            "provided_fee_rate": provided_fee_rate,
+        });
+
+        if let Some(txid) = txid {
+            data["txid"] = json!(txid);
+        }
+
+        if let Some(required) = required_fee {
+            data["required_fee_satoshis"] = json!(required);
+        }
+
+        if let Some(provided) = provided_fee {
+            data["provided_fee_satoshis"] = json!(provided);
+        }
+
+        let mut suggestions = vec![
+            format!(
+                "Increase fee rate to at least {:.2} sat/vB",
+                required_fee_rate
+            ),
+            "Use estimatesmartfee to get current fee recommendations".to_string(),
+        ];
+
+        if let Some(required) = required_fee {
+            if let Some(provided) = provided_fee {
+                let shortfall = required.saturating_sub(provided);
+                suggestions.push(format!("Fee shortfall: {} satoshis", shortfall));
+            }
+        }
+
+        data["suggestions"] = json!(suggestions);
+
+        Self::with_data(
+            RpcErrorCode::TxRejected,
+            format!("Transaction rejected: insufficient fee (required: {:.2} sat/vB, provided: {:.2} sat/vB)", required_fee_rate, provided_fee_rate),
+            data,
+        )
+    }
+
+    /// Invalid hash format error
+    pub fn invalid_hash_format(
+        hash: &str,
+        expected_length: Option<usize>,
+        reason: Option<&str>,
+    ) -> Self {
+        let mut data = json!({
+            "hash": hash,
+            "reason": reason.unwrap_or("Invalid hash format"),
+        });
+
+        if let Some(length) = expected_length {
+            data["expected_length"] = json!(length);
+            data["actual_length"] = json!(hash.len());
+        }
+
+        let mut suggestions = vec!["Hash must be a hexadecimal string".to_string()];
+        if let Some(length) = expected_length {
+            suggestions.push(format!(
+                "Hash must be exactly {} characters ({} bytes)",
+                length * 2,
+                length
+            ));
+        }
+        suggestions
+            .push("Use lowercase or uppercase hexadecimal characters (0-9, a-f, A-F)".to_string());
+
+        data["suggestions"] = json!(suggestions);
+
+        Self::with_data(
+            RpcErrorCode::InvalidParams,
+            format!(
+                "Invalid hash format: {}",
+                reason.unwrap_or("Invalid hexadecimal string")
+            ),
+            data,
+        )
+    }
+
+    /// Invalid address format error
+    pub fn invalid_address_format(
+        address: &str,
+        reason: Option<&str>,
+        expected_format: Option<&str>,
+    ) -> Self {
+        let mut data = json!({
+            "address": address,
+            "reason": reason.unwrap_or("Invalid address format"),
+        });
+
+        if let Some(format) = expected_format {
+            data["expected_format"] = json!(format);
+        }
+
+        let mut suggestions = vec![
+            "Address must be a valid Bitcoin address".to_string(),
+            "Supported formats: P2PKH (starts with '1'), P2SH (starts with '3'), Bech32 (starts with 'bc1')".to_string(),
+        ];
+
+        if let Some(format) = expected_format {
+            suggestions.push(format!("Expected format: {}", format));
+        }
+
+        data["suggestions"] = json!(suggestions);
+
+        Self::with_data(
+            RpcErrorCode::InvalidParams,
+            format!(
+                "Invalid address format: {}",
+                reason.unwrap_or("Invalid Bitcoin address")
+            ),
+            data,
+        )
+    }
+
+    /// Missing required parameter error
+    pub fn missing_parameter(param_name: &str, param_type: Option<&str>) -> Self {
+        let mut data = json!({
+            "parameter": param_name,
+        });
+
+        if let Some(ty) = param_type {
+            data["expected_type"] = json!(ty);
+        }
+
+        let mut suggestions = vec![format!("Provide the '{}' parameter", param_name)];
+        if let Some(ty) = param_type {
+            suggestions.push(format!("Parameter type should be: {}", ty));
+        }
+
+        data["suggestions"] = json!(suggestions);
+
+        Self::with_data(
+            RpcErrorCode::InvalidParams,
+            format!("Missing required parameter: {}", param_name),
+            data,
+        )
+    }
+
+    /// Block not found with context
+    pub fn block_not_found_with_context(
+        hash: &str,
+        suggestion: Option<&str>,
+        available_height: Option<u64>,
+    ) -> Self {
+        let mut data = json!({
+            "block_hash": hash,
+        });
+
+        if let Some(suggestion) = suggestion {
+            data["suggestion"] = json!(suggestion);
+        }
+
+        if let Some(height) = available_height {
+            data["available_height"] = json!(height);
+        }
+
+        Self::with_data(
+            RpcErrorCode::BlockNotFound,
+            format!("Block not found: {hash}"),
+            data,
+        )
+    }
+
+    /// Transaction not found with context
+    pub fn tx_not_found_with_context(
+        txid: &str,
+        in_mempool: bool,
+        suggestion: Option<&str>,
+    ) -> Self {
+        let mut data = json!({
+            "txid": txid,
+            "in_mempool": in_mempool,
+        });
+
+        if let Some(suggestion) = suggestion {
+            data["suggestion"] = json!(suggestion);
+        }
+
+        Self::with_data(
+            RpcErrorCode::TxNotFound,
+            format!("Transaction not found: {txid}"),
+            data,
+        )
+    }
+
+    /// Invalid params with detailed field information
+    pub fn invalid_params_with_fields(
+        message: impl Into<String>,
+        fields: Vec<(&str, &str)>,
+        suggestions: Option<Value>,
+    ) -> Self {
+        let mut data = json!({
+            "invalid_fields": fields
+                .iter()
+                .map(|(field, reason)| json!({
+                    "field": field,
+                    "reason": reason
+                }))
+                .collect::<Vec<_>>(),
+        });
+
+        if let Some(suggestions) = suggestions {
+            data["suggestions"] = suggestions;
+        }
+
+        Self::with_data(RpcErrorCode::InvalidParams, message, data)
+    }
+
+    /// Add suggestion to error
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        let data = self.data.get_or_insert_with(|| json!({}));
+        data["suggestion"] = json!(suggestion.into());
+        self
+    }
+
+    /// Add context to error
+    pub fn with_context(mut self, context: Value) -> Self {
+        let data = self.data.get_or_insert_with(|| json!({}));
+        if let Some(obj) = data.as_object_mut() {
+            if let Some(ctx_obj) = context.as_object() {
+                for (k, v) in ctx_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        self
+    }
+
     /// Convert to JSON-RPC error response
     pub fn to_json(&self, id: Option<Value>) -> Value {
         let mut error = json!({

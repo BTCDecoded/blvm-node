@@ -206,14 +206,21 @@ impl NetworkRpc {
         let node = params
             .get(0)
             .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Missing node parameter"))?;
+            .ok_or_else(|| RpcError::missing_parameter("node", Some("string (IP:port)")))?;
 
         let command = params.get(1).and_then(|p| p.as_str()).unwrap_or("add");
 
         // Parse node address
-        let addr: SocketAddr = node
-            .parse()
-            .map_err(|_| RpcError::invalid_params(format!("Invalid node address: {node}")))?;
+        let addr: SocketAddr = node.parse().map_err(|_| {
+            RpcError::invalid_params_with_fields(
+                format!("Invalid node address: {node}"),
+                vec![("node", "Must be in format IP:port (e.g., 192.168.1.1:8333)")],
+                Some(json!([
+                    "Format: IPv4:port or [IPv6]:port",
+                    "Example: 192.168.1.1:8333 or [2001:db8::1]:8333"
+                ])),
+            )
+        })?;
 
         if let Some(ref mut network) = self.network_manager.as_ref() {
             match command {
@@ -260,11 +267,21 @@ impl NetworkRpc {
         let address = params
             .get(0)
             .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Missing address parameter"))?;
+            .ok_or_else(|| RpcError::missing_parameter("address", Some("string (IP:port)")))?;
 
-        let addr: SocketAddr = address
-            .parse()
-            .map_err(|_| RpcError::invalid_params(format!("Invalid address: {address}")))?;
+        let addr: SocketAddr = address.parse().map_err(|_| {
+            RpcError::invalid_params_with_fields(
+                format!("Invalid address: {address}"),
+                vec![(
+                    "address",
+                    "Must be in format IP:port (e.g., 192.168.1.1:8333)",
+                )],
+                Some(json!([
+                    "Format: IPv4:port or [IPv6]:port",
+                    "Example: 192.168.1.1:8333 or [2001:db8::1]:8333"
+                ])),
+            )
+        })?;
 
         if let Some(ref network) = self.network_manager {
             // Send disconnect message to network manager
@@ -379,14 +396,24 @@ impl NetworkRpc {
         let subnet = params
             .get(0)
             .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Missing subnet parameter"))?;
+            .ok_or_else(|| RpcError::missing_parameter("subnet", Some("string (IP:port)")))?;
 
         let command = params.get(1).and_then(|p| p.as_str()).unwrap_or("add");
 
         // Parse address/subnet
-        let addr: SocketAddr = subnet
-            .parse()
-            .map_err(|_| RpcError::invalid_params(format!("Invalid address/subnet: {subnet}")))?;
+        let addr: SocketAddr = subnet.parse().map_err(|_| {
+            RpcError::invalid_params_with_fields(
+                format!("Invalid address/subnet: {subnet}"),
+                vec![(
+                    "subnet",
+                    "Must be in format IP:port (e.g., 192.168.1.1:8333)",
+                )],
+                Some(json!([
+                    "Format: IPv4:port or [IPv6]:port",
+                    "Example: 192.168.1.1:8333 or [2001:db8::1]:8333"
+                ])),
+            )
+        })?;
 
         // Parse bantime (seconds) - 0 = permanent
         let bantime = params.get(2).and_then(|p| p.as_u64()).unwrap_or(86400); // Default 24 hours

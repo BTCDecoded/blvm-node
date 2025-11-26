@@ -163,6 +163,8 @@ zmq = ["dep:zmq"]
 mimalloc = []
 # JSON logging format for structured logging (production/monitoring)
 json-logging = []
+# Modern REST API (runs alongside JSON-RPC)
+rest-api = []
 
 # Formal verification (Kani model checking) - verification only, not in release builds
 verify = ["kani-verifier"]

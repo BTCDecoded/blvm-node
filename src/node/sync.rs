@@ -5,11 +5,12 @@
 
 use crate::node::block_processor::{
     parse_block_from_wire, prepare_block_validation_context, protocol_version_to_network,
-    store_block_with_context, validate_block_with_context,
+    store_block_with_context_and_index, validate_block_with_context,
 };
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use crate::storage::blockstore::BlockStore;
+use crate::storage::Storage;
 use anyhow::Result;
 use bllvm_protocol::{Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult};
 use std::collections::HashMap;
@@ -185,9 +186,11 @@ impl SyncCoordinator {
     /// 1. Parses the block from wire format (extracting witness data)
     /// 2. Validates the block with proper witnesses and headers
     /// 3. Stores the block with witnesses and updates headers
+    /// 4. Indexes transactions if storage is provided
     pub fn process_block(
         &mut self,
         blockstore: &BlockStore,
+        storage: Option<&Arc<Storage>>,
         block_data: &[u8],
         current_height: u64,
         utxo_set: &mut UtxoSet,
@@ -236,8 +239,14 @@ impl SyncCoordinator {
         let processing_time = start_time.elapsed();
 
         if matches!(validation_result, ValidationResult::Valid) {
-            // Store block with witnesses and update headers
-            store_block_with_context(blockstore, &block, witnesses_to_use, current_height)?;
+            // Store block with witnesses, update headers, and index transactions
+            store_block_with_context_and_index(
+                blockstore,
+                storage,
+                &block,
+                witnesses_to_use,
+                current_height,
+            )?;
 
             // Update metrics
             if let Some(ref metrics) = metrics {

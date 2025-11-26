@@ -84,13 +84,33 @@ impl Storage {
         backend: DatabaseBackend,
         pruning_config: Option<PruningConfig>,
     ) -> Result<Self> {
+        Self::with_backend_pruning_and_indexing(data_dir, backend, pruning_config, None)
+    }
+
+    /// Create a new storage instance with backend, pruning, and indexing config
+    pub fn with_backend_pruning_and_indexing<P: AsRef<Path>>(
+        data_dir: P,
+        backend: DatabaseBackend,
+        pruning_config: Option<PruningConfig>,
+        indexing_config: Option<crate::config::IndexingConfig>,
+    ) -> Result<Self> {
         let db = Arc::from(create_database(data_dir, backend)?);
 
         use crate::utils::arc_new;
         let blockstore = arc_new(blockstore::BlockStore::new(Arc::clone(&db))?);
         let utxostore = arc_new(utxostore::UtxoStore::new(Arc::clone(&db))?);
         let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
-        let txindex = arc_new(txindex::TxIndex::new(Arc::clone(&db))?);
+
+        // Configure transaction indexing based on config
+        let txindex = if let Some(indexing) = indexing_config {
+            arc_new(txindex::TxIndex::with_indexing(
+                Arc::clone(&db),
+                indexing.enable_address_index,
+                indexing.enable_value_index,
+            )?)
+        } else {
+            arc_new(txindex::TxIndex::new(Arc::clone(&db))?)
+        };
 
         let pruning_manager = pruning_config.map(|config| {
             use crate::utils::{arc_clone, arc_new};
@@ -244,6 +264,17 @@ impl Storage {
     /// Get transaction count from txindex
     pub fn transaction_count(&self) -> Result<usize> {
         self.txindex.transaction_count()
+    }
+
+    /// Index a block's transactions (optimized batch indexing)
+    /// This should be called after a block is stored to index all its transactions
+    pub fn index_block(
+        &self,
+        block: &bllvm_protocol::Block,
+        block_hash: &bllvm_protocol::Hash,
+        block_height: u64,
+    ) -> Result<()> {
+        self.txindex.index_block(block, block_hash, block_height)
     }
 
     /// Get pruning manager (if pruning is configured)

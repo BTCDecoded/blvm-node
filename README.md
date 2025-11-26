@@ -27,6 +27,17 @@ This is **Tier 4** of the 5-tier Bitcoin Commons architecture (BLLVM technology 
 
 ## Configuration
 
+### RBF and Mempool Policies
+
+bllvm-node supports configurable RBF (Replace-By-Fee) modes and comprehensive mempool policies:
+
+- **RBF Modes**: Disabled, Conservative, Standard (default), Aggressive
+- **Mempool Policies**: Size limits, fee thresholds, eviction strategies, ancestor/descendant limits
+
+See the [Configuration Guide](docs/CONFIGURATION_GUIDE.md) for details:
+- [RBF Configuration](docs/RBF_CONFIGURATION.md) - Detailed RBF mode configuration
+- [Mempool Policies](docs/MEMPOOL_POLICIES.md) - Detailed mempool policy configuration
+
 ### Protocol Variants
 
 The reference-node supports multiple Bitcoin protocol variants:

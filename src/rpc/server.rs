@@ -763,6 +763,7 @@ impl RpcServer {
     }
 
     /// Process a JSON-RPC request with a server instance (reuses cached handlers)
+    /// Supports both single requests and batch requests (JSON-RPC 2.0)
     async fn process_request_with_server(server: Arc<Self>, request: &str) -> String {
         let request: Value = match serde_json::from_str(request) {
             Ok(req) => req,
@@ -773,6 +774,13 @@ impl RpcServer {
             }
         };
 
+        // Check if this is a batch request (array) or single request (object)
+        if let Some(requests) = request.as_array() {
+            // Batch request - process all requests in parallel
+            return Self::process_batch_request(server, requests).await;
+        }
+
+        // Single request - process normally
         let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
         let params = request.get("params").cloned().unwrap_or_else(|| json!([]));
@@ -796,6 +804,80 @@ impl RpcServer {
                 serde_json::to_string(&e.to_json(id.cloned())).unwrap_or_else(|_| "{}".to_string())
             }
         }
+    }
+
+    /// Process a batch of JSON-RPC requests in parallel
+    /// Maintains request order and handles errors per-request
+    async fn process_batch_request(server: Arc<Self>, requests: &[Value]) -> String {
+        // Empty batch returns empty array (JSON-RPC 2.0 spec)
+        if requests.is_empty() {
+            return "[]".to_string();
+        }
+
+        // Process all requests in parallel using tokio::task::spawn
+        // Each request is processed independently, maintaining order
+        let handles: Vec<_> = requests
+            .iter()
+            .enumerate()
+            .map(|(index, req)| {
+                let server_clone = Arc::clone(&server);
+                let req_clone = req.clone();
+                tokio::spawn(async move {
+                    // Process each request
+                    let method = req_clone
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("");
+                    let params = req_clone
+                        .get("params")
+                        .cloned()
+                        .unwrap_or_else(|| json!([]));
+                    let id = req_clone.get("id").cloned();
+
+                    let result = server_clone.call_method(method, params).await;
+
+                    // Build response maintaining original request ID
+                    let response = match result {
+                        Ok(response_value) => {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "result": response_value,
+                                "id": id.unwrap_or(Value::Null)
+                            })
+                        }
+                        Err(e) => {
+                            // Error response maintains the request ID
+                            e.to_json(id)
+                        }
+                    };
+
+                    (index, response)
+                })
+            })
+            .collect();
+
+        // Wait for all requests to complete
+        let mut results = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    // Task join error - create error response
+                    error!("Task join error in batch request: {}", e);
+                    // We can't recover the original request ID here, so we'll skip this response
+                    // In practice, this should rarely happen
+                }
+            }
+        }
+
+        // Sort by original index to maintain request order
+        results.sort_by_key(|(index, _)| *index);
+
+        // Extract responses in order
+        let responses: Vec<Value> = results.into_iter().map(|(_, response)| response).collect();
+
+        // Return batch response as JSON array
+        serde_json::to_string(&responses).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Call a specific RPC method
@@ -956,6 +1038,22 @@ impl RpcServer {
                 .get_index_info(&params)
                 .await
                 .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getblockchainstate" => self
+                .blockchain
+                .get_blockchain_state()
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "validateaddress" => self
+                .blockchain
+                .validate_address(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "getaddressinfo" => self
+                .blockchain
+                .get_address_info(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "gettransactiondetails" => self.rawtx.get_transaction_details(&params).await,
 
             // Control methods
             "stop" => self.control.stop(&params).await,
@@ -1378,5 +1476,127 @@ mod tests {
             );
             assert_eq!(response["id"], 1);
         }
+    }
+
+    #[tokio::test]
+    async fn test_batch_request_empty() {
+        let request = "[]";
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
+
+        assert!(response.is_array());
+        assert_eq!(response.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_batch_request_single() {
+        let request = r#"[{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}]"#;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
+
+        assert!(response.is_array());
+        let responses = response.as_array().unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["jsonrpc"], "2.0");
+        assert!(responses[0]["result"].is_object());
+        assert_eq!(responses[0]["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_batch_request_multiple() {
+        let request = r#"[
+            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1},
+            {"jsonrpc":"2.0","method":"getblockcount","params":[],"id":2},
+            {"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":3}
+        ]"#;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
+
+        assert!(response.is_array());
+        let responses = response.as_array().unwrap();
+        assert_eq!(responses.len(), 3);
+
+        // Verify order is maintained
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[2]["id"], 3);
+
+        // Verify all are successful
+        assert!(responses[0]["result"].is_object());
+        assert!(responses[1]["result"].is_number());
+        assert!(responses[2]["result"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_batch_request_with_errors() {
+        let request = r#"[
+            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1},
+            {"jsonrpc":"2.0","method":"unknown_method","params":[],"id":2},
+            {"jsonrpc":"2.0","method":"getblockcount","params":[],"id":3}
+        ]"#;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
+
+        assert!(response.is_array());
+        let responses = response.as_array().unwrap();
+        assert_eq!(responses.len(), 3);
+
+        // First request should succeed
+        assert_eq!(responses[0]["id"], 1);
+        assert!(responses[0]["result"].is_object());
+        assert!(responses[0]["error"].is_null());
+
+        // Second request should fail
+        assert_eq!(responses[1]["id"], 2);
+        assert!(responses[1]["result"].is_null());
+        assert!(responses[1]["error"].is_object());
+        assert_eq!(responses[1]["error"]["code"], -32601);
+
+        // Third request should succeed
+        assert_eq!(responses[2]["id"], 3);
+        assert!(responses[2]["result"].is_number());
+        assert!(responses[2]["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_batch_request_order_preserved() {
+        let request = r#"[
+            {"jsonrpc":"2.0","method":"getblockcount","params":[],"id":3},
+            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1},
+            {"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":2}
+        ]"#;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
+
+        assert!(response.is_array());
+        let responses = response.as_array().unwrap();
+        assert_eq!(responses.len(), 3);
+
+        // Order should match request order, not ID order
+        assert_eq!(responses[0]["id"], 3);
+        assert_eq!(responses[1]["id"], 1);
+        assert_eq!(responses[2]["id"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_batch_request_without_ids() {
+        let request = r#"[
+            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[]},
+            {"jsonrpc":"2.0","method":"getblockcount","params":[]}
+        ]"#;
+        let response_str = RpcServer::process_request(request).await;
+        let response: Value = serde_json::from_str(&response_str).unwrap();
+
+        assert!(response.is_array());
+        let responses = response.as_array().unwrap();
+        assert_eq!(responses.len(), 2);
+
+        // Both should have null IDs
+        assert_eq!(responses[0]["id"], Value::Null);
+        assert_eq!(responses[1]["id"], Value::Null);
+
+        // Both should succeed
+        assert!(responses[0]["result"].is_object());
+        assert!(responses[1]["result"].is_number());
     }
 }

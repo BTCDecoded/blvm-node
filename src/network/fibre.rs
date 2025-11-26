@@ -776,9 +776,12 @@ impl FibreRelay {
             });
             conn.last_seen = Instant::now();
             conn.out_sequence = conn.out_sequence.wrapping_add(packets.len() as u64);
-            
+
             if send_errors > 0 {
-                Err(FibreError::UdpError(format!("Failed to send {} packets", send_errors)))
+                Err(FibreError::UdpError(format!(
+                    "Failed to send {} packets",
+                    send_errors
+                )))
             } else {
                 Ok(())
             }
@@ -1019,7 +1022,7 @@ impl FibreRelay {
         } else {
             0.0
         };
-        
+
         FibreStats {
             encoded_blocks: self.encoded_blocks.len(),
             fibre_peers: self.fibre_peers.len(),

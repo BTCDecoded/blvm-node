@@ -2,7 +2,7 @@ name: Coverage
 
 # Separate coverage workflow - runs independently from CI
 # Coverage is skipped by default in CI to keep PRs fast
-# This workflow can be triggered manually or on schedule
+# This workflow only runs manually via workflow_dispatch
 on:
   # Manual trigger for on-demand coverage (default: enabled)
   workflow_dispatch:
@@ -12,12 +12,6 @@ on:
         required: false
         type: boolean
         default: true
-  # Run on main branch merges (after code is reviewed and merged)
-  push:
-    branches: [ main ]
-  # Weekly scheduled run to track coverage trends
-  schedule:
-    - cron: '0 0 * * 0'  # Sunday 00:00 UTC
 
 permissions:
   contents: read
@@ -32,12 +26,8 @@ jobs:
   coverage:
     name: Coverage Report
     runs-on: [self-hosted, Linux, X64, builds]
-    # Skip only if manually triggered with run_coverage=false
-    # Otherwise run for push/schedule events
-    if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_coverage == true) ||
-      github.event_name == 'push' ||
-      github.event_name == 'schedule'
+    # Only run if manually triggered with run_coverage=true
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_coverage == true
     
     steps:
       - uses: actions/checkout@v4

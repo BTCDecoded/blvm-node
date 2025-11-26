@@ -219,13 +219,17 @@ impl MempoolRpc {
         debug!("RPC: getmempoolancestors");
 
         let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
-            crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
+            crate::rpc::errors::RpcError::missing_parameter("txid", Some("string (hex)"))
         })?;
 
         let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
         let hash_bytes = hex::decode(txid).map_err(|e| {
-            crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {e}"))
+            crate::rpc::errors::RpcError::invalid_hash_format(
+                txid,
+                Some(32),
+                Some(&format!("Invalid hex encoding: {e}")),
+            )
         })?;
         if hash_bytes.len() != 32 {
             return Err(crate::rpc::errors::RpcError::invalid_params(
@@ -300,13 +304,17 @@ impl MempoolRpc {
         debug!("RPC: getmempooldescendants");
 
         let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
-            crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
+            crate::rpc::errors::RpcError::missing_parameter("txid", Some("string (hex)"))
         })?;
 
         let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
 
         let hash_bytes = hex::decode(txid).map_err(|e| {
-            crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {e}"))
+            crate::rpc::errors::RpcError::invalid_hash_format(
+                txid,
+                Some(32),
+                Some(&format!("Invalid hex encoding: {e}")),
+            )
         })?;
         if hash_bytes.len() != 32 {
             return Err(crate::rpc::errors::RpcError::invalid_params(
@@ -405,11 +413,15 @@ impl MempoolRpc {
         debug!("RPC: getmempoolentry");
 
         let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
-            crate::rpc::errors::RpcError::invalid_params("Transaction ID required".to_string())
+            crate::rpc::errors::RpcError::missing_parameter("txid", Some("string (hex)"))
         })?;
 
         let hash_bytes = hex::decode(txid).map_err(|e| {
-            crate::rpc::errors::RpcError::invalid_params(format!("Invalid transaction ID: {e}"))
+            crate::rpc::errors::RpcError::invalid_hash_format(
+                txid,
+                Some(32),
+                Some(&format!("Invalid hex encoding: {e}")),
+            )
         })?;
         if hash_bytes.len() != 32 {
             return Err(crate::rpc::errors::RpcError::invalid_params(

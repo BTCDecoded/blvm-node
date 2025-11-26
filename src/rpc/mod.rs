@@ -11,6 +11,8 @@ pub mod mempool;
 pub mod mining;
 pub mod network;
 pub mod rawtx;
+#[cfg(feature = "rest-api")]
+pub mod rest;
 #[cfg(kani)]
 pub mod rpc_proofs;
 pub mod server;
@@ -29,7 +31,12 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+#[cfg(feature = "rest-api")]
+use tracing::warn;
 use tracing::{error, info};
+
+#[cfg(feature = "rest-api")]
+use crate::rpc::rest::RestApiServer;
 
 /// RPC manager that coordinates all RPC operations
 ///
@@ -37,6 +44,8 @@ use tracing::{error, info};
 pub struct RpcManager {
     server_addr: SocketAddr,
     quinn_addr: Option<SocketAddr>,
+    #[cfg(feature = "rest-api")]
+    rest_api_addr: Option<SocketAddr>,
     blockchain_rpc: blockchain::BlockchainRpc,
     network_rpc: network::NetworkRpc,
     mining_rpc: mining::MiningRpc,
@@ -47,6 +56,8 @@ pub struct RpcManager {
     shutdown_tx: Option<mpsc::UnboundedSender<()>>,
     #[cfg(feature = "quinn")]
     quinn_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
+    #[cfg(feature = "rest-api")]
+    rest_api_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
     /// RPC authentication manager (optional)
     auth_manager: Option<Arc<auth::RpcAuthManager>>,
     /// Node shutdown callback (optional)
@@ -63,6 +74,8 @@ impl RpcManager {
         Self {
             server_addr,
             quinn_addr: None,
+            #[cfg(feature = "rest-api")]
+            rest_api_addr: None,
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
             mining_rpc: mining::MiningRpc::new(),
@@ -75,6 +88,8 @@ impl RpcManager {
             shutdown_tx: None,
             #[cfg(feature = "quinn")]
             quinn_shutdown_tx: None,
+            #[cfg(feature = "rest-api")]
+            rest_api_shutdown_tx: None,
             auth_manager: None,
             node_shutdown: None,
         }
@@ -190,6 +205,12 @@ impl RpcManager {
     #[cfg(feature = "quinn")]
     pub fn enable_quinn(&mut self, quinn_addr: SocketAddr) {
         self.quinn_addr = Some(quinn_addr);
+    }
+
+    /// Enable REST API server on specified address
+    #[cfg(feature = "rest-api")]
+    pub fn enable_rest_api(&mut self, rest_api_addr: SocketAddr) {
+        self.rest_api_addr = Some(rest_api_addr);
     }
 
     /// Start the RPC server(s)
@@ -325,6 +346,70 @@ impl RpcManager {
             None
         };
 
+        // Start REST API server if enabled
+        #[cfg(feature = "rest-api")]
+        let rest_api_handle = if let Some(rest_api_addr) = self.rest_api_addr {
+            if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
+                info!("Starting REST API server on {}", rest_api_addr);
+
+                let (rest_api_shutdown_tx, mut rest_api_shutdown_rx) = mpsc::unbounded_channel();
+                self.rest_api_shutdown_tx = Some(rest_api_shutdown_tx);
+
+                use crate::utils::{arc_clone, arc_new};
+                let blockchain = arc_new(blockchain::BlockchainRpc::with_dependencies(arc_clone(
+                    storage,
+                )));
+                let mempool_rpc = arc_new(mempool::MempoolRpc::with_dependencies(
+                    arc_clone(mempool),
+                    arc_clone(storage),
+                ));
+                let rawtx_rpc = arc_new(rawtx::RawTxRpc::with_dependencies(
+                    arc_clone(storage),
+                    arc_clone(mempool),
+                    None,
+                    None,
+                ));
+                let mining = arc_new(mining::MiningRpc::with_dependencies(
+                    arc_clone(storage),
+                    arc_clone(mempool),
+                ));
+                let network = if let Some(ref network_manager) = self.network_manager {
+                    arc_new(network::NetworkRpc::with_dependencies(arc_clone(
+                        network_manager,
+                    )))
+                } else {
+                    arc_new(network::NetworkRpc::new())
+                };
+
+                let rest_server = RestApiServer::new(
+                    rest_api_addr,
+                    blockchain,
+                    network,
+                    mempool_rpc,
+                    mining,
+                    rawtx_rpc,
+                );
+
+                Some(tokio::spawn(async move {
+                    tokio::select! {
+                        result = rest_server.start() => {
+                            if let Err(e) = result {
+                                error!("REST API server error: {}", e);
+                            }
+                        }
+                        _ = rest_api_shutdown_rx.recv() => {
+                            info!("REST API server shutdown requested");
+                        }
+                    }
+                }))
+            } else {
+                warn!("REST API requested but storage/mempool not available");
+                None
+            }
+        } else {
+            None
+        };
+
         // Wait for shutdown signal
         shutdown_rx.recv().await;
 
@@ -339,6 +424,13 @@ impl RpcManager {
             info!("QUIC RPC server stopped");
         }
 
+        // Shutdown REST API server if it was started
+        #[cfg(feature = "rest-api")]
+        if let Some(handle) = rest_api_handle {
+            handle.abort();
+            info!("REST API server stopped");
+        }
+
         Ok(())
     }
 
@@ -350,6 +442,11 @@ impl RpcManager {
 
         #[cfg(feature = "quinn")]
         if let Some(tx) = &self.quinn_shutdown_tx {
+            let _ = tx.send(());
+        }
+
+        #[cfg(feature = "rest-api")]
+        if let Some(tx) = &self.rest_api_shutdown_tx {
             let _ = tx.send(());
         }
 
