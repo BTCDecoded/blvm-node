@@ -210,7 +210,9 @@ jobs:
           # Use --lib --bins --tests to ensure all test types run
           # Use --skip-clean to reuse cached build artifacts, --timeout to prevent hangs
           # --all-features for complete coverage
-          cargo tarpaulin --lib --bins --tests --all-features --out xml --output-dir coverage --skip-clean --timeout 120
+          # --jobs 2 limits parallelism to prevent OOM when compiling 63+ test executables
+          # This is critical: without --jobs, tarpaulin uses all CPU cores which causes memory exhaustion
+          cargo tarpaulin --lib --bins --tests --all-features --out xml --output-dir coverage --skip-clean --timeout 120 --jobs 2
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3

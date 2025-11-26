@@ -96,7 +96,7 @@ cargo build
 cargo test
 
 # Run with coverage
-cargo tarpaulin --out Html
+cargo tarpaulin --out Html --jobs 2
 
 # Run specific test categories
 cargo test --test integration_tests
