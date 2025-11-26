@@ -331,19 +331,109 @@ impl BlockchainRpc {
             .await
             {
                 Ok(Ok(Ok(Some(block)))) => {
-                    // Block found - return it
-                    // TODO: Format block according to verbosity parameter
+                    // Block found - calculate all required fields (similar to get_block_header)
+                    use std::time::{Duration, Instant};
+                    
+                    thread_local! {
+                        static CACHED_TIP_HEIGHT: std::cell::RefCell<(Option<u64>, Instant)> =
+                            std::cell::RefCell::new((None, Instant::now()));
+                    }
+                    
+                    let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
+                    
+                    let tip_height = {
+                        let should_refresh = CACHED_TIP_HEIGHT.with(|c| {
+                            let cache = c.borrow();
+                            cache.0.is_none() || cache.1.elapsed() >= Duration::from_secs(1)
+                        });
+                        
+                        if should_refresh {
+                            let height = storage.chain().get_height()?.unwrap_or(0);
+                            CACHED_TIP_HEIGHT.with(|c| {
+                                let mut cache = c.borrow_mut();
+                                *cache = (Some(height), Instant::now());
+                            });
+                            CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
+                        } else {
+                            CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
+                        }
+                    };
+                    
+                    let confirmations = block_height
+                        .map(|h| Self::calculate_confirmations(h, tip_height))
+                        .unwrap_or(0);
+                    
+                    // Calculate block size
+                    let block_size = bincode::serialize(&block).map(|b| b.len()).unwrap_or(0);
+                    
+                    // Calculate block weight (simplified: size * 4 for non-segwit, proper calculation for segwit)
+                    // Proper weight = base_size * 3 + total_size
+                    let block_weight = block_size * 4; // Simplified - proper weight calculation would account for witness data
+                    
+                    // Calculate median time from recent headers
+                    let mediantime = if block_height.is_some() {
+                        if let Ok(recent_headers) = storage.blocks().get_recent_headers(11) {
+                            Self::calculate_median_time(&recent_headers)
+                        } else {
+                            block.header.timestamp
+                        }
+                    } else {
+                        block.header.timestamp
+                    };
+                    
+                    // Calculate difficulty
+                    let difficulty = Self::calculate_difficulty(block.header.bits);
+                    
+                    // Get transaction IDs
+                    let tx_ids: Vec<String> = block.transactions
+                        .iter()
+                        .map(|tx| {
+                            let tx_hash = bllvm_protocol::block::calculate_tx_id(tx);
+                            hex::encode(tx_hash)
+                        })
+                        .collect();
+                    
+                    // Get next block hash
+                    let next_blockhash = block_height.and_then(|h| {
+                        storage
+                            .blocks()
+                            .get_hash_by_height(h + 1)
+                            .ok()
+                            .flatten()
+                            .map(hex::encode)
+                    });
+                    
+                    // Get chainwork
+                    let chainwork = if let Some(_height) = block_height {
+                        storage
+                            .chain()
+                            .get_chainwork(&hash_array)?
+                            .map(Self::format_chainwork)
+                            .unwrap_or_else(|| ZERO_HASH_STR.to_string())
+                    } else {
+                        ZERO_HASH_STR.to_string()
+                    };
+                    
                     return Ok(json!({
                         "hash": hash,
-                        "confirmations": 1, // TODO: Calculate actual confirmations
-                        "size": 0, // TODO: Calculate size
-                        "height": 0, // TODO: Get height
+                        "confirmations": confirmations,
+                        "size": block_size,
+                        "strippedsize": block_size, // Same as size for now (no witness stripping)
+                        "weight": block_weight,
+                        "height": block_height.unwrap_or(0),
                         "version": block.header.version,
+                        "versionHex": format!("{:08x}", block.header.version),
                         "merkleroot": hex::encode(block.header.merkle_root),
-                        "tx": [], // TODO: Include transactions
+                        "tx": tx_ids,
                         "time": block.header.timestamp,
+                        "mediantime": mediantime,
+                        "nonce": block.header.nonce as u32,
                         "bits": format!("{:08x}", block.header.bits),
-                        "difficulty": 1.0, // TODO: Calculate difficulty
+                        "difficulty": difficulty,
+                        "chainwork": chainwork,
+                        "nTx": block.transactions.len(),
+                        "previousblockhash": hex::encode(block.header.prev_block_hash),
+                        "nextblockhash": next_blockhash.unwrap_or_else(|| ZERO_HASH_STR.to_string()),
                     }));
                 }
                 Ok(Ok(Ok(None))) => {
