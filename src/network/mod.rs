@@ -1008,11 +1008,10 @@ impl NetworkManager {
             info!("TCP listener started on {}", listen_addr);
 
             // Start TCP accept loop
-            use crate::utils::arc_clone;
             let peer_tx = self.peer_tx.clone();
-            let dos_protection = arc_clone(&self.dos_protection);
-            let peer_manager_clone = arc_clone(&self.peer_manager);
-            let ban_list = arc_clone(&self.ban_list);
+            let dos_protection = Arc::clone(&self.dos_protection);
+            let peer_manager_clone = Arc::clone(&self.peer_manager);
+            let ban_list = Arc::clone(&self.ban_list);
             tokio::spawn(async move {
                 loop {
                     match tcp_listener.accept().await {
@@ -1086,8 +1085,7 @@ impl NetworkManager {
 
                             // Handle connection in background with graceful error handling
                             let peer_tx_clone = peer_tx.clone();
-                            use crate::utils::arc_clone;
-                            let peer_manager_for_peer = arc_clone(&peer_manager_clone);
+                            let peer_manager_for_peer = Arc::clone(&peer_manager_clone);
                             let transport_addr_for_peer = transport_addr_tcp;
                             tokio::spawn(async move {
                                 // Create peer from transport connection
@@ -1132,10 +1130,9 @@ impl NetworkManager {
                 Ok(mut quinn_listener) => {
                     info!("Quinn listener started on {}", listen_addr);
                     let peer_tx = self.peer_tx.clone();
-                    use crate::utils::arc_clone;
-                    let peer_manager = arc_clone(&self.peer_manager);
-                    let dos_protection = arc_clone(&self.dos_protection);
-                    let ban_list = arc_clone(&self.ban_list);
+                    let peer_manager = Arc::clone(&self.peer_manager);
+                    let dos_protection = Arc::clone(&self.dos_protection);
+                    let ban_list = Arc::clone(&self.ban_list);
 
                     tokio::spawn(async move {
                         loop {
@@ -1191,9 +1188,8 @@ impl NetworkManager {
                                     ));
 
                                     // Handle connection in background with graceful error handling
-                                    use crate::utils::arc_clone;
                                     let peer_tx_clone = peer_tx.clone();
-                                    let peer_manager_clone = arc_clone(&peer_manager);
+                                    let peer_manager_clone = Arc::clone(&peer_manager);
                                     tokio::spawn(async move {
                                         use crate::network::transport::TransportAddr;
 
@@ -1250,11 +1246,10 @@ impl NetworkManager {
                 Ok(mut iroh_listener) => {
                     info!("Iroh listener started on {}", listen_addr);
                     let peer_tx = self.peer_tx.clone();
-                    use crate::utils::arc_clone;
-                    let peer_manager = arc_clone(&self.peer_manager);
-                    let dos_protection = arc_clone(&self.dos_protection);
-                    let address_database = arc_clone(&self.address_database);
-                    let socket_to_transport = arc_clone(&self.socket_to_transport);
+                    let peer_manager = Arc::clone(&self.peer_manager);
+                    let dos_protection = Arc::clone(&self.dos_protection);
+                    let address_database = Arc::clone(&self.address_database);
+                    let socket_to_transport = Arc::clone(&self.socket_to_transport);
                     tokio::spawn(async move {
                         loop {
                             match iroh_listener.accept().await {
@@ -1536,9 +1531,8 @@ impl NetworkManager {
 
     /// Start periodic task to clean up expired pending requests
     fn start_request_cleanup_task(&self) {
-        use crate::utils::arc_clone;
-        let pending_requests = arc_clone(&self.pending_requests);
-        let timeout_config = arc_clone(&self.request_timeout_config);
+        let pending_requests = Arc::clone(&self.pending_requests);
+        let timeout_config = Arc::clone(&self.request_timeout_config);
 
         tokio::spawn(async move {
             let cleanup_interval = timeout_config.request_cleanup_interval_seconds;
@@ -1570,9 +1564,8 @@ impl NetworkManager {
 
     /// Start periodic task to clean up DoS protection data
     fn start_dos_protection_cleanup_task(&self) {
-        use crate::utils::arc_clone;
-        let dos_protection = arc_clone(&self.dos_protection);
-        let ban_list = arc_clone(&self.ban_list);
+        let dos_protection = Arc::clone(&self.dos_protection);
+        let ban_list = Arc::clone(&self.ban_list);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
@@ -1584,9 +1577,8 @@ impl NetworkManager {
 
                 // Auto-ban IPs that should be banned
                 // Periodic check for IPs that have exceeded violation thresholds
-                use crate::utils::arc_clone;
-                let dos_clone = arc_clone(&dos_protection);
-                let ban_list_clone = arc_clone(&ban_list);
+                let dos_clone = Arc::clone(&dos_protection);
+                let ban_list_clone = Arc::clone(&ban_list);
                 let ban_duration = dos_protection.ban_duration_seconds();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Check every minute
@@ -1621,8 +1613,7 @@ impl NetworkManager {
 
     /// Start periodic task to clean up expired bans
     fn start_ban_cleanup_task(&self) {
-        use crate::utils::arc_clone;
-        let ban_list = arc_clone(&self.ban_list);
+        let ban_list = Arc::clone(&self.ban_list);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
             loop {
@@ -1654,12 +1645,11 @@ impl NetworkManager {
 
     /// Start periodic task to attempt peer reconnections with exponential backoff
     fn start_peer_reconnection_task(&self) {
-        use crate::utils::arc_clone;
-        let reconnection_queue = arc_clone(&self.peer_reconnection_queue);
-        let peer_manager = arc_clone(&self.peer_manager);
+        let reconnection_queue = Arc::clone(&self.peer_reconnection_queue);
+        let peer_manager = Arc::clone(&self.peer_manager);
         let peer_tx = self.peer_tx.clone();
         let tcp_transport = self.tcp_transport.clone();
-        let ban_list = arc_clone(&self.ban_list);
+        let ban_list = Arc::clone(&self.ban_list);
         // Get max_peers (we'll need to access it later, so we'll query it in the loop)
 
         tokio::spawn(async move {
@@ -1766,10 +1756,9 @@ impl NetworkManager {
                     // Clone for async move
                     let addr_clone = *addr;
                     let peer_tx_clone = peer_tx.clone();
-                    use crate::utils::arc_clone;
-                    let peer_manager_clone = arc_clone(&peer_manager);
+                    let peer_manager_clone = Arc::clone(&peer_manager);
                     let tcp_transport_clone = tcp_transport.clone();
-                    let reconnection_queue_clone = arc_clone(&reconnection_queue);
+                    let reconnection_queue_clone = Arc::clone(&reconnection_queue);
 
                     // Attempt connection in background
                     tokio::spawn(async move {
@@ -2676,11 +2665,10 @@ impl NetworkManager {
 
             // Create NodeChainAccess
             use crate::network::chain_access::NodeChainAccess;
-            use crate::utils::arc_clone;
             let chain_access = NodeChainAccess::new(
                 storage.blocks(),
                 storage.transactions(),
-                arc_clone(mempool_manager),
+                Arc::clone(mempool_manager),
             );
 
             // Get UTXO set and height

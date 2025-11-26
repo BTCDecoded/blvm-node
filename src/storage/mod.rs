@@ -22,7 +22,6 @@ pub mod utxostore;
 pub mod utxostore_proofs;
 
 use crate::config::PruningConfig;
-use crate::utils::arc_clone;
 use anyhow::Result;
 use database::{create_database, default_backend, fallback_backend, Database, DatabaseBackend};
 use std::path::Path;
@@ -96,24 +95,22 @@ impl Storage {
     ) -> Result<Self> {
         let db = Arc::from(create_database(data_dir, backend)?);
 
-        use crate::utils::arc_new;
-        let blockstore = arc_new(blockstore::BlockStore::new(Arc::clone(&db))?);
-        let utxostore = arc_new(utxostore::UtxoStore::new(Arc::clone(&db))?);
+        let blockstore = Arc::new(blockstore::BlockStore::new(Arc::clone(&db))?);
+        let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
         let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
 
         // Configure transaction indexing based on config
         let txindex = if let Some(indexing) = indexing_config {
-            arc_new(txindex::TxIndex::with_indexing(
+            Arc::new(txindex::TxIndex::with_indexing(
                 Arc::clone(&db),
                 indexing.enable_address_index,
                 indexing.enable_value_index,
             )?)
         } else {
-            arc_new(txindex::TxIndex::new(Arc::clone(&db))?)
+            Arc::new(txindex::TxIndex::new(Arc::clone(&db))?)
         };
 
         let pruning_manager = pruning_config.map(|config| {
-            use crate::utils::{arc_clone, arc_new};
             #[cfg(feature = "utxo-commitments")]
             {
                 // Check if aggressive mode requires UTXO commitments
@@ -121,26 +118,25 @@ impl Storage {
                     || matches!(config.mode, crate::config::PruningMode::Custom { keep_commitments: true, .. });
                 if needs_commitments {
                     let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db)) {
-                        Ok(store) => arc_new(store),
+                        Ok(store) => Arc::new(store),
                         Err(e) => {
                             warn!("Failed to create commitment store: {}. Pruning will continue without commitments.", e);
-                            use crate::utils::arc_clone;
-                            return arc_new(pruning::PruningManager::new(config, arc_clone(&blockstore)));
+                            return Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)));
                         }
                     };
-                    arc_new(pruning::PruningManager::with_utxo_commitments(
+                    Arc::new(pruning::PruningManager::with_utxo_commitments(
                         config,
-                        arc_clone(&blockstore),
+                        Arc::clone(&blockstore),
                         commitment_store,
-                        arc_clone(&utxostore),
+                        Arc::clone(&utxostore),
                     ))
                 } else {
-                    arc_new(pruning::PruningManager::new(config, arc_clone(&blockstore)))
+                    Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
                 }
             }
             #[cfg(not(feature = "utxo-commitments"))]
             {
-                arc_new(pruning::PruningManager::new(config, arc_clone(&blockstore)))
+                Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
             }
         });
 
@@ -156,8 +152,7 @@ impl Storage {
 
     /// Get the block store (as Arc for sharing)
     pub fn blocks(&self) -> Arc<blockstore::BlockStore> {
-        use crate::utils::arc_clone;
-        arc_clone(&self.blockstore)
+        Arc::clone(&self.blockstore)
     }
 
     /// Get the UTXO store
@@ -167,7 +162,7 @@ impl Storage {
 
     /// Get the UTXO store as Arc (for sharing)
     pub fn utxos_arc(&self) -> Arc<utxostore::UtxoStore> {
-        arc_clone(&self.utxostore)
+        Arc::clone(&self.utxostore)
     }
 
     /// Get the chain state
@@ -177,7 +172,7 @@ impl Storage {
 
     /// Get the transaction index (as Arc for sharing)
     pub fn transactions(&self) -> Arc<txindex::TxIndex> {
-        arc_clone(&self.txindex)
+        Arc::clone(&self.txindex)
     }
 
     /// Flush all pending writes to disk

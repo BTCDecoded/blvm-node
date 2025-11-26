@@ -15,7 +15,7 @@ pub mod timeout;
 pub mod validation;
 
 // Re-export commonly used items
-pub use arc::{arc_clone, arc_clone_many, arc_clone_pair, arc_new};
+pub use arc::{arc_clone_many, arc_clone_pair};
 pub use async_helpers::{collect_results, delay_before, ignore_error, with_timeout_opt};
 pub use circuit_breaker::{CircuitBreaker, CircuitState};
 pub use env::{env_bool, env_int, env_opt, env_or_default, env_or_else};

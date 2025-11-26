@@ -44,15 +44,14 @@ pub struct RpcServer {
 impl RpcServer {
     /// Create a new RPC server
     pub fn new(addr: SocketAddr) -> Self {
-        use crate::utils::arc_new;
         Self {
             addr,
-            blockchain: arc_new(blockchain::BlockchainRpc::new()),
-            network: arc_new(network::NetworkRpc::new()),
-            mempool: arc_new(mempool::MempoolRpc::new()),
-            mining: arc_new(mining::MiningRpc::new()),
-            rawtx: arc_new(rawtx::RawTxRpc::new()),
-            control: arc_new(control::ControlRpc::new()),
+            blockchain: Arc::new(blockchain::BlockchainRpc::new()),
+            network: Arc::new(network::NetworkRpc::new()),
+            mempool: Arc::new(mempool::MempoolRpc::new()),
+            mining: Arc::new(mining::MiningRpc::new()),
+            rawtx: Arc::new(rawtx::RawTxRpc::new()),
+            control: Arc::new(control::ControlRpc::new()),
             auth_manager: None,
             metrics: None,
         }
@@ -60,15 +59,14 @@ impl RpcServer {
 
     /// Create a new RPC server with authentication
     pub fn with_auth(addr: SocketAddr, auth_manager: Arc<auth::RpcAuthManager>) -> Self {
-        use crate::utils::arc_new;
         Self {
             addr,
-            blockchain: arc_new(blockchain::BlockchainRpc::new()),
-            network: arc_new(network::NetworkRpc::new()),
-            mempool: arc_new(mempool::MempoolRpc::new()),
-            mining: arc_new(mining::MiningRpc::new()),
-            rawtx: arc_new(rawtx::RawTxRpc::new()),
-            control: arc_new(control::ControlRpc::new()),
+            blockchain: Arc::new(blockchain::BlockchainRpc::new()),
+            network: Arc::new(network::NetworkRpc::new()),
+            mempool: Arc::new(mempool::MempoolRpc::new()),
+            mining: Arc::new(mining::MiningRpc::new()),
+            rawtx: Arc::new(rawtx::RawTxRpc::new()),
+            control: Arc::new(control::ControlRpc::new()),
             auth_manager: Some(auth_manager),
             metrics: None,
         }
@@ -179,15 +177,14 @@ impl RpcServer {
 
         // Wrap server in Arc to share across connections
         // Create a new server instance with cloned Arc handlers
-        use crate::utils::{arc_clone, arc_new};
-        let server = arc_new(RpcServer {
+        let server = Arc::new(RpcServer {
             addr: self.addr,
-            blockchain: arc_clone(&self.blockchain),
-            network: arc_clone(&self.network),
-            mempool: arc_clone(&self.mempool),
-            mining: arc_clone(&self.mining),
-            rawtx: arc_clone(&self.rawtx),
-            control: arc_clone(&self.control),
+            blockchain: Arc::clone(&self.blockchain),
+            network: Arc::clone(&self.network),
+            mempool: Arc::clone(&self.mempool),
+            mining: Arc::clone(&self.mining),
+            rawtx: Arc::clone(&self.rawtx),
+            control: Arc::clone(&self.control),
             auth_manager: self.auth_manager.clone(),
             metrics: self.metrics.clone(),
         });
@@ -757,8 +754,7 @@ impl RpcServer {
         let addr: SocketAddr = "127.0.0.1:0"
             .parse()
             .expect("127.0.0.1:0 should always parse as valid SocketAddr");
-        use crate::utils::arc_new;
-        let server = arc_new(Self::new(addr));
+        let server = Arc::new(Self::new(addr));
         Self::process_request_with_server(server, request).await
     }
 
@@ -1089,8 +1085,7 @@ mod tests {
         // Start server on random port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        use crate::utils::arc_new;
-        let server = arc_new(RpcServer::new(server_addr));
+        let server = Arc::new(RpcServer::new(server_addr));
 
         // Spawn server task using hyper
         let server_handle = tokio::spawn(async move {

@@ -4,34 +4,6 @@
 
 use std::sync::Arc;
 
-/// Clone an Arc with a shorter name
-///
-/// # Example
-/// ```rust
-/// use crate::utils::arc_clone;
-///
-/// let cloned = arc_clone(&my_arc);
-/// // Instead of: Arc::clone(&my_arc)
-/// ```
-#[inline]
-pub fn arc_clone<T>(arc: &Arc<T>) -> Arc<T> {
-    Arc::clone(arc)
-}
-
-/// Create a new Arc with a shorter name
-///
-/// # Example
-/// ```rust
-/// use crate::utils::arc_new;
-///
-/// let arc = arc_new(value);
-/// // Instead of: Arc::new(value)
-/// ```
-#[inline]
-pub fn arc_new<T>(value: T) -> Arc<T> {
-    Arc::new(value)
-}
-
 /// Clone multiple Arcs at once
 ///
 /// # Example

@@ -127,8 +127,7 @@ impl RawTxRpc {
 
             // Validate transaction using consensus layer
             let _timer = self.profiler.as_ref().map(|p| {
-                use crate::utils::arc_clone;
-                PerformanceTimer::start(arc_clone(p), OperationType::TxValidation)
+                PerformanceTimer::start(Arc::clone(p), OperationType::TxValidation)
             });
             let validation_start = Instant::now();
             use bllvm_protocol::ConsensusProof;
