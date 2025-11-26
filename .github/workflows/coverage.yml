@@ -1,0 +1,176 @@
+name: Coverage
+
+# Separate coverage workflow - runs independently from CI
+# Coverage is skipped by default in CI to keep PRs fast
+# This workflow can be triggered manually or on schedule
+on:
+  # Manual trigger for on-demand coverage (default: enabled)
+  workflow_dispatch:
+    inputs:
+      run_coverage:
+        description: 'Run coverage report'
+        required: false
+        type: boolean
+        default: true
+  # Run on main branch merges (after code is reviewed and merged)
+  push:
+    branches: [ main ]
+  # Weekly scheduled run to track coverage trends
+  schedule:
+    - cron: '0 0 * * 0'  # Sunday 00:00 UTC
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  CARGO_INCREMENTAL: '1'
+
+jobs:
+  coverage:
+    name: Coverage Report
+    runs-on: [self-hosted, Linux, X64, builds]
+    # Skip only if manually triggered with run_coverage=false
+    # Otherwise run for push/schedule events
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_coverage == true) ||
+      github.event_name == 'push' ||
+      github.event_name == 'schedule'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Cleanup any leftover dependency directories
+        run: |
+          # Remove any leftover dependency directories from previous jobs
+          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
+          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+          # Also remove any .cargo/config.toml that might have been left behind
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+      
+      - name: Cache
+        run: |
+          CACHE_ROOT="/tmp/runner-cache"
+          
+          # Generate cache key from Cargo.lock
+          DEPS_KEY=$(sha256sum Cargo.lock | cut -d' ' -f1)
+          TOOLCHAIN=$(grep -E '^channel|rust-version' rust-toolchain.toml Cargo.toml 2>/dev/null | head -1 | sha256sum | cut -d' ' -f1 || echo "1.88.0")
+          CACHE_KEY="${DEPS_KEY}-${TOOLCHAIN}"
+          
+          CARGO_CACHE_DIR="$CACHE_ROOT/cargo/$CACHE_KEY"
+          TARGET_CACHE_DIR="$CACHE_ROOT/target/$CACHE_KEY"
+          
+          echo "CARGO_CACHE_DIR=$CARGO_CACHE_DIR" >> $GITHUB_ENV
+          echo "TARGET_CACHE_DIR=$TARGET_CACHE_DIR" >> $GITHUB_ENV
+      
+      - name: Restore registry
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/registry"
+            rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
+          else
+            echo "💿 No Cargo registry cache found"
+          fi
+      
+      - name: Restore git
+        run: |
+          if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
+            mkdir -p "$HOME/.cargo/git"
+            rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
+          else
+            echo "💿 No Cargo git cache found"
+          fi
+      
+      - name: Restore target
+        run: |
+          if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
+            rsync -a --delete "$TARGET_CACHE_DIR/" ./target/ || true
+          else
+            echo "💿 No target cache found, will build from scratch"
+          fi
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      
+      - name: Run tests with coverage
+        id: coverage
+        run: |
+          # Ensure cargo bin is in PATH
+          export PATH="$HOME/.cargo/bin:$PATH"
+          
+          # Verify cargo is available
+          if ! command -v cargo &> /dev/null; then
+            echo "ERROR: cargo not found in PATH"
+            exit 1
+          fi
+          
+          # Install tarpaulin with error checking
+          if ! cargo install cargo-tarpaulin --version 0.27.0; then
+            echo "ERROR: Failed to install cargo-tarpaulin"
+            exit 1
+          fi
+          
+          # Run tests with coverage
+          # --jobs 2 limits parallelism to prevent OOM when compiling 63+ test executables
+          cargo tarpaulin --lib --bins --tests --all-features --out xml --output-dir coverage --skip-clean --timeout 120 --jobs 2
+          
+          # Extract coverage percentage from XML
+          if [ -f "coverage/cobertura.xml" ]; then
+            COVERAGE_PCT=$(grep -oP 'line-rate="\K[0-9.]+' coverage/cobertura.xml | head -1 | awk '{printf "%.2f", $1 * 100}')
+            echo "coverage_percent=$COVERAGE_PCT" >> $GITHUB_OUTPUT
+            echo "📊 Coverage: ${COVERAGE_PCT}%"
+            
+            # Warn if coverage is below 50%
+            if (( $(echo "$COVERAGE_PCT < 50" | bc -l) )); then
+              echo "⚠️  Coverage is below 50% - consider adding more tests"
+            fi
+          else
+            echo "coverage_percent=0.00" >> $GITHUB_OUTPUT
+            echo "⚠️  Coverage file not found"
+          fi
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: coverage/cobertura.xml
+          flags: unittests
+          name: codecov-bllvm-node
+          fail_ci_if_error: false
+      
+      - name: Cache registry
+        if: always()
+        run: |
+          if [ -d "$HOME/.cargo/registry" ] && [ "$CARGO_CACHE_DIR" != "" ]; then
+            mkdir -p "$CARGO_CACHE_DIR/registry"
+            rsync -a --delete "$HOME/.cargo/registry/" "$CARGO_CACHE_DIR/registry/" || true
+          fi
+      
+      - name: Cache git
+        if: always()
+        run: |
+          if [ -d "$HOME/.cargo/git" ] && [ "$CARGO_CACHE_DIR" != "" ]; then
+            mkdir -p "$CARGO_CACHE_DIR/git"
+            rsync -a --delete "$HOME/.cargo/git/" "$CARGO_CACHE_DIR/git/" || true
+          fi
+      
+      - name: Cache target
+        if: always()
+        run: |
+          if [ -d "./target" ] && [ "$TARGET_CACHE_DIR" != "" ]; then
+            mkdir -p "$TARGET_CACHE_DIR"
+            rsync -a --delete "./target/" "$TARGET_CACHE_DIR/" || true
+          fi
+      
+      - name: Coverage Summary
+        if: always()
+        run: |
+          echo "## Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Coverage**: ${{ steps.coverage.outputs.coverage_percent }}%" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Coverage report uploaded to Codecov." >> $GITHUB_STEP_SUMMARY
+

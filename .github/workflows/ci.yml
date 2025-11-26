@@ -179,45 +179,11 @@ jobs:
         with:
           toolchain: 1.88.0
       
-      - name: Run tests with coverage
+      - name: Run tests
         run: |
-          # Ensure cargo bin is in PATH (fixes exit code 127)
-          export PATH="$HOME/.cargo/bin:$PATH"
-          
-          # Verify cargo is available
-          if ! command -v cargo &> /dev/null; then
-            echo "ERROR: cargo not found in PATH"
-            echo "PATH: $PATH"
-            exit 1
-          fi
-          
-          # Install tarpaulin with error checking
-          if ! cargo install cargo-tarpaulin --version 0.27.0; then
-            echo "ERROR: Failed to install cargo-tarpaulin"
-            exit 1
-          fi
-          
-          # Verify tarpaulin is available
-          if ! command -v cargo-tarpaulin &> /dev/null; then
-            echo "ERROR: cargo-tarpaulin not found after installation"
-            echo "PATH: $PATH"
-            echo "Cargo bin dir: $HOME/.cargo/bin"
-            ls -la $HOME/.cargo/bin/ || true
-            exit 1
-          fi
-          
-          # Run tests with coverage in one step
-          # Use --lib --bins --tests to ensure all test types run
-          # Use --skip-clean to reuse cached build artifacts, --timeout to prevent hangs
-          # --all-features for complete coverage
-          # --jobs 2 limits parallelism to prevent OOM when compiling 63+ test executables
-          # This is critical: without --jobs, tarpaulin uses all CPU cores which causes memory exhaustion
-          cargo tarpaulin --lib --bins --tests --all-features --out xml --output-dir coverage --skip-clean --timeout 120 --jobs 2
-      
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          file: coverage/cobertura.xml
+          # Run tests only (no coverage) for fast PR feedback
+          # Coverage runs separately in coverage.yml workflow
+          cargo test --all-features --verbose
       
       - name: Cache registry
         if: always()
