@@ -58,15 +58,15 @@ impl ParallelBlockValidator {
             .iter()
             .map(|_| Vec::new())
             .collect();
-        connect_block(
+        let (result, new_utxo_set, _undo_log) = connect_block(
             &context.block,
             &witnesses,
             context.prev_utxo_set.clone(),
             context.height,
             None, // No recent headers for single block validation
             network,
-        )
-        .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
+        )?;
+        Ok((result, new_utxo_set))
     }
 
     /// Validate multiple blocks in parallel (Phase 4.2)
@@ -104,15 +104,15 @@ impl ParallelBlockValidator {
                         .iter()
                         .map(|_| Vec::new())
                         .collect();
-                    connect_block(
+                    let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
                         &witnesses,
                         context.prev_utxo_set.clone(),
                         context.height,
                         None, // No recent headers for parallel validation
                         network,
-                    )
-                    .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
+                    )?;
+                    Ok::<_, anyhow::Error>((result, new_utxo_set))
                 })
                 .collect()
         };
@@ -130,15 +130,15 @@ impl ParallelBlockValidator {
                         .iter()
                         .map(|_| Vec::new())
                         .collect();
-                    connect_block(
+                    let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
                         &witnesses,
                         context.prev_utxo_set.clone(),
                         context.height,
                         None, // No recent headers for parallel validation
                         network,
-                    )
-                    .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))
+                    )?;
+                    Ok::<_, anyhow::Error>((result, new_utxo_set))
                 })
                 .collect()
         };
@@ -167,16 +167,15 @@ impl ParallelBlockValidator {
                 .iter()
                 .map(|_| Vec::new())
                 .collect();
-            let result = connect_block(
+            let (result, new_utxo_set, _undo_log) = connect_block(
                 &context.block,
                 &witnesses,
                 context.prev_utxo_set.clone(),
                 context.height,
                 None, // No recent headers for sequential validation
                 network,
-            )
-            .map_err(|e| anyhow::anyhow!("Block validation error: {}", e))?;
-            results.push(result);
+            )?;
+            results.push((result, new_utxo_set));
         }
 
         Ok(results)

@@ -524,11 +524,11 @@ impl Node {
                 let blocks_arc = self.storage.blocks();
                 match self.sync_coordinator.process_block(
                     &blocks_arc,
+                    &self.protocol,
                     Some(&self.storage),
                     &block_data,
                     current_height,
                     &mut utxo_set,
-                    self.protocol_version,
                     Some(Arc::clone(&self.metrics)),
                     Some(Arc::clone(&self.profiler)),
                 ) {

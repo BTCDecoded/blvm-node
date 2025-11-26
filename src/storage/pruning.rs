@@ -719,6 +719,9 @@ impl PruningManager {
     ///
     /// This function replays blocks from genesis to the target height
     /// to reconstruct the exact UTXO set at that point in history.
+    ///
+    /// Note: For historical replay, we use connect_block directly since these blocks
+    /// are already validated. Protocol validation is applied during initial block processing.
     #[cfg(feature = "utxo-commitments")]
     fn reconstruct_utxo_set_at_height(
         &self,

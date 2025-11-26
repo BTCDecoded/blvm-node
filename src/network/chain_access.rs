@@ -51,15 +51,15 @@ impl ChainStateAccess for NodeChainAccess {
     fn get_object(&self, hash: &Hash) -> Option<ChainObject> {
         // Try blockstore first (blocks)
         if let Ok(Some(block)) = self.blockstore.get_block(hash) {
-            return Some(ChainObject::Block(block));
+            return Some(ChainObject::Block(Arc::new(block)));
         }
         // Try txindex (confirmed transactions)
         if let Ok(Some(tx)) = self.txindex.get_transaction(hash) {
-            return Some(ChainObject::Transaction(Box::new(tx)));
+            return Some(ChainObject::Transaction(Arc::new(tx)));
         }
         // Try mempool (unconfirmed transactions)
         if let Some(tx) = self.mempool.get_transaction(hash) {
-            return Some(ChainObject::Transaction(Box::new(tx)));
+            return Some(ChainObject::Transaction(Arc::new(tx)));
         }
         None
     }

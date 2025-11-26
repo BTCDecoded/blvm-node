@@ -6,22 +6,13 @@
 use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
 use anyhow::Result;
-use bllvm_protocol::block::connect_block;
 use bllvm_protocol::serialization::deserialize_block_with_witnesses;
-use bllvm_protocol::types::Network;
+use bllvm_protocol::validation::ProtocolValidationContext;
 use bllvm_protocol::{
-    segwit::Witness, Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult,
+    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, ProtocolVersion, UtxoSet,
+    ValidationResult,
 };
 use std::sync::Arc;
-
-/// Convert ProtocolVersion to Network type
-pub fn protocol_version_to_network(version: ProtocolVersion) -> Network {
-    match version {
-        ProtocolVersion::BitcoinV1 => Network::Mainnet,
-        ProtocolVersion::Testnet3 => Network::Testnet,
-        ProtocolVersion::Regtest => Network::Regtest,
-    }
-}
 
 /// Parse a block from Bitcoin wire format and extract witness data
 pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Witness>)> {
@@ -100,14 +91,17 @@ pub fn prepare_block_validation_context(
     Ok((witnesses, recent_headers))
 }
 
-/// Validate a block using connect_block with proper witness data and headers
+/// Validate a block using protocol validation with proper witness data and headers
+///
+/// This function uses the protocol engine's `validate_and_connect_block()` method,
+/// which ensures protocol-specific validation (size limits, feature flags) is always applied.
 pub fn validate_block_with_context(
     blockstore: &BlockStore,
+    protocol: &BitcoinProtocolEngine,
     block: &Block,
     witnesses: &[Witness],
     utxo_set: &mut UtxoSet,
     height: u64,
-    network: Network,
 ) -> Result<ValidationResult> {
     // Get recent headers for median time-past
     let recent_headers = blockstore
@@ -115,14 +109,17 @@ pub fn validate_block_with_context(
         .ok()
         .filter(|headers| !headers.is_empty());
 
-    // Validate block
-    let (result, new_utxo_set) = connect_block(
+    // Create protocol validation context
+    let context = ProtocolValidationContext::new(protocol.get_protocol_version(), height)?;
+
+    // Validate block with protocol validation
+    let (result, new_utxo_set) = protocol.validate_and_connect_block(
         block,
         witnesses,
-        utxo_set.clone(),
+        utxo_set,
         height,
         recent_headers.as_deref(),
-        network,
+        &context,
     )?;
 
     // Update UTXO set if valid

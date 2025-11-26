@@ -1,6 +1,7 @@
-# Local development override for bllvm-consensus
+# Local development override for bllvm-consensus and bllvm-protocol
 # This allows using local path instead of crates.io version
 # For production, remove this file and use published crates.io version
 
 [patch.crates-io]
 bllvm-consensus = { path = "../bllvm-consensus", package = "bllvm-consensus" }
+bllvm-protocol = { path = "../bllvm-protocol" }

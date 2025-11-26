@@ -248,6 +248,25 @@ impl ProtocolAdapter {
             ConsensusNetworkMessage::Pong(_) => "pong",
             ConsensusNetworkMessage::MemPool => "mempool",
             ConsensusNetworkMessage::FeeFilter(_) => "feefilter",
+            ConsensusNetworkMessage::GetBlocks(_) => "getblocks",
+            ConsensusNetworkMessage::GetAddr => "getaddr",
+            ConsensusNetworkMessage::NotFound(_) => "notfound",
+            ConsensusNetworkMessage::Reject(_) => "reject",
+            ConsensusNetworkMessage::SendHeaders => "sendheaders",
+            ConsensusNetworkMessage::SendCmpct(_) => "sendcmpct",
+            ConsensusNetworkMessage::CmpctBlock(_) => "cmpctblock",
+            ConsensusNetworkMessage::GetBlockTxn(_) => "getblocktxn",
+            ConsensusNetworkMessage::BlockTxn(_) => "blocktxn",
+            #[cfg(feature = "utxo-commitments")]
+            ConsensusNetworkMessage::GetUTXOSet(_) => "getutxoset",
+            #[cfg(feature = "utxo-commitments")]
+            ConsensusNetworkMessage::UTXOSet(_) => "utxoset",
+            #[cfg(feature = "utxo-commitments")]
+            ConsensusNetworkMessage::GetFilteredBlock(_) => "getfilteredblock",
+            #[cfg(feature = "utxo-commitments")]
+            ConsensusNetworkMessage::FilteredBlock(_) => "filteredblock",
+            ConsensusNetworkMessage::GetBanList(_) => "getbanlist",
+            ConsensusNetworkMessage::BanList(_) => "banlist",
         }
     }
 }

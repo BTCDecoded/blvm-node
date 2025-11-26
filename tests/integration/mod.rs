@@ -1,6 +1,7 @@
 //! Integration tests for bllvm-node
 
 pub mod basic;
+mod e2e_protocol_validation;
 pub mod mining_integration_tests;
 pub mod mining_comprehensive_tests;
 pub mod transport_tests;

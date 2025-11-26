@@ -4,7 +4,7 @@
 //! and chain reorganization.
 
 use crate::node::block_processor::{
-    parse_block_from_wire, prepare_block_validation_context, protocol_version_to_network,
+    parse_block_from_wire, prepare_block_validation_context,
     store_block_with_context_and_index, validate_block_with_context,
 };
 use crate::node::metrics::MetricsCollector;
@@ -12,7 +12,7 @@ use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTi
 use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
 use anyhow::Result;
-use bllvm_protocol::{Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult};
+use bllvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -190,11 +190,11 @@ impl SyncCoordinator {
     pub fn process_block(
         &mut self,
         blockstore: &BlockStore,
+        protocol: &BitcoinProtocolEngine,
         storage: Option<&Arc<Storage>>,
         block_data: &[u8],
         current_height: u64,
         utxo_set: &mut UtxoSet,
-        protocol_version: ProtocolVersion,
         metrics: Option<Arc<MetricsCollector>>,
         profiler: Option<Arc<PerformanceProfiler>>,
     ) -> Result<bool> {
@@ -225,15 +225,14 @@ impl SyncCoordinator {
             );
         }
 
-        // Validate block with witness data and headers
-        let network = protocol_version_to_network(protocol_version);
+        // Validate block with witness data and headers using protocol validation
         let validation_result = validate_block_with_context(
             blockstore,
+            protocol,
             &block,
             witnesses_to_use,
             utxo_set,
             current_height,
-            network,
         )?;
 
         let processing_time = start_time.elapsed();
