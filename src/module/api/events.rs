@@ -99,32 +99,42 @@ impl EventManager {
             payload,
         }));
 
-        // Send to all subscribed modules
-        // Note: We drop locks before sending to avoid deadlock
-        let mut failed_modules = Vec::new();
+        // Build snapshot of channels while holding locks
         let channels_snapshot: Vec<(String, mpsc::Sender<ModuleMessage>)> = {
-            // channels is already a lock guard
             module_ids
                 .iter()
                 .filter_map(|id| channels.get(id).map(|sender| (id.clone(), sender.clone())))
                 .collect()
         };
+        
+        // Explicitly drop locks before sending to avoid deadlock
+        drop(subscribers);
+        drop(channels);
 
-        // Clone Arc for each module to share the same message
+        // Send to all subscribed modules without holding locks
+        let mut failed_modules = Vec::new();
         for (module_id, sender) in channels_snapshot {
             let event_msg_clone = Arc::clone(&event_message);
-            // Dereference Arc to get ModuleMessage (which implements Clone)
-            if let Err(e) = sender.send((*event_msg_clone).clone()).await {
-                warn!("Failed to send event to module {}: {}", module_id, e);
-                failed_modules.push(module_id);
+            // Use try_send to avoid blocking if channel is full or receiver is dropped
+            match sender.try_send((*event_msg_clone).clone()) {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!("Failed to send event to module {}: {}", module_id, e);
+                    failed_modules.push(module_id);
+                }
             }
         }
 
-        // Clean up failed channels
+        // Clean up failed channels and remove from subscribers
         if !failed_modules.is_empty() {
             let mut channels = self.module_channels.lock().await;
+            let mut subscribers = self.subscribers.lock().await;
             for module_id in failed_modules {
                 channels.remove(&module_id);
+                // Remove from all subscriber lists
+                for subscribers_list in subscribers.values_mut() {
+                    subscribers_list.retain(|id| id != &module_id);
+                }
             }
         }
 

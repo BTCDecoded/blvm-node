@@ -9,8 +9,7 @@ use anyhow::Result;
 use bllvm_protocol::serialization::deserialize_block_with_witnesses;
 use bllvm_protocol::validation::ProtocolValidationContext;
 use bllvm_protocol::{
-    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, ProtocolVersion, UtxoSet,
-    ValidationResult,
+    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult,
 };
 use std::sync::Arc;
 

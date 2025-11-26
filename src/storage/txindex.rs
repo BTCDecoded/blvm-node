@@ -194,13 +194,13 @@ impl TxIndex {
             // Track tx_hash for this address
             address_tx_updates
                 .entry(address_hash)
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(*tx_hash);
 
             // Track (tx_hash, output_index) for this address
             address_output_updates
                 .entry(address_hash)
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert((*tx_hash, output_index as u32));
         }
 
@@ -303,11 +303,10 @@ impl TxIndex {
             let value = output.value as u64;
             let bucket = value_to_bucket(value);
 
-            bucket_updates.entry(bucket).or_insert_with(Vec::new).push((
-                *tx_hash,
-                output_index as u32,
-                value,
-            ));
+            bucket_updates
+                .entry(bucket)
+                .or_default()
+                .push((*tx_hash, output_index as u32, value));
         }
 
         // Apply batched updates (one DB read/write per unique bucket)

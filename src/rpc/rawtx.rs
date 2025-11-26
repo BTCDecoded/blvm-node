@@ -166,7 +166,7 @@ impl RawTxRpc {
                             );
                             return Err(RpcError::with_data(
                                 RpcErrorCode::TxMissingInputs,
-                                format!("Input {} not found in UTXO set", prevout_str),
+                                format!("Input {prevout_str} not found in UTXO set"),
                                 json!({
                                     "prevout": prevout_str,
                                     "txid": txid_hex,
@@ -990,7 +990,7 @@ impl RawTxRpc {
                         .flatten();
                     let tip_height = storage.chain().get_height().ok().flatten().unwrap_or(0);
                     block_height
-                        .map(|h| (tip_height.saturating_sub(h) + 1) as u64)
+                        .map(|h| (tip_height.saturating_sub(h) + 1))
                         .unwrap_or(0)
                 } else {
                     0

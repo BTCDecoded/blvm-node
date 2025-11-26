@@ -227,7 +227,7 @@ impl RpcError {
         if let Some(required) = required_fee {
             if let Some(provided) = provided_fee {
                 let shortfall = required.saturating_sub(provided);
-                suggestions.push(format!("Fee shortfall: {} satoshis", shortfall));
+                suggestions.push(format!("Fee shortfall: {shortfall} satoshis"));
             }
         }
 
@@ -235,7 +235,7 @@ impl RpcError {
 
         Self::with_data(
             RpcErrorCode::TxRejected,
-            format!("Transaction rejected: insufficient fee (required: {:.2} sat/vB, provided: {:.2} sat/vB)", required_fee_rate, provided_fee_rate),
+            format!("Transaction rejected: insufficient fee (required: {required_fee_rate:.2} sat/vB, provided: {provided_fee_rate:.2} sat/vB)"),
             data,
         )
     }
@@ -300,7 +300,7 @@ impl RpcError {
         ];
 
         if let Some(format) = expected_format {
-            suggestions.push(format!("Expected format: {}", format));
+            suggestions.push(format!("Expected format: {format}"));
         }
 
         data["suggestions"] = json!(suggestions);
@@ -327,14 +327,14 @@ impl RpcError {
 
         let mut suggestions = vec![format!("Provide the '{}' parameter", param_name)];
         if let Some(ty) = param_type {
-            suggestions.push(format!("Parameter type should be: {}", ty));
+            suggestions.push(format!("Parameter type should be: {ty}"));
         }
 
         data["suggestions"] = json!(suggestions);
 
         Self::with_data(
             RpcErrorCode::InvalidParams,
-            format!("Missing required parameter: {}", param_name),
+            format!("Missing required parameter: {param_name}"),
             data,
         )
     }

@@ -69,6 +69,7 @@ impl BlockFilterService {
             .insert(block_hash, height);
 
         // Update filter header chain
+        // Get previous header before acquiring write lock to avoid deadlock
         let prev_header = if height > 0 {
             self.filter_headers
                 .read()
@@ -82,6 +83,7 @@ impl BlockFilterService {
         let filter_header = bip157::FilterHeader::new(&filter, prev_header.as_ref());
 
         // Extend filter header chain if needed
+        // Release read lock before acquiring write lock to avoid deadlock
         let mut headers = self.filter_headers.write().unwrap();
         let current_len = headers.len() as u32;
         if height >= current_len {
@@ -90,8 +92,9 @@ impl BlockFilterService {
             headers[height as usize] = filter_header.clone();
         }
 
-        // Update current height
-        *self.current_height.write().unwrap() = height.max(*self.current_height.read().unwrap());
+        // Update current height (avoid holding read and write locks simultaneously)
+        let current = *self.current_height.read().unwrap();
+        *self.current_height.write().unwrap() = height.max(current);
 
         Ok(filter)
     }

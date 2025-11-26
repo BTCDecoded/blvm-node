@@ -516,7 +516,7 @@ impl MempoolManager {
 
             self.transactions
                 .iter()
-                .filter_map(|(hash, tx)| {
+                .map(|(hash, tx)| {
                     let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
                     let age = timestamps
                         .get(hash)
@@ -539,7 +539,7 @@ impl MempoolManager {
                     let score = fee_score + age_score;
 
                     let size = serialize_transaction(tx).len();
-                    Some((*hash, score, size))
+                    (*hash, score, size)
                 })
                 .collect()
         };
@@ -774,7 +774,7 @@ impl MempoolManager {
 
         // Find all ancestors (transactions this tx depends on)
         let mut ancestors = HashSet::new();
-        let mut to_process = vec![tx_hash.clone()];
+        let mut to_process = vec![*tx_hash];
         let mut processed = HashSet::new();
 
         while let Some(current_hash) = to_process.pop() {
@@ -786,7 +786,7 @@ impl MempoolManager {
             if let Some(current_tx) = self.transactions.get(&current_hash) {
                 for input in &current_tx.inputs {
                     // Find parent transaction that created this output
-                    for (parent_hash, _parent_tx) in &self.transactions {
+                    for parent_hash in self.transactions.keys() {
                         if parent_hash == &input.prevout.hash {
                             if !ancestors.contains(parent_hash) {
                                 ancestors.insert(*parent_hash);
@@ -830,7 +830,7 @@ impl MempoolManager {
 
         // Find all descendants (transactions that depend on this tx)
         let mut descendants = HashSet::new();
-        let mut to_process = vec![tx_hash.clone()];
+        let mut to_process = vec![*tx_hash];
         let mut processed = HashSet::new();
 
         while let Some(current_hash) = to_process.pop() {
@@ -901,24 +901,24 @@ impl MempoolManager {
         let mut descendants = self.tx_descendants.write().unwrap();
 
         // Initialize empty sets for this transaction
-        dependencies.entry(*tx_hash).or_insert_with(HashSet::new);
-        descendants.entry(*tx_hash).or_insert_with(HashSet::new);
+        dependencies.entry(*tx_hash).or_default();
+        descendants.entry(*tx_hash).or_default();
 
         // Find parent transactions (ancestors) - transactions that created inputs
         for input in &tx.inputs {
             // Find transaction that created this output
-            for (parent_hash, _parent_tx) in &self.transactions {
+            for parent_hash in self.transactions.keys() {
                 if parent_hash == &input.prevout.hash {
                     // This transaction depends on parent
                     dependencies
                         .entry(*tx_hash)
-                        .or_insert_with(HashSet::new)
+                        .or_default()
                         .insert(*parent_hash);
 
                     // Parent has this as a descendant
                     descendants
                         .entry(*parent_hash)
-                        .or_insert_with(HashSet::new)
+                        .or_default()
                         .insert(*tx_hash);
 
                     break;

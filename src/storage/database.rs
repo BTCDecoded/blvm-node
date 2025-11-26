@@ -287,6 +287,10 @@ mod redb_impl {
                             let _ = write_txn.open_table(TX_BY_HASH_TABLE)?;
                             let _ = write_txn.open_table(TX_BY_BLOCK_TABLE)?;
                             let _ = write_txn.open_table(TX_METADATA_TABLE)?;
+                            let _ = write_txn.open_table(ADDRESS_TX_INDEX_TABLE)?;
+                            let _ = write_txn.open_table(ADDRESS_OUTPUT_INDEX_TABLE)?;
+                            let _ = write_txn.open_table(ADDRESS_INPUT_INDEX_TABLE)?;
+                            let _ = write_txn.open_table(VALUE_INDEX_TABLE)?;
                             let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
                             let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
                             let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
@@ -326,6 +330,10 @@ mod redb_impl {
                 let _ = write_txn.open_table(TX_BY_HASH_TABLE)?;
                 let _ = write_txn.open_table(TX_BY_BLOCK_TABLE)?;
                 let _ = write_txn.open_table(TX_METADATA_TABLE)?;
+                let _ = write_txn.open_table(ADDRESS_TX_INDEX_TABLE)?;
+                let _ = write_txn.open_table(ADDRESS_OUTPUT_INDEX_TABLE)?;
+                let _ = write_txn.open_table(ADDRESS_INPUT_INDEX_TABLE)?;
+                let _ = write_txn.open_table(VALUE_INDEX_TABLE)?;
                 let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
                 let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
                 let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
@@ -358,6 +366,10 @@ mod redb_impl {
                 "tx_by_hash" => Some(&TX_BY_HASH_TABLE),
                 "tx_by_block" => Some(&TX_BY_BLOCK_TABLE),
                 "tx_metadata" => Some(&TX_METADATA_TABLE),
+                "address_tx_index" => Some(&ADDRESS_TX_INDEX_TABLE),
+                "address_output_index" => Some(&ADDRESS_OUTPUT_INDEX_TABLE),
+                "address_input_index" => Some(&ADDRESS_INPUT_INDEX_TABLE),
+                "value_index" => Some(&VALUE_INDEX_TABLE),
                 "invalid_blocks" => Some(&INVALID_BLOCKS_TABLE),
                 "chain_tips" => Some(&CHAIN_TIPS_TABLE),
                 "block_metadata" => Some(&BLOCK_METADATA_TABLE),

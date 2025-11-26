@@ -1725,7 +1725,7 @@ impl BlockchainRpc {
         for tx in &transactions {
             for output in &tx.outputs {
                 if output.script_pubkey == script_pubkey {
-                    balance += output.value as i64;
+                    balance += output.value;
                 }
             }
         }
@@ -1747,7 +1747,7 @@ impl BlockchainRpc {
         if let Some(ref storage) = self.storage {
             let height = storage.chain().get_height()?.unwrap_or(0);
             let tip_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
-            let tip_header = storage.chain().get_tip_header()?.unwrap_or_else(|| {
+            let tip_header = storage.chain().get_tip_header()?.unwrap_or({
                 // Return genesis block header as fallback
                 bllvm_protocol::BlockHeader {
                     version: 1,
@@ -1838,7 +1838,7 @@ impl BlockchainRpc {
             "isvalid": is_valid && (is_p2pkh || is_p2sh || is_bech32),
             "address": address,
             "scriptPubKey": if is_valid && (is_p2pkh || is_p2sh || is_bech32) {
-                format!("76a914{}88ac", hex::encode(&address.as_bytes()[1..address.len()-1].to_vec())) // Simplified
+                format!("76a914{}88ac", hex::encode(&address.as_bytes()[1..address.len()-1])) // Simplified
             } else {
                 "".to_string()
             },
@@ -1896,7 +1896,7 @@ impl BlockchainRpc {
 
                 for (idx, output) in tx.outputs.iter().enumerate() {
                     if output.script_pubkey == script_pubkey {
-                        received += output.value as i64;
+                        received += output.value;
                         // Check if UTXO is spent
                         let outpoint = bllvm_protocol::OutPoint {
                             hash: txid,
@@ -1904,11 +1904,11 @@ impl BlockchainRpc {
                         };
                         if storage.utxos().get_utxo(&outpoint).ok().flatten().is_some() {
                             // UTXO is unspent
-                            balance += output.value as i64;
+                            balance += output.value;
                             utxo_count += 1;
                         } else {
                             // UTXO is spent
-                            sent += output.value as i64;
+                            sent += output.value;
                         }
                     }
                 }

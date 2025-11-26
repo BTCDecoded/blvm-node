@@ -4,15 +4,15 @@
 //! and chain reorganization.
 
 use crate::node::block_processor::{
-    parse_block_from_wire, prepare_block_validation_context,
-    store_block_with_context_and_index, validate_block_with_context,
+    parse_block_from_wire, prepare_block_validation_context, store_block_with_context_and_index,
+    validate_block_with_context,
 };
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
 use anyhow::Result;
-use bllvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult};
+use bllvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
