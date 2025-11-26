@@ -3,10 +3,27 @@
 //! Provides fast lookup of transactions by hash and maintains transaction metadata.
 
 use crate::storage::database::{Database, Tree};
+use crate::storage::hashing::sha256;
 use anyhow::Result;
-use bllvm_protocol::{Hash, Transaction};
+use bllvm_protocol::{Hash, Transaction, OutPoint};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
+
+/// Address output entry (internal helper)
+#[derive(Debug, Clone)]
+struct AddressOutputEntry {
+    tx_hash: Hash,
+    output_index: u32,
+}
+
+/// Value entry (internal helper)
+#[derive(Debug, Clone)]
+struct ValueEntry {
+    tx_hash: Hash,
+    output_index: u32,
+    value: u64,
+}
 
 /// Transaction metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,20 +43,52 @@ pub struct TxIndex {
     tx_by_hash: Arc<dyn Tree>,
     tx_by_block: Arc<dyn Tree>,
     tx_metadata: Arc<dyn Tree>,
+    // Address indexing (optional, enabled via config)
+    address_tx_index: Arc<dyn Tree>,        // script_pubkey_hash → Vec<tx_hash>
+    address_output_index: Arc<dyn Tree>,    // script_pubkey_hash → Vec<(tx_hash, output_index)>
+    address_input_index: Arc<dyn Tree>,    // script_pubkey_hash → Vec<(tx_hash, input_index, prev_tx_hash, prev_output_index)>
+    // Value range indexing (optional, enabled via config)
+    value_index: Arc<dyn Tree>,             // value_bucket → Vec<(tx_hash, output_index)>
+    // Configuration
+    enable_address_index: bool,
+    enable_value_index: bool,
 }
 
 impl TxIndex {
     /// Create a new transaction index
     pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        Self::with_indexing(db, false, false)
+    }
+
+    /// Create a new transaction index with optional advanced indexing
+    pub fn with_indexing(
+        db: Arc<dyn Database>,
+        enable_address_index: bool,
+        enable_value_index: bool,
+    ) -> Result<Self> {
         let tx_by_hash = Arc::from(db.open_tree("tx_by_hash")?);
         let tx_by_block = Arc::from(db.open_tree("tx_by_block")?);
         let tx_metadata = Arc::from(db.open_tree("tx_metadata")?);
+        
+        // Address indexing trees (always create, but only use if enabled)
+        let address_tx_index = Arc::from(db.open_tree("address_tx_index")?);
+        let address_output_index = Arc::from(db.open_tree("address_output_index")?);
+        let address_input_index = Arc::from(db.open_tree("address_input_index")?);
+        
+        // Value indexing tree (always create, but only use if enabled)
+        let value_index = Arc::from(db.open_tree("value_index")?);
 
         Ok(Self {
             db,
             tx_by_hash,
             tx_by_block,
             tx_metadata,
+            address_tx_index,
+            address_output_index,
+            address_input_index,
+            value_index,
+            enable_address_index,
+            enable_value_index,
         })
     }
 
@@ -76,7 +125,152 @@ impl TxIndex {
         let block_key = self.block_tx_key(block_hash, tx_index);
         self.tx_by_block.insert(&block_key, tx_hash.as_slice())?;
 
+        // Advanced indexing: Address index (if enabled)
+        if self.enable_address_index {
+            self.index_addresses(tx, &tx_hash)?;
+        }
+
+        // Advanced indexing: Value index (if enabled)
+        if self.enable_value_index {
+            self.index_values(tx, &tx_hash)?;
+        }
+
         Ok(())
+    }
+
+    /// Index addresses (script_pubkeys) from transaction outputs
+    fn index_addresses(&self, tx: &Transaction, tx_hash: &Hash) -> Result<()> {
+        // Extract script_pubkeys from outputs
+        for (output_index, output) in tx.outputs.iter().enumerate() {
+            let script_pubkey = &output.script_pubkey;
+            
+            // Hash script_pubkey to create index key (32 bytes)
+            let address_hash = sha256(script_pubkey);
+            
+            // Add tx_hash to address_tx_index (all transactions touching this address)
+            let mut existing_txs = self.get_address_transactions(&address_hash)?;
+            if !existing_txs.contains(tx_hash) {
+                existing_txs.push(*tx_hash);
+                let tx_list_data = bincode::serialize(&existing_txs)?;
+                self.address_tx_index.insert(&address_hash, &tx_list_data)?;
+            }
+            
+            // Add (tx_hash, output_index) to address_output_index (outputs sent to this address)
+            let mut existing_outputs = self.get_address_outputs(&address_hash)?;
+            let addr_output = AddressOutputEntry {
+                tx_hash: *tx_hash,
+                output_index: output_index as u32,
+            };
+            // Check if already exists (avoid duplicates)
+            if !existing_outputs.iter().any(|o| o.tx_hash == *tx_hash && o.output_index == output_index as u32) {
+                existing_outputs.push(addr_output);
+                // Serialize for storage
+                #[derive(Serialize, Deserialize)]
+                struct AddressOutputSer {
+                    tx_hash: Hash,
+                    output_index: u32,
+                }
+                let output_list: Vec<AddressOutputSer> = existing_outputs.iter()
+                    .map(|o| AddressOutputSer { tx_hash: o.tx_hash, output_index: o.output_index })
+                    .collect();
+                let output_list_data = bincode::serialize(&output_list)?;
+                self.address_output_index.insert(&address_hash, &output_list_data)?;
+            }
+        }
+        
+        // Note: Input indexing requires UTXO lookup to get script_pubkey from prevout
+        // This is more complex and can be added later if needed
+        
+        Ok(())
+    }
+
+    /// Index values from transaction outputs
+    fn index_values(&self, tx: &Transaction, tx_hash: &Hash) -> Result<()> {
+        // Use logarithmic bucketing for value ranges
+        // Buckets: 0-1000, 1000-10000, 10000-100000, 100000-1000000, 1000000-10000000, etc.
+        fn value_to_bucket(value: u64) -> u64 {
+            if value == 0 {
+                return 0;
+            }
+            // Logarithmic bucketing: bucket = floor(log10(value)) * 1000
+            let log10 = (value as f64).log10().floor() as u64;
+            (log10 + 1) * 1000
+        }
+        
+        for (output_index, output) in tx.outputs.iter().enumerate() {
+            let value = output.value as u64;
+            let bucket = value_to_bucket(value);
+            
+            // Get existing entries for this bucket
+            let mut existing_entries = self.get_value_entries(&bucket)?;
+            let entry = ValueEntry {
+                tx_hash: *tx_hash,
+                output_index: output_index as u32,
+                value,
+            };
+            // Avoid duplicates
+            if !existing_entries.iter().any(|e| e.tx_hash == *tx_hash && e.output_index == output_index as u32) {
+                existing_entries.push(entry);
+                // Serialize for storage
+                #[derive(Serialize, Deserialize)]
+                struct ValueEntrySer {
+                    tx_hash: Hash,
+                    output_index: u32,
+                    value: u64,
+                }
+                let entry_list: Vec<ValueEntrySer> = existing_entries.iter()
+                    .map(|e| ValueEntrySer { tx_hash: e.tx_hash, output_index: e.output_index, value: e.value })
+                    .collect();
+                let entries_data = bincode::serialize(&entry_list)?;
+                let bucket_key = bucket.to_be_bytes();
+                self.value_index.insert(&bucket_key, &entries_data)?;
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Get all transaction hashes for an address (internal helper)
+    fn get_address_transactions(&self, address_hash: &[u8; 32]) -> Result<Vec<Hash>> {
+        if let Some(data) = self.address_tx_index.get(address_hash)? {
+            let txs: Vec<Hash> = bincode::deserialize(&data)?;
+            Ok(txs)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Get all outputs for an address (internal helper)
+    fn get_address_outputs(&self, address_hash: &[u8; 32]) -> Result<Vec<AddressOutputEntry>> {
+        #[derive(Serialize, Deserialize)]
+        struct AddressOutput {
+            tx_hash: Hash,
+            output_index: u32,
+        }
+        
+        if let Some(data) = self.address_output_index.get(address_hash)? {
+            let outputs: Vec<AddressOutput> = bincode::deserialize(&data)?;
+            Ok(outputs.into_iter().map(|o| AddressOutputEntry { tx_hash: o.tx_hash, output_index: o.output_index }).collect())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Get all value entries for a bucket (internal helper)
+    fn get_value_entries(&self, bucket: &u64) -> Result<Vec<ValueEntry>> {
+        let bucket_key = bucket.to_be_bytes();
+        if let Some(data) = self.value_index.get(&bucket_key)? {
+            #[derive(Serialize, Deserialize)]
+            struct ValueEntrySer {
+                tx_hash: Hash,
+                output_index: u32,
+                value: u64,
+            }
+            let entries: Vec<ValueEntrySer> = bincode::deserialize(&data)?;
+            Ok(entries.into_iter().map(|e| ValueEntry { tx_hash: e.tx_hash, output_index: e.output_index, value: e.value }).collect())
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// Get transaction by hash
@@ -172,15 +366,46 @@ impl TxIndex {
     /// Useful for querying large transactions or filtering by value
     pub fn get_transactions_by_value_range(
         &self,
-        _min_value: u64,
-        _max_value: u64,
+        min_value: u64,
+        max_value: u64,
     ) -> Result<Vec<Transaction>> {
-        // TODO: Implement value index for efficient value-based queries
-        // This would require:
-        // 1. Index: value_range → Vec<tx_hash>
-        // 2. Index: output_value → Vec<(tx_hash, output_index)>
-        // For now, return empty (value indexing is expensive and optional)
-        Ok(Vec::new())
+        if !self.enable_value_index {
+            return Ok(Vec::new());
+        }
+        
+        // Determine which buckets to query
+        fn value_to_bucket(value: u64) -> u64 {
+            if value == 0 {
+                return 0;
+            }
+            let log10 = (value as f64).log10().floor() as u64;
+            (log10 + 1) * 1000
+        }
+        
+        let min_bucket = value_to_bucket(min_value);
+        let max_bucket = value_to_bucket(max_value);
+        
+        // Collect all unique transaction hashes from relevant buckets
+        let mut tx_hashes = HashSet::new();
+        
+        for bucket in min_bucket..=max_bucket {
+            let entries = self.get_value_entries(&bucket)?;
+            for entry in entries {
+                if entry.value >= min_value && entry.value <= max_value {
+                    tx_hashes.insert(entry.tx_hash);
+                }
+            }
+        }
+        
+        // Fetch all transactions
+        let mut transactions = Vec::new();
+        for tx_hash in tx_hashes {
+            if let Some(tx) = self.get_transaction(&tx_hash)? {
+                transactions.push(tx);
+            }
+        }
+        
+        Ok(transactions)
     }
 
     /// Remove transaction from index
@@ -201,6 +426,17 @@ impl TxIndex {
         self.tx_by_hash.clear()?;
         self.tx_by_block.clear()?;
         self.tx_metadata.clear()?;
+        
+        if self.enable_address_index {
+            self.address_tx_index.clear()?;
+            self.address_output_index.clear()?;
+            self.address_input_index.clear()?;
+        }
+        
+        if self.enable_value_index {
+            self.value_index.clear()?;
+        }
+        
         Ok(())
     }
 

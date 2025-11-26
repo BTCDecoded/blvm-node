@@ -230,6 +230,10 @@ mod redb_impl {
     static TX_BY_HASH_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_by_hash");
     static TX_BY_BLOCK_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_by_block");
     static TX_METADATA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("tx_metadata");
+    static ADDRESS_TX_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("address_tx_index");
+    static ADDRESS_OUTPUT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("address_output_index");
+    static ADDRESS_INPUT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("address_input_index");
+    static VALUE_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("value_index");
     static INVALID_BLOCKS_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("invalid_blocks");
     static CHAIN_TIPS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_tips");
