@@ -43,6 +43,23 @@ pub struct FibreRelay {
     config: FibreConfig,
     /// Channel sender for assembled blocks (sends to NetworkManager)
     message_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::network::NetworkMessage>>,
+    /// Statistics tracking
+    stats: Arc<Mutex<FibreStatsInternal>>,
+}
+
+/// Internal statistics structure (thread-safe)
+#[derive(Debug, Clone)]
+struct FibreStatsInternal {
+    blocks_sent: u64,
+    blocks_received: u64,
+    chunks_sent: u64,
+    chunks_received: u64,
+    chunks_retransmitted: u64,
+    fec_recoveries: u64,
+    udp_errors: u64,
+    total_latency_ms: f64,
+    total_successful_sends: u64,
+    total_send_attempts: u64,
 }
 
 /// FEC encoder for Reed-Solomon erasure coding
@@ -499,6 +516,18 @@ impl FibreRelay {
             sequence_counter: 0,
             config: FibreConfig::default(),
             message_tx: None,
+            stats: Arc::new(Mutex::new(FibreStatsInternal {
+                blocks_sent: 0,
+                blocks_received: 0,
+                chunks_sent: 0,
+                chunks_received: 0,
+                chunks_retransmitted: 0,
+                fec_recoveries: 0,
+                udp_errors: 0,
+                total_latency_ms: 0.0,
+                total_successful_sends: 0,
+                total_send_attempts: 0,
+            })),
         }
     }
 
@@ -514,6 +543,18 @@ impl FibreRelay {
             sequence_counter: 0,
             config,
             message_tx: None,
+            stats: Arc::new(Mutex::new(FibreStatsInternal {
+                blocks_sent: 0,
+                blocks_received: 0,
+                chunks_sent: 0,
+                chunks_received: 0,
+                chunks_retransmitted: 0,
+                fec_recoveries: 0,
+                udp_errors: 0,
+                total_latency_ms: 0.0,
+                total_successful_sends: 0,
+                total_send_attempts: 0,
+            })),
         }
     }
 
@@ -673,6 +714,8 @@ impl FibreRelay {
         peer_id: &str,
         encoded: EncodedBlock,
     ) -> Result<(), FibreError> {
+        let start_time = Instant::now();
+        let chunk_count = encoded.chunks.len() as u64;
         let peer = self
             .fibre_peers
             .get(peer_id)
@@ -700,7 +743,7 @@ impl FibreRelay {
         let packets = packets?;
 
         // Send all packets in a single lock acquisition
-        {
+        let send_result = {
             let transport_guard = transport.lock().await;
             let socket = transport_guard.socket.clone();
             let connections = transport_guard.connections.clone();
@@ -708,18 +751,18 @@ impl FibreRelay {
             // Batch send all packets (drop lock before async operations)
             drop(transport_guard);
 
+            let mut send_errors = 0u64;
             for packet in &packets {
                 if packet.len() > bllvm_protocol::fibre::MAX_PACKET_SIZE {
-                    return Err(FibreError::UdpError(format!(
-                        "Packet too large: {} bytes",
-                        packet.len()
-                    )));
+                    send_errors += 1;
+                    continue;
                 }
 
-                socket
-                    .send_to(packet, udp_addr)
-                    .await
-                    .map_err(|e| FibreError::UdpError(format!("Failed to send UDP packet: {e}")))?;
+                if let Err(e) = socket.send_to(packet, udp_addr).await {
+                    send_errors += 1;
+                    // Continue sending other packets even if one fails
+                    debug!("Failed to send UDP packet: {e}");
+                }
             }
 
             // Update connection state (separate lock for minimal contention)
@@ -733,11 +776,36 @@ impl FibreRelay {
             });
             conn.last_seen = Instant::now();
             conn.out_sequence = conn.out_sequence.wrapping_add(packets.len() as u64);
-        } // Drop lock here
+            
+            if send_errors > 0 {
+                Err(FibreError::UdpError(format!("Failed to send {} packets", send_errors)))
+            } else {
+                Ok(())
+            }
+        };
 
-        self.mark_relay_success(peer_id);
-
-        Ok(())
+        // Update statistics (after dropping all other borrows)
+        let latency_ms = start_time.elapsed().as_millis() as f64;
+        match send_result {
+            Ok(()) => {
+                let mut stats = self.stats.lock().await;
+                stats.total_send_attempts += 1;
+                stats.chunks_sent += chunk_count;
+                stats.blocks_sent += 1;
+                stats.total_successful_sends += 1;
+                stats.total_latency_ms += latency_ms;
+                drop(stats);
+                self.mark_relay_success(peer_id);
+                Ok(())
+            }
+            Err(e) => {
+                let mut stats = self.stats.lock().await;
+                stats.total_send_attempts += 1;
+                stats.chunks_sent += chunk_count;
+                stats.udp_errors += 1;
+                Err(e)
+            }
+        }
     }
 
     /// Process received chunk and attempt block assembly
@@ -745,6 +813,11 @@ impl FibreRelay {
         &mut self,
         chunk: FecChunk,
     ) -> Result<Option<Block>, FibreError> {
+        // Update statistics
+        {
+            let mut stats = self.stats.lock().await;
+            stats.chunks_received += 1;
+        }
         // Check max assemblies limit
         if self.receiving_blocks.len() >= self.config.max_assemblies {
             // Remove oldest incomplete assembly
@@ -817,9 +890,17 @@ impl FibreRelay {
 
             // Attempt reconstruction
             let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_chunks as usize];
+            let received_count = received_chunks.len();
+            let required_count = total_chunks as usize;
 
             for (idx, chunk) in &received_chunks {
                 shards[*idx as usize] = Some(chunk.data.clone());
+            }
+
+            // Track FEC recovery if we recovered from missing chunks
+            if received_count < required_count {
+                let mut stats = self.stats.lock().await;
+                stats.fec_recoveries += 1;
             }
 
             // Decode using FEC
@@ -925,20 +1006,33 @@ impl FibreRelay {
     }
 
     /// Get FIBRE statistics
-    pub fn get_stats(&self) -> FibreStats {
+    pub async fn get_stats(&self) -> FibreStats {
+        let stats = self.stats.lock().await;
+        let total_attempts = stats.total_send_attempts.max(1); // Avoid division by zero
+        let success_rate = if total_attempts > 0 {
+            stats.total_successful_sends as f64 / total_attempts as f64
+        } else {
+            1.0
+        };
+        let average_latency = if stats.total_successful_sends > 0 {
+            stats.total_latency_ms / stats.total_successful_sends as f64
+        } else {
+            0.0
+        };
+        
         FibreStats {
             encoded_blocks: self.encoded_blocks.len(),
             fibre_peers: self.fibre_peers.len(),
             cache_ttl_secs: self.cache_ttl.as_secs(),
-            blocks_sent: 0,          // TODO: Track this
-            blocks_received: 0,      // TODO: Track this
-            chunks_sent: 0,          // TODO: Track this
-            chunks_received: 0,      // TODO: Track this
-            chunks_retransmitted: 0, // TODO: Track this
-            fec_recoveries: 0,       // TODO: Track this
-            udp_errors: 0,           // TODO: Track this
-            average_latency_ms: 0.0, // TODO: Track this
-            success_rate: 1.0,       // TODO: Track this
+            blocks_sent: stats.blocks_sent,
+            blocks_received: stats.blocks_received,
+            chunks_sent: stats.chunks_sent,
+            chunks_received: stats.chunks_received,
+            chunks_retransmitted: stats.chunks_retransmitted,
+            fec_recoveries: stats.fec_recoveries,
+            udp_errors: stats.udp_errors,
+            average_latency_ms: average_latency,
+            success_rate,
         }
     }
 }

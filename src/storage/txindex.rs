@@ -5,7 +5,7 @@
 use crate::storage::database::{Database, Tree};
 use crate::storage::hashing::sha256;
 use anyhow::Result;
-use bllvm_protocol::{Hash, Transaction, OutPoint};
+use bllvm_protocol::{Hash, Transaction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
