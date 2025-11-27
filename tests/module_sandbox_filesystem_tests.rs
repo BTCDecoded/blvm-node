@@ -2,7 +2,6 @@
 
 use bllvm_node::module::sandbox::FileSystemSandbox;
 use bllvm_node::module::traits::ModuleError;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn create_test_sandbox() -> (TempDir, FileSystemSandbox) {

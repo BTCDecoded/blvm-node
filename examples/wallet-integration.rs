@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
                                             // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
 
-    println!("RPC Endpoint: {}", rpc_url);
+    println!("RPC Endpoint: {rpc_url}");
     println!();
     println!("Example RPC Requests:");
     println!();

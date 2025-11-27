@@ -44,6 +44,7 @@ pub mod governance;
 pub mod module;
 pub mod network;
 pub mod node;
+pub mod payment;
 pub mod rpc;
 pub mod storage;
 pub mod utils;

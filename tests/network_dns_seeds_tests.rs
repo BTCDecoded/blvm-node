@@ -1,7 +1,6 @@
 //! Tests for DNS Seeds
 
 use bllvm_node::network::dns_seeds::{resolve_dns_seeds, MAINNET_DNS_SEEDS, TESTNET_DNS_SEEDS};
-use bllvm_node::network::protocol::NetworkAddress;
 
 #[tokio::test]
 async fn test_dns_seeds_constants() {
@@ -80,12 +79,12 @@ fn test_dns_seeds_no_duplicates() {
     // Check for duplicates in mainnet seeds
     let mut seen = std::collections::HashSet::new();
     for seed in MAINNET_DNS_SEEDS {
-        assert!(seen.insert(seed), "Duplicate DNS seed: {}", seed);
+        assert!(seen.insert(seed), "Duplicate DNS seed: {seed}");
     }
 
     // Check for duplicates in testnet seeds
     let mut seen = std::collections::HashSet::new();
     for seed in TESTNET_DNS_SEEDS {
-        assert!(seen.insert(seed), "Duplicate DNS seed: {}", seed);
+        assert!(seen.insert(seed), "Duplicate DNS seed: {seed}");
     }
 }

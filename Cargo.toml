@@ -20,10 +20,10 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-# Protocol abstraction layer - Use published crate from crates.io
+# Protocol abstraction layer - Use local path for development
 # This transitively provides bllvm-consensus, so we only need this one dependency
-# For local development, the [patch.crates-io] section below overrides this with local path
-bllvm-protocol = "^0.1"
+# For local development, use path dependency
+bllvm-protocol = { path = "../bllvm-protocol" }
 
 # Storage layer - EXACT VERSIONS for security
 sled = { version = "=0.34.7", optional = true }
@@ -165,6 +165,8 @@ mimalloc = []
 json-logging = []
 # Modern REST API (runs alongside JSON-RPC)
 rest-api = []
+# HTTP BIP70 payment protocol support (requires rest-api)
+bip70-http = ["rest-api"]
 
 # Formal verification (Kani model checking) - verification only, not in release builds
 verify = ["kani-verifier"]
@@ -209,6 +211,7 @@ codegen-units = 16
 # Local development: Use .cargo/config.toml to override dependencies with local paths
 # This allows you to develop against local changes in bllvm-protocol without publishing
 # For CI jobs that checkout dependencies, .cargo/config.toml is created automatically
+
 
 # Examples
 [[example]]

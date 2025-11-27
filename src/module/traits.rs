@@ -221,6 +221,9 @@ pub enum ModuleError {
 
     #[error("Resource limit exceeded: {0}")]
     ResourceLimitExceeded(String),
+
+    #[error("Cryptographic error: {0}")]
+    CryptoError(String),
 }
 
 impl From<serde_json::Error> for ModuleError {

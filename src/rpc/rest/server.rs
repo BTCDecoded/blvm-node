@@ -39,6 +39,8 @@ pub struct RestApiServer {
     mempool: Arc<mempool::MempoolRpc>,
     mining: Arc<mining::MiningRpc>,
     rawtx: Arc<rawtx::RawTxRpc>,
+    #[cfg(feature = "bip70-http")]
+    payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
 }
 
 impl RestApiServer {
@@ -58,7 +60,19 @@ impl RestApiServer {
             mempool,
             mining,
             rawtx,
+            #[cfg(feature = "bip70-http")]
+            payment_processor: None,
         }
+    }
+
+    /// Set payment processor for BIP70 HTTP endpoints
+    #[cfg(feature = "bip70-http")]
+    pub fn with_payment_processor(
+        mut self,
+        processor: Arc<crate::payment::processor::PaymentProcessor>,
+    ) -> Self {
+        self.payment_processor = Some(processor);
+        self
     }
 
     /// Start the REST API server
@@ -136,6 +150,43 @@ impl RestApiServer {
             Self::handle_network_request(server, method, path, request_id).await
         } else if path.starts_with("/api/v1/fees") {
             Self::handle_fee_request(server, method, path, request_id).await
+        } else if path.starts_with("/api/v1/payment") {
+            // BIP70 payment endpoints (requires bip70-http feature)
+            #[cfg(feature = "bip70-http")]
+            {
+                if let Some(ref processor) = server.payment_processor {
+                    match crate::payment::http::handle_payment_routes(Arc::clone(processor), req)
+                        .await
+                    {
+                        Ok(resp) => resp,
+                        Err(e) => Self::error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "PAYMENT_ERROR",
+                            &format!("Payment processing error: {}", e),
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else {
+                    Self::error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "SERVICE_UNAVAILABLE",
+                        "Payment processor not configured",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            #[cfg(not(feature = "bip70-http"))]
+            {
+                Self::error_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "NOT_IMPLEMENTED",
+                    "HTTP BIP70 not enabled. Compile with --features bip70-http",
+                    None,
+                    request_id,
+                )
+            }
         } else {
             Self::error_response(
                 StatusCode::NOT_FOUND,

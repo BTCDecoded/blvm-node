@@ -366,13 +366,13 @@ fn test_package_id_hash() {
     set.insert(id2);
 
     // Set should contain at least 1 element (may be 2 if transactions are different)
-    assert!(set.len() >= 1);
+    assert!(!set.is_empty());
     assert!(set.len() <= 2);
 
     // Test that same ID can be inserted only once
     let id1_again = PackageId::from_transactions(&[tx1]);
     set.insert(id1_again);
     // Length should not increase if it's the same ID
-    assert!(set.len() >= 1);
+    assert!(!set.is_empty());
     assert!(set.len() <= 2);
 }

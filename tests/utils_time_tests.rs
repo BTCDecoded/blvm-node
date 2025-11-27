@@ -3,7 +3,6 @@
 //! Tests for time-related utilities.
 
 use bllvm_node::utils::time::{current_timestamp, current_timestamp_duration};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn test_current_timestamp() {
@@ -65,14 +64,9 @@ fn test_current_timestamp_reasonable() {
     let min_timestamp = 946_684_800; // 2000-01-01 00:00:00 UTC
     let max_timestamp = 4_102_444_800; // 2100-01-01 00:00:00 UTC
 
-    assert!(
-        timestamp >= min_timestamp,
-        "Timestamp too old: {}",
-        timestamp
-    );
+    assert!(timestamp >= min_timestamp, "Timestamp too old: {timestamp}");
     assert!(
         timestamp <= max_timestamp,
-        "Timestamp too far in future: {}",
-        timestamp
+        "Timestamp too far in future: {timestamp}"
     );
 }

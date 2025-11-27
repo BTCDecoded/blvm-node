@@ -5,7 +5,7 @@ use bllvm_node::node::block_processor::{
     store_block_with_context_and_index, validate_block_with_context,
 };
 use bllvm_node::storage::Storage;
-use bllvm_node::{Block, BlockHeader, Hash, UtxoSet};
+use bllvm_node::{Block, BlockHeader, UtxoSet};
 use bllvm_protocol::{segwit::Witness, BitcoinProtocolEngine, ProtocolVersion};
 use std::sync::Arc;
 use tempfile::TempDir;

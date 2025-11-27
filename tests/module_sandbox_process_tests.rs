@@ -3,8 +3,6 @@
 use bllvm_node::module::sandbox::process::{
     ProcessSandbox, ResourceLimits, ResourceUsage, SandboxConfig,
 };
-use bllvm_node::module::traits::ModuleError;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn create_test_sandbox() -> (TempDir, ProcessSandbox) {

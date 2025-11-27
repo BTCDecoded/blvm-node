@@ -40,6 +40,8 @@ pub struct ModuleManager {
     event_manager: Arc<EventManager>,
     /// API hub for request routing
     api_hub: Option<Arc<tokio::sync::Mutex<crate::module::api::hub::ModuleApiHub>>>,
+    /// Module registry for fetching modules via P2P
+    module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
 }
 
 /// Managed module instance
@@ -85,7 +87,25 @@ impl ModuleManager {
             modules_dir: modules_dir.as_ref().to_path_buf(),
             event_manager: Arc::new(EventManager::new()),
             api_hub: None,
+            module_registry: None,
         }
+    }
+
+    /// Set module registry for fetching modules via P2P
+    pub fn with_module_registry(
+        mut self,
+        module_registry: Arc<crate::module::registry::client::ModuleRegistry>,
+    ) -> Self {
+        self.module_registry = Some(module_registry);
+        self
+    }
+
+    /// Set module registry for fetching modules via P2P (mutable reference version)
+    pub fn set_module_registry(
+        &mut self,
+        module_registry: Arc<crate::module::registry::client::ModuleRegistry>,
+    ) {
+        self.module_registry = Some(module_registry);
     }
 
     /// Start the module manager
@@ -288,15 +308,65 @@ impl ModuleManager {
         info!("Auto-discovering and loading modules");
 
         let discovery = ModuleDiscovery::new(&self.spawner.modules_dir);
-        let discovered_modules = discovery.discover_modules()?;
+        let mut discovered_modules = discovery.discover_modules()?;
+
+        // If registry is available and we have missing dependencies, try fetching from registry
+        if let Some(ref registry) = self.module_registry {
+            // Check for missing dependencies (this would be determined by dependency resolution)
+            // For now, we'll just try to fetch any modules that are requested but not found
+            // In a full implementation, we'd check dependencies first
+        }
 
         if discovered_modules.is_empty() {
             info!("No modules discovered");
             return Ok(());
         }
 
-        // Resolve dependencies
-        let resolution = ModuleDependencies::resolve(&discovered_modules)?;
+        // Try to resolve dependencies - if missing and we have a registry, fetch them
+        let resolution = match ModuleDependencies::resolve(&discovered_modules) {
+            Ok(res) => res,
+            Err(ModuleError::DependencyMissing(msg)) => {
+                // Try fetching missing dependencies from registry
+                if let Some(ref registry) = self.module_registry {
+                    // Parse missing dependencies from error message
+                    // Format: "Missing dependencies: [\"dep1\", \"dep2\"]"
+                    let missing: Vec<String> = if let Some(start) = msg.find('[') {
+                        let deps_str = &msg[start + 1..msg.len() - 1];
+                        deps_str
+                            .split(',')
+                            .map(|s| s.trim().trim_matches('"').to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Fetch each missing dependency
+                    for dep_name in &missing {
+                        info!(
+                            "Attempting to fetch missing dependency {} from registry",
+                            dep_name
+                        );
+                        if let Ok(entry) = registry.fetch_module(dep_name).await {
+                            // Install fetched module
+                            if let Ok(installed) = self.install_module_from_registry(entry).await {
+                                discovered_modules.push(installed);
+                                info!(
+                                    "Successfully fetched and installed module {} from registry",
+                                    dep_name
+                                );
+                            }
+                        }
+                    }
+
+                    // Re-resolve dependencies after fetching
+                    ModuleDependencies::resolve(&discovered_modules)?
+                } else {
+                    return Err(ModuleError::DependencyMissing(msg));
+                }
+            }
+            Err(e) => return Err(e),
+        };
 
         // Load module configurations
         let mut module_configs = HashMap::new();
@@ -318,6 +388,82 @@ impl ModuleManager {
 
         info!("Auto-loaded {} modules", discovered_modules.len());
         Ok(())
+    }
+
+    /// Fetch and install a module from the registry
+    pub async fn fetch_module_from_registry(
+        &mut self,
+        module_name: &str,
+    ) -> Result<(), ModuleError> {
+        let registry = self.module_registry.as_ref().ok_or_else(|| {
+            ModuleError::OperationError("Module registry not available".to_string())
+        })?;
+
+        info!("Fetching module {} from registry", module_name);
+        let entry = registry.fetch_module(module_name).await?;
+
+        // Install the module
+        self.install_module_from_registry(entry).await?;
+
+        Ok(())
+    }
+
+    /// Install a module entry from the registry to the modules directory
+    async fn install_module_from_registry(
+        &self,
+        entry: crate::module::registry::client::ModuleEntry,
+    ) -> Result<crate::module::registry::discovery::DiscoveredModule, ModuleError> {
+        use std::fs;
+        use std::io::Write;
+
+        // Create module directory
+        let module_dir = self.modules_dir.join(&entry.name);
+        fs::create_dir_all(&module_dir).map_err(|e| {
+            ModuleError::OperationError(format!("Failed to create module directory: {e}"))
+        })?;
+
+        // Write manifest
+        let manifest_path = module_dir.join("module.toml");
+        let manifest_toml = toml::to_string_pretty(&entry.manifest).map_err(|e| {
+            ModuleError::OperationError(format!("Failed to serialize manifest: {e}"))
+        })?;
+        fs::write(&manifest_path, manifest_toml)
+            .map_err(|e| ModuleError::OperationError(format!("Failed to write manifest: {e}")))?;
+
+        // Write binary
+        let binary_path = module_dir.join(&entry.name);
+        if let Some(binary_data) = entry.binary {
+            let mut file = fs::File::create(&binary_path).map_err(|e| {
+                ModuleError::OperationError(format!("Failed to create binary file: {e}"))
+            })?;
+            file.write_all(&binary_data)
+                .map_err(|e| ModuleError::OperationError(format!("Failed to write binary: {e}")))?;
+        } else {
+            // Binary not included, fetch separately if needed
+            warn!(
+                "Module {} binary not included in registry entry",
+                entry.name
+            );
+        }
+
+        // Make binary executable (Unix)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&binary_path)
+                .map_err(|e| {
+                    ModuleError::OperationError(format!("Failed to get file metadata: {e}"))
+                })?
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&binary_path, perms).map_err(|e| {
+                ModuleError::OperationError(format!("Failed to set executable permissions: {e}"))
+            })?;
+        }
+
+        // Create DiscoveredModule
+        let discovery = ModuleDiscovery::new(&self.modules_dir);
+        discovery.discover_module(&entry.name)
     }
 
     /// Get event manager for publishing events

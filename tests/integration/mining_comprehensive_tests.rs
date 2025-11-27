@@ -52,7 +52,8 @@ async fn test_complete_mining_workflow() {
             value: 100000000 * (i + 1), // 1-5 BTC
             script_pubkey: p2pkh_script(random_hash20()),
             height: 100,
-        };
+        
+            is_coinbase: false,};
         storage.utxos().add_utxo(&outpoint, &utxo).unwrap();
     }
     
@@ -145,7 +146,8 @@ async fn test_template_large_utxo_set() {
             value: 1000000 + (i as i64) * 1000, // Varying amounts
             script_pubkey: p2pkh_script(random_hash20()),
             height: 0,
-        };
+        
+            is_coinbase: false,};
         storage.utxos().add_utxo(&outpoint, &utxo).unwrap();
     }
     

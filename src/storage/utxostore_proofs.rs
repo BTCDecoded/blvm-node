@@ -20,8 +20,11 @@ mod kani_proofs {
 
     /// Verify UTXO uniqueness property
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 5.3.1
     /// ∀ outpoint: has_utxo(outpoint) ⟹ get_utxo(outpoint) = Some(utxo)
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 5.3, Theorem 5.3.1
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_UTXO)]
     fn verify_utxo_uniqueness() {
@@ -103,8 +106,11 @@ mod kani_proofs {
 
     /// Verify value conservation
     ///
-    /// Mathematical Specification:
-    /// total_value() = sum(utxo.value for all utxos)
+    /// Mathematical Specification: Orange Paper Theorem 5.3.2
+    /// total_value(us) = Σ_{op ∈ dom(us)} us(op).value
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 5.3, Theorem 5.3.2
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::UTXO_SET)]
     fn verify_value_conservation() {
@@ -173,8 +179,11 @@ mod kani_proofs {
 
     /// Verify round-trip storage
     ///
-    /// Mathematical Specification:
-    /// store_utxo_set(set); load_utxo_set() = set
+    /// Mathematical Specification: Orange Paper Theorem 5.3.3
+    /// load_utxo_set(store_utxo_set(us)) = us
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 5.3, Theorem 5.3.3
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::UTXO_SET)]
     fn verify_roundtrip_storage() {

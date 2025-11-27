@@ -11,6 +11,7 @@ pub mod dns_seeds;
 pub mod dos_protection;
 pub mod inventory;
 pub mod message_bridge;
+pub mod module_registry_extensions;
 pub mod peer;
 pub mod protocol;
 pub mod protocol_adapter;
@@ -330,6 +331,10 @@ pub struct NetworkManager {
     storage: Option<Arc<Storage>>,
     /// Mempool manager for transaction access
     mempool_manager: Option<Arc<MempoolManager>>,
+    /// Module registry for serving modules via P2P
+    module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
+    /// Payment processor for BIP70 payments (HTTP and P2P)
+    payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
     /// FIBRE relay manager (for fast block relay)
     #[cfg(feature = "fibre")]
     fibre_relay: Option<Arc<Mutex<fibre::FibreRelay>>>,
@@ -422,6 +427,18 @@ pub enum NetworkMessage {
     // BIP331 Package Relay messages
     PkgTxnReceived(Vec<u8>, SocketAddr),     // (data, peer_addr)
     SendPkgTxnReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    // Module Registry messages
+    GetModuleReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    ModuleReceived(Vec<u8>, SocketAddr),    // (data, peer_addr)
+    GetModuleByHashReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    ModuleByHashReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    GetModuleListReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    ModuleListReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    // BIP70 Payment Protocol messages
+    GetPaymentRequestReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    PaymentRequestReceived(Vec<u8>, SocketAddr),    // (data, peer_addr)
+    PaymentReceived(Vec<u8>, SocketAddr),           // (data, peer_addr)
+    PaymentACKReceived(Vec<u8>, SocketAddr),        // (data, peer_addr)
 }
 
 impl NetworkManager {
@@ -490,6 +507,8 @@ impl NetworkManager {
             protocol_engine: None,
             storage: None,
             mempool_manager: None,
+            module_registry: None,
+            payment_processor: None,
             #[cfg(feature = "fibre")]
             fibre_relay: None,
             peer_states: Arc::new(RwLock::new(HashMap::new())),
@@ -525,6 +544,23 @@ impl NetworkManager {
         self.storage = Some(storage);
         self.mempool_manager = Some(mempool_manager);
         self
+    }
+
+    /// Set module registry for serving modules via P2P
+    pub fn with_module_registry(
+        mut self,
+        module_registry: Arc<crate::module::registry::client::ModuleRegistry>,
+    ) -> Self {
+        self.module_registry = Some(module_registry);
+        self
+    }
+
+    /// Set module registry for serving modules via P2P (mutable reference version)
+    pub fn set_module_registry(
+        &mut self,
+        module_registry: Arc<crate::module::registry::client::ModuleRegistry>,
+    ) {
+        self.module_registry = Some(module_registry);
     }
 
     /// Initialize FIBRE relay (if enabled in config)
@@ -2252,7 +2288,13 @@ impl NetworkManager {
                 Ok(NetworkMessage::BlockReceived(data)) => {
                     return Some(data);
                 }
-                Ok(_) => {
+                Ok(NetworkMessage::GetModuleReceived(_, _))
+                | Ok(NetworkMessage::ModuleReceived(_, _))
+                | Ok(NetworkMessage::GetModuleByHashReceived(_, _))
+                | Ok(NetworkMessage::ModuleByHashReceived(_, _))
+                | Ok(NetworkMessage::GetModuleListReceived(_, _))
+                | Ok(NetworkMessage::ModuleListReceived(_, _))
+                | Ok(_) => {
                     // Other message types, continue checking
                     continue;
                 }
@@ -2510,6 +2552,91 @@ impl NetworkManager {
                     );
                     self.handle_getcfcheckpt_request(data, peer_addr).await?;
                 }
+                // Module Registry messages
+                NetworkMessage::GetModuleReceived(data, peer_addr) => {
+                    info!(
+                        "GetModule received from {}: {} bytes",
+                        peer_addr,
+                        data.len()
+                    );
+                    // Parse and handle GetModule request
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::GetModule(msg) = parsed {
+                            if let Err(e) = self.handle_get_module(peer_addr, msg).await {
+                                warn!("Failed to handle GetModule request: {}", e);
+                            }
+                        }
+                    }
+                }
+                NetworkMessage::ModuleReceived(_, _) => {
+                    // Handle Module response (for async request matching)
+                }
+                NetworkMessage::GetModuleByHashReceived(data, peer_addr) => {
+                    info!(
+                        "GetModuleByHash received from {}: {} bytes",
+                        peer_addr,
+                        data.len()
+                    );
+                    // Parse and handle GetModuleByHash request
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::GetModuleByHash(msg) = parsed {
+                            if let Err(e) = self.handle_get_module_by_hash(peer_addr, msg).await {
+                                warn!("Failed to handle GetModuleByHash request: {}", e);
+                            }
+                        }
+                    }
+                }
+                NetworkMessage::ModuleByHashReceived(_, _) => {
+                    // Handle ModuleByHash response (for async request matching)
+                }
+                NetworkMessage::GetModuleListReceived(data, peer_addr) => {
+                    info!(
+                        "GetModuleList received from {}: {} bytes",
+                        peer_addr,
+                        data.len()
+                    );
+                    // Parse and handle GetModuleList request
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::GetModuleList(msg) = parsed {
+                            if let Err(e) = self.handle_get_module_list(peer_addr, msg).await {
+                                warn!("Failed to handle GetModuleList request: {}", e);
+                            }
+                        }
+                    }
+                }
+                NetworkMessage::ModuleListReceived(_, _) => {
+                    // Handle ModuleList response (for async request matching)
+                }
+                // BIP70 Payment Protocol messages
+                NetworkMessage::GetPaymentRequestReceived(data, peer_addr) => {
+                    info!(
+                        "GetPaymentRequest received from {}: {} bytes",
+                        peer_addr, data.len()
+                    );
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::GetPaymentRequest(msg) = parsed {
+                            if let Err(e) = self.handle_get_payment_request(peer_addr, msg).await {
+                                warn!("Failed to handle GetPaymentRequest: {}", e);
+                            }
+                        }
+                    }
+                }
+                NetworkMessage::PaymentRequestReceived(_, _) => {
+                    // Handle PaymentRequest response (for async request matching)
+                }
+                NetworkMessage::PaymentReceived(data, peer_addr) => {
+                    info!("Payment received from {}: {} bytes", peer_addr, data.len());
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::Payment(msg) = parsed {
+                            if let Err(e) = self.handle_payment(peer_addr, msg).await {
+                                warn!("Failed to handle Payment: {}", e);
+                            }
+                        }
+                    }
+                }
+                NetworkMessage::PaymentACKReceived(_, _) => {
+                    // Handle PaymentACK response (for async request matching)
+                }
                 // Raw messages from peer connections
                 NetworkMessage::RawMessageReceived(data, peer_addr) => {
                     // Update peer receive stats - drop lock before async operations
@@ -2545,12 +2672,14 @@ impl NetworkManager {
                         continue;
                     }
 
-                    // Check if this is a response to a pending request (UTXOSet or FilteredBlock)
+                    // Check if this is a response to a pending request (UTXOSet, FilteredBlock, Module, ModuleByHash)
                     // Extract request_id from message and route to correct pending request
                     if let Ok(parsed) = ProtocolParser::parse_message(&data) {
                         let request_id_opt = match &parsed {
                             ProtocolMessage::UTXOSet(msg) => Some(msg.request_id),
                             ProtocolMessage::FilteredBlock(msg) => Some(msg.request_id),
+                            ProtocolMessage::Module(msg) => Some(msg.request_id),
+                            ProtocolMessage::ModuleByHash(msg) => Some(msg.request_id),
                             _ => None,
                         };
 
@@ -2634,6 +2763,68 @@ impl NetworkManager {
                     .send(NetworkMessage::GetCfcheckptReceived(data, peer_addr));
                 return Ok(());
             }
+            // Module Registry
+            ProtocolMessage::GetModule(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::GetModuleReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::Module(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::ModuleReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::GetModuleByHash(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::GetModuleByHashReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::ModuleByHash(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::ModuleByHashReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::GetModuleList(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::GetModuleListReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::ModuleList(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::ModuleListReceived(data, peer_addr));
+                return Ok(());
+            }
+            // BIP70 Payment Protocol
+            ProtocolMessage::GetPaymentRequest(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::GetPaymentRequestReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::PaymentRequest(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::PaymentRequestReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::Payment(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::PaymentReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::PaymentACK(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::PaymentACKReceived(data, peer_addr));
+                return Ok(());
+            }
             // Ban List Sharing
             ProtocolMessage::GetBanList(msg) => {
                 return self.handle_get_ban_list(peer_addr, msg).await;
@@ -2647,6 +2838,16 @@ impl NetworkManager {
             }
             ProtocolMessage::Addr(msg) => {
                 return self.handle_addr(peer_addr, msg).await;
+            }
+            // Module Registry
+            ProtocolMessage::GetModule(msg) => {
+                return self.handle_get_module(peer_addr, msg).await;
+            }
+            ProtocolMessage::GetModuleByHash(msg) => {
+                return self.handle_get_module_by_hash(peer_addr, msg).await;
+            }
+            ProtocolMessage::GetModuleList(msg) => {
+                return self.handle_get_module_list(peer_addr, msg).await;
             }
             _ => {
                 // Continue to protocol layer processing
@@ -2782,6 +2983,108 @@ impl NetworkManager {
         let response_wire = ProtocolParser::serialize_message(&ProtocolMessage::UTXOSet(response))?;
         self.send_to_peer(peer_addr, response_wire).await?;
 
+        Ok(())
+    }
+
+    /// Handle GetModule request from a peer
+    async fn handle_get_module(
+        &self,
+        peer_addr: SocketAddr,
+        message: crate::network::protocol::GetModuleMessage,
+    ) -> Result<()> {
+        use crate::network::module_registry_extensions::handle_get_module;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::protocol::ProtocolParser;
+
+        // Handle the request with registry integration
+        let registry = self.module_registry.as_ref().map(Arc::clone);
+        let response = handle_get_module(message, registry).await?;
+
+        // Serialize and send response
+        let response_wire = ProtocolParser::serialize_message(&ProtocolMessage::Module(response))?;
+        self.send_to_peer(peer_addr, response_wire).await?;
+
+        Ok(())
+    }
+
+    /// Handle GetModuleByHash request from a peer
+    async fn handle_get_module_by_hash(
+        &self,
+        peer_addr: SocketAddr,
+        message: crate::network::protocol::GetModuleByHashMessage,
+    ) -> Result<()> {
+        use crate::network::module_registry_extensions::handle_get_module_by_hash;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::protocol::ProtocolParser;
+
+        // Handle the request with registry integration
+        let registry = self.module_registry.as_ref().map(Arc::clone);
+        let response = handle_get_module_by_hash(message, registry).await?;
+
+        // Serialize and send response
+        let response_wire =
+            ProtocolParser::serialize_message(&ProtocolMessage::ModuleByHash(response))?;
+        self.send_to_peer(peer_addr, response_wire).await?;
+
+        Ok(())
+    }
+
+    /// Handle GetModuleList request from a peer
+    async fn handle_get_module_list(
+        &self,
+        peer_addr: SocketAddr,
+        message: crate::network::protocol::GetModuleListMessage,
+    ) -> Result<()> {
+        use crate::network::module_registry_extensions::handle_get_module_list;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::protocol::ProtocolParser;
+
+        // Handle the request with registry integration
+        let registry = self.module_registry.as_ref().map(Arc::clone);
+        let response = handle_get_module_list(message, registry).await?;
+
+        // Serialize and send response
+        let response_wire =
+            ProtocolParser::serialize_message(&ProtocolMessage::ModuleList(response))?;
+        self.send_to_peer(peer_addr, response_wire).await?;
+
+        Ok(())
+    }
+
+    /// Handle GetPaymentRequest message (P2P BIP70)
+    async fn handle_get_payment_request(
+        &self,
+        peer_addr: SocketAddr,
+        message: crate::network::protocol::GetPaymentRequestMessage,
+    ) -> Result<()> {
+        use crate::network::bip70_handler::handle_get_payment_request;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::protocol::ProtocolParser;
+
+        let processor = self.payment_processor.as_ref().map(Arc::clone);
+        let response_msg = handle_get_payment_request(&message, processor).await?;
+        let response = ProtocolMessage::PaymentRequest(response_msg);
+        let wire_msg = ProtocolParser::serialize_message(&response)?;
+        self.send_to_peer(peer_addr, wire_msg).await?;
+        Ok(())
+    }
+
+    /// Handle Payment message (P2P BIP70)
+    async fn handle_payment(
+        &self,
+        peer_addr: SocketAddr,
+        message: crate::network::protocol::PaymentMessage,
+    ) -> Result<()> {
+        use crate::network::bip70_handler::handle_payment;
+        use crate::network::protocol::ProtocolMessage;
+        use crate::network::protocol::ProtocolParser;
+
+        let processor = self.payment_processor.as_ref().map(Arc::clone);
+        // TODO: Get merchant private key from config
+        let response_msg = handle_payment(&message, processor, None).await?;
+        let response = ProtocolMessage::PaymentACK(response_msg);
+        let wire_msg = ProtocolParser::serialize_message(&response)?;
+        self.send_to_peer(peer_addr, wire_msg).await?;
         Ok(())
     }
 

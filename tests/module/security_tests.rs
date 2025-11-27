@@ -49,6 +49,8 @@ fn test_manifest_validation() {
         dependencies: std::collections::HashMap::new(),
         entry_point: "my-module".to_string(),
         config_schema: std::collections::HashMap::new(),
+        binary: None,
+        signatures: None,
     };
     
     let invalid_manifest = ModuleManifest {
@@ -60,6 +62,8 @@ fn test_manifest_validation() {
         dependencies: std::collections::HashMap::new(),
         entry_point: "my-module".to_string(),
         config_schema: std::collections::HashMap::new(),
+        binary: None,
+        signatures: None,
     };
     
     // Validate manifests

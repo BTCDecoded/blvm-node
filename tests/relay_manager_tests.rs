@@ -2,8 +2,6 @@
 
 use bllvm_node::network::relay::{RelayManager, RelayPolicies};
 use bllvm_node::Hash;
-use std::thread;
-use std::time::Duration;
 
 fn create_test_hash(byte: u8) -> Hash {
     let mut hash = [0u8; 32];

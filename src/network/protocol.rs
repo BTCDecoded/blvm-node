@@ -74,6 +74,14 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     // Ban List Sharing
     "getbanlist",
     "banlist",
+    // Module Registry
+    "getmodule",
+    "module",
+    "getmodulebyhash",
+    "modulebyhash",
+    "moduleinv",
+    "getmodulelist",
+    "modulelist",
 ];
 
 /// Bitcoin protocol message types
@@ -122,6 +130,14 @@ pub enum ProtocolMessage {
     // Address relay
     GetAddr,
     Addr(AddrMessage),
+    // Module Registry
+    GetModule(GetModuleMessage),
+    Module(ModuleMessage),
+    GetModuleByHash(GetModuleByHashMessage),
+    ModuleByHash(ModuleByHashMessage),
+    ModuleInv(ModuleInvMessage),
+    GetModuleList(GetModuleListMessage),
+    ModuleList(ModuleListMessage),
 }
 
 /// Version message
@@ -575,6 +591,98 @@ pub struct PkgTxnRejectMessage {
     pub reason_text: Option<String>,
 }
 
+// Module Registry messages
+
+/// getmodule message - Request module by name
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetModuleMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// Module name
+    pub name: String,
+    /// Optional version (if not specified, get latest)
+    pub version: Option<String>,
+}
+
+/// module message - Module response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleMessage {
+    /// Request ID (echo from GetModule for matching)
+    pub request_id: u64,
+    /// Module name
+    pub name: String,
+    /// Module version
+    pub version: String,
+    /// Module hash (content-addressable identifier)
+    pub hash: Hash,
+    /// Manifest hash
+    pub manifest_hash: Hash,
+    /// Binary hash
+    pub binary_hash: Hash,
+    /// Manifest content (TOML)
+    pub manifest: Vec<u8>,
+    /// Binary content (optional - may be fetched separately via getmodulebyhash)
+    pub binary: Option<Vec<u8>>,
+}
+
+/// getmodulebyhash message - Request module by hash (content-addressable)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetModuleByHashMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// Module hash
+    pub hash: Hash,
+    /// Request binary (if false, only manifest is returned)
+    pub include_binary: bool,
+}
+
+/// modulebyhash message - Module response by hash
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleByHashMessage {
+    /// Request ID (echo from GetModuleByHash for matching)
+    pub request_id: u64,
+    /// Module hash (echo from request)
+    pub hash: Hash,
+    /// Manifest content
+    pub manifest: Vec<u8>,
+    /// Binary content (if requested)
+    pub binary: Option<Vec<u8>>,
+}
+
+/// moduleinv message - Module inventory (announce available modules)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleInvMessage {
+    /// List of available modules
+    pub modules: Vec<ModuleInventoryItem>,
+}
+
+/// Module inventory item
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleInventoryItem {
+    /// Module name
+    pub name: String,
+    /// Module version
+    pub version: String,
+    /// Module hash
+    pub hash: Hash,
+}
+
+/// getmodulelist message - Request list of available modules
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetModuleListMessage {
+    /// Optional filter by name prefix
+    pub name_prefix: Option<String>,
+    /// Maximum number of modules to return
+    pub max_count: Option<u32>,
+}
+
+/// modulelist message - List of available modules
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleListMessage {
+    /// List of available modules
+    pub modules: Vec<ModuleInventoryItem>,
+}
+
 /// SpamSummary - Summary of filtered spam transactions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpamSummary {
@@ -703,6 +811,20 @@ impl ProtocolParser {
             "banlist" => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
             "getaddr" => Ok(ProtocolMessage::GetAddr),
             "addr" => Ok(ProtocolMessage::Addr(bincode::deserialize(payload)?)),
+            // Module Registry
+            "getmodule" => Ok(ProtocolMessage::GetModule(bincode::deserialize(payload)?)),
+            "module" => Ok(ProtocolMessage::Module(bincode::deserialize(payload)?)),
+            "getmodulebyhash" => Ok(ProtocolMessage::GetModuleByHash(bincode::deserialize(
+                payload,
+            )?)),
+            "modulebyhash" => Ok(ProtocolMessage::ModuleByHash(bincode::deserialize(
+                payload,
+            )?)),
+            "moduleinv" => Ok(ProtocolMessage::ModuleInv(bincode::deserialize(payload)?)),
+            "getmodulelist" => Ok(ProtocolMessage::GetModuleList(bincode::deserialize(
+                payload,
+            )?)),
+            "modulelist" => Ok(ProtocolMessage::ModuleList(bincode::deserialize(payload)?)),
             _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
         }
     }
@@ -757,6 +879,14 @@ impl ProtocolParser {
             // Address relay
             ProtocolMessage::GetAddr => ("getaddr", vec![]),
             ProtocolMessage::Addr(msg) => ("addr", bincode::serialize(msg)?),
+            // Module Registry
+            ProtocolMessage::GetModule(msg) => ("getmodule", bincode::serialize(msg)?),
+            ProtocolMessage::Module(msg) => ("module", bincode::serialize(msg)?),
+            ProtocolMessage::GetModuleByHash(msg) => ("getmodulebyhash", bincode::serialize(msg)?),
+            ProtocolMessage::ModuleByHash(msg) => ("modulebyhash", bincode::serialize(msg)?),
+            ProtocolMessage::ModuleInv(msg) => ("moduleinv", bincode::serialize(msg)?),
+            ProtocolMessage::GetModuleList(msg) => ("getmodulelist", bincode::serialize(msg)?),
+            ProtocolMessage::ModuleList(msg) => ("modulelist", bincode::serialize(msg)?),
         };
 
         let mut message = Vec::new();

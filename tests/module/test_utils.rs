@@ -84,6 +84,8 @@ impl ModuleTestFixture {
             dependencies: HashMap::new(),
             entry_point: name.to_string(),
             config_schema: HashMap::new(),
+            binary: None,
+            signatures: None,
         };
         
         let toml_content = toml::to_string_pretty(&manifest)?;

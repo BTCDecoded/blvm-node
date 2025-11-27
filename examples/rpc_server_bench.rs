@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get server address from args or use default
     let server_addr: SocketAddr = match std::env::args().nth(1) {
         Some(addr) => addr.parse().unwrap_or_else(|_| {
-            eprintln!("Invalid address: {}", addr);
+            eprintln!("Invalid address: {addr}");
             std::process::exit(1);
         }),
         None => "127.0.0.1:18332".parse().unwrap(),

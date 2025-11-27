@@ -54,6 +54,7 @@ async fn test_mempool_get_prioritized_transactions() {
             value: 10000,
             script_pubkey: vec![0x51],
             height: 0,
+            is_coinbase: false,
         },
     );
 

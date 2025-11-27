@@ -3,7 +3,7 @@
 #[cfg(unix)]
 mod tests {
     use bllvm_node::module::ipc::client::ModuleIpcClient;
-    use bllvm_node::module::ipc::protocol::{RequestMessage, ResponseMessage};
+    use bllvm_node::module::ipc::protocol::RequestMessage;
     use bllvm_node::module::ipc::server::ModuleIpcServer;
     use bllvm_node::module::traits::{EventType, ModuleError, NodeAPI};
     use bllvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};

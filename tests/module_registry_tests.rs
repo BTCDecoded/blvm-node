@@ -19,6 +19,8 @@ fn create_test_manifest(name: &str, deps: HashMap<String, String>) -> ModuleMani
         dependencies: deps,
         entry_point: format!("{}.so", name),
         config_schema: HashMap::new(),
+        binary: None,
+        signatures: None,
     }
 }
 
