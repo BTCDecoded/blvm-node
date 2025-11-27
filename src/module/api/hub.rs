@@ -83,7 +83,7 @@ impl ModuleApiHub {
         {
             crate::module::security::ValidationResult::Allowed => {}
             crate::module::security::ValidationResult::Denied(reason) => {
-                  return Err(ModuleError::OperationError(format!(
+                return Err(ModuleError::OperationError(format!(
                     "Request denied: {reason}"
                 )));
             }
