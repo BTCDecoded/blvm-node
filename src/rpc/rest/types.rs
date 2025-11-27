@@ -107,3 +107,55 @@ impl ApiError {
         }
     }
 }
+
+// Helper functions for REST responses
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::{Request, Response, StatusCode};
+
+/// Read and parse JSON request body
+pub async fn read_json_body(req: Request<Incoming>) -> Result<Option<Value>, hyper::Error> {
+    use http_body_util::BodyExt;
+    let (_, body) = req.into_parts();
+    let body_bytes = body.collect().await?.to_bytes();
+    if body_bytes.is_empty() {
+        Ok(None)
+    } else {
+        match serde_json::from_slice::<Value>(&body_bytes) {
+            Ok(v) => Ok(Some(v)),
+            Err(_) => Ok(None), // Or return an error if body is malformed JSON
+        }
+    }
+}
+
+/// Create success response
+pub fn success_response(data: Value, request_id: String) -> Response<Full<Bytes>> {
+    let response = ApiResponse::success(data, Some(request_id));
+    let body = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+/// Create error response
+pub fn error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    request_id: String,
+) -> Response<Full<Bytes>> {
+    let error = ApiError::new(code, message, None, None, Some(request_id));
+    let body = serde_json::to_string(&error).unwrap_or_else(|_| "{}".to_string());
+
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}

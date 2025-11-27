@@ -47,7 +47,7 @@ impl NetworkRpc {
             let base_info = CACHED_NETWORK_INFO.get_or_init(|| {
                 json!({
                     "version": 70015,
-                    "subversion": "/reference-node:0.1.0/",
+                    "subversion": format!("/BitcoinCommons:{}/", env!("CARGO_PKG_VERSION")),
                     "protocolversion": 70015,
                     "localservices": "0000000000000001",
                     "localrelay": true,

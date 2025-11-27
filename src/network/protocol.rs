@@ -120,6 +120,10 @@ pub enum ProtocolMessage {
     PaymentRequest(PaymentRequestMessage),
     Payment(PaymentMessage),
     PaymentACK(PaymentACKMessage),
+    // CTV Payment Proof messages (for instant proof)
+    #[cfg(feature = "ctv")]
+    PaymentProof(PaymentProofMessage),
+    SettlementNotification(SettlementNotificationMessage),
     // Package Relay (BIP 331)
     SendPkgTxn(SendPkgTxnMessage),
     PkgTxn(PkgTxnMessage),
@@ -528,6 +532,10 @@ pub struct PaymentRequestMessage {
     /// Payment ID (echo from GetPaymentRequest)
     #[serde(with = "serde_bytes")]
     pub payment_id: Vec<u8>,
+    /// Optional CTV covenant proof (for instant proof)
+    #[cfg(feature = "ctv")]
+    #[serde(default)]
+    pub covenant_proof: Option<crate::payment::covenant::CovenantProof>,
 }
 
 /// payment message - Customer payment transaction(s)
@@ -554,6 +562,37 @@ pub struct PaymentACKMessage {
     /// Merchant signature confirming receipt
     #[serde(with = "serde_bytes")]
     pub merchant_signature: Vec<u8>,
+}
+
+// CTV Payment Proof messages (for instant proof, not instant settlement)
+
+/// paymentproof message - CTV covenant proof for payment commitment
+#[cfg(feature = "ctv")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentProofMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// Payment request ID this proof commits to
+    pub payment_request_id: String,
+    /// CTV covenant proof
+    pub covenant_proof: crate::payment::covenant::CovenantProof,
+    /// Optional full transaction template (for verification)
+    pub transaction_template: Option<crate::payment::covenant::TransactionTemplate>,
+}
+
+/// settlementnotification message - Settlement status update
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettlementNotificationMessage {
+    /// Payment request ID
+    pub payment_request_id: String,
+    /// Transaction hash (if in mempool or confirmed)
+    pub transaction_hash: Option<Hash>,
+    /// Confirmation count (0 = in mempool, >0 = confirmed)
+    pub confirmation_count: u32,
+    /// Block hash (if confirmed)
+    pub block_hash: Option<Hash>,
+    /// Settlement status
+    pub status: String, // "mempool", "confirmed", "failed"
 }
 
 // Package Relay (BIP 331) messages
@@ -602,6 +641,9 @@ pub struct GetModuleMessage {
     pub name: String,
     /// Optional version (if not specified, get latest)
     pub version: Option<String>,
+    /// Optional payment ID (required if module requires payment)
+    /// This is the payment_id from a completed PaymentACK
+    pub payment_id: Option<String>,
 }
 
 /// module message - Module response
@@ -755,7 +797,33 @@ impl ProtocolParser {
 
         // Parse payload based on command
         match command.as_str() {
-            "version" => Ok(ProtocolMessage::Version(bincode::deserialize(payload)?)),
+            "version" => {
+                // Use proper Bitcoin wire format deserialization for version messages
+                use bllvm_protocol::wire::deserialize_version;
+
+                let version_msg = deserialize_version(payload)?;
+
+                // Convert to node's ProtocolMessage format
+                Ok(ProtocolMessage::Version(VersionMessage {
+                    version: version_msg.version as i32, // bllvm-node uses i32, bllvm-protocol uses u32
+                    services: version_msg.services,
+                    timestamp: version_msg.timestamp,
+                    addr_recv: NetworkAddress {
+                        services: version_msg.addr_recv.services,
+                        ip: version_msg.addr_recv.ip,
+                        port: version_msg.addr_recv.port,
+                    },
+                    addr_from: NetworkAddress {
+                        services: version_msg.addr_from.services,
+                        ip: version_msg.addr_from.ip,
+                        port: version_msg.addr_from.port,
+                    },
+                    nonce: version_msg.nonce,
+                    user_agent: version_msg.user_agent,
+                    start_height: version_msg.start_height,
+                    relay: version_msg.relay,
+                }))
+            }
             "verack" => Ok(ProtocolMessage::Verack),
             "ping" => Ok(ProtocolMessage::Ping(bincode::deserialize(payload)?)),
             "pong" => Ok(ProtocolMessage::Pong(bincode::deserialize(payload)?)),
@@ -832,7 +900,38 @@ impl ProtocolParser {
     /// Serialize a protocol message to bytes
     pub fn serialize_message(message: &ProtocolMessage) -> Result<Vec<u8>> {
         let (command, payload) = match message {
-            ProtocolMessage::Version(msg) => ("version", bincode::serialize(msg)?),
+            ProtocolMessage::Version(msg) => {
+                // Use proper Bitcoin wire format for version messages
+                // Convert to bllvm-protocol format and use its wire serialization
+                use bllvm_protocol::network::{NetworkAddress, VersionMessage};
+                use bllvm_protocol::wire::serialize_version;
+
+                let version_msg = VersionMessage {
+                    version: msg.version as u32,
+                    services: msg.services,
+                    timestamp: msg.timestamp,
+                    addr_recv: NetworkAddress {
+                        services: msg.addr_recv.services,
+                        ip: msg.addr_recv.ip,
+                        port: msg.addr_recv.port,
+                    },
+                    addr_from: NetworkAddress {
+                        services: msg.addr_from.services,
+                        ip: msg.addr_from.ip,
+                        port: msg.addr_from.port,
+                    },
+                    nonce: msg.nonce,
+                    user_agent: msg.user_agent.clone(),
+                    start_height: msg.start_height,
+                    relay: msg.relay,
+                };
+
+                // Serialize payload using proper Bitcoin wire format
+                // This uses the serialize_version function from bllvm-protocol wire.rs
+                // which implements the exact Bitcoin protocol format
+                let payload = serialize_version(&version_msg)?;
+                ("version", payload)
+            }
             ProtocolMessage::Verack => ("verack", vec![]),
             ProtocolMessage::Ping(msg) => ("ping", bincode::serialize(msg)?),
             ProtocolMessage::Pong(msg) => ("pong", bincode::serialize(msg)?),
@@ -869,6 +968,12 @@ impl ProtocolParser {
             ProtocolMessage::PaymentRequest(msg) => ("paymentrequest", bincode::serialize(msg)?),
             ProtocolMessage::Payment(msg) => ("payment", bincode::serialize(msg)?),
             ProtocolMessage::PaymentACK(msg) => ("paymentack", bincode::serialize(msg)?),
+            // CTV Payment Proof messages
+            #[cfg(feature = "ctv")]
+            ProtocolMessage::PaymentProof(msg) => ("paymentproof", bincode::serialize(msg)?),
+            ProtocolMessage::SettlementNotification(msg) => {
+                ("settlementnotification", bincode::serialize(msg)?)
+            }
             // Package Relay (BIP 331)
             ProtocolMessage::SendPkgTxn(msg) => ("sendpkgtxn", bincode::serialize(msg)?),
             ProtocolMessage::PkgTxn(msg) => ("pkgtxn", bincode::serialize(msg)?),

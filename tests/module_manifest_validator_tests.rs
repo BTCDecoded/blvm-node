@@ -16,6 +16,7 @@ fn create_valid_manifest() -> ModuleManifest {
         config_schema: HashMap::new(),
         binary: None,
         signatures: None,
+        payment: None,
     }
 }
 

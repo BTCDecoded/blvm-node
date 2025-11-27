@@ -83,10 +83,12 @@ pub struct AddressDatabase {
 impl AddressDatabase {
     /// Create a new address database
     pub fn new(max_addresses: usize) -> Self {
+        // Optimization: Pre-allocate HashMap with capacity to reduce rehashing
+        let capacity = (max_addresses * 4 / 3).next_power_of_two(); // 75% load factor
         Self {
-            addresses: HashMap::new(),
+            addresses: HashMap::with_capacity(capacity),
             #[cfg(feature = "iroh")]
-            iroh_addresses: HashMap::new(),
+            iroh_addresses: HashMap::with_capacity(capacity / 2), // Estimate 50% Iroh peers
             max_addresses,
             expiration_seconds: 24 * 60 * 60, // 24 hours default
         }
@@ -94,10 +96,12 @@ impl AddressDatabase {
 
     /// Create with custom expiration
     pub fn with_expiration(max_addresses: usize, expiration_seconds: u64) -> Self {
+        // Optimization: Pre-allocate HashMap with capacity to reduce rehashing
+        let capacity = (max_addresses * 4 / 3).next_power_of_two(); // 75% load factor
         Self {
-            addresses: HashMap::new(),
+            addresses: HashMap::with_capacity(capacity),
             #[cfg(feature = "iroh")]
-            iroh_addresses: HashMap::new(),
+            iroh_addresses: HashMap::with_capacity(capacity / 2), // Estimate 50% Iroh peers
             max_addresses,
             expiration_seconds,
         }

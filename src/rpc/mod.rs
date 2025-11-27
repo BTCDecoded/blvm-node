@@ -10,6 +10,8 @@ pub mod errors;
 pub mod mempool;
 pub mod mining;
 pub mod network;
+#[cfg(feature = "bip70-http")]
+pub mod payment;
 pub mod rawtx;
 #[cfg(feature = "rest-api")]
 pub mod rest;
@@ -66,6 +68,12 @@ pub struct RpcManager {
     metrics: Option<Arc<MetricsCollector>>,
     /// Performance profiler (optional)
     profiler: Option<Arc<PerformanceProfiler>>,
+    /// Payment processor for BIP70 HTTP endpoints
+    #[cfg(feature = "bip70-http")]
+    payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
+    /// Payment state machine for CTV payment endpoints
+    #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
 }
 
 impl RpcManager {
@@ -92,6 +100,10 @@ impl RpcManager {
             rest_api_shutdown_tx: None,
             auth_manager: None,
             node_shutdown: None,
+            #[cfg(feature = "bip70-http")]
+            payment_processor: None,
+            #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+            payment_state_machine: None,
         }
     }
 
@@ -176,6 +188,26 @@ impl RpcManager {
         self
     }
 
+    /// Set payment processor for BIP70 HTTP endpoints
+    #[cfg(feature = "bip70-http")]
+    pub fn with_payment_processor(
+        mut self,
+        processor: Arc<crate::payment::processor::PaymentProcessor>,
+    ) -> Self {
+        self.payment_processor = Some(processor);
+        self
+    }
+
+    /// Set payment state machine for CTV payment endpoints
+    #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+    pub fn with_payment_state_machine(
+        mut self,
+        state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
+    ) -> Self {
+        self.payment_state_machine = Some(state_machine);
+        self
+    }
+
     /// Create a new RPC manager with both TCP and QUIC transports
     #[cfg(feature = "quinn")]
     pub fn with_quinn(tcp_addr: SocketAddr, quinn_addr: SocketAddr) -> Self {
@@ -195,6 +227,10 @@ impl RpcManager {
             quinn_shutdown_tx: None,
             auth_manager: None,
             node_shutdown: None,
+            #[cfg(feature = "bip70-http")]
+            payment_processor: None,
+            #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+            payment_state_machine: None,
         }
     }
 
@@ -376,7 +412,7 @@ impl RpcManager {
                     Arc::new(network::NetworkRpc::new())
                 };
 
-                let rest_server = RestApiServer::new(
+                let mut rest_server = RestApiServer::new(
                     rest_api_addr,
                     blockchain,
                     network,
@@ -384,6 +420,16 @@ impl RpcManager {
                     mining,
                     rawtx_rpc,
                 );
+
+                // Set payment processor if available
+                #[cfg(feature = "bip70-http")]
+                if let Some(ref processor) = self.payment_processor {
+                    rest_server = rest_server.with_payment_processor(Arc::clone(processor));
+                }
+                #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+                if let Some(ref state_machine) = self.payment_state_machine {
+                    rest_server = rest_server.with_payment_state_machine(Arc::clone(state_machine));
+                }
 
                 Some(tokio::spawn(async move {
                     tokio::select! {

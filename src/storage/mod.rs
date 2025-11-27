@@ -175,6 +175,14 @@ impl Storage {
         Arc::clone(&self.txindex)
     }
 
+    /// Open a custom tree for application-specific data
+    ///
+    /// This allows modules to store their own key-value data in the database.
+    /// The tree name should be unique and descriptive (e.g., "payment_states", "vaults").
+    pub fn open_tree(&self, name: &str) -> Result<Arc<dyn database::Tree>> {
+        Ok(Arc::from(self.db.open_tree(name)?))
+    }
+
     /// Flush all pending writes to disk
     pub fn flush(&self) -> Result<()> {
         self.db.flush()

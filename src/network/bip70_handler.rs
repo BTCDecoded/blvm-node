@@ -38,6 +38,8 @@ pub async fn handle_get_payment_request(
         payment_id: request.payment_id.clone(),
         merchant_pubkey: request.merchant_pubkey.clone(),
         merchant_signature: vec![], // Placeholder - would be signed in production
+        #[cfg(feature = "ctv")]
+        covenant_proof: None, // Can be set if CTV proof is created
     })
 }
 

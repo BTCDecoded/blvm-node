@@ -14,7 +14,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -41,6 +41,8 @@ pub struct RestApiServer {
     rawtx: Arc<rawtx::RawTxRpc>,
     #[cfg(feature = "bip70-http")]
     payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
+    #[cfg(feature = "bip70-http")]
+    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
 }
 
 impl RestApiServer {
@@ -62,6 +64,8 @@ impl RestApiServer {
             rawtx,
             #[cfg(feature = "bip70-http")]
             payment_processor: None,
+            #[cfg(feature = "bip70-http")]
+            payment_state_machine: None,
         }
     }
 
@@ -72,6 +76,16 @@ impl RestApiServer {
         processor: Arc<crate::payment::processor::PaymentProcessor>,
     ) -> Self {
         self.payment_processor = Some(processor);
+        self
+    }
+
+    /// Set payment state machine for CTV payment endpoints
+    #[cfg(feature = "bip70-http")]
+    pub fn with_payment_state_machine(
+        mut self,
+        state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
+    ) -> Self {
+        self.payment_state_machine = Some(state_machine);
         self
     }
 
@@ -150,8 +164,159 @@ impl RestApiServer {
             Self::handle_network_request(server, method, path, request_id).await
         } else if path.starts_with("/api/v1/fees") {
             Self::handle_fee_request(server, method, path, request_id).await
+        } else if path.starts_with("/api/v1/payments") {
+            // CTV payment endpoints (requires bip70-http feature)
+            #[cfg(feature = "bip70-http")]
+            {
+                if let Some(ref state_machine) = server.payment_state_machine {
+                    // Parse request body if present
+                    let body = if method == Method::POST || method == Method::PUT {
+                        let (_, body_stream) = req.into_parts();
+                        let body_bytes = body_stream.collect().await?.to_bytes();
+                        if body_bytes.is_empty() {
+                            None
+                        } else {
+                            match serde_json::from_slice::<Value>(&body_bytes) {
+                                Ok(v) => Some(v),
+                                Err(_) => None,
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Handle payment REST endpoints
+                    crate::rpc::rest::payment::handle_payment_request(
+                        Arc::clone(state_machine),
+                        &method,
+                        path,
+                        body,
+                    )
+                    .await
+                } else {
+                    Self::error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "SERVICE_UNAVAILABLE",
+                        "Payment state machine not configured",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            #[cfg(not(feature = "bip70-http"))]
+            {
+                Self::error_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "NOT_IMPLEMENTED",
+                    "Payment endpoints require --features bip70-http",
+                    None,
+                    request_id,
+                )
+            }
+        } else if path.starts_with("/api/v1/vaults") {
+            // Vault endpoints (requires ctv feature)
+            #[cfg(feature = "ctv")]
+            {
+                if let Some(ref state_machine) = server.payment_state_machine {
+                    let body = crate::rpc::rest::types::read_json_body(req).await?;
+                    crate::rpc::rest::vault::handle_vault_request(
+                        Arc::clone(state_machine),
+                        &method,
+                        path,
+                        body,
+                        request_id,
+                    )
+                    .await
+                } else {
+                    Self::error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "SERVICE_UNAVAILABLE",
+                        "Vault engine not configured",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            #[cfg(not(feature = "ctv"))]
+            {
+                Self::error_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "NOT_IMPLEMENTED",
+                    "CTV feature not enabled for Vaults",
+                    None,
+                    request_id,
+                )
+            }
+        } else if path.starts_with("/api/v1/pools") {
+            // Pool endpoints (requires ctv feature)
+            #[cfg(feature = "ctv")]
+            {
+                if let Some(ref state_machine) = server.payment_state_machine {
+                    let body = crate::rpc::rest::types::read_json_body(req).await?;
+                    crate::rpc::rest::pool::handle_pool_request(
+                        Arc::clone(state_machine),
+                        &method,
+                        path,
+                        body,
+                        request_id,
+                    )
+                    .await
+                } else {
+                    Self::error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "SERVICE_UNAVAILABLE",
+                        "Pool engine not configured",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            #[cfg(not(feature = "ctv"))]
+            {
+                Self::error_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "NOT_IMPLEMENTED",
+                    "CTV feature not enabled for Pools",
+                    None,
+                    request_id,
+                )
+            }
+        } else if path.starts_with("/api/v1/batches") || path.starts_with("/api/v1/congestion") {
+            // Congestion control endpoints (requires ctv feature)
+            #[cfg(feature = "ctv")]
+            {
+                if let Some(ref state_machine) = server.payment_state_machine {
+                    let body = crate::rpc::rest::types::read_json_body(req).await?;
+                    crate::rpc::rest::congestion::handle_congestion_request(
+                        Arc::clone(state_machine),
+                        &method,
+                        path,
+                        body,
+                        request_id,
+                    )
+                    .await
+                } else {
+                    Self::error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "SERVICE_UNAVAILABLE",
+                        "Congestion manager not configured",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            #[cfg(not(feature = "ctv"))]
+            {
+                Self::error_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "NOT_IMPLEMENTED",
+                    "CTV feature not enabled for Congestion Control",
+                    None,
+                    request_id,
+                )
+            }
         } else if path.starts_with("/api/v1/payment") {
-            // BIP70 payment endpoints (requires bip70-http feature)
+            // Legacy BIP70 payment endpoints (requires bip70-http feature)
             #[cfg(feature = "bip70-http")]
             {
                 if let Some(ref processor) = server.payment_processor {

@@ -59,7 +59,10 @@ use bllvm_protocol::mempool::Mempool;
 use bllvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
@@ -335,6 +338,12 @@ pub struct NetworkManager {
     module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
     /// Payment processor for BIP70 payments (HTTP and P2P)
     payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
+    /// Payment state machine for unified payment coordination
+    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
+    /// Module encryption for encrypted module serving
+    module_encryption: Option<Arc<crate::module::encryption::ModuleEncryption>>,
+    /// Modules directory for encrypted/decrypted module storage
+    modules_dir: Option<std::path::PathBuf>,
     /// FIBRE relay manager (for fast block relay)
     #[cfg(feature = "fibre")]
     fibre_relay: Option<Arc<Mutex<fibre::FibreRelay>>>,
@@ -357,12 +366,14 @@ pub struct NetworkManager {
     /// Per-peer message rate limiting (token bucket)
     peer_message_rates: Arc<Mutex<HashMap<SocketAddr, PeerRateLimiter>>>,
     /// Network statistics
-    bytes_sent: Arc<Mutex<u64>>,
-    bytes_received: Arc<Mutex<u64>>,
+    /// Optimization: Use AtomicU64 for lock-free updates
+    bytes_sent: Arc<AtomicU64>,
+    bytes_received: Arc<AtomicU64>,
     /// Mapping from SocketAddr to TransportAddr (for Iroh peers that use placeholder SocketAddr)
     socket_to_transport: Arc<Mutex<HashMap<SocketAddr, TransportAddr>>>,
     /// Request ID counter for async request-response patterns
-    request_id_counter: Arc<Mutex<u64>>,
+    /// Optimization: Use AtomicU64 for lock-free updates (eliminates need for block_in_place)
+    request_id_counter: Arc<AtomicU64>,
     /// Pending async requests with metadata
     /// Key: request_id, Value: (sender, peer_addr, timestamp)
     pending_requests: Arc<Mutex<HashMap<u64, PendingRequest>>>,
@@ -439,6 +450,10 @@ pub enum NetworkMessage {
     PaymentRequestReceived(Vec<u8>, SocketAddr),    // (data, peer_addr)
     PaymentReceived(Vec<u8>, SocketAddr),           // (data, peer_addr)
     PaymentACKReceived(Vec<u8>, SocketAddr),        // (data, peer_addr)
+    // CTV Payment Proof messages
+    #[cfg(feature = "ctv")]
+    PaymentProofReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    SettlementNotificationReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
 }
 
 impl NetworkManager {
@@ -509,6 +524,9 @@ impl NetworkManager {
             mempool_manager: None,
             module_registry: None,
             payment_processor: None,
+            payment_state_machine: None,
+            module_encryption: None,
+            modules_dir: None,
             #[cfg(feature = "fibre")]
             fibre_relay: None,
             peer_states: Arc::new(RwLock::new(HashMap::new())),
@@ -517,10 +535,10 @@ impl NetworkManager {
             ban_list: Arc::new(RwLock::new(HashMap::new())),
             connections_per_ip: Arc::new(Mutex::new(HashMap::new())),
             peer_message_rates: Arc::new(Mutex::new(HashMap::new())),
-            bytes_sent: Arc::new(Mutex::new(0)),
-            bytes_received: Arc::new(Mutex::new(0)),
+            bytes_sent: Arc::new(AtomicU64::new(0)),
+            bytes_received: Arc::new(AtomicU64::new(0)),
             socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
-            request_id_counter: Arc::new(Mutex::new(0)),
+            request_id_counter: Arc::new(AtomicU64::new(0)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             dos_protection,
             pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
@@ -561,6 +579,35 @@ impl NetworkManager {
         module_registry: Arc<crate::module::registry::client::ModuleRegistry>,
     ) {
         self.module_registry = Some(module_registry);
+    }
+
+    /// Set payment processor for BIP70 payments (HTTP and P2P)
+    pub fn set_payment_processor(
+        &mut self,
+        processor: Arc<crate::payment::processor::PaymentProcessor>,
+    ) {
+        self.payment_processor = Some(processor);
+    }
+
+    /// Set payment state machine for unified payment coordination
+    pub fn set_payment_state_machine(
+        &mut self,
+        state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
+    ) {
+        self.payment_state_machine = Some(state_machine);
+    }
+
+    /// Set module encryption for encrypted module serving
+    pub fn set_module_encryption(
+        &mut self,
+        encryption: Arc<crate::module::encryption::ModuleEncryption>,
+    ) {
+        self.module_encryption = Some(encryption);
+    }
+
+    /// Set modules directory for encrypted/decrypted module storage
+    pub fn set_modules_dir(&mut self, modules_dir: std::path::PathBuf) {
+        self.modules_dir = Some(modules_dir);
     }
 
     /// Initialize FIBRE relay (if enabled in config)
@@ -1446,16 +1493,10 @@ impl NetworkManager {
     }
 
     /// Generate a new request ID for async request-response patterns
+    ///
+    /// Optimization: Uses AtomicU64 for lock-free operation (no async locks needed)
     pub fn generate_request_id(&self) -> u64 {
-        // Use block_in_place to avoid blocking async runtime
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut counter = self.request_id_counter.lock().await;
-                let id = *counter;
-                *counter = counter.wrapping_add(1);
-                id
-            })
-        })
+        self.request_id_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Register a pending request and return the response receiver
@@ -2330,8 +2371,8 @@ impl NetworkManager {
             if should_update {
                 let pm = self.peer_manager.lock().await;
                 let active_connections = pm.peer_count();
-                let bytes_received = *self.bytes_received.lock().await;
-                let bytes_sent = *self.bytes_sent.lock().await;
+                let bytes_received = self.bytes_received.load(Ordering::Relaxed);
+                let bytes_sent = self.bytes_sent.load(Ordering::Relaxed);
 
                 // Approximate queue size (messages processed since last check)
                 let queue_size = message_count as usize;
@@ -2611,7 +2652,8 @@ impl NetworkManager {
                 NetworkMessage::GetPaymentRequestReceived(data, peer_addr) => {
                     info!(
                         "GetPaymentRequest received from {}: {} bytes",
-                        peer_addr, data.len()
+                        peer_addr,
+                        data.len()
                     );
                     if let Ok(parsed) = ProtocolParser::parse_message(&data) {
                         if let ProtocolMessage::GetPaymentRequest(msg) = parsed {
@@ -2636,6 +2678,39 @@ impl NetworkManager {
                 }
                 NetworkMessage::PaymentACKReceived(_, _) => {
                     // Handle PaymentACK response (for async request matching)
+                }
+                #[cfg(feature = "ctv")]
+                NetworkMessage::PaymentProofReceived(data, peer_addr) => {
+                    info!(
+                        "PaymentProof received from {}: {} bytes",
+                        peer_addr,
+                        data.len()
+                    );
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::PaymentProof(msg) = parsed {
+                            // TODO: Handle payment proof (verify and update state machine)
+                            debug!(
+                                "Payment proof received: request_id={}, payment_id={}",
+                                msg.request_id, msg.payment_request_id
+                            );
+                        }
+                    }
+                }
+                NetworkMessage::SettlementNotificationReceived(data, peer_addr) => {
+                    info!(
+                        "SettlementNotification received from {}: {} bytes",
+                        peer_addr,
+                        data.len()
+                    );
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::SettlementNotification(msg) = parsed {
+                            // TODO: Handle settlement notification (update state machine)
+                            debug!(
+                                "Settlement notification: payment_id={}, confirmations={}",
+                                msg.payment_request_id, msg.confirmation_count
+                            );
+                        }
+                    }
                 }
                 // Raw messages from peer connections
                 NetworkMessage::RawMessageReceived(data, peer_addr) => {
@@ -2680,6 +2755,8 @@ impl NetworkManager {
                             ProtocolMessage::FilteredBlock(msg) => Some(msg.request_id),
                             ProtocolMessage::Module(msg) => Some(msg.request_id),
                             ProtocolMessage::ModuleByHash(msg) => Some(msg.request_id),
+                            #[cfg(feature = "ctv")]
+                            ProtocolMessage::PaymentProof(msg) => Some(msg.request_id),
                             _ => None,
                         };
 
@@ -2823,6 +2900,21 @@ impl NetworkManager {
                 let _ = self
                     .peer_tx
                     .send(NetworkMessage::PaymentACKReceived(data, peer_addr));
+                return Ok(());
+            }
+            #[cfg(feature = "ctv")]
+            ProtocolMessage::PaymentProof(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::PaymentProofReceived(data, peer_addr));
+                return Ok(());
+            }
+            ProtocolMessage::SettlementNotification(_) => {
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::SettlementNotificationReceived(
+                        data, peer_addr,
+                    ));
                 return Ok(());
             }
             // Ban List Sharing
@@ -2996,15 +3088,48 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
 
-        // Handle the request with registry integration
+        // Handle the request with registry integration and payment checking
         let registry = self.module_registry.as_ref().map(Arc::clone);
-        let response = handle_get_module(message, registry).await?;
+        let payment_processor = self.payment_processor.as_ref().map(Arc::clone);
+        let payment_state_machine = self.payment_state_machine.as_ref().map(Arc::clone);
+        let encryption = self.module_encryption.as_ref().map(Arc::clone);
+        let modules_dir = self.modules_dir.clone();
+        // TODO: Get node's payment address from config
+        let node_script = None; // Placeholder - would get from config
 
-        // Serialize and send response
-        let response_wire = ProtocolParser::serialize_message(&ProtocolMessage::Module(response))?;
-        self.send_to_peer(peer_addr, response_wire).await?;
-
-        Ok(())
+        match handle_get_module(
+            message,
+            registry,
+            payment_processor,
+            payment_state_machine,
+            encryption,
+            modules_dir,
+            node_script,
+        )
+        .await
+        {
+            Ok(module_response) => {
+                // Serialize and send module response
+                let response_wire =
+                    ProtocolParser::serialize_message(&ProtocolMessage::Module(module_response))?;
+                self.send_to_peer(peer_addr, response_wire).await?;
+                Ok(())
+            }
+            Err(e) => {
+                // Check if error indicates payment required
+                let error_msg = e.to_string();
+                if error_msg.contains("requires payment") {
+                    // Return error to client - they should request payment
+                    warn!("Module requires payment: {}", error_msg);
+                    // For now, just return error - client will handle requesting payment
+                    // TODO: Could return a special "PaymentRequired" message type
+                    Err(e)
+                } else {
+                    // Other error - propagate
+                    Err(e)
+                }
+            }
+        }
     }
 
     /// Handle GetModuleByHash request from a peer
@@ -3632,15 +3757,17 @@ impl NetworkManager {
     }
 
     /// Track bytes sent (async-safe)
+    ///
+    /// Optimization: Uses AtomicU64 for lock-free operation
     pub async fn track_bytes_sent(&self, bytes: u64) {
-        let mut sent = self.bytes_sent.lock().await;
-        *sent += bytes;
+        self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Track bytes received (async-safe)
+    ///
+    /// Optimization: Uses AtomicU64 for lock-free operation
     pub async fn track_bytes_received(&self, bytes: u64) {
-        let mut received = self.bytes_received.lock().await;
-        *received += bytes;
+        self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Handle GetBanList message - respond with ban list or hash
@@ -3828,8 +3955,8 @@ impl NetworkManager {
 
     /// Get network statistics
     pub async fn get_network_stats(&self) -> crate::node::metrics::NetworkMetrics {
-        let sent = *self.bytes_sent.lock().await;
-        let received = *self.bytes_received.lock().await;
+        let sent = self.bytes_sent.load(Ordering::Relaxed);
+        let received = self.bytes_received.load(Ordering::Relaxed);
         let active_connections = {
             let pm = self.peer_manager.lock().await;
             pm.peer_count()
@@ -3865,8 +3992,8 @@ impl NetworkManager {
         // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let sent = *self.bytes_sent.lock().await;
-                let received = *self.bytes_received.lock().await;
+                let sent = self.bytes_sent.load(Ordering::Relaxed);
+                let received = self.bytes_received.load(Ordering::Relaxed);
                 (sent, received)
             })
         })
@@ -3877,6 +4004,9 @@ impl NetworkManager {
     /// Creates version message with service flags for all supported features
     ///
     /// Sets service flags based on:
+    /// - Standard Bitcoin flags:
+    ///   - NODE_NETWORK (bit 0) - Always set for full nodes
+    ///   - NODE_WITNESS (bit 3) - SegWit support (always enabled)
     /// - BIP157: NODE_COMPACT_FILTERS (always enabled if filter service exists)
     /// - UTXO Commitments: NODE_UTXO_COMMITMENTS (if feature enabled)
     /// - Ban List Sharing: NODE_BAN_LIST_SHARING (if config enabled)
@@ -3896,9 +4026,25 @@ impl NetworkManager {
         relay: bool,
     ) -> crate::network::protocol::VersionMessage {
         use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        use bllvm_protocol::service_flags::standard;
 
-        // Add service flags for supported features
-        let mut services_with_filters = services;
+        // Start with standard Bitcoin flags that should always be set
+        // NODE_NETWORK (bit 0) - Always set for full nodes (even if pruned)
+        // NODE_WITNESS (bit 3) - Set for SegWit support (Commons supports SegWit)
+        let mut services_with_filters = standard::NODE_NETWORK | standard::NODE_WITNESS;
+
+        // NODE_NETWORK_LIMITED (bit 10) - Set if node is pruned (can only serve recent blocks)
+        // Check if storage has pruning enabled
+        if let Some(ref storage) = self.storage {
+            if let Some(pruning_manager) = storage.pruning() {
+                if pruning_manager.is_enabled() {
+                    services_with_filters |= standard::NODE_NETWORK_LIMITED;
+                }
+            }
+        }
+
+        // Add any additional services passed in (for future extensibility)
+        services_with_filters |= services;
 
         // BIP157 Compact Block Filters (always enabled if filter service exists)
         services_with_filters |= NODE_COMPACT_FILTERS;

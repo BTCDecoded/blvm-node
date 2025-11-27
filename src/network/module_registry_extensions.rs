@@ -8,22 +8,40 @@
 //! - ModuleInv: Announce available modules
 //! - GetModuleList: Request list of available modules
 //! - ModuleList: Response with module list
+//!
+//! Payment Integration:
+//! - If module requires payment, returns PaymentRequest instead of module
+//! - Verifies payment before serving module
+//! - Supports both P2P and HTTP transports
 
 use crate::module::registry::client::ModuleRegistry;
 use crate::module::registry::manifest::ModuleManifest;
 use crate::network::protocol::*;
+use crate::payment::processor::PaymentProcessor;
+use crate::payment::state_machine::PaymentStateMachine;
 use anyhow::Result;
 use std::sync::Arc;
 
 /// Handle GetModule message
 ///
 /// Responds with module data for the requested module name.
+/// If module requires payment:
+/// 1. Check if payment_id provided
+/// 2. If not, return PaymentRequest (via error or special response)
+/// 3. If yes, verify payment before serving module
+///
+/// For free modules:
 /// 1. Look up module in registry
 /// 2. Load manifest and binary from CAS
 /// 3. Return Module response
 pub async fn handle_get_module(
     message: GetModuleMessage,
     registry: Option<Arc<ModuleRegistry>>,
+    payment_processor: Option<Arc<PaymentProcessor>>,
+    payment_state_machine: Option<Arc<PaymentStateMachine>>,
+    encryption: Option<std::sync::Arc<crate::module::encryption::ModuleEncryption>>,
+    modules_dir: Option<std::path::PathBuf>,
+    _node_script: Option<Vec<u8>>, // Node's payment address (10% of payment) - placeholder for future use
 ) -> Result<ModuleMessage> {
     let request_id = message.request_id; // Store for response
     let registry = match registry {
@@ -53,6 +71,146 @@ pub async fn handle_get_module(
         }
     }
 
+    // Check if module requires payment
+    let mut module_binary = entry.binary;
+    if let Some(ref payment_section) = entry.manifest.payment {
+        if payment_section.required {
+            // Module requires payment
+            if let Some(ref payment_id) = message.payment_id {
+                // Payment ID provided - verify payment and decrypt if confirmed
+                let payment_confirmed = if let Some(ref state_machine) = payment_state_machine {
+                    // Use state machine to check payment state
+                    match state_machine.get_payment_state(payment_id).await {
+                        Ok(state) => {
+                            // Check if payment is settled or in mempool
+                            match state {
+                                crate::payment::state_machine::PaymentState::Settled { .. }
+                                | crate::payment::state_machine::PaymentState::InMempool {
+                                    ..
+                                } => {
+                                    tracing::info!(
+                                        "Payment verified for module {} (payment_id: {}, state: {:?})",
+                                        message.name,
+                                        payment_id,
+                                        state
+                                    );
+                                    true
+                                }
+                                _ => {
+                                    // Payment pending - serve encrypted version
+                                    false
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Fallback: check if payment request exists
+                            if let Some(ref processor) = payment_processor {
+                                processor.get_payment_request(payment_id).await.is_ok()
+                            } else {
+                                false
+                            }
+                        }
+                    }
+                } else if let Some(ref processor) = payment_processor {
+                    // Fallback to payment processor if state machine not available
+                    processor.get_payment_request(payment_id).await.is_ok()
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Payment processor not available: cannot verify payment for module {}",
+                        message.name
+                    ));
+                };
+
+                // If payment confirmed, decrypt module; otherwise serve encrypted
+                if payment_confirmed {
+                    // Payment confirmed - decrypt module
+                    if let (Some(ref enc), Some(ref modules_dir_path)) = (encryption, modules_dir) {
+                        match crate::module::encryption::load_encrypted_module(
+                            modules_dir_path,
+                            &message.name,
+                        )
+                        .await
+                        {
+                            Ok((encrypted_binary, metadata)) => {
+                                // Decrypt
+                                let module_hash: [u8; 32] =
+                                    metadata.module_hash[..32].try_into().map_err(|_| {
+                                        anyhow::anyhow!("Invalid module hash length in metadata")
+                                    })?;
+
+                                match enc.decrypt_module(
+                                    &encrypted_binary,
+                                    &metadata.nonce,
+                                    payment_id,
+                                    &module_hash,
+                                ) {
+                                    Ok(decrypted) => {
+                                        tracing::info!(
+                                            "Module {} decrypted for payment {}",
+                                            message.name,
+                                            payment_id
+                                        );
+                                        module_binary = Some(decrypted);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to decrypt module {}: {}",
+                                            message.name,
+                                            e
+                                        );
+                                        // Fall back to encrypted version
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                // Encrypted module not found - may not be encrypted yet
+                                // Use original binary if available
+                            }
+                        }
+                    }
+                } else {
+                    // Payment pending - serve encrypted version
+                    if let Some(ref modules_dir_path) = modules_dir {
+                        match crate::module::encryption::load_encrypted_module(
+                            modules_dir_path,
+                            &message.name,
+                        )
+                        .await
+                        {
+                            Ok((encrypted_binary, _metadata)) => {
+                                tracing::info!(
+                                    "Serving encrypted module {} (payment pending)",
+                                    message.name
+                                );
+                                module_binary = Some(encrypted_binary);
+                            }
+                            Err(_) => {
+                                // Encrypted module not found - may not be encrypted yet
+                                // Return error or serve nothing
+                                return Err(anyhow::anyhow!(
+                                    "Module {} payment pending but encrypted module not found",
+                                    message.name
+                                ));
+                            }
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Payment pending for module {} but modules directory not configured",
+                            message.name
+                        ));
+                    }
+                }
+            } else {
+                // No payment ID provided - return error indicating payment required
+                return Err(anyhow::anyhow!(
+                    "Module {} requires payment. Request payment with GetPaymentRequest message (module_name: {})",
+                    message.name,
+                    message.name
+                ));
+            }
+        }
+    }
+
     // Serialize manifest to TOML
     let manifest_toml = toml::to_string(&entry.manifest)
         .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
@@ -65,7 +223,7 @@ pub async fn handle_get_module(
         manifest_hash: entry.manifest_hash,
         binary_hash: entry.binary_hash,
         manifest: manifest_toml.into_bytes(),
-        binary: entry.binary,
+        binary: module_binary,
     })
 }
 

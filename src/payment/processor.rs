@@ -19,8 +19,6 @@ use tracing::{debug, info, warn};
 fn address_to_script_pubkey(
     address: &bllvm_protocol::address::BitcoinAddress,
 ) -> Result<Vec<u8>, PaymentError> {
-    use bllvm_protocol::address::BitcoinAddress;
-
     match (address.witness_version, address.witness_program.len()) {
         // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
         (0, 20) => {
@@ -67,6 +65,9 @@ pub enum PaymentError {
 
     #[error("Payment processing error: {0}")]
     ProcessingError(String),
+
+    #[error("Covenant verification failed: {0}")]
+    CovenantVerificationFailed(String),
 }
 
 /// Unified payment processor (transport-agnostic)
@@ -75,6 +76,10 @@ pub struct PaymentProcessor {
     payment_store: Arc<Mutex<HashMap<String, PaymentRequest>>>,
     /// Module registry (optional, for module payments)
     module_registry: Option<Arc<ModuleRegistry>>,
+    /// Module encryption (optional, for module payment encryption)
+    module_encryption: Option<Arc<crate::module::encryption::ModuleEncryption>>,
+    /// Modules directory path (for storing encrypted/decrypted modules)
+    modules_dir: Option<std::path::PathBuf>,
     /// Payment configuration
     config: PaymentConfig,
 }
@@ -111,6 +116,8 @@ impl PaymentProcessor {
         Ok(Self {
             payment_store: Arc::new(Mutex::new(HashMap::new())),
             module_registry: None,
+            module_encryption: None,
+            modules_dir: None,
             config,
         })
     }
@@ -119,6 +126,27 @@ impl PaymentProcessor {
     pub fn with_module_registry(mut self, registry: Arc<ModuleRegistry>) -> Self {
         self.module_registry = Some(registry);
         self
+    }
+
+    /// Set module encryption for module payment encryption
+    pub fn with_module_encryption(
+        mut self,
+        encryption: Arc<crate::module::encryption::ModuleEncryption>,
+    ) -> Self {
+        self.module_encryption = Some(encryption);
+        self
+    }
+
+    /// Set modules directory for storing encrypted/decrypted modules
+    pub fn with_modules_dir(mut self, modules_dir: std::path::PathBuf) -> Self {
+        self.modules_dir = Some(modules_dir);
+        self
+    }
+
+    /// Get module registry (for internal use)
+    #[allow(dead_code)]
+    fn get_module_registry(&self) -> Option<&Arc<ModuleRegistry>> {
+        self.module_registry.as_ref()
     }
 
     /// Generate payment ID from payment request
@@ -202,7 +230,138 @@ impl PaymentProcessor {
 
         info!("Processed payment: {}", payment_id);
 
+        // Check if this is a module payment and encrypt module
+        if let Some(merchant_data) = &request.payment_details.merchant_data {
+            if let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(merchant_data) {
+                if metadata
+                    .get("payment_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == "module_payment")
+                    .unwrap_or(false)
+                {
+                    // This is a module payment - encrypt the module
+                    if let Err(e) = self
+                        .encrypt_module_for_payment(&payment_id, &metadata)
+                        .await
+                    {
+                        warn!("Failed to encrypt module for payment {}: {}", payment_id, e);
+                        // Don't fail the payment if encryption fails - log and continue
+                    }
+                }
+            }
+        }
+
         Ok(ack)
+    }
+
+    /// Encrypt module for a payment
+    async fn encrypt_module_for_payment(
+        &self,
+        payment_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), PaymentError> {
+        // Get required components
+        let module_registry = self.module_registry.as_ref().ok_or_else(|| {
+            PaymentError::ProcessingError("Module registry not available".to_string())
+        })?;
+
+        let encryption = self.module_encryption.as_ref().ok_or_else(|| {
+            PaymentError::ProcessingError("Module encryption not available".to_string())
+        })?;
+
+        let modules_dir = self.modules_dir.as_ref().ok_or_else(|| {
+            PaymentError::ProcessingError("Modules directory not configured".to_string())
+        })?;
+
+        // Extract module info from metadata
+        let module_name = metadata
+            .get("module_name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                PaymentError::ProcessingError(
+                    "Module name not found in payment metadata".to_string(),
+                )
+            })?;
+
+        let module_hash_hex = metadata
+            .get("module_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                PaymentError::ProcessingError(
+                    "Module hash not found in payment metadata".to_string(),
+                )
+            })?;
+
+        let module_hash = hex::decode(module_hash_hex)
+            .map_err(|e| PaymentError::ProcessingError(format!("Invalid module hash: {}", e)))?
+            .try_into()
+            .map_err(|_| {
+                PaymentError::ProcessingError("Module hash must be 32 bytes".to_string())
+            })?;
+
+        // Determine payment method from payment
+        let payment_method = if metadata
+            .get("payment_method")
+            .and_then(|v| v.as_str())
+            .is_some()
+        {
+            metadata
+                .get("payment_method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("on-chain")
+        } else {
+            "on-chain" // Default
+        };
+
+        // Fetch module from registry
+        let entry = module_registry
+            .fetch_module(module_name)
+            .await
+            .map_err(|e| PaymentError::ProcessingError(format!("Failed to fetch module: {}", e)))?;
+
+        let binary = entry.binary.ok_or_else(|| {
+            PaymentError::ProcessingError("Module binary not available".to_string())
+        })?;
+
+        // Encrypt module
+        let (encrypted_binary, nonce) = encryption
+            .encrypt_module(&binary, payment_id, &module_hash)
+            .map_err(|e| PaymentError::ProcessingError(format!("Encryption failed: {}", e)))?;
+
+        // Create metadata
+        use crate::module::encryption::EncryptedModuleMetadata;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let encrypted_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let encryption_metadata = EncryptedModuleMetadata {
+            payment_id: payment_id.to_string(),
+            module_hash: module_hash.to_vec(),
+            nonce,
+            encrypted_at,
+            payment_method: payment_method.to_string(),
+        };
+
+        // Store encrypted module
+        crate::module::encryption::store_encrypted_module(
+            modules_dir,
+            module_name,
+            &encrypted_binary,
+            &encryption_metadata,
+        )
+        .await
+        .map_err(|e| {
+            PaymentError::ProcessingError(format!("Failed to store encrypted module: {}", e))
+        })?;
+
+        info!(
+            "Module {} encrypted at rest (payment_id: {}, method: {})",
+            module_name, payment_id, payment_method
+        );
+
+        Ok(())
     }
 
     /// Create module payment request (75/15/10 split)
@@ -216,11 +375,13 @@ impl PaymentProcessor {
     /// # Arguments
     ///
     /// * `manifest` - Module manifest containing signed payment addresses
+    /// * `module_hash` - Module hash (for encryption key derivation)
     /// * `node_script` - Node operator's payment script (10% of payment)
     /// * `merchant_key` - Optional merchant key for signing payment request
     pub async fn create_module_payment_request(
         &self,
         manifest: &crate::module::registry::manifest::ModuleManifest,
+        module_hash: &[u8; 32],
         node_script: Vec<u8>,
         merchant_key: Option<&secp256k1::SecretKey>,
     ) -> Result<PaymentRequest, PaymentError> {
@@ -244,21 +405,19 @@ impl PaymentProcessor {
 
         // Prefer payment codes (BIP47) over fixed addresses for privacy
         // Payment codes generate unique addresses per payment, avoiding address reuse
-        let (author_address_str, using_payment_code_author) = if let Some(ref code) =
-            payment.author_payment_code
-        {
+        let author_address_str = if payment.author_payment_code.is_some() {
             // TODO: Implement BIP47 address derivation from payment code
             // For now, warn that payment codes are not yet implemented
             warn!("Payment codes (BIP47) not yet implemented, falling back to legacy address");
             // Fall back to legacy address if provided
-            (payment.author_address.as_ref().ok_or_else(|| {
+            payment.author_address.as_ref().ok_or_else(|| {
                 PaymentError::ProcessingError(
                     "Payment code provided but BIP47 not implemented, and legacy address not provided".to_string(),
                 )
-            })?, false)
+            })?
         } else if let Some(ref addr) = payment.author_address {
             warn!("Using legacy fixed address for author payment - consider migrating to payment codes (BIP47) for better privacy");
-            (addr, false)
+            addr
         } else {
             return Err(PaymentError::ProcessingError(
                 "Module author payment address or payment code not specified in manifest"
@@ -266,19 +425,17 @@ impl PaymentProcessor {
             ));
         };
 
-        let (commons_address_str, using_payment_code_commons) = if let Some(ref code) =
-            payment.commons_payment_code
-        {
+        let commons_address_str = if payment.commons_payment_code.is_some() {
             // TODO: Implement BIP47 address derivation from payment code
             warn!("Payment codes (BIP47) not yet implemented, falling back to legacy address");
-            (payment.commons_address.as_ref().ok_or_else(|| {
+            payment.commons_address.as_ref().ok_or_else(|| {
                 PaymentError::ProcessingError(
                     "Payment code provided but BIP47 not implemented, and legacy address not provided".to_string(),
                 )
-            })?, false)
+            })?
         } else if let Some(ref addr) = payment.commons_address {
             warn!("Using legacy fixed address for commons payment - consider migrating to payment codes (BIP47) for better privacy");
-            (addr, false)
+            addr
         } else {
             return Err(PaymentError::ProcessingError(
                 "Commons governance payment address or payment code not specified in manifest"
@@ -372,12 +529,13 @@ impl PaymentProcessor {
             },
         ];
 
-        // Include module info in merchant_data
+        // Include module info in merchant_data (for encryption/decryption)
         let merchant_data = Some(
             serde_json::to_vec(&json!({
                 "module_name": manifest.name,
                 "module_version": manifest.version,
-                "payment_type": "module_purchase",
+                "module_hash": hex::encode(module_hash),
+                "payment_type": "module_payment",
                 "price_sats": price_sats,
                 "split": {
                     "author": author_amount,

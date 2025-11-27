@@ -198,7 +198,8 @@ impl ModuleRegistry {
         let get_module_msg = GetModuleMessage {
             request_id,
             name: name.to_string(),
-            version: None, // Get latest version
+            version: None,    // Get latest version
+            payment_id: None, // Payment ID would be provided if payment was already made
         };
 
         // Serialize and send message

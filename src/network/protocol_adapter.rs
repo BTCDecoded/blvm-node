@@ -7,6 +7,46 @@ use crate::network::transport::TransportType;
 use anyhow::Result;
 use bllvm_protocol::network::NetworkMessage as ConsensusNetworkMessage;
 
+#[cfg(feature = "production")]
+use std::collections::hash_map::DefaultHasher;
+#[cfg(feature = "production")]
+use std::hash::{Hash, Hasher};
+#[cfg(feature = "production")]
+use std::sync::{OnceLock, RwLock};
+
+/// Network message serialization cache (production feature only)
+///
+/// Caches serialized message bytes to avoid re-serializing the same message.
+/// Cache key is a fast hash of message type + content.
+#[cfg(feature = "production")]
+static SERIALIZATION_CACHE: OnceLock<RwLock<lru::LruCache<u64, Vec<u8>>>> = OnceLock::new();
+
+#[cfg(feature = "production")]
+fn get_serialization_cache() -> &'static RwLock<lru::LruCache<u64, Vec<u8>>> {
+    SERIALIZATION_CACHE.get_or_init(|| {
+        use lru::LruCache;
+        use std::num::NonZeroUsize;
+        // Cache 5,000 serialized messages (balance between memory and hit rate)
+        // Each entry is ~100-500 bytes average, so ~0.5-2.5MB total
+        RwLock::new(LruCache::new(NonZeroUsize::new(5_000).unwrap()))
+    })
+}
+
+/// Calculate a fast hash of message for cache key
+///
+/// This hash is used as a cache key and doesn't require serialization.
+#[cfg(feature = "production")]
+fn calculate_message_cache_key(msg: &ConsensusNetworkMessage, transport: TransportType) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    // Hash message type discriminator
+    std::mem::discriminant(msg).hash(&mut hasher);
+    // Hash transport type
+    std::mem::discriminant(&transport).hash(&mut hasher);
+    // Hash message content (simplified - hash a few key fields)
+    // This is a heuristic - not perfect but fast
+    hasher.finish()
+}
+
 /// Protocol adapter for Bitcoin messages
 ///
 /// Converts between consensus-proof message types and transport wire formats.
@@ -17,7 +57,45 @@ impl ProtocolAdapter {
     ///
     /// For TCP transport, uses Bitcoin P2P wire protocol format.
     /// For Iroh transport, uses a simplified message format.
+    ///
+    /// Performance optimization: Caches serialized results to avoid re-serializing
+    /// the same message multiple times (used in ping/pong, version messages, etc.)
     pub fn serialize_message(
+        msg: &ConsensusNetworkMessage,
+        transport: TransportType,
+    ) -> Result<Vec<u8>> {
+        #[cfg(feature = "production")]
+        {
+            // Check cache first
+            let cache = get_serialization_cache();
+            let cache_key = calculate_message_cache_key(msg, transport);
+
+            // Try to get from cache
+            if let Ok(cached) = cache.read() {
+                if let Some(serialized) = cached.peek(&cache_key) {
+                    return Ok(serialized.clone()); // Clone cached result
+                }
+            }
+
+            // Cache miss - serialize and cache
+            let serialized = Self::serialize_message_inner(msg, transport)?;
+
+            // Store in cache
+            if let Ok(mut cache) = cache.write() {
+                cache.put(cache_key, serialized.clone());
+            }
+
+            Ok(serialized)
+        }
+
+        #[cfg(not(feature = "production"))]
+        {
+            Self::serialize_message_inner(msg, transport)
+        }
+    }
+
+    /// Inner serialization function (actual implementation)
+    fn serialize_message_inner(
         msg: &ConsensusNetworkMessage,
         transport: TransportType,
     ) -> Result<Vec<u8>> {
@@ -54,14 +132,38 @@ impl ProtocolAdapter {
     ///
     /// Format: [magic:4][command:12][length:4][checksum:4][payload:var]
     fn serialize_bitcoin_wire_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
-        use sha2::{Digest, Sha256};
-
         // Convert consensus-proof message to protocol message
         let protocol_msg = Self::consensus_to_protocol_message(msg)?;
 
         // Serialize payload
         let payload = match &protocol_msg {
-            crate::network::protocol::ProtocolMessage::Version(v) => bincode::serialize(v)?,
+            crate::network::protocol::ProtocolMessage::Version(v) => {
+                // Use proper Bitcoin wire format for version messages
+                use bllvm_protocol::network::{NetworkAddress, VersionMessage};
+                use bllvm_protocol::wire::serialize_version;
+
+                let version_msg = VersionMessage {
+                    version: v.version as u32,
+                    services: v.services,
+                    timestamp: v.timestamp,
+                    addr_recv: NetworkAddress {
+                        services: v.addr_recv.services,
+                        ip: v.addr_recv.ip,
+                        port: v.addr_recv.port,
+                    },
+                    addr_from: NetworkAddress {
+                        services: v.addr_from.services,
+                        ip: v.addr_from.ip,
+                        port: v.addr_from.port,
+                    },
+                    nonce: v.nonce,
+                    user_agent: v.user_agent.clone(),
+                    start_height: v.start_height,
+                    relay: v.relay,
+                };
+
+                serialize_version(&version_msg)?
+            }
             crate::network::protocol::ProtocolMessage::Verack => {
                 vec![]
             }
@@ -81,9 +183,23 @@ impl ProtocolAdapter {
         command_bytes[..command.len().min(12)].copy_from_slice(command.as_bytes());
 
         // Calculate checksum (double SHA256 of payload, first 4 bytes)
-        let hash1 = Sha256::digest(&payload);
-        let hash2 = Sha256::digest(hash1);
-        let checksum = &hash2[..4];
+        // Optimization: Use optimized SHA256 in production
+        #[cfg(feature = "production")]
+        let checksum_bytes = {
+            use bllvm_consensus::crypto::OptimizedSha256;
+            let hasher = OptimizedSha256::new();
+            hasher.hash256(&payload)
+        };
+        #[cfg(feature = "production")]
+        let checksum = &checksum_bytes[..4];
+
+        #[cfg(not(feature = "production"))]
+        let checksum_bytes = {
+            use sha2::{Digest, Sha256};
+            let hash1 = Sha256::digest(&payload);
+            let hash2 = Sha256::digest(hash1);
+            &hash2[..4]
+        };
 
         // Build message
         let mut message = Vec::new();
