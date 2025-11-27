@@ -18,4 +18,7 @@ pub mod async_routing_integration_tests;
 pub mod pruning_integration_tests;
 pub mod full_node_tests;
 pub mod rbf_mempool_integration_tests;
+pub mod node_lifecycle_comprehensive_tests;
+pub mod module_lifecycle_e2e_tests;
+pub mod network_sync_scenarios_tests;
 

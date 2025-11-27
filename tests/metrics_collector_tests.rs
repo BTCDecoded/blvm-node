@@ -1,8 +1,8 @@
 //! Tests for metrics collector
 
 use bllvm_node::node::metrics::{
-    DosMetrics, MetricsCollector, NetworkMetrics, NodeMetrics, PerformanceMetrics,
-    RpcMetrics, StorageMetrics, SystemMetrics,
+    DosMetrics, MetricsCollector, NetworkMetrics, NodeMetrics, PerformanceMetrics, RpcMetrics,
+    StorageMetrics, SystemMetrics,
 };
 
 #[test]
@@ -182,11 +182,11 @@ fn test_node_metrics_structure() {
 fn test_get_network_metrics_reference() {
     let collector = MetricsCollector::new();
     let network_arc = collector.network();
-    
+
     let mut network = network_arc.lock().unwrap();
     network.peer_count = 5;
     drop(network);
-    
+
     let metrics = collector.collect();
     assert_eq!(metrics.network.peer_count, 5);
 }
@@ -195,12 +195,11 @@ fn test_get_network_metrics_reference() {
 fn test_get_storage_metrics_reference() {
     let collector = MetricsCollector::new();
     let storage_arc = collector.storage();
-    
+
     let mut storage = storage_arc.lock().unwrap();
     storage.block_count = 100;
     drop(storage);
-    
+
     let metrics = collector.collect();
     assert_eq!(metrics.storage.block_count, 100);
 }
-

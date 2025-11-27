@@ -1,8 +1,6 @@
 //! Tests for Compact Block Relay (BIP152)
 
-use bllvm_node::network::compact_blocks::{
-    calculate_short_tx_id, calculate_tx_hash, CompactBlock,
-};
+use bllvm_node::network::compact_blocks::{calculate_short_tx_id, calculate_tx_hash, CompactBlock};
 use bllvm_node::network::transport::TransportType;
 use bllvm_node::{Block, BlockHeader, Hash, Transaction};
 use bllvm_protocol::tx_inputs;
@@ -12,12 +10,10 @@ fn create_test_transaction() -> Transaction {
     Transaction {
         version: 1,
         inputs: tx_inputs![],
-        outputs: tx_outputs![
-            bllvm_protocol::TransactionOutput {
-                value: 1000,
-                script_pubkey: vec![0x51], // OP_1
-            }
-        ],
+        outputs: tx_outputs![bllvm_protocol::TransactionOutput {
+            value: 1000,
+            script_pubkey: vec![0x51], // OP_1
+        }],
         lock_time: 0,
     }
 }
@@ -75,12 +71,10 @@ fn test_short_tx_id_different_transactions() {
     let tx2 = Transaction {
         version: 2, // Different version
         inputs: tx_inputs![],
-        outputs: tx_outputs![
-            bllvm_protocol::TransactionOutput {
-                value: 2000, // Different value
-                script_pubkey: vec![0x51],
-            }
-        ],
+        outputs: tx_outputs![bllvm_protocol::TransactionOutput {
+            value: 2000, // Different value
+            script_pubkey: vec![0x51],
+        }],
         lock_time: 0,
     };
 
@@ -154,18 +148,16 @@ fn test_compact_block_serialization() {
 
 #[test]
 fn test_should_prefer_compact_blocks_tcp() {
-    let should_prefer = bllvm_node::network::compact_blocks::should_prefer_compact_blocks(
-        TransportType::Tcp,
-    );
+    let should_prefer =
+        bllvm_node::network::compact_blocks::should_prefer_compact_blocks(TransportType::Tcp);
     // TCP doesn't necessarily prefer compact blocks
     assert!(should_prefer == false || should_prefer == true); // Just verify it returns a bool
 }
 
 #[test]
 fn test_recommended_compact_block_version() {
-    let version = bllvm_node::network::compact_blocks::recommended_compact_block_version(
-        TransportType::Tcp,
-    );
+    let version =
+        bllvm_node::network::compact_blocks::recommended_compact_block_version(TransportType::Tcp);
     // Should return a valid version (1 or 2)
     assert!(version == 1 || version == 2);
 }
@@ -208,4 +200,3 @@ fn test_compact_block_with_prefilled_txs() {
     assert_eq!(compact.prefilled_txs[0].0, 0); // Index
     assert_eq!(compact.prefilled_txs[0].1.version, tx.version);
 }
-

@@ -351,9 +351,9 @@ impl RpcManager {
                 let (rest_api_shutdown_tx, mut rest_api_shutdown_rx) = mpsc::unbounded_channel();
                 self.rest_api_shutdown_tx = Some(rest_api_shutdown_tx);
 
-                let blockchain = Arc::new(blockchain::BlockchainRpc::with_dependencies(Arc::clone(
-                    storage,
-                )));
+                let blockchain = Arc::new(blockchain::BlockchainRpc::with_dependencies(
+                    Arc::clone(storage),
+                ));
                 let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(
                     Arc::clone(mempool),
                     Arc::clone(storage),

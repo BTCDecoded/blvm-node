@@ -71,7 +71,10 @@ impl NodeAPI for MockNodeAPI {
     async fn subscribe_events(
         &self,
         _event_types: Vec<bllvm_node::module::traits::EventType>,
-    ) -> Result<tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>, ModuleError> {
+    ) -> Result<
+        tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>,
+        ModuleError,
+    > {
         let (_tx, rx) = tokio::sync::mpsc::channel(10);
         Ok(rx)
     }
@@ -89,10 +92,10 @@ async fn test_module_api_hub_new() {
 async fn test_module_api_hub_register_permissions() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadBlockchain);
-    
+
     hub.register_module_permissions("test-module".to_string(), permissions);
     // Permissions should be registered
     assert!(true);
@@ -102,7 +105,7 @@ async fn test_module_api_hub_register_permissions() {
 async fn test_module_api_hub_handle_handshake() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
@@ -113,13 +116,13 @@ async fn test_module_api_hub_handle_handshake() {
             version: "1.0.0".to_string(),
         },
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::HandshakeAck { node_version }) = response.payload {
         assert!(!node_version.is_empty());
@@ -132,7 +135,7 @@ async fn test_module_api_hub_handle_handshake() {
 async fn test_module_api_hub_handle_handshake_id_mismatch() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
@@ -143,35 +146,38 @@ async fn test_module_api_hub_handle_handshake_id_mismatch() {
             version: "1.0.0".to_string(),
         },
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ModuleError::OperationError(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ModuleError::OperationError(_)
+    ));
 }
 
 #[tokio::test]
 async fn test_module_api_hub_handle_get_chain_tip() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions (GetChainTip requires ReadChainState)
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadChainState);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetChainTip,
         payload: RequestPayload::GetChainTip,
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::Hash(hash)) = response.payload {
         assert_eq!(hash.len(), 32); // Hash is [u8; 32]
@@ -184,12 +190,12 @@ async fn test_module_api_hub_handle_get_chain_tip() {
 async fn test_module_api_hub_handle_get_block() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
@@ -198,13 +204,13 @@ async fn test_module_api_hub_handle_get_block() {
             hash: Hash::default(),
         },
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::Block(block)) = response.payload {
         assert!(block.is_some());
@@ -217,12 +223,12 @@ async fn test_module_api_hub_handle_get_block() {
 async fn test_module_api_hub_handle_get_block_header() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
@@ -231,13 +237,13 @@ async fn test_module_api_hub_handle_get_block_header() {
             hash: Hash::default(),
         },
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::BlockHeader(header)) = response.payload {
         assert!(header.is_some());
@@ -250,12 +256,12 @@ async fn test_module_api_hub_handle_get_block_header() {
 async fn test_module_api_hub_handle_get_transaction() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
@@ -264,13 +270,13 @@ async fn test_module_api_hub_handle_get_transaction() {
             hash: Hash::default(),
         },
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::Transaction(tx)) = response.payload {
         assert!(tx.is_some());
@@ -283,12 +289,12 @@ async fn test_module_api_hub_handle_get_transaction() {
 async fn test_module_api_hub_handle_has_transaction() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
@@ -297,13 +303,13 @@ async fn test_module_api_hub_handle_has_transaction() {
             hash: Hash::default(),
         },
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::Bool(exists)) = response.payload {
         assert!(exists);
@@ -316,25 +322,25 @@ async fn test_module_api_hub_handle_has_transaction() {
 async fn test_module_api_hub_handle_get_block_height() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions (GetBlockHeight requires ReadChainState)
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadChainState);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetBlockHeight,
         payload: RequestPayload::GetBlockHeight,
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::U64(height)) = response.payload {
         assert_eq!(height, 100);
@@ -347,12 +353,12 @@ async fn test_module_api_hub_handle_get_block_height() {
 async fn test_module_api_hub_handle_get_utxo() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions (GetUtxo requires ReadUTXO)
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadUTXO);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     use bllvm_protocol::types::Natural;
     let request = RequestMessage {
@@ -365,13 +371,13 @@ async fn test_module_api_hub_handle_get_utxo() {
             },
         },
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::Utxo(utxo)) = response.payload {
         assert!(utxo.is_some());
@@ -384,12 +390,12 @@ async fn test_module_api_hub_handle_get_utxo() {
 async fn test_module_api_hub_handle_subscribe_events() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::SubscribeEvents);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
@@ -398,13 +404,13 @@ async fn test_module_api_hub_handle_subscribe_events() {
             event_types: vec![bllvm_node::module::traits::EventType::NewBlock],
         },
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_ok(), "Request failed: {:?}", result);
-    
+
     let response = result.unwrap();
     if let Some(ResponsePayload::SubscribeAck) = response.payload {
         // Success
@@ -417,37 +423,40 @@ async fn test_module_api_hub_handle_subscribe_events() {
 async fn test_module_api_hub_permission_denied() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register empty permissions to override defaults and test permission denied
     let empty_permissions = PermissionSet::new();
     hub.register_module_permissions("test-module".to_string(), empty_permissions);
-    
+
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetChainTip,
         payload: RequestPayload::GetChainTip,
     };
-    
+
     let result = hub.handle_request("test-module", request).await;
     if let Err(e) = &result {
         eprintln!("Error: {:?}", e);
     }
     assert!(result.is_err(), "Expected permission denied error");
     // Permission errors are returned as OperationError, not PermissionDenied
-    assert!(matches!(result.unwrap_err(), ModuleError::OperationError(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ModuleError::OperationError(_)
+    ));
 }
 
 #[tokio::test]
 async fn test_module_api_hub_audit_log() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions (GetChainTip requires ReadChainState)
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadChainState);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     // Make a request
     use bllvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
@@ -455,9 +464,9 @@ async fn test_module_api_hub_audit_log() {
         request_type: MessageType::GetChainTip,
         payload: RequestPayload::GetChainTip,
     };
-    
+
     let _ = hub.handle_request("test-module", request).await;
-    
+
     // Check audit log
     let audit_log = hub.get_audit_log(10);
     assert!(!audit_log.is_empty());
@@ -470,12 +479,12 @@ async fn test_module_api_hub_audit_log() {
 async fn test_module_api_hub_audit_log_limit() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
-    
+
     // Register permissions
     let mut permissions = PermissionSet::new();
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
-    
+
     // Make many requests (more than max_audit_entries)
     use bllvm_node::module::ipc::protocol::MessageType;
     for i in 0..1500 {
@@ -486,9 +495,8 @@ async fn test_module_api_hub_audit_log_limit() {
         };
         let _ = hub.handle_request("test-module", request).await;
     }
-    
+
     // Check audit log is limited
     let audit_log = hub.get_audit_log(2000);
     assert!(audit_log.len() <= 1000); // Should be limited to max_audit_entries
 }
-

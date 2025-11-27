@@ -39,10 +39,10 @@ fn create_test_pong_message() -> NetworkMessage {
 #[test]
 fn test_protocol_adapter_serialize_tcp() {
     let msg = create_test_version_message();
-    
+
     let result = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
     assert!(result.is_ok());
-    
+
     let serialized = result.unwrap();
     // Should have at least magic bytes (4) + command (12) + length (4) + checksum (4) = 24 bytes
     assert!(serialized.len() >= 24);
@@ -51,10 +51,10 @@ fn test_protocol_adapter_serialize_tcp() {
 #[test]
 fn test_protocol_adapter_serialize_verack_tcp() {
     let msg = NetworkMessage::VerAck;
-    
+
     let result = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
     assert!(result.is_ok());
-    
+
     let serialized = result.unwrap();
     // Verack has no payload, so should be minimal
     assert!(serialized.len() >= 24);
@@ -63,7 +63,7 @@ fn test_protocol_adapter_serialize_verack_tcp() {
 #[test]
 fn test_protocol_adapter_serialize_ping_tcp() {
     let msg = create_test_ping_message();
-    
+
     let result = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
     assert!(result.is_ok());
 }
@@ -71,7 +71,7 @@ fn test_protocol_adapter_serialize_ping_tcp() {
 #[test]
 fn test_protocol_adapter_serialize_pong_tcp() {
     let msg = create_test_pong_message();
-    
+
     let result = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
     assert!(result.is_ok());
 }
@@ -79,11 +79,11 @@ fn test_protocol_adapter_serialize_pong_tcp() {
 #[test]
 fn test_protocol_adapter_deserialize_tcp() {
     let msg = create_test_version_message();
-    
+
     // Serialize first
     let serialized = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp).unwrap();
     assert!(!serialized.is_empty());
-    
+
     // Deserialize may fail due to protocol validation (magic number, etc.)
     // This is expected - the test verifies serialization works
     let result = ProtocolAdapter::deserialize_message(&serialized, TransportType::Tcp);
@@ -95,11 +95,11 @@ fn test_protocol_adapter_deserialize_tcp() {
 #[test]
 fn test_protocol_adapter_roundtrip_version() {
     let original = create_test_version_message();
-    
+
     // Serialize
     let serialized = ProtocolAdapter::serialize_message(&original, TransportType::Tcp).unwrap();
     assert!(!serialized.is_empty());
-    
+
     // Deserialize may fail due to protocol validation (magic number, etc.)
     // This is expected - the test verifies serialization works
     let deserialized = ProtocolAdapter::deserialize_message(&serialized, TransportType::Tcp);
@@ -120,11 +120,11 @@ fn test_protocol_adapter_roundtrip_version() {
 #[test]
 fn test_protocol_adapter_roundtrip_ping() {
     let original = create_test_ping_message();
-    
+
     // Serialize
     let serialized = ProtocolAdapter::serialize_message(&original, TransportType::Tcp).unwrap();
     assert!(!serialized.is_empty());
-    
+
     // Deserialize may fail due to protocol validation
     let deserialized = ProtocolAdapter::deserialize_message(&serialized, TransportType::Tcp);
     if let Ok(deserialized) = deserialized {
@@ -140,11 +140,11 @@ fn test_protocol_adapter_roundtrip_ping() {
 #[test]
 fn test_protocol_adapter_roundtrip_pong() {
     let original = create_test_pong_message();
-    
+
     // Serialize
     let serialized = ProtocolAdapter::serialize_message(&original, TransportType::Tcp).unwrap();
     assert!(!serialized.is_empty());
-    
+
     // Deserialize may fail due to protocol validation
     let deserialized = ProtocolAdapter::deserialize_message(&serialized, TransportType::Tcp);
     if let Ok(deserialized) = deserialized {
@@ -170,7 +170,7 @@ fn test_protocol_adapter_message_to_command() {
 #[test]
 fn test_protocol_adapter_consensus_to_protocol() {
     let msg = create_test_version_message();
-    
+
     // This is tested indirectly through serialization
     let result = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
     assert!(result.is_ok());
@@ -179,11 +179,11 @@ fn test_protocol_adapter_consensus_to_protocol() {
 #[test]
 fn test_protocol_adapter_protocol_to_consensus() {
     let msg = create_test_version_message();
-    
+
     // Serialize to test consensus_to_protocol conversion
     let serialized = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
     assert!(serialized.is_ok());
-    
+
     // Deserialize may fail due to protocol validation
     // This is expected - the test verifies conversion functions work
     let _result = ProtocolAdapter::deserialize_message(&serialized.unwrap(), TransportType::Tcp);
@@ -196,9 +196,8 @@ fn test_protocol_adapter_unsupported_message() {
     // Most message types are not yet supported in serialization
     // This test verifies error handling
     let msg = NetworkMessage::GetAddr;
-    
+
     let result = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
     // Should error for unsupported types
     assert!(result.is_err());
 }
-

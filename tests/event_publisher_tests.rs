@@ -25,12 +25,10 @@ fn create_test_transaction() -> Transaction {
     Transaction {
         version: 1,
         inputs: tx_inputs![],
-        outputs: tx_outputs![
-            bllvm_protocol::TransactionOutput {
-                value: 1000,
-                script_pubkey: vec![0x51], // OP_1
-            }
-        ],
+        outputs: tx_outputs![bllvm_protocol::TransactionOutput {
+            value: 1000,
+            script_pubkey: vec![0x51], // OP_1
+        }],
         lock_time: 0,
     }
 }
@@ -52,7 +50,9 @@ async fn test_publish_new_block() {
     let height = 100;
 
     // Should publish without error
-    publisher.publish_new_block(&block, &block_hash, height).await;
+    publisher
+        .publish_new_block(&block, &block_hash, height)
+        .await;
     assert!(true);
 }
 
@@ -64,9 +64,7 @@ async fn test_publish_new_transaction() {
     let tx_hash: Hash = [0xbb; 32];
 
     // Should publish without error
-    publisher
-        .publish_new_transaction(&tx, &tx_hash, true)
-        .await;
+    publisher.publish_new_transaction(&tx, &tx_hash, true).await;
     assert!(true);
 }
 
@@ -78,9 +76,7 @@ async fn test_publish_new_transaction_mempool_entry() {
     let tx_hash: Hash = [0xcc; 32];
 
     // Test with is_mempool_entry = true
-    publisher
-        .publish_new_transaction(&tx, &tx_hash, true)
-        .await;
+    publisher.publish_new_transaction(&tx, &tx_hash, true).await;
 
     // Test with is_mempool_entry = false
     publisher
@@ -101,7 +97,9 @@ async fn test_publish_multiple_blocks() {
         block_hash[0] = i;
         let height = i as u64;
 
-        publisher.publish_new_block(&block, &block_hash, height).await;
+        publisher
+            .publish_new_block(&block, &block_hash, height)
+            .await;
     }
 
     assert!(true);
@@ -117,11 +115,8 @@ async fn test_publish_multiple_transactions() {
         let mut tx_hash = [0u8; 32];
         tx_hash[0] = i;
 
-        publisher
-            .publish_new_transaction(&tx, &tx_hash, true)
-            .await;
+        publisher.publish_new_transaction(&tx, &tx_hash, true).await;
     }
 
     assert!(true);
 }
-

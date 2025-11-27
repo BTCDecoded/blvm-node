@@ -5,10 +5,10 @@ mod tests {
     use bllvm_node::network::stratum_v2::messages::{
         OpenMiningChannelMessage, SetupConnectionMessage,
     };
-    use bllvm_node::network::stratum_v2::pool::{StratumV2Pool, MinerStats};
-    use bllvm_protocol::{Block, BlockHeader};
+    use bllvm_node::network::stratum_v2::pool::{MinerStats, StratumV2Pool};
     use bllvm_protocol::tx_inputs;
     use bllvm_protocol::tx_outputs;
+    use bllvm_protocol::{Block, BlockHeader};
 
     fn create_test_block() -> Block {
         Block {
@@ -34,16 +34,16 @@ mod tests {
     #[test]
     fn test_stratum_v2_pool_handle_setup_connection() {
         let mut pool = StratumV2Pool::new();
-        
+
         let msg = SetupConnectionMessage {
             protocol_version: 2,
             endpoint: "test-miner".to_string(),
             capabilities: vec!["mining".to_string()],
         };
-        
+
         let result = pool.handle_setup_connection(msg);
         assert!(result.is_ok());
-        
+
         let response = result.unwrap();
         assert_eq!(response.supported_versions, vec![2]);
         assert!(response.capabilities.contains(&"mining".to_string()));
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn test_stratum_v2_pool_handle_open_channel() {
         let mut pool = StratumV2Pool::new();
-        
+
         // First setup connection
         let setup_msg = SetupConnectionMessage {
             protocol_version: 2,
@@ -60,17 +60,17 @@ mod tests {
             capabilities: vec!["mining".to_string()],
         };
         pool.handle_setup_connection(setup_msg).unwrap();
-        
+
         // Then open channel
         let channel_msg = OpenMiningChannelMessage {
             channel_id: 1,
             request_id: 1,
             min_difficulty: 1,
         };
-        
+
         let result = pool.handle_open_channel("test-miner", channel_msg);
         assert!(result.is_ok());
-        
+
         let response = result.unwrap();
         assert_eq!(response.channel_id, 1);
     }
@@ -78,13 +78,13 @@ mod tests {
     #[test]
     fn test_stratum_v2_pool_handle_open_channel_no_miner() {
         let mut pool = StratumV2Pool::new();
-        
+
         let channel_msg = OpenMiningChannelMessage {
             channel_id: 1,
             request_id: 1,
             min_difficulty: 1,
         };
-        
+
         // Should fail if miner not registered
         let result = pool.handle_open_channel("unknown-miner", channel_msg);
         assert!(result.is_err());
@@ -94,9 +94,9 @@ mod tests {
     fn test_stratum_v2_pool_set_template() {
         let mut pool = StratumV2Pool::new();
         let block = create_test_block();
-        
+
         let (job_id, messages) = pool.set_template(block);
-        
+
         // Should return job_id and messages
         assert!(job_id > 0);
         assert!(messages.is_empty()); // No miners connected yet
@@ -111,4 +111,3 @@ mod tests {
         assert!(stats.last_share_time.is_none());
     }
 }
-

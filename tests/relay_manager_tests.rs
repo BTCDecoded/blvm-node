@@ -187,4 +187,3 @@ fn test_relay_policies_structure() {
     assert!(policies.enable_block_relay);
     assert!(policies.enable_tx_relay);
 }
-

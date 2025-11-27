@@ -106,7 +106,7 @@ impl EventManager {
                 .filter_map(|id| channels.get(id).map(|sender| (id.clone(), sender.clone())))
                 .collect()
         };
-        
+
         // Explicitly drop locks before sending to avoid deadlock
         drop(subscribers);
         drop(channels);

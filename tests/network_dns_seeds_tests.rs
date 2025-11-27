@@ -39,7 +39,7 @@ async fn test_resolve_dns_seeds_port() {
     // Test that port is correctly set
     let seeds = vec!["localhost"]; // Will likely fail, but tests structure
     let addresses = resolve_dns_seeds(&seeds, 8334, 10).await;
-    
+
     // If any addresses are returned, they should have the correct port
     for addr in &addresses {
         assert_eq!(addr.port, 8334);
@@ -49,10 +49,7 @@ async fn test_resolve_dns_seeds_port() {
 #[tokio::test]
 async fn test_resolve_dns_seeds_multiple_seeds() {
     // Test with multiple seeds (even if they fail)
-    let seeds = vec![
-        "invalid-seed-1.example.com",
-        "invalid-seed-2.example.com",
-    ];
+    let seeds = vec!["invalid-seed-1.example.com", "invalid-seed-2.example.com"];
     let addresses = resolve_dns_seeds(&seeds, 8333, 10).await;
     // Should handle multiple seeds gracefully
     assert!(addresses.len() <= 10);
@@ -85,11 +82,10 @@ fn test_dns_seeds_no_duplicates() {
     for seed in MAINNET_DNS_SEEDS {
         assert!(seen.insert(seed), "Duplicate DNS seed: {}", seed);
     }
-    
+
     // Check for duplicates in testnet seeds
     let mut seen = std::collections::HashSet::new();
     for seed in TESTNET_DNS_SEEDS {
         assert!(seen.insert(seed), "Duplicate DNS seed: {}", seed);
     }
 }
-

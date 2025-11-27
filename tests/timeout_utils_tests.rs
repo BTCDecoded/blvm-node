@@ -16,11 +16,8 @@ fn test_default_timeout_constants() {
 
 #[tokio::test]
 async fn test_with_custom_timeout_success() {
-    let result = with_custom_timeout(
-        async { 42 },
-        Duration::from_secs(1),
-    ).await;
-    
+    let result = with_custom_timeout(async { 42 }, Duration::from_secs(1)).await;
+
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 42);
 }
@@ -33,8 +30,9 @@ async fn test_with_custom_timeout_timeout() {
             42
         },
         Duration::from_millis(100),
-    ).await;
-    
+    )
+    .await;
+
     assert!(result.is_err()); // Should timeout
 }
 
@@ -64,8 +62,9 @@ async fn test_with_network_timeout_timeout() {
     let result = with_network_timeout(async {
         sleep(Duration::from_secs(31)).await; // Longer than DEFAULT_NETWORK_TIMEOUT
         42
-    }).await;
-    
+    })
+    .await;
+
     assert!(result.is_err()); // Should timeout
 }
 
@@ -74,8 +73,9 @@ async fn test_with_storage_timeout_timeout() {
     let result = with_storage_timeout(async {
         sleep(Duration::from_secs(11)).await; // Longer than DEFAULT_STORAGE_TIMEOUT
         42
-    }).await;
-    
+    })
+    .await;
+
     assert!(result.is_err()); // Should timeout
 }
 
@@ -84,8 +84,8 @@ async fn test_with_rpc_timeout_timeout() {
     let result = with_rpc_timeout(async {
         sleep(Duration::from_secs(61)).await; // Longer than DEFAULT_RPC_TIMEOUT
         42
-    }).await;
-    
+    })
+    .await;
+
     assert!(result.is_err()); // Should timeout
 }
-

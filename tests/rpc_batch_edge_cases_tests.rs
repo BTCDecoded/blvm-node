@@ -13,15 +13,15 @@ fn create_test_server() -> RpcServer {
 #[tokio::test]
 async fn test_rpc_batch_empty_array() {
     let server = create_test_server();
-    
+
     // Empty batch should return empty array
     let batch: Vec<Value> = vec![];
     let batch_json = serde_json::to_string(&batch).unwrap();
-    
+
     // Process as batch (empty array)
     let result = process_batch_request(&server, &batch_json).await;
     assert!(result.is_ok());
-    
+
     let response: Vec<Value> = serde_json::from_str(&result.unwrap()).unwrap();
     assert!(response.is_empty());
 }
@@ -29,17 +29,15 @@ async fn test_rpc_batch_empty_array() {
 #[tokio::test]
 async fn test_rpc_batch_single_request() {
     let server = create_test_server();
-    
+
     // Single request in batch should work
-    let batch = vec![
-        json!({
-            "jsonrpc": "2.0",
-            "method": "getblockcount",
-            "id": 1
-        })
-    ];
+    let batch = vec![json!({
+        "jsonrpc": "2.0",
+        "method": "getblockcount",
+        "id": 1
+    })];
     let batch_json = serde_json::to_string(&batch).unwrap();
-    
+
     let result = process_batch_request(&server, &batch_json).await;
     // Should process successfully (even if method doesn't exist, should return error response)
     assert!(result.is_ok());
@@ -48,7 +46,7 @@ async fn test_rpc_batch_single_request() {
 #[tokio::test]
 async fn test_rpc_batch_mixed_valid_invalid() {
     let server = create_test_server();
-    
+
     // Mix of valid and invalid requests
     let batch = vec![
         json!({
@@ -68,10 +66,10 @@ async fn test_rpc_batch_mixed_valid_invalid() {
         }),
     ];
     let batch_json = serde_json::to_string(&batch).unwrap();
-    
+
     let result = process_batch_request(&server, &batch_json).await;
     assert!(result.is_ok());
-    
+
     let response: Vec<Value> = serde_json::from_str(&result.unwrap()).unwrap();
     assert_eq!(response.len(), 3); // Should have 3 responses
 }
@@ -79,7 +77,7 @@ async fn test_rpc_batch_mixed_valid_invalid() {
 #[tokio::test]
 async fn test_rpc_batch_duplicate_ids() {
     let server = create_test_server();
-    
+
     // Multiple requests with same ID
     let batch = vec![
         json!({
@@ -94,11 +92,11 @@ async fn test_rpc_batch_duplicate_ids() {
         }),
     ];
     let batch_json = serde_json::to_string(&batch).unwrap();
-    
+
     let result = process_batch_request(&server, &batch_json).await;
     // Should handle duplicate IDs (each request gets its own response)
     assert!(result.is_ok());
-    
+
     let response: Vec<Value> = serde_json::from_str(&result.unwrap()).unwrap();
     assert_eq!(response.len(), 2);
 }
@@ -106,7 +104,7 @@ async fn test_rpc_batch_duplicate_ids() {
 #[tokio::test]
 async fn test_rpc_batch_missing_ids() {
     let server = create_test_server();
-    
+
     // Requests without IDs (notification)
     let batch = vec![
         json!({
@@ -120,10 +118,10 @@ async fn test_rpc_batch_missing_ids() {
         }),
     ];
     let batch_json = serde_json::to_string(&batch).unwrap();
-    
+
     let result = process_batch_request(&server, &batch_json).await;
     assert!(result.is_ok());
-    
+
     let response: Vec<Value> = serde_json::from_str(&result.unwrap()).unwrap();
     // Notifications don't get responses, so should have 1 response
     assert_eq!(response.len(), 1);
@@ -132,7 +130,7 @@ async fn test_rpc_batch_missing_ids() {
 #[tokio::test]
 async fn test_rpc_batch_large_batch() {
     let server = create_test_server();
-    
+
     // Large batch (100 requests)
     let mut batch = Vec::new();
     for i in 0..100 {
@@ -143,10 +141,10 @@ async fn test_rpc_batch_large_batch() {
         }));
     }
     let batch_json = serde_json::to_string(&batch).unwrap();
-    
+
     let result = process_batch_request(&server, &batch_json).await;
     assert!(result.is_ok());
-    
+
     let response: Vec<Value> = serde_json::from_str(&result.unwrap()).unwrap();
     assert_eq!(response.len(), 100);
 }
@@ -154,10 +152,10 @@ async fn test_rpc_batch_large_batch() {
 #[tokio::test]
 async fn test_rpc_batch_invalid_json() {
     let server = create_test_server();
-    
+
     // Invalid JSON in batch
     let invalid_json = "[{ invalid json }]";
-    
+
     let result = process_batch_request(&server, invalid_json).await;
     // Should handle gracefully
     assert!(result.is_ok() || result.is_err()); // Either is acceptable
@@ -166,18 +164,18 @@ async fn test_rpc_batch_invalid_json() {
 #[tokio::test]
 async fn test_rpc_batch_malformed_requests() {
     let server = create_test_server();
-    
+
     // Malformed requests in batch
     let batch = vec![
-        json!({}), // Empty object
+        json!({}),                 // Empty object
         json!({"jsonrpc": "1.0"}), // Wrong version
         json!({"method": "test"}), // Missing jsonrpc
     ];
     let batch_json = serde_json::to_string(&batch).unwrap();
-    
+
     let result = process_batch_request(&server, &batch_json).await;
     assert!(result.is_ok());
-    
+
     let response: Vec<Value> = serde_json::from_str(&result.unwrap()).unwrap();
     // Should have error responses for malformed requests
     assert_eq!(response.len(), 3);
@@ -188,7 +186,7 @@ async fn test_rpc_batch_malformed_requests() {
 async fn process_batch_request(_server: &RpcServer, body: &str) -> Result<String, String> {
     // Parse as JSON
     let value: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
-    
+
     // Check if it's an array (batch) or object (single)
     if let Value::Array(requests) = value {
         let mut responses = Vec::new();
@@ -197,7 +195,7 @@ async fn process_batch_request(_server: &RpcServer, body: &str) -> Result<String
             // Malformed requests should still get error responses
             let id = request.get("id").cloned();
             let has_jsonrpc = request.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0");
-            
+
             if !has_jsonrpc || request.get("method").is_none() {
                 // Invalid request - should return error
                 responses.push(json!({
@@ -224,7 +222,9 @@ async fn process_batch_request(_server: &RpcServer, body: &str) -> Result<String
         Ok(serde_json::to_string(&responses).unwrap())
     } else {
         // Single request
-        Ok(r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":null}"#.to_string())
+        Ok(
+            r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":null}"#
+                .to_string(),
+        )
     }
 }
-

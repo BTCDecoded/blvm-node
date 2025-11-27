@@ -9,7 +9,13 @@ use tempfile::TempDir;
 
 fn create_test_blockstore() -> (TempDir, Arc<BlockStore>) {
     let temp_dir = TempDir::new().unwrap();
-    let db = Arc::from(create_database(temp_dir.path(), bllvm_node::storage::database::DatabaseBackend::Redb).unwrap());
+    let db = Arc::from(
+        create_database(
+            temp_dir.path(),
+            bllvm_node::storage::database::DatabaseBackend::Redb,
+        )
+        .unwrap(),
+    );
     let blockstore = Arc::new(BlockStore::new(db).unwrap());
     (temp_dir, blockstore)
 }
@@ -140,4 +146,3 @@ fn test_pruning_mode_variants() {
         }
     }
 }
-

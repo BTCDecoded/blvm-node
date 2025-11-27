@@ -17,8 +17,7 @@ fn test_monitor_creation() {
 #[test]
 fn test_monitor_with_interval() {
     let (crash_tx, _crash_rx) = mpsc::unbounded_channel();
-    let monitor = ModuleProcessMonitor::new(crash_tx)
-        .with_interval(Duration::from_secs(10));
+    let monitor = ModuleProcessMonitor::new(crash_tx).with_interval(Duration::from_secs(10));
     // Should create successfully with custom interval
     assert!(true);
 }
@@ -45,7 +44,7 @@ fn test_module_health_variants() {
 fn test_module_health_clone() {
     let health = ModuleHealth::Healthy;
     let cloned = health.clone();
-    
+
     match (health, cloned) {
         (ModuleHealth::Healthy, ModuleHealth::Healthy) => assert!(true),
         _ => panic!("Health should clone correctly"),
@@ -55,7 +54,7 @@ fn test_module_health_clone() {
 #[test]
 fn test_module_health_crashed() {
     let health = ModuleHealth::Crashed("Test error".to_string());
-    
+
     match health {
         ModuleHealth::Crashed(msg) => {
             assert_eq!(msg, "Test error");
@@ -70,4 +69,3 @@ fn test_module_health_crashed() {
 // - Integration test setup
 // These are better suited for integration tests.
 // Here we test the monitor structure and health enum.
-

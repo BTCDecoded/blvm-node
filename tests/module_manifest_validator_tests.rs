@@ -35,7 +35,7 @@ fn test_manifest_validator_default() {
 fn test_manifest_validator_valid_manifest() {
     let validator = ManifestValidator::new();
     let manifest = create_valid_manifest();
-    
+
     let result = validator.validate(&manifest);
     assert_eq!(result, ValidationResult::Valid);
 }
@@ -45,7 +45,7 @@ fn test_manifest_validator_empty_name() {
     let validator = ManifestValidator::new();
     let mut manifest = create_valid_manifest();
     manifest.name = String::new();
-    
+
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
@@ -60,7 +60,7 @@ fn test_manifest_validator_empty_version() {
     let validator = ManifestValidator::new();
     let mut manifest = create_valid_manifest();
     manifest.version = String::new();
-    
+
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
@@ -75,11 +75,13 @@ fn test_manifest_validator_empty_entry_point() {
     let validator = ManifestValidator::new();
     let mut manifest = create_valid_manifest();
     manifest.entry_point = String::new();
-    
+
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
-            assert!(errors.iter().any(|e| e.contains("Entry point cannot be empty")));
+            assert!(errors
+                .iter()
+                .any(|e| e.contains("Entry point cannot be empty")));
         }
         ValidationResult::Valid => panic!("Should be invalid"),
     }
@@ -90,7 +92,7 @@ fn test_manifest_validator_invalid_version_format() {
     let validator = ManifestValidator::new();
     let mut manifest = create_valid_manifest();
     manifest.version = "invalid".to_string();
-    
+
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
@@ -103,7 +105,7 @@ fn test_manifest_validator_invalid_version_format() {
 #[test]
 fn test_manifest_validator_valid_version_formats() {
     let validator = ManifestValidator::new();
-    
+
     let valid_versions = vec![
         "1.0",
         "1.0.0",
@@ -112,37 +114,45 @@ fn test_manifest_validator_valid_version_formats() {
         "1.0.0+build",
         "1.0.0-alpha+build",
     ];
-    
+
     for version in valid_versions {
         let mut manifest = create_valid_manifest();
         manifest.version = version.to_string();
-        
+
         let result = validator.validate(&manifest);
-        assert_eq!(result, ValidationResult::Valid, "Version {} should be valid", version);
+        assert_eq!(
+            result,
+            ValidationResult::Valid,
+            "Version {} should be valid",
+            version
+        );
     }
 }
 
 #[test]
 fn test_manifest_validator_invalid_name_format() {
     let validator = ManifestValidator::new();
-    
+
     let invalid_names = vec![
-        "", // Empty
-        "-invalid", // Starts with dash
-        "_invalid", // Starts with underscore
+        "",             // Empty
+        "-invalid",     // Starts with dash
+        "_invalid",     // Starts with underscore
         "invalid name", // Contains space
         "invalid@name", // Contains invalid char
     ];
-    
+
     for name in invalid_names {
         let mut manifest = create_valid_manifest();
         manifest.name = name.to_string();
-        
+
         let result = validator.validate(&manifest);
         match result {
             ValidationResult::Invalid(errors) => {
-                assert!(errors.iter().any(|e| e.contains("Invalid module name")), 
-                    "Name '{}' should be invalid", name);
+                assert!(
+                    errors.iter().any(|e| e.contains("Invalid module name")),
+                    "Name '{}' should be invalid",
+                    name
+                );
             }
             ValidationResult::Valid => panic!("Name '{}' should be invalid", name),
         }
@@ -152,7 +162,7 @@ fn test_manifest_validator_invalid_name_format() {
 #[test]
 fn test_manifest_validator_valid_name_formats() {
     let validator = ManifestValidator::new();
-    
+
     let valid_names = vec![
         "test-module",
         "test_module",
@@ -162,13 +172,18 @@ fn test_manifest_validator_valid_name_formats() {
         "module-name-with-dashes",
         "module_name_with_underscores",
     ];
-    
+
     for name in valid_names {
         let mut manifest = create_valid_manifest();
         manifest.name = name.to_string();
-        
+
         let result = validator.validate(&manifest);
-        assert_eq!(result, ValidationResult::Valid, "Name '{}' should be valid", name);
+        assert_eq!(
+            result,
+            ValidationResult::Valid,
+            "Name '{}' should be valid",
+            name
+        );
     }
 }
 
@@ -177,7 +192,7 @@ fn test_manifest_validator_invalid_capability() {
     let validator = ManifestValidator::new();
     let mut manifest = create_valid_manifest();
     manifest.capabilities = vec!["invalid-capability".to_string()];
-    
+
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
@@ -195,7 +210,7 @@ fn test_manifest_validator_valid_capabilities() {
         "read_blockchain".to_string(),
         "subscribe_events".to_string(),
     ];
-    
+
     let result = validator.validate(&manifest);
     assert_eq!(result, ValidationResult::Valid);
 }
@@ -207,7 +222,7 @@ fn test_manifest_validator_invalid_dependency_name() {
     let mut deps = HashMap::new();
     deps.insert("invalid-name!".to_string(), "1.0.0".to_string());
     manifest.dependencies = deps;
-    
+
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
@@ -224,11 +239,13 @@ fn test_manifest_validator_invalid_dependency_version() {
     let mut deps = HashMap::new();
     deps.insert("valid-dep".to_string(), "invalid-version".to_string());
     manifest.dependencies = deps;
-    
+
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
-            assert!(errors.iter().any(|e| e.contains("Invalid dependency version format")));
+            assert!(errors
+                .iter()
+                .any(|e| e.contains("Invalid dependency version format")));
         }
         ValidationResult::Valid => panic!("Should be invalid"),
     }
@@ -237,24 +254,22 @@ fn test_manifest_validator_invalid_dependency_version() {
 #[test]
 fn test_manifest_validator_valid_dependency_versions() {
     let validator = ManifestValidator::new();
-    
-    let valid_versions = vec![
-        "1.0.0",
-        ">=1.0.0",
-        "<=2.0.0",
-        "==1.0.0",
-        "^1.0.0",
-        "~1.0.0",
-    ];
-    
+
+    let valid_versions = vec!["1.0.0", ">=1.0.0", "<=2.0.0", "==1.0.0", "^1.0.0", "~1.0.0"];
+
     for version in valid_versions {
         let mut manifest = create_valid_manifest();
         let mut deps = HashMap::new();
         deps.insert("valid-dep".to_string(), version.to_string());
         manifest.dependencies = deps;
-        
+
         let result = validator.validate(&manifest);
-        assert_eq!(result, ValidationResult::Valid, "Version '{}' should be valid", version);
+        assert_eq!(
+            result,
+            ValidationResult::Valid,
+            "Version '{}' should be valid",
+            version
+        );
     }
 }
 
@@ -265,7 +280,7 @@ fn test_manifest_validator_multiple_errors() {
     manifest.name = String::new();
     manifest.version = "invalid".to_string();
     manifest.entry_point = String::new();
-    
+
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
@@ -279,12 +294,11 @@ fn test_manifest_validator_multiple_errors() {
 fn test_validate_module_signature() {
     use bllvm_node::module::validation::manifest_validator::validate_module_signature;
     use std::path::PathBuf;
-    
+
     let manifest = create_valid_manifest();
     let binary_path = PathBuf::from("/nonexistent/binary.so");
-    
+
     // Phase 1: Signature validation is disabled (always succeeds)
     let result = validate_module_signature(&manifest, &binary_path);
     assert!(result.is_ok());
 }
-

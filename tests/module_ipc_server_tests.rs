@@ -87,7 +87,10 @@ mod tests {
         async fn subscribe_events(
             &self,
             _event_types: Vec<EventType>,
-        ) -> Result<tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>, ModuleError> {
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>,
+            ModuleError,
+        > {
             let (_tx, rx) = tokio::sync::mpsc::channel(100);
             Ok(rx)
         }
@@ -431,10 +434,7 @@ mod tests {
 
         // Get UTXO
         let hash: Hash = [0xbb; 32];
-        let outpoint = OutPoint {
-            hash,
-            index: 0,
-        };
+        let outpoint = OutPoint { hash, index: 0 };
         let correlation_id = client.next_correlation_id();
         let request = RequestMessage::get_utxo(correlation_id, outpoint);
         let response = client.request(request).await.unwrap();
@@ -459,8 +459,7 @@ mod tests {
         let server_path = socket_path.clone();
         let event_mgr_clone = Arc::clone(&event_manager);
         let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path)
-                .with_event_manager(event_mgr_clone);
+            let mut server = ModuleIpcServer::new(&server_path).with_event_manager(event_mgr_clone);
             let _ = server.start(node_api).await;
         });
 
@@ -542,4 +541,3 @@ mod tests {
         server_handle.abort();
     }
 }
-

@@ -139,4 +139,3 @@ fn test_signed_ban_list_message_verify_invalid() {
     assert!(result.is_ok());
     assert!(!result.unwrap());
 }
-

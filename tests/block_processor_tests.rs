@@ -6,7 +6,7 @@ use bllvm_node::node::block_processor::{
 };
 use bllvm_node::storage::Storage;
 use bllvm_node::{Block, BlockHeader, Hash, UtxoSet};
-use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, segwit::Witness};
+use bllvm_protocol::{segwit::Witness, BitcoinProtocolEngine, ProtocolVersion};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -235,13 +235,6 @@ fn test_store_block_with_context_and_index_without_storage() {
     let witnesses = create_empty_witnesses();
 
     // Pass None for storage (should still work, just won't index)
-    let result = store_block_with_context_and_index(
-        &storage.blocks(),
-        None,
-        &block,
-        &witnesses,
-        0,
-    );
+    let result = store_block_with_context_and_index(&storage.blocks(), None, &block, &witnesses, 0);
     assert!(result.is_ok());
 }
-

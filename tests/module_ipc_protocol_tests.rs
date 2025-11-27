@@ -4,8 +4,8 @@ use bllvm_node::module::ipc::protocol::{
     CorrelationId, EventMessage, EventPayload, MessageType, ModuleMessage, RequestMessage,
     RequestPayload, ResponseMessage, ResponsePayload,
 };
-use bllvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 use bllvm_node::module::traits::EventType;
+use bllvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 
 #[test]
 fn test_request_message_serialization() {
@@ -88,10 +88,7 @@ fn test_module_message_wrapper() {
 #[test]
 fn test_all_request_types() {
     let hash: Hash = [0xef; 32];
-    let outpoint = OutPoint {
-        hash,
-        index: 0,
-    };
+    let outpoint = OutPoint { hash, index: 0 };
 
     // Test all request helper methods
     let requests = vec![
@@ -145,10 +142,7 @@ fn test_handshake_request() {
 #[test]
 fn test_response_payload_types() {
     let hash: Hash = [0x12; 32];
-    let outpoint = OutPoint {
-        hash,
-        index: 1,
-    };
+    let outpoint = OutPoint { hash, index: 1 };
     let utxo = UTXO {
         value: 1000,
         script_pubkey: vec![0x51], // OP_1
@@ -156,9 +150,12 @@ fn test_response_payload_types() {
     };
 
     let responses = vec![
-        ResponseMessage::success(1, ResponsePayload::HandshakeAck {
-            node_version: "1.0.0".to_string(),
-        }),
+        ResponseMessage::success(
+            1,
+            ResponsePayload::HandshakeAck {
+                node_version: "1.0.0".to_string(),
+            },
+        ),
         ResponseMessage::success(2, ResponsePayload::Block(None)),
         ResponseMessage::success(3, ResponsePayload::BlockHeader(None)),
         ResponseMessage::success(4, ResponsePayload::Transaction(None)),
@@ -199,10 +196,7 @@ fn test_event_message_serialization() {
         ModuleMessage::Event(e) => {
             assert_eq!(e.event_type, EventType::NewBlock);
             match e.payload {
-                EventPayload::NewBlock {
-                    block_hash,
-                    height,
-                } => {
+                EventPayload::NewBlock { block_hash, height } => {
                     assert_eq!(block_hash, hash);
                     assert_eq!(height, 100);
                 }
@@ -346,4 +340,3 @@ fn test_multiple_event_types_subscription() {
         _ => panic!("Expected SubscribeEvents payload"),
     }
 }
-

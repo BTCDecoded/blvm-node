@@ -12,11 +12,11 @@ fn create_test_spawner() -> (TempDir, ModuleProcessSpawner) {
     let modules_dir = temp_dir.path().join("modules");
     let data_dir = temp_dir.path().join("data");
     let socket_dir = temp_dir.path().join("sockets");
-    
+
     std::fs::create_dir_all(&modules_dir).unwrap();
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::create_dir_all(&socket_dir).unwrap();
-    
+
     let spawner = ModuleProcessSpawner::new(&modules_dir, &data_dir, &socket_dir);
     (temp_dir, spawner)
 }
@@ -43,11 +43,11 @@ fn test_spawner_with_config() {
     let modules_dir = temp_dir.path().join("modules");
     let data_dir = temp_dir.path().join("data");
     let socket_dir = temp_dir.path().join("sockets");
-    
+
     std::fs::create_dir_all(&modules_dir).unwrap();
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::create_dir_all(&socket_dir).unwrap();
-    
+
     let config = ModuleResourceLimitsConfig {
         default_max_cpu_percent: 75,
         default_max_memory_bytes: 1024 * 1024 * 1024, // 1 GB
@@ -58,8 +58,9 @@ fn test_spawner_with_config() {
         module_socket_check_interval_millis: 50,
         module_socket_max_attempts: 100,
     };
-    
-    let _spawner = ModuleProcessSpawner::with_config(&modules_dir, &data_dir, &socket_dir, Some(&config));
+
+    let _spawner =
+        ModuleProcessSpawner::with_config(&modules_dir, &data_dir, &socket_dir, Some(&config));
     // Should create successfully with custom config
     assert!(true);
 }
@@ -67,7 +68,7 @@ fn test_spawner_with_config() {
 #[test]
 fn test_spawner_directories() {
     let (_temp_dir, spawner) = create_test_spawner();
-    
+
     // Verify directories are set correctly
     assert!(spawner.modules_dir.exists() || spawner.modules_dir.parent().is_some());
     assert!(spawner.data_dir.exists() || spawner.data_dir.parent().is_some());
@@ -79,9 +80,9 @@ async fn test_spawn_nonexistent_binary() {
     let (_temp_dir, spawner) = create_test_spawner();
     let context = create_test_context();
     let fake_binary = PathBuf::from("/nonexistent/binary");
-    
+
     let result = spawner.spawn("test-module", &fake_binary, context).await;
-    
+
     // Should fail with an error
     assert!(result.is_err());
     // Error type should be ModuleError (which implements Debug)
@@ -99,11 +100,11 @@ fn test_spawner_resource_limits_config() {
     let modules_dir = temp_dir.path().join("modules");
     let data_dir = temp_dir.path().join("data");
     let socket_dir = temp_dir.path().join("sockets");
-    
+
     std::fs::create_dir_all(&modules_dir).unwrap();
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::create_dir_all(&socket_dir).unwrap();
-    
+
     let config = ModuleResourceLimitsConfig {
         default_max_cpu_percent: 50,
         default_max_memory_bytes: 512 * 1024 * 1024,
@@ -114,9 +115,10 @@ fn test_spawner_resource_limits_config() {
         module_socket_check_interval_millis: 100,
         module_socket_max_attempts: 50,
     };
-    
-    let _spawner = ModuleProcessSpawner::with_config(&modules_dir, &data_dir, &socket_dir, Some(&config));
-    
+
+    let _spawner =
+        ModuleProcessSpawner::with_config(&modules_dir, &data_dir, &socket_dir, Some(&config));
+
     // Verify spawner was created with config
     assert!(true);
 }
@@ -126,14 +128,14 @@ fn test_module_context_creation() {
     let mut config = HashMap::new();
     config.insert("key1".to_string(), "value1".to_string());
     config.insert("key2".to_string(), "value2".to_string());
-    
+
     let context = ModuleContext::new(
         "test-id".to_string(),
         "/tmp/test.sock".to_string(),
         "/tmp/test-data".to_string(),
         config,
     );
-    
+
     assert_eq!(context.module_id, "test-id");
     assert_eq!(context.config.len(), 2);
     assert_eq!(context.config.get("key1"), Some(&"value1".to_string()));
@@ -147,8 +149,7 @@ fn test_module_context_empty() {
         "/tmp/test-data".to_string(),
         HashMap::new(),
     );
-    
+
     assert_eq!(context.module_id, "test-id");
     assert_eq!(context.config.len(), 0);
 }
-

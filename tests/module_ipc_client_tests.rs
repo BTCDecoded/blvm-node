@@ -47,7 +47,10 @@ mod tests {
         async fn subscribe_events(
             &self,
             _event_types: Vec<EventType>,
-        ) -> Result<tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>, ModuleError> {
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>,
+            ModuleError,
+        > {
             let (_tx, rx) = tokio::sync::mpsc::channel(100);
             Ok(rx)
         }
@@ -270,4 +273,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

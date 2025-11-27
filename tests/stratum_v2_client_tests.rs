@@ -30,8 +30,7 @@ mod tests {
         // Test that client can be created with different URL formats
         let _client1 = StratumV2Client::new("tcp://pool.example.com:3333".to_string());
         let _client2 = StratumV2Client::new("pool.example.com:3333".to_string()); // Defaults to TCP
-        // Should create successfully
+                                                                                  // Should create successfully
         assert!(true);
     }
 }
-

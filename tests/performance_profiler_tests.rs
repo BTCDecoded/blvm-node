@@ -1,8 +1,6 @@
 //! Tests for performance profiler
 
-use bllvm_node::node::performance::{
-    OperationType, PerformanceProfiler, PerformanceTimer,
-};
+use bllvm_node::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -207,4 +205,3 @@ fn test_percentile_ordering() {
     assert!(stats.block_processing.p95_ms <= stats.block_processing.p99_ms);
     assert!(stats.block_processing.p99_ms <= stats.block_processing.max_ms);
 }
-

@@ -61,15 +61,15 @@ fn test_package_validator_default() {
 fn test_package_id_from_transactions() {
     let tx1 = create_minimal_tx();
     let tx2 = create_minimal_tx();
-    
+
     let package_id1 = PackageId::from_transactions(&[tx1.clone()]);
     let _package_id2 = PackageId::from_transactions(&[tx2.clone()]);
     let package_id3 = PackageId::from_transactions(&[tx1.clone(), tx2.clone()]);
-    
+
     // Same transactions should produce same ID
     let package_id1_again = PackageId::from_transactions(&[tx1.clone()]);
     assert_eq!(package_id1, package_id1_again);
-    
+
     // Different transaction sets should produce different IDs
     assert_ne!(package_id1, package_id3);
 }
@@ -89,7 +89,7 @@ fn test_transaction_package_single_tx() {
     let tx = create_minimal_tx();
     let result = TransactionPackage::new(vec![tx]);
     assert!(result.is_ok());
-    
+
     let package = result.unwrap();
     assert_eq!(package.transactions.len(), 1);
     assert!(package.combined_weight > 0);
@@ -99,10 +99,10 @@ fn test_transaction_package_single_tx() {
 fn test_transaction_package_multiple_txs() {
     let tx1 = create_minimal_tx();
     let tx2 = create_minimal_tx();
-    
+
     let result = TransactionPackage::new(vec![tx1, tx2]);
     assert!(result.is_ok());
-    
+
     let package = result.unwrap();
     assert_eq!(package.transactions.len(), 2);
 }
@@ -112,9 +112,9 @@ fn test_transaction_package_ordering_valid() {
     // Create parent and child transactions
     let parent_tx = create_minimal_tx();
     let parent_txid = bllvm_node::network::txhash::calculate_txid(&parent_tx);
-    
+
     let child_tx = create_tx_with_input(parent_txid, 0);
-    
+
     // Parent before child should be valid
     let result = TransactionPackage::new(vec![parent_tx, child_tx]);
     assert!(result.is_ok());
@@ -125,9 +125,9 @@ fn test_transaction_package_ordering_invalid() {
     // Create parent and child transactions
     let parent_tx = create_minimal_tx();
     let parent_txid = bllvm_node::network::txhash::calculate_txid(&parent_tx);
-    
+
     let child_tx = create_tx_with_input(parent_txid, 0);
-    
+
     // Child before parent should be invalid
     let result = TransactionPackage::new(vec![child_tx, parent_tx]);
     assert!(result.is_err());
@@ -141,7 +141,7 @@ fn test_transaction_package_ordering_invalid() {
 fn test_package_fee_rate() {
     let tx = create_minimal_tx();
     let package = TransactionPackage::new(vec![tx]).unwrap();
-    
+
     // Fee rate should be calculable (may be 0 if no UTXO set provided)
     let fee_rate = package.fee_rate();
     assert!(fee_rate >= 0.0);
@@ -151,7 +151,7 @@ fn test_package_fee_rate() {
 fn test_package_relay_create_package() {
     let relay = PackageRelay::new();
     let tx = create_minimal_tx();
-    
+
     let result = relay.create_package(vec![tx]);
     assert!(result.is_ok());
 }
@@ -160,15 +160,15 @@ fn test_package_relay_create_package() {
 fn test_package_relay_validate_package_size() {
     let relay = PackageRelay::new();
     let mut txs = Vec::new();
-    
+
     // Create 26 transactions (exceeds max of 25)
     for _ in 0..26 {
         txs.push(create_minimal_tx());
     }
-    
+
     let package = TransactionPackage::new(txs).unwrap();
     let result = relay.validate_package(&package);
-    
+
     assert!(result.is_err());
     match result.unwrap_err() {
         PackageRejectReason::TooManyTransactions => assert!(true),
@@ -180,11 +180,11 @@ fn test_package_relay_validate_package_size() {
 fn test_package_relay_validate_package_duplicates() {
     let relay = PackageRelay::new();
     let tx = create_minimal_tx();
-    
+
     // Create package with duplicate transactions
     let package = TransactionPackage::new(vec![tx.clone(), tx]).unwrap();
     let result = relay.validate_package(&package);
-    
+
     assert!(result.is_err());
     match result.unwrap_err() {
         PackageRejectReason::DuplicateTransactions => assert!(true),
@@ -197,10 +197,10 @@ fn test_package_relay_validate_package_valid() {
     let relay = PackageRelay::new();
     let tx1 = create_minimal_tx();
     let tx2 = create_minimal_tx();
-    
+
     let package = TransactionPackage::new(vec![tx1, tx2]).unwrap();
     let result = relay.validate_package(&package);
-    
+
     // Should be valid (within size limits, no duplicates, proper ordering)
     // Note: Fee rate check is skipped if combined_fee is 0 (no UTXO set provided)
     // So validation should pass
@@ -210,7 +210,10 @@ fn test_package_relay_validate_package_valid() {
         let err = result.unwrap_err();
         // For now, we'll accept that validation may fail if transactions reference each other
         // This is expected behavior - the test is checking the validation logic works
-        assert!(matches!(err, PackageRejectReason::InvalidOrder | PackageRejectReason::DuplicateTransactions));
+        assert!(matches!(
+            err,
+            PackageRejectReason::InvalidOrder | PackageRejectReason::DuplicateTransactions
+        ));
     } else {
         assert!(result.is_ok());
     }
@@ -220,13 +223,13 @@ fn test_package_relay_validate_package_valid() {
 fn test_package_relay_register_package() {
     let mut relay = PackageRelay::new();
     let tx = create_minimal_tx();
-    
+
     let package = TransactionPackage::new(vec![tx]).unwrap();
     let result = relay.register_package(package);
-    
+
     assert!(result.is_ok());
     let package_id = result.unwrap();
-    
+
     // Should be able to retrieve package
     let retrieved = relay.get_package(&package_id);
     assert!(retrieved.is_some());
@@ -236,7 +239,7 @@ fn test_package_relay_register_package() {
 fn test_package_relay_get_package_nonexistent() {
     let relay = PackageRelay::new();
     let fake_id = PackageId([0u8; 32]);
-    
+
     let result = relay.get_package(&fake_id);
     assert!(result.is_none());
 }
@@ -245,12 +248,12 @@ fn test_package_relay_get_package_nonexistent() {
 fn test_package_relay_mark_accepted() {
     let mut relay = PackageRelay::new();
     let tx = create_minimal_tx();
-    
+
     let package = TransactionPackage::new(vec![tx]).unwrap();
     let package_id = relay.register_package(package).unwrap();
-    
+
     relay.mark_accepted(&package_id);
-    
+
     // Package should still be retrievable
     let retrieved = relay.get_package(&package_id);
     assert!(retrieved.is_some());
@@ -260,12 +263,12 @@ fn test_package_relay_mark_accepted() {
 fn test_package_relay_mark_rejected() {
     let mut relay = PackageRelay::new();
     let tx = create_minimal_tx();
-    
+
     let package = TransactionPackage::new(vec![tx]).unwrap();
     let package_id = relay.register_package(package).unwrap();
-    
+
     relay.mark_rejected(&package_id, PackageRejectReason::FeeRateTooLow);
-    
+
     // Package should still be retrievable
     let retrieved = relay.get_package(&package_id);
     assert!(retrieved.is_some());
@@ -275,19 +278,19 @@ fn test_package_relay_mark_rejected() {
 fn test_package_relay_cleanup_old_packages() {
     let mut relay = PackageRelay::new();
     let tx = create_minimal_tx();
-    
+
     let package = TransactionPackage::new(vec![tx]).unwrap();
     let package_id = relay.register_package(package).unwrap();
-    
+
     // Package should exist
     assert!(relay.get_package(&package_id).is_some());
-    
+
     // Wait 2 seconds to ensure package is older than cleanup threshold (1 second)
     std::thread::sleep(std::time::Duration::from_secs(2));
-    
+
     // Cleanup packages older than 1 second (should remove the package we just created)
     relay.cleanup_old_packages(1);
-    
+
     // Package should be removed
     assert!(relay.get_package(&package_id).is_none());
 }
@@ -301,7 +304,7 @@ fn test_package_status_variants() {
             reason: PackageRejectReason::TooManyTransactions,
         },
     ];
-    
+
     for status in statuses {
         match status {
             PackageStatus::Pending => assert!(true),
@@ -323,7 +326,7 @@ fn test_package_reject_reason_variants() {
         PackageRejectReason::DuplicateTransactions,
         PackageRejectReason::InvalidStructure,
     ];
-    
+
     for reason in reasons {
         match reason {
             PackageRejectReason::TooManyTransactions => assert!(true),
@@ -341,7 +344,7 @@ fn test_package_id_equality() {
     let tx = create_minimal_tx();
     let id1 = PackageId::from_transactions(&[tx.clone()]);
     let id2 = PackageId::from_transactions(&[tx]);
-    
+
     assert_eq!(id1, id2);
     assert_eq!(id1.0, id2.0);
 }
@@ -349,23 +352,23 @@ fn test_package_id_equality() {
 #[test]
 fn test_package_id_hash() {
     use std::collections::HashSet;
-    
+
     let tx1 = create_minimal_tx();
     let tx2 = create_minimal_tx();
-    
+
     let id1 = PackageId::from_transactions(&[tx1.clone()]);
     let id2 = PackageId::from_transactions(&[tx2.clone()]);
-    
+
     // Note: If tx1 and tx2 are identical, they may produce the same package ID
     // So we test that HashSet works correctly with PackageId
     let mut set = HashSet::new();
     set.insert(id1);
     set.insert(id2);
-    
+
     // Set should contain at least 1 element (may be 2 if transactions are different)
     assert!(set.len() >= 1);
     assert!(set.len() <= 2);
-    
+
     // Test that same ID can be inserted only once
     let id1_again = PackageId::from_transactions(&[tx1]);
     set.insert(id1_again);
@@ -373,4 +376,3 @@ fn test_package_id_hash() {
     assert!(set.len() >= 1);
     assert!(set.len() <= 2);
 }
-

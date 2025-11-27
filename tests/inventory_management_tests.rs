@@ -67,17 +67,23 @@ fn test_add_inventory_from_multiple_peers() {
     let hash2 = create_test_hash(2);
 
     manager
-        .add_inventory("peer1", &[InventoryItem {
-            inv_type: MSG_BLOCK,
-            hash: hash1,
-        }])
+        .add_inventory(
+            "peer1",
+            &[InventoryItem {
+                inv_type: MSG_BLOCK,
+                hash: hash1,
+            }],
+        )
         .unwrap();
 
     manager
-        .add_inventory("peer2", &[InventoryItem {
-            inv_type: MSG_BLOCK,
-            hash: hash2,
-        }])
+        .add_inventory(
+            "peer2",
+            &[InventoryItem {
+                inv_type: MSG_BLOCK,
+                hash: hash2,
+            }],
+        )
         .unwrap();
 
     assert_eq!(manager.inventory_count(), 2);
@@ -93,10 +99,13 @@ fn test_has_inventory() {
     assert!(!manager.has_inventory(&hash));
 
     manager
-        .add_inventory("peer1", &[InventoryItem {
-            inv_type: MSG_BLOCK,
-            hash,
-        }])
+        .add_inventory(
+            "peer1",
+            &[InventoryItem {
+                inv_type: MSG_BLOCK,
+                hash,
+            }],
+        )
         .unwrap();
 
     assert!(manager.has_inventory(&hash));
@@ -160,17 +169,23 @@ fn test_get_peer_inventory() {
     let hash2 = create_test_hash(2);
 
     manager
-        .add_inventory("peer1", &[InventoryItem {
-            inv_type: MSG_BLOCK,
-            hash: hash1,
-        }])
+        .add_inventory(
+            "peer1",
+            &[InventoryItem {
+                inv_type: MSG_BLOCK,
+                hash: hash1,
+            }],
+        )
         .unwrap();
 
     manager
-        .add_inventory("peer2", &[InventoryItem {
-            inv_type: MSG_TX,
-            hash: hash2,
-        }])
+        .add_inventory(
+            "peer2",
+            &[InventoryItem {
+                inv_type: MSG_TX,
+                hash: hash2,
+            }],
+        )
         .unwrap();
 
     let peer1_inv = manager.get_peer_inventory("peer1").unwrap();
@@ -190,10 +205,13 @@ fn test_remove_peer() {
     let hash = create_test_hash(1);
 
     manager
-        .add_inventory("peer1", &[InventoryItem {
-            inv_type: MSG_BLOCK,
-            hash,
-        }])
+        .add_inventory(
+            "peer1",
+            &[InventoryItem {
+                inv_type: MSG_BLOCK,
+                hash,
+            }],
+        )
         .unwrap();
 
     assert!(manager.get_peer_inventory("peer1").is_some());
@@ -210,10 +228,13 @@ fn test_inventory_count() {
     for i in 0..5 {
         let hash = create_test_hash(i);
         manager
-            .add_inventory("peer1", &[InventoryItem {
-                inv_type: MSG_BLOCK,
-                hash,
-            }])
+            .add_inventory(
+                "peer1",
+                &[InventoryItem {
+                    inv_type: MSG_BLOCK,
+                    hash,
+                }],
+            )
             .unwrap();
     }
 
@@ -227,20 +248,25 @@ fn test_duplicate_inventory() {
 
     // Add same inventory twice
     manager
-        .add_inventory("peer1", &[InventoryItem {
-            inv_type: MSG_BLOCK,
-            hash,
-        }])
+        .add_inventory(
+            "peer1",
+            &[InventoryItem {
+                inv_type: MSG_BLOCK,
+                hash,
+            }],
+        )
         .unwrap();
 
     manager
-        .add_inventory("peer1", &[InventoryItem {
-            inv_type: MSG_BLOCK,
-            hash,
-        }])
+        .add_inventory(
+            "peer1",
+            &[InventoryItem {
+                inv_type: MSG_BLOCK,
+                hash,
+            }],
+        )
         .unwrap();
 
     // Should still only count as one
     assert_eq!(manager.inventory_count(), 1);
 }
-

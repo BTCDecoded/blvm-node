@@ -1,10 +1,10 @@
 //! Tests for mining coordinator
 
-use bllvm_node::node::miner::{MiningCoordinator, MiningEngine, TransactionSelector};
 use bllvm_node::node::mempool::MempoolManager;
-use bllvm_protocol::{Block, BlockHeader, Transaction, UtxoSet};
+use bllvm_node::node::miner::{MiningCoordinator, MiningEngine, TransactionSelector};
 use bllvm_protocol::tx_inputs;
 use bllvm_protocol::tx_outputs;
+use bllvm_protocol::{Block, BlockHeader, Transaction, UtxoSet};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -78,7 +78,7 @@ fn test_mining_engine_set_threads() {
 fn test_mining_engine_get_stats() {
     let engine = MiningEngine::new();
     let stats = engine.get_stats();
-    
+
     // Stats should be initialized
     assert_eq!(stats.blocks_mined, 0);
     assert_eq!(stats.total_hashrate, 0.0);
@@ -87,10 +87,10 @@ fn test_mining_engine_get_stats() {
 #[test]
 fn test_mining_engine_clear_template() {
     let mut engine = MiningEngine::new();
-    
+
     // Template should be None initially
     assert!(engine.get_block_template().is_none());
-    
+
     // Clear should not panic
     engine.clear_template();
     assert!(engine.get_block_template().is_none());
@@ -99,7 +99,7 @@ fn test_mining_engine_clear_template() {
 #[test]
 fn test_mining_engine_update_hashrate() {
     let mut engine = MiningEngine::new();
-    
+
     engine.update_hashrate(100.0);
     let stats = engine.get_stats();
     assert_eq!(stats.total_hashrate, 100.0);
@@ -108,7 +108,7 @@ fn test_mining_engine_update_hashrate() {
 #[test]
 fn test_mining_engine_update_average_block_time() {
     let mut engine = MiningEngine::new();
-    
+
     engine.update_average_block_time(10.5);
     let stats = engine.get_stats();
     assert_eq!(stats.average_block_time, 10.5);
@@ -122,7 +122,7 @@ fn create_test_mempool() -> Arc<MempoolManager> {
 fn test_mining_coordinator_new() {
     let mempool = create_test_mempool();
     let coordinator = MiningCoordinator::new(mempool, None);
-    
+
     assert!(!coordinator.is_mining_enabled());
 }
 
@@ -130,12 +130,12 @@ fn test_mining_coordinator_new() {
 fn test_mining_coordinator_enable_disable() {
     let mempool = create_test_mempool();
     let mut coordinator = MiningCoordinator::new(mempool, None);
-    
+
     assert!(!coordinator.is_mining_enabled());
-    
+
     coordinator.enable_mining();
     assert!(coordinator.is_mining_enabled());
-    
+
     coordinator.disable_mining();
     assert!(!coordinator.is_mining_enabled());
 }
@@ -144,11 +144,11 @@ fn test_mining_coordinator_enable_disable() {
 async fn test_mining_coordinator_generate_block_template() {
     let mempool = create_test_mempool();
     let mut coordinator = MiningCoordinator::new(mempool, None);
-    
+
     // Should generate a template even without storage
     let result = coordinator.generate_block_template().await;
     assert!(result.is_ok());
-    
+
     let template = result.unwrap();
     assert_eq!(template.transactions.len(), 1); // Coinbase only
     assert_eq!(template.header.prev_block_hash, [0u8; 32]); // Default genesis hash
@@ -160,12 +160,11 @@ async fn test_mining_coordinator_generate_block_template_with_storage() {
     let storage = Arc::new(bllvm_node::storage::Storage::new(temp_dir.path()).unwrap());
     let mempool = create_test_mempool();
     let mut coordinator = MiningCoordinator::new(mempool, Some(storage));
-    
+
     let result = coordinator.generate_block_template().await;
     assert!(result.is_ok());
-    
+
     let template = result.unwrap();
     // Should have at least coinbase
     assert!(template.transactions.len() >= 1);
 }
-

@@ -77,7 +77,10 @@ impl ModuleApiHub {
             .check_api_call(module_id, &request.payload)?;
 
         // Validate that request doesn't modify consensus
-        match self.request_validator.validate_request(module_id, &request.payload)? {
+        match self
+            .request_validator
+            .validate_request(module_id, &request.payload)?
+        {
             crate::module::security::ValidationResult::Allowed => {}
             crate::module::security::ValidationResult::Denied(reason) => {
                 return Err(ModuleError::OperationError(format!(

@@ -105,7 +105,7 @@ async fn test_validate_payment_request_message_no_signature() {
 #[test]
 fn test_validate_payment_ack_message() {
     use bllvm_protocol::payment::PaymentACK;
-    
+
     let payment = create_test_payment();
     let payment_ack = PaymentACK {
         payment: payment.clone(),
@@ -154,7 +154,7 @@ fn test_payment_message_structure() {
 #[test]
 fn test_payment_ack_message_structure() {
     use bllvm_protocol::payment::PaymentACK;
-    
+
     let payment = create_test_payment();
     let payment_ack = PaymentACK {
         payment: payment.clone(),
@@ -184,4 +184,3 @@ fn test_get_payment_request_message_structure() {
     assert_eq!(msg.payment_id, vec![1, 2, 3]);
     assert_eq!(msg.merchant_pubkey, vec![4, 5, 6]);
 }
-

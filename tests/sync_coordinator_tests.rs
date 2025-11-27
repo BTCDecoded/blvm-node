@@ -79,10 +79,10 @@ fn test_sync_state_machine_progress_updates() {
     // Progress should update on state transitions
     machine.transition_to(SyncState::Headers);
     let progress1 = machine.progress();
-    
+
     machine.transition_to(SyncState::Blocks);
     let progress2 = machine.progress();
-    
+
     // Progress should increase (or at least not decrease)
     assert!(progress2 >= progress1);
 
@@ -130,13 +130,12 @@ fn test_sync_state_machine_error_message() {
     let error_msg = "Connection failed".to_string();
 
     machine.set_error(error_msg.clone());
-    
+
     match machine.state() {
         SyncState::Error(msg) => assert_eq!(msg, &error_msg),
         _ => panic!("Expected Error state"),
     }
-    
+
     // Verify error state has progress reset
     assert_eq!(machine.progress(), 0.0);
 }
-

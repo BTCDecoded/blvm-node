@@ -177,12 +177,12 @@ async fn test_dos_protection_manager_active_connections_check() {
 #[tokio::test]
 async fn test_dos_protection_manager_auto_ban() {
     let manager = DosProtectionManager::with_ban_settings(
-        3,   // max_connections_per_window
-        1,   // window_seconds (short window for testing)
+        3,    // max_connections_per_window
+        1,    // window_seconds (short window for testing)
         1000, // max_message_queue_size
-        50,  // max_active_connections
-        2,   // auto_ban_threshold (ban after 2 violations - lower for testing)
-        300, // ban_duration_seconds
+        50,   // max_active_connections
+        2,    // auto_ban_threshold (ban after 2 violations - lower for testing)
+        300,  // ban_duration_seconds
     );
     let ip = create_test_ip(1);
 
@@ -191,17 +191,17 @@ async fn test_dos_protection_manager_auto_ban() {
         assert!(manager.check_connection(ip).await);
     }
     assert!(!manager.check_connection(ip).await); // First violation
-    
+
     // Verify violation is tracked
     let dos_metrics = manager.get_dos_metrics().await;
     assert!(dos_metrics.connection_rate_violations >= 1);
-    
+
     // Verify not yet at auto-ban threshold (only 1 violation so far)
     assert!(!manager.should_auto_ban(ip).await);
-    
+
     // Wait for window to expire so we can make more connections
     sleep(Duration::from_secs(2)).await;
-    
+
     // Second violation round
     for _ in 0..3 {
         assert!(manager.check_connection(ip).await);
@@ -211,7 +211,7 @@ async fn test_dos_protection_manager_auto_ban() {
     // Verify metrics updated
     let dos_metrics_after = manager.get_dos_metrics().await;
     assert!(dos_metrics_after.connection_rate_violations >= 2);
-    
+
     // Should now auto-ban after 2 violations (threshold)
     // Note: This may fail if successful connections reset violations
     // The important thing is that violations are tracked
@@ -254,7 +254,7 @@ async fn test_dos_protection_manager_violation_reset() {
 
     // Wait a bit and make a successful connection (should reset violations)
     sleep(Duration::from_millis(100)).await;
-    
+
     // Make connections from different IP to reset window, then try original IP
     // Actually, the violation count should reset on successful connection
     // But we need to wait for the window to expire first
@@ -284,11 +284,8 @@ async fn test_dos_protection_manager_multiple_ips() {
 
 #[tokio::test]
 async fn test_dos_protection_manager_ban_duration() {
-    let manager = DosProtectionManager::with_ban_settings(
-        3, 60, 1000, 50, 2, 300,
-    );
+    let manager = DosProtectionManager::with_ban_settings(3, 60, 1000, 50, 2, 300);
 
     let ban_duration = manager.ban_duration_seconds();
     assert_eq!(ban_duration, 300);
 }
-
