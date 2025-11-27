@@ -8,6 +8,26 @@ This document defines the security boundaries, threat model, and limitations of 
 
 ## Security Boundaries
 
+### What bllvm-node Handles
+
+- Consensus validation (delegated to bllvm-consensus via bllvm-protocol)
+- Network protocol (P2P message parsing, peer management)
+- Storage layer (block storage, UTXO set, chain state)
+- RPC interface (JSON-RPC 2.0 API)
+- Module orchestration (loading, IPC, lifecycle management)
+- Mempool management
+- Mining coordination
+
+### What bllvm-node NEVER Handles
+
+- Consensus rule validation (delegated to bllvm-consensus)
+- Protocol variant selection (delegated to bllvm-protocol)
+- Private key management (no wallet functionality)
+- Cryptographic key generation (delegated to bllvm-sdk or modules)
+- Governance enforcement (delegated to bllvm-commons)
+
+## Security Boundaries (Detailed)
+
 ### ✅ IN SCOPE - What This Node Handles
 
 1. **Consensus Validation**
