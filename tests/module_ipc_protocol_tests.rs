@@ -147,6 +147,8 @@ fn test_response_payload_types() {
         value: 1000,
         script_pubkey: vec![0x51], // OP_1
         height: 0,
+
+        is_coinbase: false,
     };
 
     let responses = vec![

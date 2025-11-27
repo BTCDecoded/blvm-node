@@ -68,14 +68,14 @@ async fn test_concurrent_requests() {
                 correlation_id: i,
                 request_type: MessageType::Handshake,
                 payload: RequestPayload::Handshake {
-                    module_id: format!("test_module_{}", i),
+                    module_id: format!("test_module_{i}"),
                     module_name: "Test Module".to_string(),
                     version: "1.0.0".to_string(),
                 },
             };
             let mut hub_guard = hub_clone.lock().await;
             hub_guard
-                .handle_request(&format!("test_module_{}", i), request)
+                .handle_request(&format!("test_module_{i}"), request)
                 .await
         }));
     }
@@ -97,7 +97,7 @@ async fn test_permission_edge_cases() {
     let mut hub = ModuleApiHub::new(node_api);
 
     // Test with empty permission set
-    let mut empty_permissions = PermissionSet::new();
+    let empty_permissions = PermissionSet::new();
     hub.register_module_permissions("test_module".to_string(), empty_permissions.clone());
 
     let request = RequestMessage {

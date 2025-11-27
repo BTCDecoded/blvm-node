@@ -21,12 +21,15 @@ mod kani_proofs {
 
     /// Verify message header parsing correctness
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Section 10.1 (Message Types)
     /// ∀ header_bytes ∈ [u8; 24]: parse_header(header_bytes) = header ⟺
     ///   (header_bytes[0..4] = magic ∧
     ///    header_bytes[4..16] = command ∧
     ///    header_bytes[16..20] = length ∧
     ///    header_bytes[20..24] = checksum)
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.1
+    /// Related: Theorem 10.1.1 (Message Serialization Round-Trip)
     #[kani::proof]
     #[kani::unwind(unwind_bounds::HEADER_PARSING)]
     fn verify_message_header_parsing() {
@@ -59,9 +62,12 @@ mod kani_proofs {
 
     /// Verify checksum validation rejects invalid checksums
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 10.1.2
     /// ∀ payload, wrong_checksum: checksum(payload) ≠ wrong_checksum ⟹
     ///   parse_message_with_checksum(payload, wrong_checksum) = error
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.1, Theorem 10.1.2
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::CHECKSUM)]
     fn verify_checksum_rejection() {
@@ -93,9 +99,12 @@ mod kani_proofs {
 
     /// Verify message size limits are enforced
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 10.1.3
     /// ∀ message: |message| > MAX_PROTOCOL_MESSAGE_LENGTH ⟹
     ///   parse_message(message) = error
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.1, Theorem 10.1.3
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     fn verify_message_size_limits() {
         // Create oversized payload
@@ -116,8 +125,11 @@ mod kani_proofs {
 
     /// Verify version message round-trip property
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 10.1.1
     /// ∀ version_msg: parse_version(serialize_version(version_msg)) = version_msg
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.1, Theorem 10.1.1
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_MESSAGE)]
     fn verify_version_message_roundtrip() {
@@ -217,8 +229,11 @@ mod kani_proofs {
 
     /// Verify transaction message round-trip property
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 10.1.1
     /// ∀ tx_msg: parse_tx(serialize_tx(tx_msg)) = tx_msg
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.1, Theorem 10.1.1
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::COMPLEX_MESSAGE)]
     fn verify_tx_message_roundtrip() {
@@ -359,8 +374,11 @@ mod kani_proofs {
 
     /// Verify block message round-trip property
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 10.1.1
     /// ∀ block_msg: parse_block(serialize_block(block_msg)) = block_msg
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.1, Theorem 10.1.1
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     ///
     /// Note: Block messages are large, so we use bounded verification
     #[kani::proof]

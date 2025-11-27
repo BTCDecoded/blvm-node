@@ -50,6 +50,7 @@ impl NodeAPI for MockNodeAPI {
             value: Integer::from(1000i64),
             script_pubkey: vec![], // ByteString is a type alias for Vec<u8>
             height: Natural::from(100u64),
+            is_coinbase: false,
         }))
     }
 

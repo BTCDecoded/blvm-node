@@ -1,6 +1,6 @@
 //! Tests for node health monitoring
 
-use bllvm_node::node::health::{ComponentHealth, HealthChecker, HealthReport, HealthStatus};
+use bllvm_node::node::health::{HealthChecker, HealthStatus};
 use bllvm_node::node::metrics::{NetworkMetrics, StorageMetrics};
 use std::thread;
 use std::time::Duration;

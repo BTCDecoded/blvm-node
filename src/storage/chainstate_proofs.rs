@@ -41,9 +41,12 @@ mod kani_proofs {
 
     /// Verify height consistency
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 5.3.4
     /// ∀ chain_state: height = chain_length - 1
     /// After update_tip(height), get_height() = height
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 5.3, Theorem 5.3.4
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_CHAINSTATE)]
     fn verify_height_consistency() {
@@ -108,8 +111,11 @@ mod kani_proofs {
 
     /// Verify chain work monotonicity
     ///
-    /// Mathematical Specification:
-    /// ∀ height: chain_work(height+1) ≥ chain_work(height)
+    /// Mathematical Specification: Orange Paper Theorem 5.3.5
+    /// ∀ chain_state, height: chain_work(chain_state, height+1) ≥ chain_work(chain_state, height)
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 5.3, Theorem 5.3.5
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::COMPLEX_CHAINSTATE)]
     fn verify_chain_work_monotonicity() {

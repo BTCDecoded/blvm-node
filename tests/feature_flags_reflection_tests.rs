@@ -35,8 +35,7 @@ async fn getblocktemplate_rules_include_feature_flags() {
     let result = &response["result"];
     assert!(
         result.is_object(),
-        "result should be an object, got: {:?}",
-        result
+        "result should be an object, got: {result:?}"
     );
 
     let rules = result["rules"].as_array().expect("rules array");

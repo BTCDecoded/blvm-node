@@ -1,11 +1,10 @@
 //! Tests for configuration parsing and validation
 
 use bllvm_node::config::{
-    BanListSharingConfig, BanShareMode, DosProtectionConfig, IndexingConfig, IndexingStrategy,
-    ModuleConfig, ModuleResourceLimitsConfig, NetworkTimingConfig, NodeConfig, PruningConfig,
-    PruningMode, RequestTimeoutConfig, RpcAuthConfig, StorageConfig, TransportPreferenceConfig,
+    BanListSharingConfig, DosProtectionConfig, IndexingConfig, IndexingStrategy, ModuleConfig,
+    ModuleResourceLimitsConfig, NetworkTimingConfig, NodeConfig, PruningConfig, PruningMode,
+    RequestTimeoutConfig, RpcAuthConfig, StorageConfig, TransportPreferenceConfig,
 };
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use tempfile::TempDir;
 

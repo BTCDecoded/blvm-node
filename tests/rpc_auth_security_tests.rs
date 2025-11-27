@@ -3,7 +3,7 @@
 //! Tests security boundaries, authentication bypass attempts,
 //! and edge cases that could lead to security vulnerabilities.
 
-use bllvm_node::rpc::auth::{AuthToken, RpcAuthManager, UserId};
+use bllvm_node::rpc::auth::{RpcAuthManager, UserId};
 use hyper::HeaderMap;
 use std::net::SocketAddr;
 
@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 async fn test_auth_bypass_attempt_empty_token() {
     let manager = RpcAuthManager::new(true);
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let mut headers = HeaderMap::new();
+    let headers = HeaderMap::new();
 
     // Empty token should be rejected
     let result = manager.authenticate_request(&headers, addr).await;
@@ -60,7 +60,7 @@ async fn test_auth_valid_token_accepted() {
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",
-        format!("Bearer {}", token_str).parse().unwrap(),
+        format!("Bearer {token_str}").parse().unwrap(),
     );
 
     let result = manager.authenticate_request(&headers, addr).await;
@@ -76,7 +76,7 @@ async fn test_auth_valid_token_accepted() {
 async fn test_auth_no_auth_required_allows_access() {
     let manager = RpcAuthManager::new(false);
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let mut headers = HeaderMap::new();
+    let headers = HeaderMap::new();
 
     // When auth not required, should allow access
     let result = manager.authenticate_request(&headers, addr).await;
@@ -101,7 +101,7 @@ async fn test_auth_token_revocation() {
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",
-        format!("Bearer {}", token_str).parse().unwrap(),
+        format!("Bearer {token_str}").parse().unwrap(),
     );
     let result = manager.authenticate_request(&headers, addr).await;
     assert!(result.user_id.is_some());
@@ -127,7 +127,7 @@ async fn test_auth_concurrent_requests() {
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",
-        format!("Bearer {}", token_str).parse().unwrap(),
+        format!("Bearer {token_str}").parse().unwrap(),
     );
 
     // Simulate concurrent authentication attempts
@@ -161,7 +161,7 @@ async fn test_auth_brute_force_protection() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "authorization",
-            format!("Bearer invalid-token-{}", i).parse().unwrap(),
+            format!("Bearer invalid-token-{i}").parse().unwrap(),
         );
 
         let result = manager.authenticate_request(&headers, addr).await;
@@ -186,7 +186,7 @@ async fn test_auth_case_sensitive_token() {
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",
-        format!("Bearer {}", token_str).parse().unwrap(),
+        format!("Bearer {token_str}").parse().unwrap(),
     );
     let result = manager.authenticate_request(&headers, addr).await;
     assert!(result.user_id.is_some());

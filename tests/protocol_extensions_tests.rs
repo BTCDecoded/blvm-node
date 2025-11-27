@@ -7,7 +7,7 @@ use bllvm_node::network::protocol::{
 };
 use bllvm_node::network::protocol_extensions::{handle_get_filtered_block, handle_get_utxo_set};
 use bllvm_node::storage::Storage;
-use bllvm_node::{Block, BlockHeader, Hash, Transaction};
+use bllvm_node::{Block, BlockHeader, Transaction};
 use std::sync::Arc;
 
 fn create_test_storage() -> Arc<Storage> {

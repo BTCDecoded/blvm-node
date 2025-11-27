@@ -5,7 +5,7 @@
 
 use bllvm_node::node::health::{HealthChecker, HealthStatus};
 use bllvm_node::node::metrics::{MetricsCollector, NetworkMetrics, StorageMetrics};
-use bllvm_node::node::performance::{OperationType, PerformanceProfiler};
+use bllvm_node::node::performance::PerformanceProfiler;
 use std::time::Duration;
 
 #[test]

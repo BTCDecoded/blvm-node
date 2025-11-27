@@ -43,6 +43,8 @@ fn create_test_utxo_set() -> UtxoSet {
             value: 100_000,
             script_pubkey: vec![0x76, 0xa9, 0x14, 0x00].repeat(20),
             height: 0,
+
+            is_coinbase: false,
         },
     );
     utxo_set

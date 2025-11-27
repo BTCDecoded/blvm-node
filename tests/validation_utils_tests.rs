@@ -26,7 +26,7 @@ fn test_ensure_fmt_success() {
 #[test]
 fn test_ensure_fmt_failure() {
     let value = 42;
-    let result = ensure_fmt(false, || format!("Value {} must be positive", value));
+    let result = ensure_fmt(false, || format!("Value {value} must be positive"));
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Value 42"));
 }

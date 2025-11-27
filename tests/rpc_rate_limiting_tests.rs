@@ -2,7 +2,7 @@
 //!
 //! Tests rate limiting functionality, edge cases, and per-user/per-method limits.
 
-use bllvm_node::rpc::auth::{AuthToken, RpcAuthManager, RpcRateLimiter, UserId};
+use bllvm_node::rpc::auth::{RpcAuthManager, RpcRateLimiter, UserId};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -13,11 +13,7 @@ async fn test_rate_limiter_basic_functionality() {
 
     // Should allow requests up to burst limit
     for i in 0..10 {
-        assert!(
-            limiter.check_and_consume(),
-            "Request {} should be allowed",
-            i
-        );
+        assert!(limiter.check_and_consume(), "Request {i} should be allowed");
         assert_eq!(limiter.tokens_remaining(), 10 - i - 1);
     }
 
@@ -65,8 +61,7 @@ async fn test_rate_limiter_burst_limit_cap() {
     let tokens = limiter.tokens_remaining();
     assert!(
         tokens <= 5,
-        "Tokens should not exceed burst limit of 5, got {}",
-        tokens
+        "Tokens should not exceed burst limit of 5, got {tokens}"
     );
 }
 
@@ -97,7 +92,7 @@ async fn test_auth_manager_rate_limit_per_user() {
     // User1 should have stricter limits
     for i in 0..5 {
         let allowed = manager.check_rate_limit(&user1).await;
-        assert!(allowed, "User1 request {} should be allowed", i);
+        assert!(allowed, "User1 request {i} should be allowed");
     }
 
     // User1 should be rate limited after burst
@@ -253,8 +248,6 @@ async fn test_rate_limiter_high_rate() {
     // With such a high rate, should have refilled
     assert!(
         had_tokens || tokens >= 8,
-        "Should have refilled (had_tokens: {}, remaining: {})",
-        had_tokens,
-        tokens
+        "Should have refilled (had_tokens: {had_tokens}, remaining: {tokens})"
     );
 }

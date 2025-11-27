@@ -364,6 +364,12 @@ pub struct NodeConfig {
 
     /// RBF (Replace-By-Fee) configuration
     pub rbf: Option<RbfConfig>,
+
+    /// Payment configuration (BIP70)
+    pub payment: Option<PaymentConfig>,
+
+    /// REST API configuration
+    pub rest_api: Option<RestApiConfig>,
 }
 
 /// Transport preference configuration (serializable)
@@ -443,6 +449,8 @@ impl Default for NodeConfig {
             logging: None,
             mempool: None,
             rbf: None,
+            payment: None,
+            rest_api: None,
         }
     }
 }
@@ -1641,6 +1649,58 @@ impl Default for MempoolPolicyConfig {
             mempool_persistence_path: "data/mempool.dat".to_string(),
         }
     }
+}
+
+/// Payment configuration (BIP70)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentConfig {
+    /// Enable P2P BIP70 (default: true)
+    #[serde(default = "default_true")]
+    pub p2p_enabled: bool,
+
+    /// Enable HTTP BIP70 (default: false, requires bip70-http feature)
+    #[serde(default = "default_false")]
+    pub http_enabled: bool,
+
+    /// Merchant private key for signing (optional, hex-encoded)
+    #[serde(default)]
+    pub merchant_key: Option<String>,
+
+    /// Payment request storage path
+    #[serde(default = "default_payment_store_path")]
+    pub payment_store_path: String,
+
+    /// Enable module payment integration (default: true)
+    #[serde(default = "default_true")]
+    pub module_payments_enabled: bool,
+}
+
+fn default_payment_store_path() -> String {
+    "data/payments".to_string()
+}
+
+impl Default for PaymentConfig {
+    fn default() -> Self {
+        Self {
+            p2p_enabled: true,
+            http_enabled: false,
+            merchant_key: None,
+            payment_store_path: "data/payments".to_string(),
+            module_payments_enabled: true,
+        }
+    }
+}
+
+/// REST API configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RestApiConfig {
+    /// Enable REST API (default: false, requires rest-api feature)
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+
+    /// Enable payment endpoints (default: false, requires bip70-http feature)
+    #[serde(default = "default_false")]
+    pub payment_endpoints_enabled: bool,
 }
 
 /// Logging configuration

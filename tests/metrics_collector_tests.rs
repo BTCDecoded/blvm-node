@@ -1,8 +1,8 @@
 //! Tests for metrics collector
 
 use bllvm_node::node::metrics::{
-    DosMetrics, MetricsCollector, NetworkMetrics, NodeMetrics, PerformanceMetrics, RpcMetrics,
-    StorageMetrics, SystemMetrics,
+    DosMetrics, MetricsCollector, NetworkMetrics, PerformanceMetrics, RpcMetrics, StorageMetrics,
+    SystemMetrics,
 };
 
 #[test]
@@ -130,7 +130,7 @@ fn test_storage_metrics_default() {
     assert_eq!(metrics.transaction_count, 0);
     assert_eq!(metrics.disk_size, 0);
     // within_bounds may default to false or true depending on implementation
-    assert!(metrics.within_bounds == true || metrics.within_bounds == false);
+    assert!(metrics.within_bounds || !metrics.within_bounds);
 }
 
 #[test]

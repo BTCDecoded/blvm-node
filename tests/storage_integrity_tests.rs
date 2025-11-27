@@ -44,6 +44,8 @@ fn test_utxo_store_consistency() {
         value: 1000000,
         script_pubkey: p2pkh_script(random_hash20()),
         height: 0,
+
+        is_coinbase: false,
     };
 
     // Add UTXO

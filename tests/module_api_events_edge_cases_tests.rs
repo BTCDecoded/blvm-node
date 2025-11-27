@@ -3,9 +3,8 @@
 //! Stress tests and edge cases for event publishing: queue overflow, concurrent publishing.
 
 use bllvm_node::module::api::events::EventManager;
-use bllvm_node::module::ipc::protocol::{EventMessage, EventPayload};
+use bllvm_node::module::ipc::protocol::EventPayload;
 use bllvm_node::module::traits::EventType;
-use bllvm_protocol::Hash;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -15,7 +14,7 @@ async fn test_event_queue_overflow() {
     let manager = Arc::new(EventManager::new());
 
     // Subscribe a module
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     manager
         .subscribe_module("test_module".to_string(), vec![EventType::NewBlock], tx)
         .await
@@ -111,9 +110,9 @@ async fn test_multiple_subscribers() {
 
     let mut receivers = vec![];
     for i in 0..5 {
-        let (tx, mut rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::channel(10);
         manager
-            .subscribe_module(format!("module_{}", i), vec![EventType::NewBlock], tx)
+            .subscribe_module(format!("module_{i}"), vec![EventType::NewBlock], tx)
             .await
             .unwrap();
         receivers.push(rx);

@@ -65,10 +65,13 @@ mod kani_proofs {
 
     /// Verify double-spend detection
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 9.1.1
     /// ∀ tx1, tx2: (tx1 ≠ tx2) ∧ (∃ input: input ∈ tx1.inputs ∧ input ∈ tx2.inputs) ⟹
     ///   add_transaction(tx1) ∧ add_transaction(tx2) ⟹
     ///     (tx1 ∈ mempool ⟹ tx2 ∉ mempool) ∨ (tx2 ∈ mempool ⟹ tx1 ∉ mempool)
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 9.1, Theorem 9.1.1
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     ///
     /// Note: We verify the conflict detection logic directly by checking spent_outputs,
     /// since add_transaction is async and Kani has limitations with async code.
@@ -168,8 +171,11 @@ mod kani_proofs {
 
     /// Verify spent output tracking
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 9.1.2
     /// add_transaction(tx) ⟹ ∀ input ∈ tx.inputs: is_spent(input.prevout) = true
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 9.1, Theorem 9.1.2
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_MEMPOOL)]
     fn verify_spent_output_tracking() {
@@ -206,9 +212,12 @@ mod kani_proofs {
 
     /// Verify fee calculation correctness
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Theorem 9.1.3
     /// ∀ tx, utxo_set: calculate_transaction_fee(tx, utxo_set) =
     ///   sum(utxo.value for utxo ∈ inputs) - sum(output.value for output ∈ tx.outputs)
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 9.1, Theorem 9.1.3
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::COMPLEX_MEMPOOL)]
     fn verify_fee_calculation() {
@@ -329,8 +338,11 @@ mod kani_proofs {
 
     /// Verify non-negative fees
     ///
-    /// Mathematical Specification:
+    /// Mathematical Specification: Orange Paper Corollary 9.1.3.1
     /// ∀ tx, utxo_set: calculate_transaction_fee(tx, utxo_set) ≥ 0
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 9.1, Corollary 9.1.3.1
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_MEMPOOL)]
     fn verify_non_negative_fees() {

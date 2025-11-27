@@ -19,6 +19,8 @@ fn test_calculate_transaction_fee() {
         value: 100_000_000,                    // 1 BTC
         script_pubkey: vec![0x76, 0xa9, 0x14], // P2PKH script
         height: 0,
+
+        is_coinbase: false,
     };
     utxo_set.insert(outpoint.clone(), utxo);
 
@@ -56,6 +58,8 @@ fn test_calculate_transaction_fee_zero_fee() {
         value: 100_000_000,
         script_pubkey: vec![],
         height: 0,
+
+        is_coinbase: false,
     };
     utxo_set.insert(outpoint.clone(), utxo);
 

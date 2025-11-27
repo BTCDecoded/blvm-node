@@ -1,7 +1,7 @@
 //! Tests for module manager lifecycle
 
 use bllvm_node::module::manager::ModuleManager;
-use bllvm_node::module::traits::{ModuleError, ModuleMetadata, ModuleState};
+use bllvm_node::module::traits::{ModuleError, ModuleMetadata};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -14,7 +14,7 @@ fn create_test_metadata(name: &str) -> ModuleMetadata {
         author: "Test Author".to_string(),
         capabilities: Vec::new(),
         dependencies: HashMap::new(),
-        entry_point: format!("{}.so", name),
+        entry_point: format!("{name}.so"),
     }
 }
 

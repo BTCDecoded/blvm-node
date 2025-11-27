@@ -3,8 +3,7 @@
 use bllvm_node::node::mempool::MempoolManager;
 use bllvm_node::node::miner::{MiningCoordinator, MiningEngine, TransactionSelector};
 use bllvm_protocol::tx_inputs;
-use bllvm_protocol::tx_outputs;
-use bllvm_protocol::{Block, BlockHeader, Transaction, UtxoSet};
+use bllvm_protocol::Transaction;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -166,5 +165,5 @@ async fn test_mining_coordinator_generate_block_template_with_storage() {
 
     let template = result.unwrap();
     // Should have at least coinbase
-    assert!(template.transactions.len() >= 1);
+    assert!(!template.transactions.is_empty());
 }

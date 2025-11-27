@@ -2,8 +2,6 @@
 
 use bllvm_node::rpc::server::RpcServer;
 use serde_json::{json, Value};
-use std::net::SocketAddr;
-use tokio::time::{sleep, Duration};
 
 // Helper to create a test RPC server
 fn create_test_server() -> RpcServer {

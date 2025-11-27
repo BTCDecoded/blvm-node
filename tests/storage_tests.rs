@@ -64,6 +64,8 @@ fn test_utxo_store() {
         value: 5000000000,                     // 50 BTC in satoshis
         script_pubkey: vec![0x76, 0xa9, 0x14], // P2PKH script
         height: 0,
+
+        is_coinbase: false,
     };
 
     // Add UTXO
@@ -314,6 +316,8 @@ fn test_utxo_store_addition_and_retrieval() {
         value: 50_0000_0000,
         script_pubkey: p2pkh_script(random_hash20()),
         height: 100,
+
+        is_coinbase: false,
     };
 
     // Add UTXO
@@ -342,6 +346,8 @@ fn test_utxo_store_removal() {
         value: 25_0000_0000,
         script_pubkey: p2pkh_script(random_hash20()),
         height: 50,
+
+        is_coinbase: false,
     };
 
     // Add UTXO
@@ -367,6 +373,8 @@ fn test_utxo_store_spent_tracking() {
         value: 10_0000_0000,
         script_pubkey: p2pkh_script(random_hash20()),
         height: 25,
+
+        is_coinbase: false,
     };
 
     // Add UTXO
@@ -443,6 +451,8 @@ fn test_utxo_store_concurrent_operations() {
             value: 5_0000_0000,
             script_pubkey: p2pkh_script(random_hash20()),
             height: 10,
+
+            is_coinbase: false,
         };
 
         utxostore.add_utxo(&outpoint, &utxo).unwrap();
@@ -687,6 +697,8 @@ async fn test_utxostore_concurrent_operations() {
             value: utxo.value,
             script_pubkey: utxo.script_pubkey.clone(),
             height: 100, // Default height for test
+
+            is_coinbase: false,
         };
         utxostore.add_utxo(outpoint, &utxo_struct).unwrap();
     }
@@ -696,6 +708,8 @@ async fn test_utxostore_concurrent_operations() {
             value: utxo.value,
             script_pubkey: utxo.script_pubkey.clone(),
             height: 100, // Default height for test
+
+            is_coinbase: false,
         };
         utxostore.add_utxo(outpoint, &utxo_struct).unwrap();
     }

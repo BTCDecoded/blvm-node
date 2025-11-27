@@ -80,7 +80,8 @@ async fn test_getblocktemplate_with_utxo_set() {
         value: 1000000000, // 10 BTC
         script_pubkey: p2pkh_script(random_hash20()),
         height: 0,
-    };
+    
+            is_coinbase: false,};
     storage.utxos().add_utxo(&outpoint1, &utxo1).unwrap();
     
     let outpoint2 = OutPoint {
@@ -91,7 +92,8 @@ async fn test_getblocktemplate_with_utxo_set() {
         value: 500000000, // 5 BTC
         script_pubkey: p2pkh_script(random_hash20()),
         height: 0,
-    };
+    
+            is_coinbase: false,};
     storage.utxos().add_utxo(&outpoint2, &utxo2).unwrap();
     
     // Get template
@@ -189,7 +191,8 @@ async fn test_template_creation_with_real_data() {
             value: 100000000 * (i + 1), // Varying amounts
             script_pubkey: p2pkh_script(random_hash20()),
             height: 100,
-        };
+        
+            is_coinbase: false,};
         storage.utxos().add_utxo(&outpoint, &utxo).unwrap();
     }
     

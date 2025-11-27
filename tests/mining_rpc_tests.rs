@@ -270,6 +270,8 @@ async fn test_get_utxo_set_populated() {
         value: 5000000000,
         script_pubkey: vec![0x76, 0xa9, 0x14],
         height: 0,
+
+        is_coinbase: false,
     };
     storage.utxos().add_utxo(&outpoint, &utxo).unwrap();
 

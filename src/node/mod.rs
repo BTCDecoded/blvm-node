@@ -36,6 +36,8 @@ pub struct Node {
     protocol: Arc<BitcoinProtocolEngine>,
     storage: Arc<Storage>,
     network: NetworkManager,
+    /// Module registry (shared between network and module manager)
+    module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
     rpc: RpcManager,
     #[allow(dead_code)]
     sync_coordinator: sync::SyncCoordinator,
@@ -153,6 +155,7 @@ impl Node {
             network_addr,
             config: None,
             disk_check_counter: std::sync::atomic::AtomicU64::new(0),
+            module_registry: None,
             #[cfg(feature = "governance")]
             governance_webhook: None,
         })
@@ -383,6 +386,52 @@ impl Node {
             let node_api = Arc::new(NodeApiImpl::new(storage_arc));
             let socket_path = env_or_default("MODULE_SOCKET_DIR", "data/modules/socket");
 
+            // Initialize module registry if network is available
+            let registry_cache_dir = self.data_dir.join("modules").join("registry_cache");
+            let registry_cas_dir = self.data_dir.join("modules").join("registry_cas");
+            let registry_mirrors = Vec::new(); // Empty by default - can be configured later
+
+            if let Ok(mut module_registry) = crate::module::registry::client::ModuleRegistry::new(
+                &registry_cache_dir,
+                &registry_cas_dir,
+                registry_mirrors,
+            ) {
+                // Create Arc wrapper for network manager to share with registry
+                // Since NetworkManager doesn't implement Clone, we temporarily move it to Arc
+                // then move it back. This allows the registry to send P2P messages.
+                let network_arc = {
+                    // Temporarily replace network with a new one
+                    let temp_network = NetworkManager::new(self.network_addr);
+                    let old_network = std::mem::replace(&mut self.network, temp_network);
+                    Arc::new(old_network)
+                };
+
+                // Set network manager on registry
+                module_registry.set_network_manager(Arc::clone(&network_arc));
+
+                // Put network manager back
+                self.network = Arc::try_unwrap(network_arc)
+                    .map_err(|_| anyhow::anyhow!("Failed to unwrap network Arc"))
+                    .unwrap_or_else(|_| NetworkManager::new(self.network_addr));
+
+                let module_registry_arc = Arc::new(module_registry);
+
+                // Store registry in node for later use
+                self.module_registry = Some(Arc::clone(&module_registry_arc));
+
+                // Connect network manager to registry (using mutable reference)
+                // This allows the network to serve module requests
+                self.network
+                    .set_module_registry(Arc::clone(&module_registry_arc));
+
+                // Connect module manager to registry (using mutable reference)
+                module_manager.set_module_registry(Arc::clone(&module_registry_arc));
+
+                info!("Module registry initialized and connected to network and module manager");
+            } else {
+                warn!("Failed to initialize module registry - modules will only load from local directory");
+            }
+
             module_manager
                 .start(&socket_path, node_api)
                 .await
@@ -477,6 +526,8 @@ impl Node {
 
         // Use config if available, otherwise use defaults
         let default_config = NodeConfig {
+            payment: None,
+            rest_api: None,
             listen_addr: Some(self.network_addr),
             ..Default::default()
         };

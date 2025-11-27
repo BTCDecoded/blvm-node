@@ -6,7 +6,6 @@ use bllvm_node::network::bip157_handler::{
 use bllvm_node::network::filter_service::BlockFilterService;
 use bllvm_node::network::protocol::{GetCfcheckptMessage, GetCfheadersMessage, GetCfiltersMessage};
 use bllvm_node::storage::Storage;
-use bllvm_protocol::Hash;
 use std::sync::Arc;
 use tempfile::TempDir;
 

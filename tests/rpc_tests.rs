@@ -460,7 +460,7 @@ async fn test_mining_rpc_getblocktemplate() {
             {
                 return; // Skip test - expected behavior with few headers
             }
-            panic!("Unexpected error: {:?}", e);
+            panic!("Unexpected error: {e:?}");
         }
     };
 

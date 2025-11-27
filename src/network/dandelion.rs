@@ -426,6 +426,13 @@ mod kani_proofs {
     use kani::*;
 
     /// Proof 1: No Premature Broadcast - Single stem state per transaction
+    ///
+    /// Mathematical Specification: Orange Paper Theorem 10.6.5
+    /// ∀ tx: phase(tx) = Stem ⟹ broadcast_count(tx) = 0
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.6, Theorem 10.6.5
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
+    ///
     /// Invariant: At most one stem state exists per transaction hash
     #[kani::proof]
     fn kani_no_premature_broadcast_single_state() {
@@ -450,6 +457,13 @@ mod kani_proofs {
     }
 
     /// Proof 2: Bounded Stem Length - hops never exceed max_stem_hops
+    ///
+    /// Mathematical Specification: Orange Paper Theorem 10.6.6
+    /// ∀ tx: stem_hops(tx) ≤ max_stem_hops
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.6, Theorem 10.6.6
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
+    ///
     /// Invariant: stem_hops(tx) ≤ max_stem_hops
     #[kani::proof]
     fn kani_bounded_stem_length() {
@@ -486,6 +500,13 @@ mod kani_proofs {
     }
 
     /// Proof 3: Single Stem State - at most one entry per transaction in stem_txs
+    ///
+    /// Mathematical Specification: Orange Paper Theorem 10.6.7
+    /// ∀ tx: |stem_states(tx)| ≤ 1
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.6, Theorem 10.6.7
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
+    ///
     /// Invariant: |stem_states(tx)| ≤ 1
     #[kani::proof]
     fn kani_single_stem_state() {
@@ -506,6 +527,13 @@ mod kani_proofs {
     }
 
     /// Proof 4: Timeout Enforcement - if elapsed > timeout, should_fluff returns true
+    ///
+    /// Mathematical Specification: Orange Paper Theorem 10.6.8
+    /// ∀ tx: elapsed_time(tx) > stem_timeout ⟹ phase(tx) = Fluff
+    ///
+    /// Reference: THE_ORANGE_PAPER.md Section 10.6, Theorem 10.6.8
+    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
+    ///
     /// Note: This proof uses a deterministic clock that we can control
     #[kani::proof]
     fn kani_timeout_enforcement_structure() {

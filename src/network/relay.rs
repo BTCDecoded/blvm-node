@@ -363,7 +363,7 @@ pub struct RelayStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     #[cfg(feature = "fibre")]
     use crate::network::fibre::FibreRelay;
 

@@ -2,9 +2,9 @@
 
 use bllvm_node::module::api::events::EventManager;
 use bllvm_node::module::ipc::protocol::{EventMessage, EventPayload, ModuleMessage};
-use bllvm_node::module::traits::{EventType, ModuleError};
+use bllvm_node::module::traits::EventType;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 #[tokio::test]
 async fn test_event_manager_new() {

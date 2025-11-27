@@ -4,7 +4,6 @@
 //! and all authentication edge cases.
 
 use bllvm_node::rpc::auth::{AuthToken, RpcAuthManager, RpcRateLimiter, UserId};
-use hyper::HeaderMap;
 use std::net::SocketAddr;
 
 #[test]
@@ -47,7 +46,7 @@ fn test_user_id_ip() {
 
 #[test]
 fn test_rate_limiter_creation() {
-    let mut limiter = RpcRateLimiter::new(10, 5);
+    let limiter = RpcRateLimiter::new(10, 5);
     assert_eq!(limiter.tokens_remaining(), 10);
 }
 
@@ -136,7 +135,7 @@ async fn test_auth_manager_add_token() {
     let mut headers = hyper::HeaderMap::new();
     headers.insert(
         "authorization",
-        format!("Bearer {}", token_str).parse().unwrap(),
+        format!("Bearer {token_str}").parse().unwrap(),
     );
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let result = manager.authenticate_request(&headers, addr).await;
@@ -154,7 +153,7 @@ async fn test_auth_manager_remove_token() {
     let mut headers = hyper::HeaderMap::new();
     headers.insert(
         "authorization",
-        format!("Bearer {}", token_str).parse().unwrap(),
+        format!("Bearer {token_str}").parse().unwrap(),
     );
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let result = manager.authenticate_request(&headers, addr).await;
@@ -193,7 +192,7 @@ async fn test_auth_manager_set_user_rate_limit() {
     let mut headers = hyper::HeaderMap::new();
     headers.insert(
         "authorization",
-        format!("Bearer {}", token_str).parse().unwrap(),
+        format!("Bearer {token_str}").parse().unwrap(),
     );
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let result = manager.authenticate_request(&headers, addr).await;
