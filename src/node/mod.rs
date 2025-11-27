@@ -38,6 +38,10 @@ pub struct Node {
     network: NetworkManager,
     /// Module registry (shared between network and module manager)
     module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
+    /// Payment processor for BIP70 payments (HTTP and P2P)
+    payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
+    /// Payment state machine for unified payment coordination
+    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
     rpc: RpcManager,
     #[allow(dead_code)]
     sync_coordinator: sync::SyncCoordinator,
@@ -156,6 +160,8 @@ impl Node {
             config: None,
             disk_check_counter: std::sync::atomic::AtomicU64::new(0),
             module_registry: None,
+            payment_processor: None,
+            payment_state_machine: None,
             #[cfg(feature = "governance")]
             governance_webhook: None,
         })
@@ -428,6 +434,106 @@ impl Node {
                 module_manager.set_module_registry(Arc::clone(&module_registry_arc));
 
                 info!("Module registry initialized and connected to network and module manager");
+
+                // Initialize payment processor if payment is enabled
+                let payment_config = self
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.payment.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
+
+                if payment_config.p2p_enabled || payment_config.http_enabled {
+                    match crate::payment::processor::PaymentProcessor::new(payment_config.clone()) {
+                        Ok(mut processor) => {
+                            // Connect module registry to payment processor
+                            processor =
+                                processor.with_module_registry(Arc::clone(&module_registry_arc));
+
+                            // Add module encryption support
+                            let module_encryption =
+                                Arc::new(crate::module::encryption::ModuleEncryption::new());
+                            processor =
+                                processor.with_module_encryption(Arc::clone(&module_encryption));
+
+                            // Add modules directory for storing encrypted/decrypted modules
+                            if let Some(ref module_config) =
+                                self.config.as_ref().and_then(|c| c.modules.as_ref())
+                            {
+                                let modules_dir = PathBuf::from(&module_config.modules_dir);
+                                processor = processor.with_modules_dir(modules_dir);
+                            }
+
+                            let processor_arc = Arc::new(processor);
+
+                            // Store processor in node
+                            self.payment_processor = Some(Arc::clone(&processor_arc));
+
+                            // Create payment state machine for unified payment coordination
+                            #[cfg(feature = "ctv")]
+                            let state_machine =
+                                crate::payment::state_machine::PaymentStateMachine::with_storage(
+                                    Arc::clone(&processor_arc),
+                                    Some(Arc::clone(&self.storage)),
+                                )
+                                .with_congestion_manager(
+                                    Some(Arc::clone(&self.mempool_manager)),
+                                    Some(Arc::clone(&self.storage)),
+                                    crate::payment::congestion::BatchConfig::default(),
+                                );
+                            #[cfg(not(feature = "ctv"))]
+                            let state_machine =
+                                crate::payment::state_machine::PaymentStateMachine::new(
+                                    Arc::clone(&processor_arc),
+                                );
+                            let state_machine_arc = Arc::new(state_machine);
+                            self.payment_state_machine = Some(Arc::clone(&state_machine_arc));
+
+                            // Connect to network manager (for P2P payments)
+                            self.network
+                                .set_payment_processor(Arc::clone(&processor_arc));
+                            self.network
+                                .set_payment_state_machine(Arc::clone(&state_machine_arc));
+
+                            // Set module encryption and modules directory in network manager
+                            self.network
+                                .set_module_encryption(Arc::clone(&module_encryption));
+                            if let Some(ref module_config) =
+                                self.config.as_ref().and_then(|c| c.modules.as_ref())
+                            {
+                                self.network
+                                    .set_modules_dir(PathBuf::from(&module_config.modules_dir));
+                            }
+
+                            // Connect to RPC manager (for HTTP payments)
+                            #[cfg(feature = "bip70-http")]
+                            {
+                                let rpc = std::mem::replace(
+                                    &mut self.rpc,
+                                    crate::rpc::RpcManager::new("127.0.0.1:0".parse().unwrap()),
+                                );
+                                self.rpc = rpc.with_payment_processor(Arc::clone(&processor_arc));
+                                #[cfg(feature = "ctv")]
+                                {
+                                    let rpc = std::mem::replace(
+                                        &mut self.rpc,
+                                        crate::rpc::RpcManager::new("127.0.0.1:0".parse().unwrap()),
+                                    );
+                                    self.rpc = rpc
+                                        .with_payment_state_machine(Arc::clone(&state_machine_arc));
+                                }
+                            }
+
+                            info!(
+                                "Payment processor initialized: P2P={}, HTTP={}",
+                                payment_config.p2p_enabled, payment_config.http_enabled
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Failed to initialize payment processor: {}", e);
+                        }
+                    }
+                }
             } else {
                 warn!("Failed to initialize module registry - modules will only load from local directory");
             }

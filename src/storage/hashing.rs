@@ -3,6 +3,7 @@
 //! Implements proper Bitcoin double SHA256 hashing for all storage operations.
 //! This replaces the incorrect DefaultHasher usage throughout the storage layer.
 
+#[cfg(not(feature = "production"))]
 use sha2::{Digest, Sha256};
 
 /// Calculate Bitcoin double SHA256 hash
@@ -18,27 +19,52 @@ use sha2::{Digest, Sha256};
 ///
 /// # Returns
 /// 32-byte hash as array
+///
+/// Performance optimization: Uses OptimizedSha256 in production mode for SHA-NI acceleration
 pub fn double_sha256(data: &[u8]) -> [u8; 32] {
-    let first_hash = Sha256::digest(data);
-    let second_hash = Sha256::digest(first_hash);
+    #[cfg(feature = "production")]
+    {
+        use bllvm_consensus::crypto::OptimizedSha256;
+        let hasher = OptimizedSha256::new();
+        hasher.hash256(data)
+    }
 
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&second_hash);
-    result
+    #[cfg(not(feature = "production"))]
+    {
+        let first_hash = Sha256::digest(data);
+        let second_hash = Sha256::digest(first_hash);
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&second_hash);
+        result
+    }
 }
 
 /// Calculate single SHA256 hash (for internal use)
+///
+/// Performance optimization: Uses OptimizedSha256 in production mode for SHA-NI acceleration
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let hash = Sha256::digest(data);
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&hash);
-    result
+    #[cfg(feature = "production")]
+    {
+        use bllvm_consensus::crypto::OptimizedSha256;
+        let hasher = OptimizedSha256::new();
+        hasher.hash(data)
+    }
+
+    #[cfg(not(feature = "production"))]
+    {
+        let hash = Sha256::digest(data);
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&hash);
+        result
+    }
 }
 
 /// Calculate RIPEMD160 hash (for Bitcoin addresses)
 pub fn ripemd160(data: &[u8]) -> [u8; 20] {
-    use ripemd::Ripemd160;
-    let hash = Ripemd160::digest(data);
+    use ripemd::{Digest, Ripemd160};
+    let mut hasher = Ripemd160::new();
+    hasher.update(data);
+    let hash = hasher.finalize();
     let mut result = [0u8; 20];
     result.copy_from_slice(&hash);
     result

@@ -13,6 +13,7 @@
 //! - **State Separation**: Module state is completely separate from consensus state
 
 pub mod api;
+pub mod encryption;
 pub mod ipc;
 pub mod loader;
 pub mod manager;
@@ -25,6 +26,7 @@ pub mod validation;
 
 pub use security::{Permission, PermissionChecker, PermissionSet, RequestValidator};
 
+pub use encryption::ModuleEncryption;
 pub use manager::ModuleManager;
 pub use process::{ModuleProcess, ModuleProcessMonitor, ModuleProcessSpawner};
 pub use traits::{Module, ModuleContext, ModuleError, ModuleMetadata, ModuleState, NodeAPI};

@@ -61,6 +61,9 @@ pub struct MempoolManager {
     /// Maps transaction hash to set of child transaction hashes (transactions that depend on it)
     /// Uses RwLock for interior mutability
     tx_descendants: RwLock<HashMap<Hash, HashSet<Hash>>>,
+    /// UTXO set hash for change detection (optimization: only recalculate when UTXO set changes)
+    /// Uses RwLock for interior mutability
+    utxo_set_hash: RwLock<Option<u64>>,
 }
 
 impl MempoolManager {
@@ -79,6 +82,7 @@ impl MempoolManager {
             tx_timestamps: RwLock::new(HashMap::new()),
             tx_dependencies: RwLock::new(HashMap::new()),
             tx_descendants: RwLock::new(HashMap::new()),
+            utxo_set_hash: RwLock::new(None),
         }
     }
 
@@ -97,6 +101,7 @@ impl MempoolManager {
             tx_timestamps: RwLock::new(HashMap::new()),
             tx_dependencies: RwLock::new(HashMap::new()),
             tx_descendants: RwLock::new(HashMap::new()),
+            utxo_set_hash: RwLock::new(None),
         }
     }
 
@@ -193,7 +198,9 @@ impl MempoolManager {
         };
 
         let current_time = Self::current_timestamp();
-        let mut to_remove = Vec::new();
+        // Optimization: Pre-allocate with estimated capacity
+        let estimated_removals = self.transactions.len() / 100; // Estimate ~1% will expire
+        let mut to_remove = Vec::with_capacity(estimated_removals);
 
         {
             let timestamps = self.tx_timestamps.read().unwrap();
@@ -773,9 +780,11 @@ impl MempoolManager {
         let tx_size = serialize_transaction(tx).len() as u64;
 
         // Find all ancestors (transactions this tx depends on)
-        let mut ancestors = HashSet::new();
-        let mut to_process = vec![*tx_hash];
-        let mut processed = HashSet::new();
+        // Optimization: Pre-allocate with estimated capacity (most txs have < 10 ancestors)
+        let mut ancestors = HashSet::with_capacity(10);
+        let mut to_process = Vec::with_capacity(10);
+        to_process.push(*tx_hash);
+        let mut processed = HashSet::with_capacity(10);
 
         while let Some(current_hash) = to_process.pop() {
             if processed.contains(&current_hash) {
@@ -829,9 +838,11 @@ impl MempoolManager {
         }
 
         // Find all descendants (transactions that depend on this tx)
-        let mut descendants = HashSet::new();
-        let mut to_process = vec![*tx_hash];
-        let mut processed = HashSet::new();
+        // Optimization: Pre-allocate with estimated capacity (most txs have < 10 descendants)
+        let mut descendants = HashSet::with_capacity(10);
+        let mut to_process = Vec::with_capacity(10);
+        to_process.push(*tx_hash);
+        let mut processed = HashSet::with_capacity(10);
 
         while let Some(current_hash) = to_process.pop() {
             if processed.contains(&current_hash) {
@@ -1103,13 +1114,53 @@ impl MempoolManager {
         result
     }
 
+    /// Calculate a simple hash of the UTXO set for change detection
+    ///
+    /// Uses a fast hash of UTXO set size and a sample of keys to detect changes.
+    /// This is a heuristic - not perfect but fast enough for optimization purposes.
+    fn calculate_utxo_set_hash(utxo_set: &UtxoSet) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        utxo_set.len().hash(&mut hasher);
+
+        // Sample first 10 keys for change detection (fast heuristic)
+        let sample_size = utxo_set.len().min(10);
+        for (i, (outpoint, utxo)) in utxo_set.iter().enumerate() {
+            if i >= sample_size {
+                break;
+            }
+            outpoint.hash(&mut hasher);
+            utxo.value.hash(&mut hasher);
+        }
+
+        hasher.finish()
+    }
+
     /// Update fee index with current UTXO set
     ///
     /// Recalculates fee rates for all transactions and rebuilds the sorted index.
     ///
+    /// Optimization: Only recalculates when UTXO set changes (incremental updates)
     /// Optimization: Batch UTXO lookups across all transactions for better cache locality
     fn update_fee_index(&self, utxo_set: &UtxoSet) {
-        // Clear existing index
+        // Calculate current UTXO set hash
+        let current_hash = Self::calculate_utxo_set_hash(utxo_set);
+
+        // Check if UTXO set changed
+        let mut last_hash = self.utxo_set_hash.write().unwrap();
+        if Some(current_hash) == *last_hash {
+            // UTXO set unchanged - skip recalculation
+            drop(last_hash);
+            return;
+        }
+
+        // UTXO set changed - update hash and recalculate
+        *last_hash = Some(current_hash);
+        drop(last_hash);
+
+        // Clear existing index (we'll rebuild it)
         let mut fee_index = self.fee_index.write().unwrap();
         fee_index.clear();
         drop(fee_index);

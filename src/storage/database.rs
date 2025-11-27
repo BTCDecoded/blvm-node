@@ -252,6 +252,10 @@ mod redb_impl {
         TableDefinition::new("utxo_commitments");
     static COMMITMENT_HEIGHT_INDEX_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("commitment_height_index");
+    // Payment system tables
+    static VAULTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vaults");
+    static POOLS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pools");
+    static BATCHES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("batches");
 
     pub struct RedbDatabase {
         db: Arc<RedbDb>,
@@ -291,6 +295,10 @@ mod redb_impl {
                             let _ = write_txn.open_table(ADDRESS_OUTPUT_INDEX_TABLE)?;
                             let _ = write_txn.open_table(ADDRESS_INPUT_INDEX_TABLE)?;
                             let _ = write_txn.open_table(VALUE_INDEX_TABLE)?;
+                            // Payment system tables
+                            let _ = write_txn.open_table(VAULTS_TABLE)?;
+                            let _ = write_txn.open_table(POOLS_TABLE)?;
+                            let _ = write_txn.open_table(BATCHES_TABLE)?;
                             let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
                             let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
                             let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
@@ -299,6 +307,10 @@ mod redb_impl {
                             let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
                             let _ = write_txn.open_table(UTXO_COMMITMENTS_TABLE)?;
                             let _ = write_txn.open_table(COMMITMENT_HEIGHT_INDEX_TABLE)?;
+                            // Payment system tables
+                            let _ = write_txn.open_table(VAULTS_TABLE)?;
+                            let _ = write_txn.open_table(POOLS_TABLE)?;
+                            let _ = write_txn.open_table(BATCHES_TABLE)?;
                         }
                         write_txn.commit()?;
                         db
@@ -342,6 +354,10 @@ mod redb_impl {
                 let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
                 let _ = write_txn.open_table(UTXO_COMMITMENTS_TABLE)?;
                 let _ = write_txn.open_table(COMMITMENT_HEIGHT_INDEX_TABLE)?;
+                // Payment system tables
+                let _ = write_txn.open_table(VAULTS_TABLE)?;
+                let _ = write_txn.open_table(POOLS_TABLE)?;
+                let _ = write_txn.open_table(BATCHES_TABLE)?;
             }
             write_txn.commit()?;
 
@@ -378,6 +394,10 @@ mod redb_impl {
                 "network_hashrate_cache" => Some(&NETWORK_HASHRATE_CACHE_TABLE),
                 "utxo_commitments" => Some(&UTXO_COMMITMENTS_TABLE),
                 "commitment_height_index" => Some(&COMMITMENT_HEIGHT_INDEX_TABLE),
+                // Payment system tables
+                "vaults" => Some(&VAULTS_TABLE),
+                "pools" => Some(&POOLS_TABLE),
+                "batches" => Some(&BATCHES_TABLE),
                 _ => None,
             }
         }
