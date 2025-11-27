@@ -107,7 +107,7 @@ Successfully implemented a unified transport abstraction layer enabling `referen
 
 **Optional**: To enable Iroh transport (when fully integrated):
 ```rust
-use reference_node::network::{NetworkManager, transport::TransportPreference};
+use bllvm_node::network::{NetworkManager, transport::TransportPreference};
 
 let manager = NetworkManager::with_transport_preference(
     addr,

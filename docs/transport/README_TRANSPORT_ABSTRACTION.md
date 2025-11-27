@@ -63,7 +63,7 @@ Updated to support multiple transports:
 Transport preference can be configured via `NodeConfig`:
 
 ```rust
-use reference_node::{NodeConfig, TransportPreferenceConfig};
+use bllvm_node::{NodeConfig, TransportPreferenceConfig};
 
 let config = NodeConfig {
     transport_preference: TransportPreferenceConfig::TcpOnly, // or Hybrid, IrohOnly
@@ -76,7 +76,7 @@ let config = NodeConfig {
 ### Basic Usage (TCP-only, default)
 
 ```rust
-use reference_node::network::{NetworkManager, transport::TransportPreference};
+use bllvm_node::network::{NetworkManager, transport::TransportPreference};
 use std::net::SocketAddr;
 
 let addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
@@ -89,7 +89,7 @@ manager.start(addr).await?;
 ### Hybrid Mode (TCP + Iroh)
 
 ```rust
-use reference_node::network::{NetworkManager, transport::TransportPreference};
+use bllvm_node::network::{NetworkManager, transport::TransportPreference};
 
 let manager = NetworkManager::with_transport_preference(
     addr,

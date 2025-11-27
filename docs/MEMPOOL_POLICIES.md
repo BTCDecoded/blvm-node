@@ -2,7 +2,7 @@
 
 ## Overview
 
-bllvm-node supports comprehensive mempool policy configuration to control transaction acceptance, eviction, and limits. This allows fine-grained control over mempool behavior for different use cases.
+Supports comprehensive mempool policy configuration to control transaction acceptance, eviction, and limits. Enables fine-grained control over mempool behavior for different use cases.
 
 ## Configuration Parameters
 

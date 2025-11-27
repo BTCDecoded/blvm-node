@@ -2,7 +2,7 @@
 
 ## Overview
 
-bllvm-node supports configurable RBF (Replace-By-Fee) modes to accommodate different use cases. RBF allows transactions to be replaced by new transactions that spend the same inputs but pay higher fees.
+Supports configurable RBF (Replace-By-Fee) modes to accommodate different use cases. RBF allows transactions to be replaced by new transactions that spend the same inputs but pay higher fees.
 
 ## RBF Modes
 

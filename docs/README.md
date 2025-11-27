@@ -1,6 +1,6 @@
-# Reference Node Documentation
+# bllvm-node Documentation
 
-This directory contains documentation for the reference node implementation.
+Documentation for the bllvm-node implementation.
 
 ## Core Documentation
 

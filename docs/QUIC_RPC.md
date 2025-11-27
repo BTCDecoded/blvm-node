@@ -16,7 +16,7 @@ The reference-node optionally supports JSON-RPC over QUIC using Quinn, providing
 ### Basic (TCP Only - Default)
 
 ```rust
-use reference_node::rpc::RpcManager;
+use bllvm_node::rpc::RpcManager;
 use std::net::SocketAddr;
 
 let tcp_addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
@@ -27,7 +27,7 @@ rpc_manager.start().await?;
 ### With QUIC Support
 
 ```rust
-use reference_node::rpc::RpcManager;
+use bllvm_node::rpc::RpcManager;
 use std::net::SocketAddr;
 
 let tcp_addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();

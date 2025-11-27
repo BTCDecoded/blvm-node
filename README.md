@@ -1,20 +1,20 @@
-# Reference Node
+# Bitcoin Commons Node
 
-**Minimal Bitcoin implementation using bllvm-protocol for protocol abstraction and bllvm-consensus for consensus decisions.**
+Minimal Bitcoin node implementation using bllvm-protocol for protocol abstraction and bllvm-consensus for consensus decisions.
 
 > **For verified system status**: See [SYSTEM_STATUS.md](https://github.com/BTCDecoded/.github/blob/main/SYSTEM_STATUS.md) in the BTCDecoded organization repository.
 
-This crate provides a minimal, production-ready Bitcoin node implementation that uses the bllvm-protocol crate for protocol abstraction and bllvm-consensus for all consensus decisions. It adds only the non-consensus infrastructure: storage, networking, RPC, and orchestration.
+Provides a minimal Bitcoin node implementation using bllvm-protocol for protocol abstraction and bllvm-consensus for all consensus decisions. Adds only non-consensus infrastructure: storage, networking, RPC, and orchestration.
 
 ## Architecture Position
 
-This is **Tier 4** of the 6-tier Bitcoin Commons architecture (BLLVM technology stack):
+Tier 4 of the 6-tier Bitcoin Commons architecture (BLLVM technology stack):
 
 ```
 1. bllvm-spec (Orange Paper - mathematical foundation)
 2. bllvm-consensus (pure math implementation)
 3. bllvm-protocol (Bitcoin abstraction)
-4. bllvm-node (full node implementation) ← THIS CRATE
+4. bllvm-node (full node implementation)
 5. bllvm-sdk (developer toolkit)
 6. bllvm-commons (governance enforcement)
 ```
@@ -26,29 +26,23 @@ This is **Tier 4** of the 6-tier Bitcoin Commons architecture (BLLVM technology 
 3. **Pure Infrastructure**: Only adds storage, networking, RPC, orchestration
 4. **Production Ready**: Full Bitcoin node functionality
 
-## Current Implementation Status
+## Features
 
+- **Consensus Integration**: All consensus logic from bllvm-consensus
+- **Protocol Support**: Multiple variants (mainnet, testnet, regtest)
+- **RBF Support**: Configurable RBF modes (Disabled, Conservative, Standard, Aggressive)
+- **Mempool Policies**: Comprehensive mempool configuration
+- **RPC Interface**: Full RPC server implementation
+- **Storage**: UTXO set management and chain state
+- **Module System**: Process-isolated modules for optional features
 
-### Core Features
-- ✅ **Consensus Integration** - All consensus logic from bllvm-consensus
-- ✅ **Protocol Support** - Multiple variants (mainnet, testnet, regtest)
-- ✅ **RBF Support** - Configurable RBF modes (Disabled, Conservative, Standard, Aggressive)
-- ✅ **Mempool Policies** - Comprehensive mempool configuration
-- ✅ **RPC Interface** - Full RPC server implementation
-- ✅ **Storage** - UTXO set management and chain state
-
-### Production Readiness
-- ✅ **Core Functionality** - All major features implemented
-- ⚠️ **Pre-Production** - Additional hardening required for production mainnet use
-- ✅ **Testing** - Comprehensive test suite
-
-**Note**: This implementation is designed for pre-production testing and development. See [Security](#security) section for production considerations.
+See [Security](#security) for production considerations.
 
 ## Configuration
 
 ### RBF and Mempool Policies
 
-bllvm-node supports configurable RBF (Replace-By-Fee) modes and comprehensive mempool policies:
+Supports configurable RBF (Replace-By-Fee) modes and comprehensive mempool policies:
 
 - **RBF Modes**: Disabled, Conservative, Standard (default), Aggressive
 - **Mempool Policies**: Size limits, fee thresholds, eviction strategies, ancestor/descendant limits
@@ -59,24 +53,23 @@ See the [Configuration Guide](docs/CONFIGURATION_GUIDE.md) for details:
 
 ### Protocol Variants
 
-The reference-node supports multiple Bitcoin protocol variants:
+Supports multiple Bitcoin protocol variants:
 
 - **Regtest** (default): Regression testing network for development
 - **Testnet3**: Bitcoin test network
 - **BitcoinV1**: Production Bitcoin mainnet
 
-Usage:
 ```rust
-use reference_node::{ReferenceNode, ProtocolVersion};
+use bllvm_node::{Node, NodeConfig};
 
 // Default: Regtest for safe development
-let node = ReferenceNode::new(None)?;
+let config = NodeConfig::default();
+let node = Node::new(config)?;
 
 // Explicit testnet
-let testnet_node = ReferenceNode::new(Some(ProtocolVersion::Testnet3))?;
-
-// Mainnet (use with caution)
-let mainnet_node = ReferenceNode::new(Some(ProtocolVersion::BitcoinV1))?;
+let mut config = NodeConfig::default();
+config.network = ProtocolVersion::Testnet3;
+let testnet_node = Node::new(config)?;
 ```
 
 ## Building
@@ -128,21 +121,6 @@ cargo test -- --nocapture
 
 ## Usage
 
-### Basic Node Creation
-
-```rust
-use reference_node::{ReferenceNode, ProtocolVersion};
-
-// Default: Regtest for safe development
-let node = ReferenceNode::new(None)?;
-
-// Explicit testnet
-let testnet_node = ReferenceNode::new(Some(ProtocolVersion::Testnet3))?;
-
-// Mainnet (use with caution)
-let mainnet_node = ReferenceNode::new(Some(ProtocolVersion::BitcoinV1))?;
-```
-
 ### Running the Node
 
 ```bash
@@ -156,11 +134,29 @@ cargo run -- --network testnet
 cargo run -- --network mainnet
 ```
 
+### Programmatic Usage
+
+```rust
+use bllvm_node::{Node, NodeConfig};
+
+// Default: Regtest for safe development
+let config = NodeConfig::default();
+let node = Node::new(config)?;
+
+// Start the node
+node.start().await?;
+```
+
+See [docs/](docs/) for detailed documentation including:
+- [Configuration Guide](docs/CONFIGURATION_GUIDE.md) - Complete configuration options
+- [Module System](modules/README.md) - Process-isolated module system
+- [RPC Reference](docs/RPC_REFERENCE.md) - JSON-RPC API documentation
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for security policies and [BTCDecoded Security Policy](https://github.com/BTCDecoded/.github/blob/main/SECURITY.md) for organization-wide guidelines.
 
-**Important**: This implementation is designed for pre-production testing and development. Additional hardening is required for production mainnet use.
+Additional hardening required for production mainnet use.
 
 ## Dependencies
 

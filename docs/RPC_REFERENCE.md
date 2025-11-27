@@ -2,7 +2,7 @@
 
 ## Overview
 
-bllvm-node implements a JSON-RPC 2.0 API compatible with Bitcoin Core RPC methods. The API is organized into categories: blockchain, network, mining, mempool, raw transactions, and control.
+Implements a JSON-RPC 2.0 API compatible with Bitcoin Core RPC methods. API organized into categories: blockchain, network, mining, mempool, raw transactions, and control.
 
 ## Endpoints
 
