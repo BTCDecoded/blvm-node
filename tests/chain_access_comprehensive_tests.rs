@@ -6,7 +6,7 @@ use bllvm_node::network::chain_access::NodeChainAccess;
 use bllvm_node::node::mempool::MempoolManager;
 use bllvm_node::storage::Storage;
 use bllvm_protocol::network::ChainStateAccess;
-use bllvm_protocol::{BlockHeader, Hash};
+use bllvm_protocol::Hash;
 use std::sync::Arc;
 
 fn create_test_storage() -> Arc<Storage> {
@@ -24,7 +24,7 @@ fn test_chain_access_creation() {
     let txindex = storage.transactions();
     let mempool = Arc::new(MempoolManager::new());
 
-    let chain_access = NodeChainAccess::new(blockstore, txindex, mempool);
+    let _chain_access = NodeChainAccess::new(blockstore, txindex, mempool);
 
     // Should create successfully
     assert!(true);

@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[test]
 fn test_event_publisher_creation() {
     let event_manager = Arc::new(EventManager::new());
-    let publisher = EventPublisher::new(event_manager);
+    let _publisher = EventPublisher::new(event_manager);
 
     // Should create successfully
     assert!(true);
@@ -26,7 +26,7 @@ fn test_event_publisher_with_zmq() {
     let zmq_publisher = ZmqPublisher::new(&zmq_config).ok();
     let zmq_arc = zmq_publisher.map(Arc::new);
 
-    let publisher = EventPublisher::with_zmq(event_manager, zmq_arc);
+    let _publisher = EventPublisher::with_zmq(event_manager, zmq_arc);
 
     // Should create successfully
     assert!(true);
