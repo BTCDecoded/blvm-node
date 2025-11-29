@@ -309,6 +309,10 @@ pub struct NodeConfig {
     /// Ban list sharing configuration
     pub ban_list_sharing: Option<BanListSharingConfig>,
 
+    /// Governance message relay configuration
+    #[cfg(feature = "governance")]
+    pub governance: Option<GovernanceConfig>,
+
     /// Storage and pruning configuration
     pub storage: Option<StorageConfig>,
 
@@ -429,6 +433,8 @@ impl Default for NodeConfig {
             stratum_v2: None,
             rpc_auth: None,
             ban_list_sharing: None,
+            #[cfg(feature = "governance")]
+            governance: None,
             storage: None,
             persistent_peers: Vec::new(),
             enable_self_advertisement: true,
@@ -479,6 +485,37 @@ fn default_false() -> bool {
 
 fn default_fee_forwarding_percentage() -> u8 {
     0 // Default: no forwarding (opt-in)
+}
+
+/// Governance message relay configuration
+#[cfg(feature = "governance")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceConfig {
+    /// Enable governance message relay (default: false)
+    /// If false, governance messages are gossiped but not forwarded to bllvm-commons
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+
+    /// URL for bllvm-commons internal API (e.g., "http://10.0.0.2:8080")
+    /// Used for forwarding P2P governance messages via VPN
+    #[serde(default)]
+    pub commons_url: Option<String>,
+
+    /// API key for authenticating with bllvm-commons internal API
+    /// Can also be set via COMMONS_API_KEY environment variable
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[cfg(feature = "governance")]
+impl Default for GovernanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            commons_url: None,
+            api_key: None,
+        }
+    }
 }
 
 /// Ban list sharing configuration
@@ -631,6 +668,45 @@ impl NodeConfig {
     pub fn get_transport_preference(&self) -> TransportPreference {
         self.transport_preference.into()
     }
+
+    /// Auto-detect governance server and enable if available
+    ///
+    /// If `governance.commons_url` is set but `governance.enabled` is false,
+    /// this will check if the server responds to a health check and auto-enable governance.
+    #[cfg(feature = "governance")]
+    pub async fn auto_detect_governance(&mut self) -> Result<(), anyhow::Error> {
+        use reqwest::Client;
+        use tracing::{debug, info};
+
+        // Only auto-detect if governance config exists but is disabled
+        if let Some(ref mut gov_config) = self.governance {
+            if !gov_config.enabled {
+                if let Some(ref commons_url) = gov_config.commons_url {
+                    let client = Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build()?;
+
+                    let health_url = format!("{}/internal/health", commons_url);
+                    debug!("Auto-detecting governance server at {}", health_url);
+
+                    match client.get(&health_url).send().await {
+                        Ok(response) if response.status().is_success() => {
+                            info!("Governance server detected and responding at {}, auto-enabling governance", commons_url);
+                            gov_config.enabled = true;
+                        }
+                        Ok(response) => {
+                            debug!("Governance server at {} responded with status {}, keeping governance disabled", commons_url, response.status());
+                        }
+                        Err(e) => {
+                            debug!("Governance server at {} not reachable: {}, keeping governance disabled", commons_url, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Stratum V2 mining configuration
@@ -654,6 +730,37 @@ pub struct StratumV2Config {
 
     /// Secondary chains for merge mining
     pub secondary_chains: Vec<String>,
+
+    /// Merge mining fee configuration
+    pub merge_mining_fee: Option<MergeMiningFeeConfig>,
+}
+
+/// Merge mining fee configuration
+#[cfg(feature = "stratum-v2")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeMiningFeeConfig {
+    /// Enable automatic fee collection (default: false)
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+
+    /// Fee percentage (0-100, default: 1% per whitepaper)
+    #[serde(default = "default_merge_mining_fee_percentage")]
+    pub fee_percentage: u8,
+
+    /// Commons address to send fees to (required if enabled)
+    pub commons_address: Option<String>,
+
+    /// Contributor identifier (for tracking)
+    pub contributor_id: Option<String>,
+
+    /// Automatic distribution enabled (default: false, requires bllvm-commons integration)
+    #[serde(default = "default_false")]
+    pub auto_distribute: bool,
+}
+
+#[cfg(feature = "stratum-v2")]
+fn default_merge_mining_fee_percentage() -> u8 {
+    1 // 1% per whitepaper
 }
 
 #[cfg(feature = "stratum-v2")]
@@ -666,6 +773,20 @@ impl Default for StratumV2Config {
             transport_preference: TransportPreferenceConfig::TcpOnly,
             merge_mining_enabled: false,
             secondary_chains: Vec::new(),
+            merge_mining_fee: None,
+        }
+    }
+}
+
+#[cfg(feature = "stratum-v2")]
+impl Default for MergeMiningFeeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fee_percentage: 1,
+            commons_address: None,
+            contributor_id: None,
+            auto_distribute: false,
         }
     }
 }
