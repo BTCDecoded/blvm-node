@@ -151,6 +151,28 @@ impl PeerManager {
             .collect()
     }
 
+    /// Get governance-enabled peers (peers with NODE_GOVERNANCE service flag)
+    #[cfg(feature = "governance")]
+    pub fn get_governance_peers(&self) -> Vec<(TransportAddr, SocketAddr)> {
+        use crate::network::protocol::NODE_GOVERNANCE;
+        self.peers
+            .iter()
+            .filter_map(|(transport_addr, peer)| {
+                if peer.has_service(NODE_GOVERNANCE) {
+                    match transport_addr {
+                        TransportAddr::Tcp(sock) => Some((transport_addr.clone(), *sock)),
+                        #[cfg(feature = "quinn")]
+                        TransportAddr::Quinn(sock) => Some((transport_addr.clone(), *sock)),
+                        #[cfg(feature = "iroh")]
+                        TransportAddr::Iroh(_) => None, // Iroh peers don't have SocketAddr for now
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn can_accept_peer(&self) -> bool {
         self.peers.len() < self.max_peers
     }
@@ -383,6 +405,9 @@ pub struct NetworkManager {
     pending_ban_shares: Arc<Mutex<Vec<(SocketAddr, u64, String)>>>, // (addr, unban_timestamp, reason)
     /// Ban list sharing configuration
     ban_list_sharing_config: Option<crate::config::BanListSharingConfig>,
+    /// Governance message relay configuration
+    #[cfg(feature = "governance")]
+    governance_config: Option<crate::config::GovernanceConfig>,
     /// Address database for peer discovery
     /// Read-heavy: many reads to query addresses, fewer writes when adding addresses
     address_database: Arc<RwLock<address_db::AddressDatabase>>,
@@ -543,6 +568,8 @@ impl NetworkManager {
             dos_protection,
             pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
             ban_list_sharing_config: config.and_then(|c| c.ban_list_sharing.clone()),
+            #[cfg(feature = "governance")]
+            governance_config: config.and_then(|c| c.governance.clone()),
             address_database,
             last_addr_sent: Arc::new(Mutex::new(0)),
             enable_self_advertisement: config.map(|c| c.enable_self_advertisement).unwrap_or(true),
@@ -698,9 +725,400 @@ impl NetworkManager {
             Ok(())
         } else {
             // FIBRE not initialized, skip
-            Ok(())
-        }
+        Ok(())
     }
+
+    /// Handle EconomicNodeRegistration message - Relay to governance node if enabled
+    #[cfg(feature = "governance")]
+    async fn handle_economic_node_registration(
+        &self,
+        peer_addr: SocketAddr,
+        msg: crate::network::protocol::EconomicNodeRegistrationMessage,
+    ) -> Result<()> {
+        use tracing::{debug, info, warn, error};
+        use reqwest::Client;
+
+        debug!(
+            "EconomicNodeRegistration received from {}: node_type={}, entity={}, message_id={}",
+            peer_addr, msg.node_type, msg.entity_name, msg.message_id
+        );
+
+        // Check if governance relay is enabled
+        let governance_enabled = self.governance_config
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false);
+
+        if !governance_enabled {
+            // Relay to other peers (gossip) but don't forward to bllvm-commons
+            debug!("Governance relay disabled, gossiping message to peers");
+            self.gossip_governance_message(peer_addr, &msg).await?;
+            return Ok(());
+        }
+
+        // Forward to bllvm-commons via VPN
+        if let Some(config) = &self.governance_config {
+            if let Some(ref commons_url) = config.commons_url {
+                let api_key = config.api_key.as_ref()
+                    .or_else(|| std::env::var("COMMONS_API_KEY").ok().as_ref())
+                    .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
+
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+                let url = format!("{}/internal/governance/registration", commons_url);
+                
+                let response = client
+                    .post(&url)
+                    .header("X-API-Key", api_key)
+                    .json(&msg)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to forward registration: {}", e))?;
+
+                if response.status().is_success() {
+                    info!(
+                        "Successfully forwarded EconomicNodeRegistration to bllvm-commons: message_id={}",
+                        msg.message_id
+                    );
+                } else {
+                    let status = response.status();
+                    let error_text = response.text().await.unwrap_or_default();
+                    error!(
+                        "Failed to forward EconomicNodeRegistration: status={}, error={}",
+                        status, error_text
+                    );
+                }
+            } else {
+                warn!("Governance enabled but commons_url not configured");
+            }
+        }
+
+        // Relay to other governance-enabled peers (gossip)
+        self.gossip_governance_message(peer_addr, &msg).await?;
+
+        Ok(())
+    }
+
+    /// Gossip a governance message to other governance-enabled peers
+    #[cfg(feature = "governance")]
+    async fn gossip_governance_message<T: serde::Serialize>(
+        &self,
+        sender_addr: SocketAddr,
+        msg: &T,
+    ) -> Result<()> {
+        use tracing::debug;
+
+        // Get governance-enabled peers (excluding sender)
+        let pm = self.peer_manager.lock().await;
+        let governance_peers = pm.get_governance_peers();
+        drop(pm);
+
+        let governance_peers: Vec<_> = governance_peers
+            .into_iter()
+            .filter(|(_, addr)| *addr != sender_addr)
+            .collect();
+
+        if governance_peers.is_empty() {
+            debug!("No governance-enabled peers to gossip to");
+            return Ok(());
+        }
+
+        // Serialize message using the protocol parser
+        // We need to convert the message to the wire format
+        // For now, use JSON serialization as a simple approach
+        let msg_json = serde_json::to_vec(msg)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize governance message: {}", e))?;
+
+        // Send to each governance peer
+        let pm = self.peer_manager.lock().await;
+        for (_transport_addr, peer_addr) in governance_peers {
+            if let Some(peer) = pm.get_peer(&super::transport::TransportAddr::Tcp(peer_addr)) {
+                if let Err(e) = peer.send_message(msg_json.clone()).await {
+                    debug!("Failed to gossip to peer {}: {}", peer_addr, e);
+                } else {
+                    debug!("Gossiped governance message to peer {}", peer_addr);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle EconomicNodeVeto message - Relay to governance node if enabled
+    #[cfg(feature = "governance")]
+    async fn handle_economic_node_veto(
+        &self,
+        peer_addr: SocketAddr,
+        msg: crate::network::protocol::EconomicNodeVetoMessage,
+    ) -> Result<()> {
+        use tracing::{debug, info, warn, error};
+        use reqwest::Client;
+
+        debug!(
+            "EconomicNodeVeto received from {}: pr_id={}, signal={}, message_id={}",
+            peer_addr, msg.pr_id, msg.signal_type, msg.message_id
+        );
+
+        // Check if governance relay is enabled
+        let governance_enabled = self.governance_config
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false);
+
+        if !governance_enabled {
+            // Relay to other peers (gossip) but don't forward to bllvm-commons
+            debug!("Governance relay disabled, gossiping message to peers");
+            self.gossip_governance_message(peer_addr, &msg).await?;
+            return Ok(());
+        }
+
+        // Forward to bllvm-commons via VPN
+        if let Some(config) = &self.governance_config {
+            if let Some(ref commons_url) = config.commons_url {
+                let api_key = config.api_key.as_ref()
+                    .or_else(|| std::env::var("COMMONS_API_KEY").ok().as_ref())
+                    .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
+
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+                let url = format!("{}/internal/governance/veto", commons_url);
+                
+                let response = client
+                    .post(&url)
+                    .header("X-API-Key", api_key)
+                    .json(&msg)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to forward veto: {}", e))?;
+
+                if response.status().is_success() {
+                    info!(
+                        "Successfully forwarded EconomicNodeVeto to bllvm-commons: message_id={}",
+                        msg.message_id
+                    );
+                } else {
+                    let status = response.status();
+                    let error_text = response.text().await.unwrap_or_default();
+                    error!(
+                        "Failed to forward EconomicNodeVeto: status={}, error={}",
+                        status, error_text
+                    );
+                }
+            } else {
+                warn!("Governance enabled but commons_url not configured");
+            }
+        }
+
+        // Relay to other governance-enabled peers (gossip)
+        self.gossip_governance_message(peer_addr, &msg).await?;
+
+        Ok(())
+    }
+
+    /// Handle EconomicNodeStatus message - Query or respond with node status
+    #[cfg(feature = "governance")]
+    async fn handle_economic_node_status(
+        &self,
+        peer_addr: SocketAddr,
+        msg: crate::network::protocol::EconomicNodeStatusMessage,
+    ) -> Result<()> {
+        use tracing::{debug, info, warn, error};
+        use reqwest::Client;
+
+        debug!(
+            "EconomicNodeStatus received from {}: request_id={}, query_type={}, identifier={}",
+            peer_addr, msg.request_id, msg.query_type, msg.node_identifier
+        );
+
+        // If this is a response, relay it to governance peers
+        if msg.status.is_some() {
+            debug!("EconomicNodeStatus response, relaying to governance peers");
+            self.gossip_governance_message(peer_addr, &msg).await?;
+            return Ok(());
+        }
+
+        // If this is a query, forward to bllvm-commons if we're a governance node
+        let governance_enabled = self.governance_config
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false);
+
+        if governance_enabled {
+            if let Some(config) = &self.governance_config {
+                if let Some(ref commons_url) = config.commons_url {
+                    let api_key = config.api_key.as_ref()
+                        .or_else(|| std::env::var("COMMONS_API_KEY").ok().as_ref())
+                        .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
+
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+                    // Forward query to bllvm-commons (it expects the same format)
+                    let url = format!("{}/internal/governance/status", commons_url);
+                    
+                    info!(
+                        "Forwarding EconomicNodeStatus query to bllvm-commons: request_id={}, query_type={}",
+                        msg.request_id, msg.query_type
+                    );
+
+                    // Create request payload (bllvm-commons expects EconomicNodeStatusMessage format)
+                    let request_payload = serde_json::json!({
+                        "request_id": msg.request_id,
+                        "node_identifier": msg.node_identifier,
+                        "query_type": msg.query_type,
+                        "status": null
+                    });
+
+                    let response = client
+                        .post(&url)
+                        .header("X-API-Key", api_key)
+                        .json(&request_payload)
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to forward status query: {}", e))?;
+
+                    if response.status().is_success() {
+                        // Parse response
+                        let status_response: serde_json::Value = response
+                            .json()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to parse status response: {}", e))?;
+
+                        // Convert response to P2P format
+                        let status_data = status_response.get("status").and_then(|s| s.as_object());
+                        let response_status = if let Some(data) = status_data {
+                            Some(crate::network::protocol::NodeStatusResponse {
+                                node_id: data.get("node_id")?.as_i64()? as i32,
+                                node_type: data.get("node_type")?.as_str()?.to_string(),
+                                entity_name: data.get("entity_name")?.as_str()?.to_string(),
+                                status: data.get("status")?.as_str()?.to_string(),
+                                weight: data.get("weight")?.as_f64()?,
+                                registered_at: data.get("registered_at")?.as_i64()?,
+                                last_verified_at: data.get("last_verified_at").and_then(|v| v.as_i64()),
+                            })
+                        } else {
+                            None
+                        };
+
+                        let response_msg = crate::network::protocol::EconomicNodeStatusMessage {
+                            request_id: msg.request_id,
+                            node_identifier: msg.node_identifier.clone(),
+                            query_type: msg.query_type.clone(),
+                            status: response_status,
+                        };
+
+                        // Send response back to original peer
+                        let pm = self.peer_manager.lock().await;
+                        if let Some(peer) = pm.get_peer(&super::transport::TransportAddr::Tcp(peer_addr)) {
+                            let msg_bytes = bincode::serialize(&crate::network::protocol::ProtocolMessage::EconomicNodeStatus(response_msg))
+                                .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+                            if let Err(e) = peer.send_message(msg_bytes).await {
+                                warn!("Failed to send status response to peer {}: {}", peer_addr, e);
+                            } else {
+                                info!("Sent status response to peer {} for request_id={}", peer_addr, msg.request_id);
+                            }
+                        }
+                    } else {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_default();
+                        error!(
+                            "Failed to forward EconomicNodeStatus query: status={}, error={}",
+                            status, error_text
+                        );
+                    }
+                } else {
+                    warn!("Governance enabled but commons_url not configured");
+                }
+            }
+        } else {
+            debug!("Governance relay disabled, gossiping query to peers");
+            self.gossip_governance_message(peer_addr, &msg).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle EconomicNodeForkDecision message - Relay to governance node if enabled
+    #[cfg(feature = "governance")]
+    async fn handle_economic_node_fork_decision(
+        &self,
+        peer_addr: SocketAddr,
+        msg: crate::network::protocol::EconomicNodeForkDecisionMessage,
+    ) -> Result<()> {
+        use tracing::{debug, info, warn, error};
+        use reqwest::Client;
+
+        debug!(
+            "EconomicNodeForkDecision received from {}: ruleset={}, message_id={}",
+            peer_addr, msg.chosen_ruleset, msg.message_id
+        );
+
+        // Check if governance relay is enabled
+        let governance_enabled = self.governance_config
+            .as_ref()
+            .map(|c| c.enabled)
+            .unwrap_or(false);
+
+        if !governance_enabled {
+            debug!("Governance relay disabled, gossiping fork decision to peers");
+            self.gossip_governance_message(peer_addr, &msg).await?;
+            return Ok(());
+        }
+
+        // Forward to bllvm-commons via VPN
+        if let Some(config) = &self.governance_config {
+            if let Some(ref commons_url) = config.commons_url {
+                let api_key = config.api_key.as_ref()
+                    .or_else(|| std::env::var("COMMONS_API_KEY").ok().as_ref())
+                    .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
+
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+                let url = format!("{}/internal/governance/fork-decision", commons_url);
+                
+                let response = client
+                    .post(&url)
+                    .header("X-API-Key", api_key)
+                    .json(&msg)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to forward fork decision: {}", e))?;
+
+                if response.status().is_success() {
+                    info!(
+                        "Successfully forwarded EconomicNodeForkDecision to bllvm-commons: message_id={}",
+                        msg.message_id
+                    );
+                } else {
+                    let status = response.status();
+                    let error_text = response.text().await.unwrap_or_default();
+                    error!(
+                        "Failed to forward EconomicNodeForkDecision: status={}, error={}",
+                        status, error_text
+                    );
+                }
+            } else {
+                warn!("Governance enabled but commons_url not configured");
+            }
+        }
+
+        // Relay to other governance-enabled peers (gossip)
+        self.gossip_governance_message(peer_addr, &msg).await?;
+
+        Ok(())
+    }
+}
 
     /// Create a new network manager with transport preference
     pub fn with_transport_preference(
@@ -2924,6 +3342,23 @@ impl NetworkManager {
             ProtocolMessage::BanList(msg) => {
                 return self.handle_ban_list(peer_addr, msg).await;
             }
+            // Governance messages
+            #[cfg(feature = "governance")]
+            ProtocolMessage::EconomicNodeRegistration(msg) => {
+                return self.handle_economic_node_registration(peer_addr, msg).await;
+            }
+            #[cfg(feature = "governance")]
+            ProtocolMessage::EconomicNodeVeto(msg) => {
+                return self.handle_economic_node_veto(peer_addr, msg).await;
+            }
+            #[cfg(feature = "governance")]
+            ProtocolMessage::EconomicNodeStatus(msg) => {
+                return self.handle_economic_node_status(peer_addr, msg).await;
+            }
+            #[cfg(feature = "governance")]
+            ProtocolMessage::EconomicNodeForkDecision(msg) => {
+                return self.handle_economic_node_fork_decision(peer_addr, msg).await;
+            }
             // Address relay
             ProtocolMessage::GetAddr => {
                 return self.handle_get_addr(peer_addr).await;
@@ -2975,8 +3410,18 @@ impl NetworkManager {
                 .map_err(|e| anyhow::anyhow!("Failed to get height: {}", e))?
                 .unwrap_or(0);
 
-            // Handle version message to detect FIBRE-capable peers
+            // Handle version message to detect peer capabilities and store service flags
             if let ProtocolMessage::Version(version_msg) = &parsed {
+                // Store service flags in peer
+                {
+                    let mut pm = self.peer_manager.lock().await;
+                    let transport_addr = super::transport::TransportAddr::Tcp(peer_addr);
+                    if let Some(peer) = pm.get_peer_mut(&transport_addr) {
+                        peer.set_services(version_msg.services);
+                        debug!("Stored service flags {} for peer {}", version_msg.services, peer_addr);
+                    }
+                }
+
                 if version_msg.supports_fibre() {
                     // Register FIBRE-capable peer
                     #[cfg(feature = "fibre")]
@@ -4058,6 +4503,12 @@ impl NetworkManager {
         // Ban List Sharing (if config enabled)
         if self.ban_list_sharing_config.is_some() {
             services_with_filters |= crate::network::protocol::NODE_BAN_LIST_SHARING;
+        }
+
+        // Governance message relay (if config enabled)
+        #[cfg(feature = "governance")]
+        if self.governance_config.is_some() {
+            services_with_filters |= crate::network::protocol::NODE_GOVERNANCE;
         }
 
         // Dandelion (if feature enabled)
