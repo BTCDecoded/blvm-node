@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, warn};
+use std::result::Result;
 
 /// Raw Transaction RPC methods
 pub struct RawTxRpc {
@@ -222,35 +223,194 @@ impl RawTxRpc {
 
     /// Test if a raw transaction would be accepted to the mempool
     ///
-    /// Params: ["hexstring", maxfeerate (optional)]
+    /// Params: [["hexstring", ...], maxfeerate (optional)] or ["hexstring", maxfeerate (optional)]
+    /// Supports both single transaction and package validation
     pub async fn testmempoolaccept(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: testmempoolaccept");
 
-        let hex_string = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::missing_parameter("hexstring", Some("string")))?;
+        // Handle both array of transactions (package) and single transaction
+        let rawtxs = if let Some(arr) = params.get(0).and_then(|p| p.as_array()) {
+            // Array of hex strings (package validation)
+            arr.iter()
+                .map(|v| v.as_str().ok_or_else(|| {
+                    RpcError::invalid_params("First parameter must be array of hex strings or single hex string")
+                }))
+                .collect::<Result<Vec<&str>, _>>()?
+        } else if let Some(hex_str) = params.get(0).and_then(|p| p.as_str()) {
+            // Single hex string
+            vec![hex_str]
+        } else {
+            return Err(RpcError::missing_parameter("rawtxs", Some("array of hex strings or single hex string")));
+        };
 
-        // Decode hex string
-        let tx_bytes = hex::decode(hex_string).map_err(|e| {
-            RpcError::invalid_params_with_fields(
-                format!("Invalid hex string: {e}"),
-                vec![("hexstring", &format!("Invalid hex encoding: {e}"))],
-                Some(json!([
-                    "Hex string must contain only characters 0-9, a-f, A-F",
-                    "Ensure the hex string is complete (even number of characters)"
-                ])),
-            )
-        })?;
+        // Parse all transactions with witness data
+        let mut transactions = Vec::new();
+        let mut all_witnesses = Vec::new(); // Vec<Vec<Witness>> - one Vec<Witness> per transaction
+        
+        for hex_string in &rawtxs {
+            let tx_bytes = hex::decode(hex_string).map_err(|e| {
+                RpcError::invalid_params_with_fields(
+                    format!("Invalid hex string: {e}"),
+                    vec![("hexstring", &format!("Invalid hex encoding: {e}"))],
+                    Some(json!([
+                        "Hex string must contain only characters 0-9, a-f, A-F",
+                        "Ensure the hex string is complete (even number of characters)"
+                    ])),
+                )
+            })?;
 
+            // Parse transaction and witness data (witnesses is Vec<Witness> - one per input)
+            let (tx, witnesses) = Self::deserialize_transaction_with_witness(&tx_bytes)?;
+            transactions.push(tx);
+            all_witnesses.push(witnesses);
+        }
+
+        // Package validation: check for conflicts and dependencies
+        let package_error = if transactions.len() > 1 {
+            Self::validate_package(&transactions)
+        } else {
+            None
+        };
+
+        // Process each transaction
+        let mut results = Vec::new();
+        
+        for (tx, tx_witnesses) in transactions.iter().zip(all_witnesses.iter()) {
+            // If package validation failed, mark all transactions as failed
+            if let Some(ref pkg_err) = package_error {
+                results.push(json!({
+                    "txid": hex::encode(bllvm_protocol::block::calculate_tx_id(tx)),
+                    "wtxid": Self::calculate_wtxid(tx, tx_witnesses),
+                    "package-error": pkg_err,
+                    "allowed": false
+                }));
+                continue;
+            }
+
+            // Calculate txid and wtxid
+            use bllvm_protocol::block::calculate_tx_id;
+            let txid = calculate_tx_id(tx);
+            let txid_hex = hex::encode(txid);
+            let wtxid_hex = Self::calculate_wtxid(tx, tx_witnesses);
+
+            // Validate transaction using consensus layer
+            use bllvm_protocol::ConsensusProof;
+            let consensus = ConsensusProof::new();
+            let validation_result = consensus.validate_transaction(tx);
+
+            let allowed = matches!(
+                validation_result,
+                Ok(bllvm_protocol::ValidationResult::Valid)
+            );
+            let reject_reason = if !allowed {
+                match validation_result {
+                    Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => Some(reason),
+                    Err(e) => Some(format!("Validation error: {e}")),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Calculate transaction size and weight with witness
+            use bllvm_protocol::serialization::transaction::serialize_transaction;
+            let base_size = serialize_transaction(tx).len() as u64;
+            // Calculate total witness size (sum of all witness stacks for all inputs)
+            let witness_size: u64 = tx_witnesses.iter()
+                .map(|witness_stack| witness_stack.iter().map(|w| w.len() as u64).sum::<u64>())
+                .sum();
+            let total_size = base_size + witness_size;
+            
+            // Calculate weight using BIP141 formula: weight = 4 * base_size + total_size
+            let weight = 4 * base_size + total_size;
+            
+            // Calculate vsize using proper BIP141 formula: vsize = ceil(weight / 4)
+            use bllvm_consensus::witness::weight_to_vsize;
+            let vsize = weight_to_vsize(weight) as usize;
+
+            // Calculate fee using mempool manager if available
+            let fee_satoshis = if let Some(ref mempool) = self.mempool {
+                if let Some(ref storage) = self.storage {
+                    let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
+                    mempool.calculate_transaction_fee(tx, &utxo_set)
+                } else {
+                    1000 // Default 1000 satoshis if no storage
+                }
+            } else {
+                1000 // Default 1000 satoshis if no mempool
+            };
+            
+            let fee_btc = fee_satoshis as f64 / 100_000_000.0; // Convert to BTC
+            
+            // Calculate effective fee rate (satoshis per kvB)
+            // effective-feerate = (fee in satoshis) / (vsize in bytes) * 1000
+            let effective_feerate_sat_per_kvb = if vsize > 0 {
+                (fee_satoshis as f64 / vsize as f64) * 1000.0
+            } else {
+                0.0
+            };
+            let effective_feerate_btc_per_kvb = effective_feerate_sat_per_kvb / 100_000_000.0;
+
+            // Get effective-includes (ancestor wtxids from mempool)
+            let effective_includes = if allowed && transactions.len() == 1 {
+                // Only calculate for single transaction (not in package)
+                Self::get_effective_includes(&txid, self.mempool.as_ref())
+            } else {
+                Vec::<String>::new()
+            };
+
+            // Build fees object matching Core's format
+            let mut fees_obj = json!({
+                "base": fee_btc
+            });
+            
+            // Add effective-feerate if transaction is allowed (Core only includes this when allowed)
+            if allowed {
+                fees_obj.as_object_mut().unwrap().insert(
+                    "effective-feerate".to_string(),
+                    json!(effective_feerate_btc_per_kvb)
+                );
+                // Add effective-includes (wtxids of ancestor transactions as hex strings)
+                fees_obj.as_object_mut().unwrap().insert(
+                    "effective-includes".to_string(),
+                    json!(effective_includes)
+                );
+            }
+
+            // Build result object
+            let mut result_obj = json!({
+                "txid": txid_hex,
+                "wtxid": wtxid_hex,
+                "allowed": allowed,
+                "vsize": vsize,
+                "fees": fees_obj,
+            });
+            
+            // Add reject-reason only if transaction is not allowed
+            if !allowed {
+                result_obj.as_object_mut().unwrap().insert(
+                    "reject-reason".to_string(),
+                    json!(reject_reason)
+                );
+            }
+
+            results.push(result_obj);
+        }
+
+        Ok(json!(results))
+    }
+
+    /// Deserialize transaction with witness data from Bitcoin wire format
+    /// Returns (transaction, all_witnesses) tuple where all_witnesses is Vec<Witness> (one per input)
+    fn deserialize_transaction_with_witness(data: &[u8]) -> Result<(bllvm_protocol::Transaction, Vec<bllvm_consensus::Witness>), RpcError> {
         use bllvm_protocol::serialization::transaction::deserialize_transaction;
-        let tx = deserialize_transaction(&tx_bytes).map_err(|e| {
+        use bllvm_consensus::serialization::varint::decode_varint;
+        
+        // Deserialize transaction (non-witness serialization)
+        let tx = deserialize_transaction(data).map_err(|e| {
             RpcError::invalid_params_with_fields(
                 format!("Failed to parse transaction: {e}"),
-                vec![(
-                    "hexstring",
-                    &format!("Transaction deserialization failed: {e}"),
-                )],
+                vec![("hexstring", &format!("Transaction deserialization failed: {e}"))],
                 Some(json!([
                     "Ensure the transaction hex is valid and complete",
                     "Check that the transaction format matches Bitcoin transaction structure"
@@ -258,56 +418,201 @@ impl RawTxRpc {
             )
         })?;
 
-        use bllvm_protocol::block::calculate_tx_id;
-        let txid = calculate_tx_id(&tx);
-        let txid_hex = hex::encode(txid);
-
-        // Validate transaction using consensus layer
-        use bllvm_protocol::ConsensusProof;
-        let consensus = ConsensusProof::new();
-        let validation_result = consensus.validate_transaction(&tx);
-
-        let allowed = matches!(
-            validation_result,
-            Ok(bllvm_protocol::ValidationResult::Valid)
-        );
-        let reject_reason = if !allowed {
-            match validation_result {
-                Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => Some(reason),
-                Err(e) => Some(format!("Validation error: {e}")),
-                _ => None,
-            }
-        } else {
-            None
-        };
-
-        // Calculate transaction size
+        // Calculate base transaction size
         use bllvm_protocol::serialization::transaction::serialize_transaction;
-        let size = serialize_transaction(&tx).len();
-        let vsize = size; // Simplified - in real implementation would use weight/4
-
-        // Calculate fee using mempool manager if available
-        let fee = if let Some(ref mempool) = self.mempool {
-            if let Some(ref storage) = self.storage {
-                let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                let fee_satoshis = mempool.calculate_transaction_fee(&tx, &utxo_set);
-                fee_satoshis as f64 / 100_000_000.0 // Convert to BTC
-            } else {
-                0.00001000 // Default if no storage
+        let base_size = serialize_transaction(&tx).len();
+        
+        // Check if there's witness data (SegWit marker 0x0001 after transaction)
+        let mut offset = base_size;
+        let witnesses = if data.len() >= offset + 2 && data[offset] == 0x00 && data[offset + 1] == 0x01 {
+            // SegWit transaction - parse witness data for each input
+            offset += 2; // Skip witness marker
+            
+            let mut all_witnesses = Vec::new();
+            for _ in 0..tx.inputs.len() {
+                if offset >= data.len() {
+                    // No more witness data - create empty witness
+                    all_witnesses.push(bllvm_consensus::Witness::new());
+                    continue;
+                }
+                
+                // Parse witness stack count
+                let (stack_count, varint_len) = decode_varint(&data[offset..]).map_err(|e| {
+                    RpcError::invalid_params(format!("Failed to parse witness: {e}"))
+                })?;
+                offset += varint_len;
+                
+                // Parse each witness element
+                let mut witness_stack = bllvm_consensus::Witness::new();
+                for _ in 0..stack_count {
+                    if offset >= data.len() {
+                        break;
+                    }
+                    
+                    // Parse element length
+                    let (element_len, varint_len) = decode_varint(&data[offset..]).map_err(|e| {
+                        RpcError::invalid_params(format!("Failed to parse witness element: {e}"))
+                    })?;
+                    offset += varint_len;
+                    
+                    if offset + element_len as usize > data.len() {
+                        break;
+                    }
+                    
+                    // Get element bytes
+                    let element = data[offset..offset + element_len as usize].to_vec();
+                    witness_stack.push(element);
+                    offset += element_len as usize;
+                }
+                
+                all_witnesses.push(witness_stack);
             }
+            
+            // Ensure we have witnesses for all inputs
+            while all_witnesses.len() < tx.inputs.len() {
+                all_witnesses.push(bllvm_consensus::Witness::new());
+            }
+            
+            all_witnesses
         } else {
-            0.00001000 // Default if no mempool
+            // Non-SegWit transaction - empty witnesses for all inputs
+            vec![bllvm_consensus::Witness::new(); tx.inputs.len()]
         };
 
-        Ok(json!([{
-            "txid": txid_hex,
-            "allowed": allowed,
-            "vsize": vsize,
-            "fees": {
-                "base": fee
-            },
-            "reject-reason": reject_reason
-        }]))
+        Ok((tx, witnesses))
+    }
+
+    /// Calculate wtxid (witness transaction hash)
+    /// For non-SegWit: wtxid == txid
+    /// For SegWit: wtxid = SHA256(SHA256(tx_with_witness))
+    /// witnesses: Vec<Witness> - one witness stack per input
+    fn calculate_wtxid(tx: &bllvm_protocol::Transaction, witnesses: &[bllvm_consensus::Witness]) -> String {
+        use bllvm_protocol::block::calculate_tx_id;
+        let txid = calculate_tx_id(tx);
+        
+        // Check if any witness has data
+        let has_witness = witnesses.iter().any(|w| !w.is_empty());
+        
+        // If no witness data, wtxid == txid
+        if !has_witness {
+            return hex::encode(txid);
+        }
+        
+        // For SegWit transactions, wtxid is hash of transaction WITH witness
+        // Serialize: version + marker(0x00) + flag(0x01) + inputs + outputs + locktime + witness_data
+        use bllvm_consensus::serialization::varint::encode_varint;
+        use sha2::{Digest, Sha256};
+        
+        let mut serialized = Vec::new();
+        
+        // Version (4 bytes)
+        serialized.extend_from_slice(&(tx.version as u32).to_le_bytes());
+        
+        // SegWit marker and flag
+        serialized.push(0x00);
+        serialized.push(0x01);
+        
+        // Input count
+        serialized.extend_from_slice(&encode_varint(tx.inputs.len() as u64));
+        
+        // Inputs (non-witness serialization)
+        for input in &tx.inputs {
+            serialized.extend_from_slice(&input.prevout.hash);
+            serialized.extend_from_slice(&(input.prevout.index as u32).to_le_bytes());
+            serialized.extend_from_slice(&encode_varint(input.script_sig.len() as u64));
+            serialized.extend_from_slice(&input.script_sig);
+            serialized.extend_from_slice(&(input.sequence as u32).to_le_bytes());
+        }
+        
+        // Output count
+        serialized.extend_from_slice(&encode_varint(tx.outputs.len() as u64));
+        
+        // Outputs
+        for output in &tx.outputs {
+            serialized.extend_from_slice(&(output.value as u64).to_le_bytes());
+            serialized.extend_from_slice(&encode_varint(output.script_pubkey.len() as u64));
+            serialized.extend_from_slice(&output.script_pubkey);
+        }
+        
+        // Lock time
+        serialized.extend_from_slice(&(tx.lock_time as u32).to_le_bytes());
+        
+        // Witness data: one witness stack per input
+        for witness_stack in witnesses {
+            // Witness stack count (number of elements)
+            serialized.extend_from_slice(&encode_varint(witness_stack.len() as u64));
+            // Each witness element
+            for element in witness_stack {
+                serialized.extend_from_slice(&encode_varint(element.len() as u64));
+                serialized.extend_from_slice(element);
+            }
+        }
+        
+        // Double SHA256
+        let first_hash = Sha256::digest(&serialized);
+        let second_hash = Sha256::digest(first_hash);
+        hex::encode(second_hash)
+    }
+
+    /// Validate package (multiple transactions)
+    /// Returns error string if package is invalid
+    fn validate_package(transactions: &[bllvm_protocol::Transaction]) -> Option<String> {
+        // Check for duplicate transactions
+        use bllvm_protocol::block::calculate_tx_id;
+        let mut txids = std::collections::HashSet::new();
+        for tx in transactions {
+            let txid = calculate_tx_id(tx);
+            if !txids.insert(txid) {
+                return Some("package contains duplicate transactions".to_string());
+            }
+        }
+        
+        // Check for conflicts (transactions spending same outputs)
+        let mut spent_outputs = std::collections::HashSet::new();
+        for tx in transactions {
+            for input in &tx.inputs {
+                if !spent_outputs.insert((input.prevout.hash, input.prevout.index)) {
+                    return Some("package contains conflicting transactions".to_string());
+                }
+            }
+        }
+        
+        None
+    }
+
+    /// Get effective-includes (ancestor wtxids from mempool)
+    /// Returns wtxids (as hex strings) of ancestor transactions used in fee calculation
+    fn get_effective_includes(txid: &bllvm_protocol::Hash, mempool: Option<&Arc<MempoolManager>>) -> Vec<String> {
+        let mut includes = Vec::new();
+        
+        if let Some(mempool) = mempool {
+            // Get ancestors from mempool
+            use bllvm_protocol::block::calculate_tx_id;
+            if let Some(tx) = mempool.get_transaction(txid) {
+                // Find ancestor transactions (transactions that this tx spends from)
+                let ancestor_txids: Vec<bllvm_protocol::Hash> = mempool.get_transactions()
+                    .iter()
+                    .filter(|ancestor_tx| {
+                        let ancestor_hash = calculate_tx_id(ancestor_tx);
+                        tx.inputs.iter().any(|input| {
+                            input.prevout.hash == ancestor_hash
+                        })
+                    })
+                    .map(|ancestor_tx| {
+                        calculate_tx_id(ancestor_tx)
+                    })
+                    .collect();
+                
+                // Convert to wtxids (hex strings)
+                // Note: For now, we use txid as wtxid (correct for non-SegWit)
+                // In full implementation, we'd need to store witness data in mempool
+                includes = ancestor_txids.iter()
+                    .map(|hash| hex::encode(hash))
+                    .collect();
+            }
+        }
+        
+        includes
     }
 
     /// Decode a raw transaction
@@ -381,6 +686,114 @@ impl RawTxRpc {
         }))
     }
 
+    /// Serialize transaction with witness data (SegWit format)
+    /// Returns hex string with witness data if witnesses provided, otherwise non-witness format
+    fn serialize_transaction_with_witness(
+        tx: &bllvm_protocol::Transaction,
+        witnesses: Option<&[bllvm_consensus::Witness]>,
+    ) -> String {
+        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use bllvm_consensus::serialization::varint::encode_varint;
+        
+        // Check if we have witness data
+        let has_witness = witnesses
+            .map(|w| w.iter().any(|witness_stack| !witness_stack.is_empty()))
+            .unwrap_or(false);
+        
+        if !has_witness {
+            // Non-SegWit: return standard serialization
+            return hex::encode(serialize_transaction(tx));
+        }
+        
+        // SegWit: serialize with witness marker and data
+        let witnesses = witnesses.unwrap();
+        let mut serialized = Vec::new();
+        
+        // Version (4 bytes, little-endian)
+        serialized.extend_from_slice(&(tx.version as i32).to_le_bytes());
+        
+        // SegWit marker and flag
+        serialized.push(0x00);
+        serialized.push(0x01);
+        
+        // Input count
+        serialized.extend_from_slice(&encode_varint(tx.inputs.len() as u64));
+        
+        // Inputs (non-witness serialization)
+        for input in &tx.inputs {
+            serialized.extend_from_slice(&input.prevout.hash);
+            serialized.extend_from_slice(&(input.prevout.index as u32).to_le_bytes());
+            serialized.extend_from_slice(&encode_varint(input.script_sig.len() as u64));
+            serialized.extend_from_slice(&input.script_sig);
+            serialized.extend_from_slice(&(input.sequence as u32).to_le_bytes());
+        }
+        
+        // Output count
+        serialized.extend_from_slice(&encode_varint(tx.outputs.len() as u64));
+        
+        // Outputs
+        for output in &tx.outputs {
+            serialized.extend_from_slice(&(output.value as u64).to_le_bytes());
+            serialized.extend_from_slice(&encode_varint(output.script_pubkey.len() as u64));
+            serialized.extend_from_slice(&output.script_pubkey);
+        }
+        
+        // Lock time
+        serialized.extend_from_slice(&(tx.lock_time as u32).to_le_bytes());
+        
+        // Witness data: one witness stack per input
+        for witness_stack in witnesses {
+            // Witness stack count (number of elements)
+            serialized.extend_from_slice(&encode_varint(witness_stack.len() as u64));
+            // Each witness element
+            for element in witness_stack {
+                serialized.extend_from_slice(&encode_varint(element.len() as u64));
+                serialized.extend_from_slice(element);
+            }
+        }
+        
+        hex::encode(serialized)
+    }
+
+    /// Calculate transaction size and weight for SegWit transactions
+    /// Returns (base_size, total_size, weight, vsize)
+    fn calculate_segwit_sizes(
+        tx: &bllvm_protocol::Transaction,
+        witnesses: Option<&[bllvm_consensus::Witness]>,
+    ) -> (usize, usize, u64, usize) {
+        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use bllvm_consensus::witness::{calculate_transaction_weight_segwit, weight_to_vsize};
+        
+        // Base size (without witness)
+        let base_size = serialize_transaction(tx).len();
+        
+        // Check if we have witness data
+        let has_witness = witnesses
+            .map(|w| w.iter().any(|witness_stack| !witness_stack.is_empty()))
+            .unwrap_or(false);
+        
+        if !has_witness {
+            // Non-SegWit: base_size == total_size
+            let total_size = base_size;
+            let weight = (base_size * 4) as u64;
+            let vsize = base_size;
+            return (base_size, total_size, weight, vsize);
+        }
+        
+        // SegWit: calculate total size with witness
+        // Serialize with witness to get total size
+        let tx_hex_with_witness = Self::serialize_transaction_with_witness(tx, witnesses);
+        let total_size = tx_hex_with_witness.len() / 2; // Hex string length / 2 = bytes
+        
+        // Calculate weight: 4 * base_size + total_size
+        let weight = calculate_transaction_weight_segwit(base_size as u64, total_size as u64);
+        
+        // Calculate vsize: ceil(weight / 4)
+        let vsize = weight_to_vsize(weight) as usize;
+        
+        (base_size, total_size, weight, vsize)
+    }
+
     /// Get raw transaction by txid
     ///
     /// Params: ["txid", verbose (optional, default: false), blockhash (optional)]
@@ -404,19 +817,45 @@ impl RawTxRpc {
 
         if let Some(ref storage) = self.storage {
             if let Ok(Some(tx)) = storage.transactions().get_transaction(&txid_array) {
-                use bllvm_protocol::serialization::transaction::serialize_transaction;
-                let tx_hex = hex::encode(serialize_transaction(&tx));
+                use bllvm_protocol::block::calculate_tx_id;
+                let calculated_txid = calculate_tx_id(&tx);
+                let txid_hex = hex::encode(calculated_txid);
+                
+                // Try to get witness data if available (from raw block data or mempool)
+                // For now, we'll assume no witness data is available from storage
+                // In a full implementation, we'd retrieve witness data from block storage
+                let witnesses: Option<Vec<bllvm_consensus::Witness>> = None;
+                
+                // Calculate wtxid
+                let wtxid_hex = if let Some(ref witnesses_vec) = witnesses {
+                    Self::calculate_wtxid(&tx, witnesses_vec)
+                } else {
+                    // No witness data available - assume non-SegWit (wtxid == txid)
+                    txid_hex.clone()
+                };
+                
+                // Calculate sizes and weight
+                let (base_size, total_size, weight, vsize) = Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
+                
+                // For SegWit transactions, hash field should be wtxid
+                // For non-SegWit, hash == txid
+                let hash_hex = if witnesses.as_ref().map(|w| w.iter().any(|ws| !ws.is_empty())).unwrap_or(false) {
+                    wtxid_hex.clone()
+                } else {
+                    txid_hex.clone()
+                };
+                
+                // Serialize transaction hex (with witness if available)
+                let tx_hex = Self::serialize_transaction_with_witness(&tx, witnesses.as_deref());
 
                 if verbose {
-                    use bllvm_protocol::block::calculate_tx_id;
-                    let calculated_txid = calculate_tx_id(&tx);
                     Ok(json!({
-                        "txid": hex::encode(calculated_txid),
-                        "hash": hex::encode(calculated_txid),
+                        "txid": txid_hex,
+                        "hash": hash_hex,
                         "version": tx.version,
-                        "size": serialize_transaction(&tx).len(),
-                        "vsize": serialize_transaction(&tx).len(),
-                        "weight": serialize_transaction(&tx).len() * 4,
+                        "size": total_size,
+                        "vsize": vsize,
+                        "weight": weight,
                         "locktime": tx.lock_time,
                         "vin": tx.inputs.iter().map(|input| json!({
                             "txid": hex::encode(input.prevout.hash),
