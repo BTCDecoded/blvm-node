@@ -14,13 +14,18 @@
 
 pub mod api;
 pub mod encryption;
+pub mod hooks;
+pub mod inter_module;
 pub mod ipc;
 pub mod loader;
 pub mod manager;
+pub mod metrics;
 pub mod process;
 pub mod registry;
+pub mod rpc;
 pub mod sandbox;
 pub mod security;
+pub mod timers;
 pub mod traits;
 pub mod validation;
 

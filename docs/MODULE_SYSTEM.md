@@ -72,6 +72,18 @@ Discovery → Verification → Loading → Execution → Monitoring
 Registry    Signer      Loader      Process      Monitor
 ```
 
+### Lifecycle Events
+
+Modules can subscribe to lifecycle events to react to dependency changes:
+
+- **`ModuleLoaded`**: Published when a module is loaded
+  - Payload: `{ module_id, module_name, version }`
+  - Use case: Dependent modules can initialize connections when dependencies load
+
+- **`ModuleUnloaded`**: Published when a module is unloaded
+  - Payload: `{ module_id, module_name }`
+  - Use case: Dependent modules can clean up when dependencies unload
+
 ### Discovery
 
 Modules discovered through:
@@ -167,55 +179,91 @@ Modules request capabilities:
 
 ## Module Manifest
 
-Module manifests use TOML format:
+Module manifests use TOML format with a clean, hierarchical structure:
 
 ```toml
-# Module Identity
+# ============================================================================
+# Module Manifest
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Core Identity (Required)
+# ----------------------------------------------------------------------------
 name = "lightning-network"
 version = "1.2.3"
-description = "Lightning Network implementation"
+entry_point = "lightning-network"
+
+# ----------------------------------------------------------------------------
+# Metadata (Optional)
+# ----------------------------------------------------------------------------
+description = "Lightning Network payment processor implementation"
 author = "Alice <alice@example.com>"
 
-# Governance
-[governance]
-tier = "application"
-maintainers = ["alice", "bob", "charlie"]
-threshold = "2-of-3"
-review_period_days = 14
-
-# Signatures
-[signatures]
-maintainers = [
-    { name = "alice", key = "02abc...", signature = "..." },
-    { name = "bob", key = "03def...", signature = "..." }
+# ----------------------------------------------------------------------------
+# Capabilities
+# ----------------------------------------------------------------------------
+# Permissions this module requires to function
+capabilities = [
+    "read_blockchain",    # Query blockchain data
+    "subscribe_events",   # Receive node events
+    "read_lightning",     # Access Lightning Network APIs
 ]
-threshold = "2-of-3"
 
-# Binary
+# ----------------------------------------------------------------------------
+# Dependencies
+# ----------------------------------------------------------------------------
+# Required dependencies (module cannot load without these)
+[dependencies]
+"bllvm-node" = ">=1.0.0"
+
+# Optional dependencies (module can work without these)
+[optional_dependencies]
+"bllvm-mesh" = ">=0.5.0"  # Optional mesh networking support
+
+# ----------------------------------------------------------------------------
+# Configuration Schema
+# ----------------------------------------------------------------------------
+# Descriptions of configuration keys this module accepts
+[config_schema]
+network = "Network: mainnet, testnet, regtest (default: mainnet)"
+fee_rate = "Default fee rate in sat/vB (default: 1)"
+
+# ----------------------------------------------------------------------------
+# Advanced Features (Optional)
+# ----------------------------------------------------------------------------
+
+# Binary integrity verification
 [binary]
 hash = "sha256:abc123..."
 size = 1234567
-download_url = "https://registry.bitcoincommons.org/modules/lightning-network/1.2.3"
 
-# Dependencies
-[dependencies]
-"bllvm-node" = ">=1.0.0"
-"another-module" = ">=0.5.0"
-
-# Compatibility
-[compatibility]
-min_consensus_version = "1.0.0"
-min_protocol_version = "1.0.0"
-min_node_version = "1.0.0"
-tested_with = ["1.0.0", "1.1.0"]
-
-# Capabilities
-capabilities = [
-    "read_blockchain",
-    "subscribe_events",
-    "governance_vote"
+# Maintainer signatures (for verified modules)
+[signatures]
+threshold = "2-of-3"
+maintainers = [
+    { name = "alice", public_key = "02abc...", signature = "..." },
+    { name = "bob", public_key = "03def...", signature = "..." },
 ]
+
+# Payment configuration (for paid modules)
+[payment]
+required = true
+price_sats = 100000
+author_payment_code = "PM8TJ..."
+commons_payment_code = "PM8TJ..."
+payment_signature = "..."
 ```
+
+### Manifest Structure
+
+The manifest is organized into logical sections:
+
+1. **Core Identity** (required): `name`, `version`, `entry_point`
+2. **Metadata** (optional): `description`, `author`
+3. **Capabilities**: List of permissions the module requires
+4. **Dependencies**: Required and optional module dependencies
+5. **Configuration Schema**: Descriptions of configurable options
+6. **Advanced Features** (optional): Signatures, binary verification, payment config
 
 ## Data Flow
 

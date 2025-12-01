@@ -17,6 +17,7 @@ pub mod protocol;
 pub mod protocol_adapter;
 pub mod protocol_extensions;
 pub mod relay;
+pub mod replay_protection;
 pub mod tcp_transport;
 pub mod transport;
 
@@ -28,9 +29,6 @@ pub mod iroh_transport;
 
 #[cfg(feature = "utxo-commitments")]
 pub mod utxo_commitments_client;
-
-#[cfg(feature = "stratum-v2")]
-pub mod stratum_v2;
 
 // Phase 3.3: Compact Block Relay (BIP152)
 pub mod compact_blocks;
@@ -69,6 +67,8 @@ use tracing::{debug, error, info, warn};
 use crate::network::tcp_transport::TcpTransport;
 use crate::network::transport::{Transport, TransportAddr, TransportListener, TransportPreference};
 use std::collections::HashSet;
+use secp256k1;
+use hex;
 
 /// Network I/O operations for testing
 /// Note: This is deprecated - use TcpTransport instead
@@ -362,10 +362,16 @@ pub struct NetworkManager {
     payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
     /// Payment state machine for unified payment coordination
     payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
+    /// Merchant private key for signing payment ACKs (optional)
+    merchant_key: Option<secp256k1::SecretKey>,
+    /// Node payment address script (for module downloads - 10% fee)
+    node_payment_script: Option<Vec<u8>>,
     /// Module encryption for encrypted module serving
     module_encryption: Option<Arc<crate::module::encryption::ModuleEncryption>>,
     /// Modules directory for encrypted/decrypted module storage
     modules_dir: Option<std::path::PathBuf>,
+    /// Event publisher for module event notifications (optional)
+    event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
     /// FIBRE relay manager (for fast block relay)
     #[cfg(feature = "fibre")]
     fibre_relay: Option<Arc<Mutex<fibre::FibreRelay>>>,
@@ -401,6 +407,8 @@ pub struct NetworkManager {
     pending_requests: Arc<Mutex<HashMap<u64, PendingRequest>>>,
     /// DoS protection manager
     dos_protection: Arc<dos_protection::DosProtectionManager>,
+    /// Replay protection for custom protocol messages
+    replay_protection: Arc<replay_protection::ReplayProtection>,
     /// Pending ban shares (for periodic sharing)
     pending_ban_shares: Arc<Mutex<Vec<(SocketAddr, u64, String)>>>, // (addr, unban_timestamp, reason)
     /// Ban list sharing configuration
@@ -479,6 +487,8 @@ pub enum NetworkMessage {
     #[cfg(feature = "ctv")]
     PaymentProofReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     SettlementNotificationReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    // Mesh networking packets
+    MeshPacketReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
 }
 
 impl NetworkManager {
@@ -550,8 +560,11 @@ impl NetworkManager {
             module_registry: None,
             payment_processor: None,
             payment_state_machine: None,
+            merchant_key: None,
+            node_payment_script: None,
             module_encryption: None,
             modules_dir: None,
+            event_publisher: None,
             #[cfg(feature = "fibre")]
             fibre_relay: None,
             peer_states: Arc::new(RwLock::new(HashMap::new())),
@@ -566,6 +579,7 @@ impl NetworkManager {
             request_id_counter: Arc::new(AtomicU64::new(0)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             dos_protection,
+            replay_protection: Arc::new(replay_protection::ReplayProtection::new()),
             pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
             ban_list_sharing_config: config.and_then(|c| c.ban_list_sharing.clone()),
             #[cfg(feature = "governance")]
@@ -616,11 +630,35 @@ impl NetworkManager {
         self.payment_processor = Some(processor);
     }
 
+    /// Set merchant private key for signing payment ACKs
+    pub fn set_merchant_key(&mut self, merchant_key: Option<secp256k1::SecretKey>) {
+        self.merchant_key = merchant_key;
+    }
+
+    /// Set node payment address script (for module downloads)
+    pub fn set_node_payment_script(&mut self, script: Option<Vec<u8>>) {
+        self.node_payment_script = script;
+    }
+
     /// Set payment state machine for unified payment coordination
     pub fn set_payment_state_machine(
         &mut self,
         state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
     ) {
+        // Set network sender for payment proof broadcasting
+        #[cfg(feature = "ctv")]
+        {
+            use std::sync::Arc as StdArc;
+            // Try to get mutable access to set the sender
+            // If we can't (multiple references exist), that's okay - broadcasting will be disabled
+            if let Some(state_machine_mut) = StdArc::get_mut(&mut state_machine.clone()) {
+                *state_machine_mut = state_machine_mut.clone().with_network_sender(self.peer_tx.clone());
+            } else {
+                // Multiple references exist - we can't update it now
+                // The state machine will work but won't broadcast (will just update state)
+                debug!("Payment state machine has multiple references, network sender not set (broadcasting disabled)");
+            }
+        }
         self.payment_state_machine = Some(state_machine);
     }
 
@@ -635,6 +673,14 @@ impl NetworkManager {
     /// Set modules directory for encrypted/decrypted module storage
     pub fn set_modules_dir(&mut self, modules_dir: std::path::PathBuf) {
         self.modules_dir = Some(modules_dir);
+    }
+
+    /// Set event publisher for network event notifications
+    pub fn set_event_publisher(
+        &mut self,
+        event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
+    ) {
+        self.event_publisher = event_publisher;
     }
 
     /// Initialize FIBRE relay (if enabled in config)
@@ -742,6 +788,16 @@ impl NetworkManager {
             "EconomicNodeRegistration received from {}: node_type={}, entity={}, message_id={}",
             peer_addr, msg.node_type, msg.entity_name, msg.message_id
         );
+
+        // Replay protection: Check message ID and timestamp
+        if let Err(e) = self.replay_protection.check_message_id(&msg.message_id, msg.timestamp).await {
+            warn!("Replay protection: Rejected EconomicNodeRegistration from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
+        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600) {
+            warn!("Replay protection: Invalid timestamp in EconomicNodeRegistration from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
 
         // Check if governance relay is enabled
         let governance_enabled = self.governance_config
@@ -861,6 +917,16 @@ impl NetworkManager {
             "EconomicNodeVeto received from {}: pr_id={}, signal={}, message_id={}",
             peer_addr, msg.pr_id, msg.signal_type, msg.message_id
         );
+
+        // Replay protection: Check message ID and timestamp
+        if let Err(e) = self.replay_protection.check_message_id(&msg.message_id, msg.timestamp).await {
+            warn!("Replay protection: Rejected EconomicNodeVeto from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
+        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600) {
+            warn!("Replay protection: Invalid timestamp in EconomicNodeVeto from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
 
         // Check if governance relay is enabled
         let governance_enabled = self.governance_config
@@ -1060,6 +1126,16 @@ impl NetworkManager {
             "EconomicNodeForkDecision received from {}: ruleset={}, message_id={}",
             peer_addr, msg.chosen_ruleset, msg.message_id
         );
+
+        // Replay protection: Check message ID and timestamp
+        if let Err(e) = self.replay_protection.check_message_id(&msg.message_id, msg.timestamp).await {
+            warn!("Replay protection: Rejected EconomicNodeForkDecision from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
+        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600) {
+            warn!("Replay protection: Invalid timestamp in EconomicNodeForkDecision from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
 
         // Check if governance relay is enabled
         let governance_enabled = self.governance_config
@@ -2831,9 +2907,49 @@ impl NetworkManager {
             match message {
                 NetworkMessage::PeerConnected(addr) => {
                     info!("Peer connected: {:?}", addr);
+                    
+                    // Publish peer connected event
+                    if let Some(ref event_publisher) = self.event_publisher {
+                        let addr_str = format!("{:?}", addr);
+                        let transport_type = match &addr {
+                            TransportAddr::Tcp(_) => "tcp",
+                            #[cfg(feature = "quinn")]
+                            TransportAddr::Quinn(_) => "quinn",
+                            #[cfg(feature = "iroh")]
+                            TransportAddr::Iroh(_) => "iroh",
+                        };
+                        
+                        // Get peer info if available
+                        let pm = self.peer_manager.lock().await;
+                        let (services, version) = if let Some(peer) = pm.get_peer(&addr) {
+                            (peer.services(), peer.version())
+                        } else {
+                            (0, 0)
+                        };
+                        drop(pm);
+                        
+                        let event_pub_clone = Arc::clone(event_publisher);
+                        tokio::spawn(async move {
+                            event_pub_clone
+                                .publish_peer_connected(&addr_str, transport_type, services, version)
+                                .await;
+                        });
+                    }
                 }
                 NetworkMessage::PeerDisconnected(addr) => {
                     info!("Peer disconnected: {:?}", addr);
+                    
+                    // Publish peer disconnected event
+                    if let Some(ref event_publisher) = self.event_publisher {
+                        let addr_str = format!("{:?}", addr);
+                        let reason = "disconnected".to_string(); // Could be more specific
+                        let event_pub_clone = Arc::clone(event_publisher);
+                        tokio::spawn(async move {
+                            event_pub_clone
+                                .publish_peer_disconnected(&addr_str, &reason)
+                                .await;
+                        });
+                    }
                     let mut pm = self.peer_manager.lock().await;
 
                     // Get peer quality score before removing
@@ -2961,21 +3077,25 @@ impl NetworkManager {
                 }
                 #[cfg(feature = "stratum-v2")]
                 NetworkMessage::StratumV2MessageReceived(data, peer_addr) => {
-                    info!(
+                    debug!(
                         "Stratum V2 message received from {}: {} bytes",
                         peer_addr,
                         data.len()
                     );
-                    // Handle Stratum V2 message
-                    // In full implementation, would:
-                    // 1. Route to StratumV2Server if server mode enabled
-                    // 2. Route to StratumV2Client if client mode enabled
-                    // 3. Send response back to peer
-                    // 4. Notify waiting futures via async message routing system
-
-                    // Server is active if we're processing messages (this function is called)
-                    // and route message to server.handle_message()
-                    // For now, just log the message
+                    // Route Stratum V2 message to Stratum V2 module via event system
+                    if let Some(event_publisher) = &self.event_publisher {
+                        use crate::module::ipc::protocol::EventPayload;
+                        use crate::module::traits::EventType;
+                        let payload = EventPayload::StratumV2MessageReceived {
+                            message_data: data,
+                            peer_addr: peer_addr.to_string(),
+                        };
+                        if let Err(e) = event_publisher.publish_event(EventType::StratumV2MessageReceived, payload).await {
+                            warn!("Failed to publish Stratum V2 message event: {}", e);
+                        }
+                    } else {
+                        debug!("Event publisher not available, Stratum V2 message dropped");
+                    }
                 }
                 // BIP157 Block Filter messages
                 NetworkMessage::GetCfiltersReceived(data, peer_addr) => {
@@ -3106,11 +3226,94 @@ impl NetworkManager {
                     );
                     if let Ok(parsed) = ProtocolParser::parse_message(&data) {
                         if let ProtocolMessage::PaymentProof(msg) = parsed {
-                            // TODO: Handle payment proof (verify and update state machine)
-                            debug!(
-                                "Payment proof received: request_id={}, payment_id={}",
-                                msg.request_id, msg.payment_request_id
-                            );
+                            // Handle payment proof: verify and update state machine
+                            if let Some(ref state_machine) = self.payment_state_machine {
+                                if let Some(ref processor) = self.payment_processor {
+                                    // Get payment request to verify proof against expected outputs
+                                    match processor.get_payment_request(&msg.payment_request_id).await {
+                                        Ok(payment_request) => {
+                                            // Extract expected outputs from payment request
+                                            let expected_outputs: Vec<_> = payment_request
+                                                .payment_details
+                                                .outputs
+                                                .iter()
+                                                .map(|output| bllvm_protocol::payment::PaymentOutput {
+                                                    script: output.script.clone(),
+                                                    amount: output.amount,
+                                                })
+                                                .collect();
+                                            
+                                            // Verify covenant proof
+                                            #[cfg(feature = "ctv")]
+                                            {
+                                                use crate::payment::covenant::CovenantEngine;
+                                                let covenant_engine = CovenantEngine::new();
+                                                
+                                                match covenant_engine.verify_covenant_proof(
+                                                    &msg.covenant_proof,
+                                                    &expected_outputs,
+                                                ) {
+                                                    Ok(true) => {
+                                                        info!(
+                                                            "Payment proof verified for payment: {}",
+                                                            msg.payment_request_id
+                                                        );
+                                                        
+                                                        // Update state machine to ProofCreated
+                                                        // Note: This is a proof received from peer, not created locally
+                                                        // We mark it as ProofCreated so it can be tracked
+                                                        // The state machine will handle the state transition
+                                                        if let Err(e) = state_machine
+                                                            .create_covenant_proof(&msg.payment_request_id)
+                                                            .await
+                                                        {
+                                                            // If creating proof fails (e.g., already exists), that's okay
+                                                            // The proof was received from peer, so we just log it
+                                                            debug!(
+                                                                "Payment proof received from peer (state update: {}): payment_id={}",
+                                                                e, msg.payment_request_id
+                                                            );
+                                                        }
+                                                    }
+                                                    Ok(false) => {
+                                                        warn!(
+                                                            "Payment proof verification failed for payment: {}",
+                                                            msg.payment_request_id
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "Error verifying payment proof for payment {}: {}",
+                                                            msg.payment_request_id, e
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            
+                                            #[cfg(not(feature = "ctv"))]
+                                            {
+                                                debug!(
+                                                    "Payment proof received but CTV feature not enabled: payment_id={}",
+                                                    msg.payment_request_id
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Failed to get payment request for proof verification: {} (payment_id: {})",
+                                                e, msg.payment_request_id
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    warn!("Payment processor not available for proof verification");
+                                }
+                            } else {
+                                debug!(
+                                    "Payment state machine not available, ignoring payment proof: request_id={}, payment_id={}",
+                                    msg.request_id, msg.payment_request_id
+                                );
+                            }
                         }
                     }
                 }
@@ -3122,12 +3325,115 @@ impl NetworkManager {
                     );
                     if let Ok(parsed) = ProtocolParser::parse_message(&data) {
                         if let ProtocolMessage::SettlementNotification(msg) = parsed {
-                            // TODO: Handle settlement notification (update state machine)
-                            debug!(
-                                "Settlement notification: payment_id={}, confirmations={}",
-                                msg.payment_request_id, msg.confirmation_count
-                            );
+                            // Handle settlement notification: update state machine
+                            if let Some(ref state_machine) = self.payment_state_machine {
+                                match msg.status.as_str() {
+                                    "mempool" => {
+                                        // Transaction in mempool
+                                        if let Some(ref tx_hash) = msg.transaction_hash {
+                                            if let Err(e) = state_machine
+                                                .mark_in_mempool(&msg.payment_request_id, *tx_hash)
+                                                .await
+                                            {
+                                                warn!(
+                                                    "Failed to update state machine for mempool settlement: {} (payment_id: {})",
+                                                    e, msg.payment_request_id
+                                                );
+                                            } else {
+                                                info!(
+                                                    "Settlement notification: payment {} in mempool (tx: {})",
+                                                    msg.payment_request_id,
+                                                    hex::encode(tx_hash)
+                                                );
+                                            }
+                                        }
+                                    }
+                                    "confirmed" => {
+                                        // Transaction confirmed
+                                        if let (Some(ref tx_hash), Some(ref block_hash)) =
+                                            (msg.transaction_hash, msg.block_hash)
+                                        {
+                                            if let Err(e) = state_machine
+                                                .mark_settled(
+                                                    &msg.payment_request_id,
+                                                    *tx_hash,
+                                                    *block_hash,
+                                                    msg.confirmation_count,
+                                                )
+                                                .await
+                                            {
+                                                warn!(
+                                                    "Failed to update state machine for confirmed settlement: {} (payment_id: {})",
+                                                    e, msg.payment_request_id
+                                                );
+                                            } else {
+                                                info!(
+                                                    "Settlement notification: payment {} confirmed (tx: {}, block: {}, confirmations: {})",
+                                                    msg.payment_request_id,
+                                                    hex::encode(tx_hash),
+                                                    hex::encode(block_hash),
+                                                    msg.confirmation_count
+                                                );
+                                            }
+                                        }
+                                    }
+                                    "failed" => {
+                                        // Payment failed
+                                        if let Err(e) = state_machine
+                                            .mark_failed(
+                                                &msg.payment_request_id,
+                                                "Settlement failed (notification from peer)".to_string(),
+                                            )
+                                            .await
+                                        {
+                                            warn!(
+                                                "Failed to update state machine for failed settlement: {} (payment_id: {})",
+                                                e, msg.payment_request_id
+                                            );
+                                        } else {
+                                            info!(
+                                                "Settlement notification: payment {} failed",
+                                                msg.payment_request_id
+                                            );
+                                        }
+                                    }
+                                    _ => {
+                                        warn!(
+                                            "Unknown settlement status '{}' for payment: {}",
+                                            msg.status, msg.payment_request_id
+                                        );
+                                    }
+                                }
+                            } else {
+                                debug!(
+                                    "Payment state machine not available, ignoring settlement notification: payment_id={}, confirmations={}",
+                                    msg.payment_request_id, msg.confirmation_count
+                                );
+                            }
                         }
+                    }
+                }
+                // Mesh networking packets
+                NetworkMessage::MeshPacketReceived(data, peer_addr) => {
+                    debug!(
+                        "Mesh packet received from {}: {} bytes",
+                        peer_addr,
+                        data.len()
+                    );
+                    // Route mesh packet to mesh module via event system
+                    // The mesh module subscribes to MeshPacketReceived events
+                    if let Some(event_publisher) = &self.event_publisher {
+                        use crate::module::ipc::protocol::EventPayload;
+                        use crate::module::traits::EventType;
+                        let payload = EventPayload::MeshPacketReceived {
+                            packet_data: data,
+                            peer_addr: peer_addr.to_string(),
+                        };
+                        if let Err(e) = event_publisher.publish_event(EventType::MeshPacketReceived, payload).await {
+                            warn!("Failed to publish mesh packet event: {}", e);
+                        }
+                    } else {
+                        debug!("Event publisher not available, mesh packet dropped");
                     }
                 }
                 // Raw messages from peer connections
@@ -3222,6 +3528,40 @@ impl NetworkManager {
             warn!("Rejecting message from banned peer: {}", peer_addr);
             return Ok(()); // Silently drop messages from banned peers
         }
+        
+        // Check for mesh packet magic bytes (0x4D, 0x45, 0x53, 0x48 = "MESH")
+        // Mesh packets are handled separately and routed to mesh module
+        if data.len() >= 4 && data[0..4] == [0x4D, 0x45, 0x53, 0x48] {
+            debug!("Detected mesh packet from {}: {} bytes", peer_addr, data.len());
+            // Route mesh packet to mesh module via IPC/event system
+            // For now, we'll add it to the message queue for mesh module handling
+            // TODO: Route to mesh module via IPC when mesh module integration is complete
+            let _ = self.peer_tx.send(NetworkMessage::MeshPacketReceived(data, peer_addr));
+            return Ok(());
+        }
+        
+        // Check for Stratum V2 TLV message format
+        // Stratum V2 messages start with [4-byte length][2-byte tag][4-byte length][payload]
+        // Valid Stratum V2 tags are in range 0x0001-0x0032 (see bllvm-stratum-v2/src/messages.rs)
+        #[cfg(feature = "stratum-v2")]
+        if data.len() >= 10 {
+            // Try to parse as Stratum V2 TLV
+            let length_prefix = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            if length_prefix >= 6 && length_prefix <= 1024 * 1024 { // Reasonable size limits
+                let tag = u16::from_le_bytes([data[4], data[5]]);
+                // Check if tag is a valid Stratum V2 message type
+                // Valid tags: 0x0001-0x0003 (setup), 0x0010-0x0012 (channel), 0x0020-0x0021 (job), 0x0030-0x0032 (shares)
+                if (tag >= 0x0001 && tag <= 0x0003) || 
+                   (tag >= 0x0010 && tag <= 0x0012) || 
+                   (tag >= 0x0020 && tag <= 0x0021) || 
+                   (tag >= 0x0030 && tag <= 0x0032) {
+                    debug!("Detected Stratum V2 message from {}: tag={:04x}, {} bytes", peer_addr, tag, data.len());
+                    let _ = self.peer_tx.send(NetworkMessage::StratumV2MessageReceived(data, peer_addr));
+                    return Ok(());
+                }
+            }
+        }
+        
         let parsed = ProtocolParser::parse_message(&data)?;
 
         // Handle special cases that don't go through protocol layer
@@ -3412,13 +3752,14 @@ impl NetworkManager {
 
             // Handle version message to detect peer capabilities and store service flags
             if let ProtocolMessage::Version(version_msg) = &parsed {
-                // Store service flags in peer
+                // Store service flags and version in peer
                 {
                     let mut pm = self.peer_manager.lock().await;
-                    let transport_addr = super::transport::TransportAddr::Tcp(peer_addr);
+                    let transport_addr = TransportAddr::Tcp(peer_addr);
                     if let Some(peer) = pm.get_peer_mut(&transport_addr) {
                         peer.set_services(version_msg.services);
-                        debug!("Stored service flags {} for peer {}", version_msg.services, peer_addr);
+                        peer.set_version(version_msg.version);
+                        debug!("Stored service flags {} and version {} for peer {}", version_msg.services, version_msg.version, peer_addr);
                     }
                 }
 
@@ -3533,14 +3874,21 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
 
+        // Replay protection: Check request ID
+        if let Err(e) = self.replay_protection.check_request_id(message.request_id).await {
+            warn!("Replay protection: Rejected duplicate GetModule request from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
+
         // Handle the request with registry integration and payment checking
         let registry = self.module_registry.as_ref().map(Arc::clone);
         let payment_processor = self.payment_processor.as_ref().map(Arc::clone);
         let payment_state_machine = self.payment_state_machine.as_ref().map(Arc::clone);
         let encryption = self.module_encryption.as_ref().map(Arc::clone);
         let modules_dir = self.modules_dir.clone();
-        // TODO: Get node's payment address from config
-        let node_script = None; // Placeholder - would get from config
+        
+        // Get node's payment address script (set from config during initialization)
+        let node_script = self.node_payment_script.clone();
 
         match handle_get_module(
             message,
@@ -3650,8 +3998,9 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolParser;
 
         let processor = self.payment_processor.as_ref().map(Arc::clone);
-        // TODO: Get merchant private key from config
-        let response_msg = handle_payment(&message, processor, None).await?;
+        // Get merchant private key (set from config during initialization)
+        let merchant_key = self.merchant_key.as_ref();
+        let response_msg = handle_payment(&message, processor, merchant_key).await?;
         let response = ProtocolMessage::PaymentACK(response_msg);
         let wire_msg = ProtocolParser::serialize_message(&response)?;
         self.send_to_peer(peer_addr, wire_msg).await?;
@@ -3811,6 +4160,12 @@ impl NetworkManager {
             ProtocolMessage::GetFilteredBlock(msg) => msg,
             _ => return Err(anyhow::anyhow!("Expected GetFilteredBlock message")),
         };
+
+        // Replay protection: Check request ID
+        if let Err(e) = self.replay_protection.check_request_id(get_filtered_block_msg.request_id).await {
+            warn!("Replay protection: Rejected duplicate GetFilteredBlock request from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
 
         // Handle the request with storage and filter service
         let storage = self.storage.as_ref().map(Arc::clone);
@@ -4323,6 +4678,12 @@ impl NetworkManager {
             msg.ban_entries.len()
         );
 
+        // Replay protection: Validate timestamp (24 hour max age for ban lists)
+        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp as i64, 86400) {
+            warn!("Replay protection: Invalid timestamp in BanList from {}: {}", peer_addr, e);
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
+
         // Verify hash if full list provided
         if msg.is_full && !verify_ban_list_hash(&msg.ban_entries, &msg.ban_list_hash) {
             warn!("Ban list hash verification failed from {}", peer_addr);
@@ -4396,6 +4757,11 @@ impl NetworkManager {
     /// Get DoS protection manager reference
     pub fn dos_protection(&self) -> &Arc<dos_protection::DosProtectionManager> {
         &self.dos_protection
+    }
+
+    /// Get peer manager reference (for module API access)
+    pub fn peer_manager(&self) -> &Arc<Mutex<PeerManager>> {
+        &self.peer_manager
     }
 
     /// Get network statistics
@@ -4811,3 +5177,12 @@ mod tests {
         );
     }
 }
+
+// Safety: NetworkManager is safe to share across threads (Sync) because:
+// - All internal state is protected by Arc<Mutex<>> or Arc<RwLock<>> which are Sync
+// - EventPublisher is already marked as Sync (see event_publisher.rs)
+// - All async operations are Send and don't require synchronous access to internal state
+// - The ZmqPublisher's Socket is only accessed through async methods which are Send
+// This is a workaround for ZMQ's Socket type not being Sync, but the actual usage is safe.
+#[cfg(feature = "zmq")]
+unsafe impl Sync for NetworkManager {}

@@ -113,12 +113,73 @@ impl RequestValidator {
             // Read-only operations - all allowed
             RequestPayload::GetBlock { .. }
             | RequestPayload::GetBlockHeader { .. }
-            | RequestPayload::GetTransaction { .. }
+            |             RequestPayload::GetTransaction { .. }
             | RequestPayload::HasTransaction { .. }
             | RequestPayload::GetChainTip
             | RequestPayload::GetBlockHeight
             | RequestPayload::GetUtxo { .. }
-            | RequestPayload::SubscribeEvents { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::SubscribeEvents { .. }
+            // Mempool API - read-only
+            | RequestPayload::GetMempoolTransactions
+            | RequestPayload::GetMempoolTransaction { .. }
+            | RequestPayload::GetMempoolSize
+            // Network API - read-only
+            | RequestPayload::GetNetworkStats
+            | RequestPayload::GetNetworkPeers
+            // Chain API - read-only
+            | RequestPayload::GetChainInfo
+            | RequestPayload::GetBlockByHeight { .. }
+            // Lightning API - read-only
+            | RequestPayload::GetLightningNodeUrl
+            | RequestPayload::GetLightningInfo
+            // Payment API - read-only
+            | RequestPayload::GetPaymentState { .. }
+            // Additional Mempool API - read-only
+            | RequestPayload::CheckTransactionInMempool { .. }
+            | RequestPayload::GetFeeEstimate { .. }
+            // Filesystem API - validated by sandbox
+            | RequestPayload::ReadFile { .. }
+            | RequestPayload::WriteFile { .. }
+            | RequestPayload::DeleteFile { .. }
+            | RequestPayload::ListDirectory { .. }
+            | RequestPayload::CreateDirectory { .. }
+            | RequestPayload::GetFileMetadata { .. }
+            // Storage API - validated by permissions
+            | RequestPayload::StorageOpenTree { .. }
+            | RequestPayload::StorageInsert { .. }
+            | RequestPayload::StorageGet { .. }
+            | RequestPayload::StorageRemove { .. }
+            | RequestPayload::StorageContainsKey { .. }
+            | RequestPayload::StorageIter { .. }
+            | RequestPayload::StorageTransaction { .. }
+            // Module RPC Endpoint Registration - validated by permissions
+            | RequestPayload::RegisterRpcEndpoint { .. }
+            | RequestPayload::UnregisterRpcEndpoint { .. }
+            // Timers and Scheduled Tasks - callbacks cannot be serialized, so these will error
+            | RequestPayload::RegisterTimer { .. }
+            | RequestPayload::CancelTimer { .. }
+            | RequestPayload::ScheduleTask { .. }
+            // Metrics and Telemetry - read-only reporting
+            | RequestPayload::ReportMetric { .. }
+            | RequestPayload::GetModuleMetrics { .. }
+            | RequestPayload::GetAllMetrics
+            // Module Health & Monitoring - read-only
+            | RequestPayload::GetModuleHealth { .. }
+            | RequestPayload::GetAllModuleHealth
+            | RequestPayload::ReportModuleHealth { .. }
+            // Module Discovery API - read-only
+            | RequestPayload::DiscoverModules
+            | RequestPayload::GetModuleInfo { .. }
+            | RequestPayload::IsModuleAvailable { .. }
+            // Module Event Publishing - validated by permissions
+            | RequestPayload::PublishEvent { .. }
+            // Module-to-Module Communication - validated by permissions
+            | RequestPayload::CallModule { .. }
+            | RequestPayload::RegisterModuleApi { .. }
+            | RequestPayload::UnregisterModuleApi
+            // Network Integration - requires validation (sending network packets)
+            | RequestPayload::SendMeshPacketToPeer { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::SendStratumV2MessageToPeer { .. } => Ok(ValidationResult::Allowed),
         }
     }
 

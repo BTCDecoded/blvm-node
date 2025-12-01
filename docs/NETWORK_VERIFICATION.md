@@ -139,5 +139,4 @@ These bounds are **proof-time only** and don't affect runtime code.
 
 - [Kani Model Checker](https://model-checking.github.io/kani/)
 - [Consensus Verification](../bllvm-consensus/docs/VERIFICATION.md)
-- [Verification Plan](../../docs/BITCOIN_NETWORKING_VERIFICATION_PLAN.md)
 

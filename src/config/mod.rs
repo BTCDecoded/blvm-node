@@ -581,8 +581,18 @@ pub struct RpcAuthConfig {
     pub required: bool,
 
     /// Valid authentication tokens
+    /// Can be loaded from:
+    /// 1. Environment variable RPC_AUTH_TOKENS (comma-separated)
+    /// 2. Token file (if token_file is set)
+    /// 3. Config file (this field)
     #[serde(default)]
     pub tokens: Vec<String>,
+
+    /// Path to file containing tokens (one per line)
+    /// If set, tokens will be loaded from this file instead of the tokens field
+    /// File should have restricted permissions (chmod 600)
+    #[serde(default)]
+    pub token_file: Option<String>,
 
     /// Valid certificate fingerprints (for certificate-based auth)
     #[serde(default)]
@@ -609,6 +619,7 @@ impl Default for RpcAuthConfig {
         Self {
             required: false,
             tokens: Vec::new(),
+            token_file: None,
             certificates: Vec::new(),
             rate_limit_burst: 100,
             rate_limit_rate: 10,
@@ -616,9 +627,69 @@ impl Default for RpcAuthConfig {
     }
 }
 
+impl RpcAuthConfig {
+    /// Load tokens from environment variable, token file, or config file
+    /// Priority: env var > token_file > config file tokens
+    ///
+    /// # Returns
+    /// Vector of tokens loaded from the highest priority source
+    pub fn load_tokens(&self) -> anyhow::Result<Vec<String>> {
+        // Use standard library directly (utils::env is just a wrapper)
+        use std::env;
+
+        // Priority 1: Environment variable (highest priority)
+        if let Ok(env_tokens) = env::var("RPC_AUTH_TOKENS") {
+            let tokens: Vec<String> = env_tokens
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !tokens.is_empty() {
+                return Ok(tokens);
+            }
+        }
+
+        // Priority 2: Token file
+        if let Some(ref token_file) = self.token_file {
+            let content = std::fs::read_to_string(token_file)
+                .map_err(|e| anyhow::anyhow!("Failed to read token file {:?}: {}", token_file, e))?;
+            let tokens: Vec<String> = content
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && !s.starts_with('#')) // Support comments
+                .collect();
+            if !tokens.is_empty() {
+                return Ok(tokens);
+            }
+        }
+
+        // Priority 3: Config file tokens (fallback to current behavior)
+        Ok(self.tokens.clone())
+    }
+}
+
 impl NodeConfig {
     /// Load configuration from file (supports JSON and TOML)
     pub fn from_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        // Validate file permissions (warn if world-readable)
+        #[cfg(unix)]
+        {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                use std::os::unix::fs::PermissionsExt;
+                let permissions = metadata.permissions();
+                let mode = permissions.mode();
+                // Check if file is readable by others (group or world)
+                if mode & 0o077 != 0 {
+                    tracing::warn!(
+                        "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
+                         Consider setting permissions to 600 for security. \
+                         Run: chmod 600 {:?}",
+                        path, mode, path
+                    );
+                }
+            }
+        }
+
         let content = std::fs::read_to_string(path)?;
 
         if path.extension().and_then(|s| s.to_str()) == Some("toml") {
@@ -1204,6 +1275,82 @@ impl NodeConfig {
 
         Ok(())
     }
+
+    /// Validate security configuration and return warnings
+    ///
+    /// Checks for insecure configurations that could expose the node to unauthorized access.
+    /// Returns a list of warning messages that should be logged but don't prevent startup.
+    ///
+    /// # Arguments
+    /// * `rpc_addr` - The RPC server bind address
+    /// * `rest_api_addr` - Optional REST API server bind address
+    ///
+    /// # Returns
+    /// Vector of warning messages (empty if configuration is secure)
+    pub fn validate_security(
+        &self,
+        rpc_addr: SocketAddr,
+        rest_api_addr: Option<SocketAddr>,
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        // Helper to check if address is localhost
+        let is_localhost = |addr: &SocketAddr| {
+            addr.ip().is_loopback() || addr.ip().to_string() == "127.0.0.1"
+        };
+
+        // Check RPC authentication
+        if let Some(ref rpc_auth) = self.rpc_auth {
+            if !rpc_auth.required {
+                // Check if binding to non-localhost
+                if !is_localhost(&rpc_addr) {
+                    warnings.push(format!(
+                        "SECURITY WARNING: RPC server is binding to {} (non-localhost) but authentication is not required. \
+                        This exposes your node to unauthorized access. Consider setting rpc_auth.required = true",
+                        rpc_addr
+                    ));
+                }
+            } else if rpc_auth.tokens.is_empty() && rpc_auth.certificates.is_empty() {
+                warnings.push(
+                    "SECURITY WARNING: RPC authentication is required but no tokens or certificates are configured. \
+                    RPC requests will be rejected. Add tokens or certificates to rpc_auth configuration."
+                        .to_string(),
+                );
+            }
+        } else {
+            // No auth config at all
+            if !is_localhost(&rpc_addr) {
+                warnings.push(format!(
+                    "SECURITY WARNING: RPC server is binding to {} (non-localhost) without authentication. \
+                    This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true",
+                    rpc_addr
+                ));
+            }
+        }
+
+        // Check REST API authentication
+        if let Some(rest_addr) = rest_api_addr {
+            if !is_localhost(&rest_addr) {
+                if let Some(ref rpc_auth) = self.rpc_auth {
+                    if !rpc_auth.required {
+                        warnings.push(format!(
+                            "SECURITY WARNING: REST API is binding to {} (non-localhost) but authentication is not required. \
+                            This exposes your node to unauthorized access. Consider setting rpc_auth.required = true",
+                            rest_addr
+                        ));
+                    }
+                } else {
+                    warnings.push(format!(
+                        "SECURITY WARNING: REST API is binding to {} (non-localhost) without authentication. \
+                        This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true",
+                        rest_addr
+                    ));
+                }
+            }
+        }
+
+        warnings
+    }
 }
 
 impl PruningConfig {
@@ -1787,6 +1934,11 @@ pub struct PaymentConfig {
     #[serde(default)]
     pub merchant_key: Option<String>,
 
+    /// Node payment address/script for module downloads (optional)
+    /// Used when serving modules that require payment
+    #[serde(default)]
+    pub node_payment_address: Option<String>,
+
     /// Payment request storage path
     #[serde(default = "default_payment_store_path")]
     pub payment_store_path: String,
@@ -1806,6 +1958,7 @@ impl Default for PaymentConfig {
             p2p_enabled: true,
             http_enabled: false,
             merchant_key: None,
+            node_payment_address: None,
             payment_store_path: "data/payments".to_string(),
             module_payments_enabled: true,
         }

@@ -76,34 +76,104 @@ pub struct PaymentSection {
 }
 
 /// Module manifest (module.toml structure)
+///
+/// The manifest defines a module's identity, dependencies, and capabilities.
+/// It follows a clean, hierarchical structure:
+///
+/// ```toml
+/// # Core metadata (required)
+/// name = "my-module"
+/// version = "1.0.0"
+/// entry_point = "my-module"
+///
+/// # Optional metadata
+/// description = "What this module does"
+/// author = "Author Name <email@example.com>"
+///
+/// # Capabilities (permissions this module requires)
+/// capabilities = ["read_blockchain", "subscribe_events"]
+///
+/// # Dependencies
+/// [dependencies]
+/// "bllvm-lightning" = ">=1.0.0"
+///
+/// [optional_dependencies]
+/// "bllvm-mesh" = ">=0.5.0"
+///
+/// # Configuration schema (optional)
+/// [config_schema]
+/// poll_interval = "Polling interval in seconds"
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleManifest {
-    /// Module name
+    // ============================================================================
+    // Core Identity (Required)
+    // ============================================================================
+    
+    /// Module name (unique identifier, alphanumeric with dashes/underscores)
     pub name: String,
-    /// Module version (semantic versioning)
+    
+    /// Module version (semantic versioning: major.minor.patch)
     pub version: String,
-    /// Human-readable description
+    
+    /// Module entry point (binary name or path relative to module directory)
+    pub entry_point: String,
+    
+    // ============================================================================
+    // Metadata (Optional)
+    // ============================================================================
+    
+    /// Human-readable description of what this module does
+    #[serde(default)]
     pub description: Option<String>,
-    /// Module author
+    
+    /// Module author (name and/or email)
+    #[serde(default)]
     pub author: Option<String>,
-    /// Capabilities this module declares it can use
+    
+    // ============================================================================
+    // Capabilities & Dependencies
+    // ============================================================================
+    
+    /// Capabilities this module requires (permissions)
+    /// These determine what APIs the module can access
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// Required dependencies (module names with versions)
+    
+    /// Required dependencies (hard dependencies)
+    /// Module will fail to load if these are missing or unavailable
     #[serde(default)]
     pub dependencies: HashMap<String, String>,
-    /// Module entry point (binary name or path)
-    pub entry_point: String,
-    /// Module configuration schema (optional)
+    
+    /// Optional dependencies (soft dependencies)
+    /// Module can load and function without these
+    #[serde(default)]
+    pub optional_dependencies: HashMap<String, String>,
+    
+    // ============================================================================
+    // Configuration
+    // ============================================================================
+    
+    /// Configuration schema (descriptions of config keys)
+    /// Maps config key names to their descriptions
     #[serde(default)]
     pub config_schema: HashMap<String, String>,
-    /// Signature section (optional - for signed modules)
+    
+    // ============================================================================
+    // Advanced Features (Optional)
+    // ============================================================================
+    
+    /// Signature section (for signed/verified modules)
+    /// Contains maintainer signatures and threshold
     #[serde(default)]
     pub signatures: Option<SignatureSection>,
-    /// Binary information (optional - for integrity verification)
+    
+    /// Binary information (for integrity verification)
+    /// Contains hash and size for binary verification
     #[serde(default)]
     pub binary: Option<BinarySection>,
-    /// Payment configuration (optional - for paid modules)
+    
+    /// Payment configuration (for paid modules)
     /// Contains cryptographically signed payment addresses
     #[serde(default)]
     pub payment: Option<PaymentSection>,
@@ -144,6 +214,7 @@ impl ModuleManifest {
             author: self.author.clone().unwrap_or_default(),
             capabilities: self.capabilities.clone(),
             dependencies: self.dependencies.clone(),
+            optional_dependencies: self.optional_dependencies.clone(),
             entry_point: self.entry_point.clone(),
         }
     }

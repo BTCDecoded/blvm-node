@@ -89,6 +89,8 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "moduleinv",
     "getmodulelist",
     "modulelist",
+    // Mesh networking
+    "mesh",
 ];
 
 /// Bitcoin protocol message types
@@ -141,6 +143,8 @@ pub enum ProtocolMessage {
     // Governance/Commons Economic Node messages
     EconomicNodeRegistration(EconomicNodeRegistrationMessage),
     EconomicNodeVeto(EconomicNodeVetoMessage),
+    // Mesh networking packets (payment-gated routing)
+    MeshPacket(Vec<u8>), // Serialized mesh packet (handled by mesh module)
     EconomicNodeStatus(EconomicNodeStatusMessage),
     EconomicNodeForkDecision(EconomicNodeForkDecisionMessage),
     // Address relay
@@ -916,6 +920,8 @@ impl ProtocolParser {
                 payload,
             )?)),
             "modulelist" => Ok(ProtocolMessage::ModuleList(bincode::deserialize(payload)?)),
+            // Mesh networking packets
+            "mesh" => Ok(ProtocolMessage::MeshPacket(payload.to_vec())),
             _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
         }
     }

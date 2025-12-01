@@ -4,7 +4,7 @@
 //! Uses the existing hyper infrastructure for consistency.
 
 use crate::node::mempool::MempoolManager;
-use crate::rpc::{blockchain, mempool, mining, network, rawtx};
+use crate::rpc::{auth, blockchain, mempool, mining, network, rawtx};
 use crate::storage::Storage;
 use anyhow::Result;
 use bytes::Bytes;
@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::addresses;
@@ -29,6 +29,7 @@ use super::mempool as rest_mempool;
 use super::network as rest_network;
 use super::transactions;
 use super::types::{ApiError, ApiResponse};
+use super::validation as rest_validation;
 
 /// REST API Server
 #[derive(Clone)]
@@ -39,6 +40,10 @@ pub struct RestApiServer {
     mempool: Arc<mempool::MempoolRpc>,
     mining: Arc<mining::MiningRpc>,
     rawtx: Arc<rawtx::RawTxRpc>,
+    /// Authentication manager (optional)
+    auth_manager: Option<Arc<auth::RpcAuthManager>>,
+    /// Whether security headers are enabled
+    security_headers_enabled: bool,
     #[cfg(feature = "bip70-http")]
     payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
     #[cfg(feature = "bip70-http")]
@@ -62,11 +67,51 @@ impl RestApiServer {
             mempool,
             mining,
             rawtx,
+            auth_manager: None,
+            security_headers_enabled: true, // Enable security headers by default
             #[cfg(feature = "bip70-http")]
             payment_processor: None,
             #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
         }
+    }
+
+    /// Create a new REST API server with authentication
+    pub fn with_auth(
+        addr: SocketAddr,
+        blockchain: Arc<blockchain::BlockchainRpc>,
+        network: Arc<network::NetworkRpc>,
+        mempool: Arc<mempool::MempoolRpc>,
+        mining: Arc<mining::MiningRpc>,
+        rawtx: Arc<rawtx::RawTxRpc>,
+        auth_manager: Arc<auth::RpcAuthManager>,
+    ) -> Self {
+        Self {
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            auth_manager: Some(auth_manager),
+            security_headers_enabled: true,
+            #[cfg(feature = "bip70-http")]
+            payment_processor: None,
+            #[cfg(feature = "bip70-http")]
+            payment_state_machine: None,
+        }
+    }
+
+    /// Set authentication manager
+    pub fn set_auth_manager(mut self, auth_manager: Arc<auth::RpcAuthManager>) -> Self {
+        self.auth_manager = Some(auth_manager);
+        self
+    }
+
+    /// Enable or disable security headers
+    pub fn with_security_headers(mut self, enabled: bool) -> Self {
+        self.security_headers_enabled = enabled;
+        self
     }
 
     /// Set payment processor for BIP70 HTTP endpoints
@@ -122,7 +167,7 @@ impl RestApiServer {
     async fn handle_request(
         server: Arc<Self>,
         req: Request<Incoming>,
-        _addr: SocketAddr,
+        addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>, hyper::Error> {
         let method = req.method().clone();
         let uri = req.uri().clone();
@@ -132,15 +177,79 @@ impl RestApiServer {
         let request_id = Uuid::new_v4().to_string();
 
         debug!(
-            "REST API {} {} (request_id: {})",
+            "REST API {} {} from {} (request_id: {})",
             method,
             path,
+            addr,
             &request_id[..8]
         );
 
+        // Extract headers before consuming request body
+        let headers = req.headers().clone();
+
+        // Authenticate request if authentication is enabled
+        if let Some(ref auth_manager) = server.auth_manager {
+            let auth_result = auth_manager.authenticate_request(&headers, addr).await;
+
+            // Check if authentication failed
+            if let Some(error) = &auth_result.error {
+                warn!("REST API authentication failed from {}: {}", addr, error);
+                return Ok(Self::error_response_with_headers(
+                    server.security_headers_enabled,
+                    StatusCode::UNAUTHORIZED,
+                    "UNAUTHORIZED",
+                    error,
+                    None,
+                    request_id,
+                ));
+            }
+
+            // Check per-user rate limiting (for authenticated users)
+            if let Some(ref user_id) = auth_result.user_id {
+                if !auth_manager.check_rate_limit_with_endpoint(user_id, Some(addr), Some(path)).await {
+                    warn!("REST API rate limit exceeded for user from {}", addr);
+                    return Ok(Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "TOO_MANY_REQUESTS",
+                        "Rate limit exceeded",
+                        None,
+                        request_id,
+                    ));
+                }
+            } else {
+                // Unauthenticated request - check per-IP rate limit
+                if !auth_manager.check_ip_rate_limit_with_endpoint(addr, Some(path)).await {
+                    return Ok(Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "TOO_MANY_REQUESTS",
+                        "IP rate limit exceeded",
+                        None,
+                        request_id,
+                    ));
+                }
+            }
+
+            // Check per-endpoint rate limiting (stricter for write operations)
+            let endpoint = Self::get_endpoint_for_rate_limiting(path);
+            if !auth_manager.check_method_rate_limit(&endpoint).await {
+                warn!("REST API endpoint rate limit exceeded: {} from {}", endpoint, addr);
+                return Ok(Self::error_response_with_headers(
+                    server.security_headers_enabled,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "TOO_MANY_REQUESTS",
+                    &format!("Endpoint '{}' rate limit exceeded", endpoint),
+                    None,
+                    request_id,
+                ));
+            }
+        }
+
         // Only allow GET and POST methods
         if method != Method::GET && method != Method::POST {
-            return Ok(Self::error_response(
+            return Ok(Self::error_response_with_headers(
+                server.security_headers_enabled,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "METHOD_NOT_ALLOWED",
                 "Only GET and POST methods are supported",
@@ -150,6 +259,7 @@ impl RestApiServer {
         }
 
         // Route requests
+        let security_headers = server.security_headers_enabled;
         let response = if path.starts_with("/api/v1/chain") {
             Self::handle_chain_request(server, method, path, request_id).await
         } else if path.starts_with("/api/v1/blocks") {
@@ -194,7 +304,8 @@ impl RestApiServer {
                     )
                     .await
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::SERVICE_UNAVAILABLE,
                         "SERVICE_UNAVAILABLE",
                         "Payment state machine not configured",
@@ -205,7 +316,8 @@ impl RestApiServer {
             }
             #[cfg(not(feature = "bip70-http"))]
             {
-                Self::error_response(
+                Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::NOT_IMPLEMENTED,
                     "NOT_IMPLEMENTED",
                     "Payment endpoints require --features bip70-http",
@@ -228,7 +340,8 @@ impl RestApiServer {
                     )
                     .await
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::SERVICE_UNAVAILABLE,
                         "SERVICE_UNAVAILABLE",
                         "Vault engine not configured",
@@ -239,7 +352,8 @@ impl RestApiServer {
             }
             #[cfg(not(feature = "ctv"))]
             {
-                Self::error_response(
+                Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::NOT_IMPLEMENTED,
                     "NOT_IMPLEMENTED",
                     "CTV feature not enabled for Vaults",
@@ -262,7 +376,8 @@ impl RestApiServer {
                     )
                     .await
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::SERVICE_UNAVAILABLE,
                         "SERVICE_UNAVAILABLE",
                         "Pool engine not configured",
@@ -273,7 +388,8 @@ impl RestApiServer {
             }
             #[cfg(not(feature = "ctv"))]
             {
-                Self::error_response(
+                Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::NOT_IMPLEMENTED,
                     "NOT_IMPLEMENTED",
                     "CTV feature not enabled for Pools",
@@ -296,7 +412,8 @@ impl RestApiServer {
                     )
                     .await
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::SERVICE_UNAVAILABLE,
                         "SERVICE_UNAVAILABLE",
                         "Congestion manager not configured",
@@ -307,7 +424,8 @@ impl RestApiServer {
             }
             #[cfg(not(feature = "ctv"))]
             {
-                Self::error_response(
+                Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::NOT_IMPLEMENTED,
                     "NOT_IMPLEMENTED",
                     "CTV feature not enabled for Congestion Control",
@@ -324,7 +442,8 @@ impl RestApiServer {
                         .await
                     {
                         Ok(resp) => resp,
-                        Err(e) => Self::error_response(
+                        Err(e) => Self::error_response_with_headers(
+                            security_headers,
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "PAYMENT_ERROR",
                             &format!("Payment processing error: {}", e),
@@ -333,7 +452,8 @@ impl RestApiServer {
                         ),
                     }
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::SERVICE_UNAVAILABLE,
                         "SERVICE_UNAVAILABLE",
                         "Payment processor not configured",
@@ -344,7 +464,8 @@ impl RestApiServer {
             }
             #[cfg(not(feature = "bip70-http"))]
             {
-                Self::error_response(
+                Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::NOT_IMPLEMENTED,
                     "NOT_IMPLEMENTED",
                     "HTTP BIP70 not enabled. Compile with --features bip70-http",
@@ -353,7 +474,8 @@ impl RestApiServer {
                 )
             }
         } else {
-            Self::error_response(
+            Self::error_response_with_headers(
+                server.security_headers_enabled,
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
                 &format!("Endpoint not found: {}", path),
@@ -362,7 +484,58 @@ impl RestApiServer {
             )
         };
 
+        // Response already has security headers added in individual handlers
         Ok(response)
+    }
+
+    /// Get endpoint identifier for rate limiting
+    fn get_endpoint_for_rate_limiting(path: &str) -> String {
+        // Extract endpoint category for rate limiting
+        if path.starts_with("/api/v1/transactions") {
+            "rest_transactions".to_string()
+        } else if path.starts_with("/api/v1/payments") || path.starts_with("/api/v1/vaults") || path.starts_with("/api/v1/pools") {
+            "rest_payments".to_string() // Write operations - stricter limits
+        } else if path.starts_with("/api/v1/addresses") {
+            "rest_addresses".to_string()
+        } else if path.starts_with("/api/v1/blocks") {
+            "rest_blocks".to_string()
+        } else if path.starts_with("/api/v1/mempool") {
+            "rest_mempool".to_string()
+        } else {
+            "rest_other".to_string()
+        }
+    }
+
+    /// Add security headers to response
+    fn add_security_headers(
+        mut response: Response<Full<Bytes>>,
+        enabled: bool,
+    ) -> Response<Full<Bytes>> {
+        if !enabled {
+            return response;
+        }
+
+        let headers = response.headers_mut();
+        
+        // Prevent MIME type sniffing
+        headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+        
+        // Prevent clickjacking
+        headers.insert("X-Frame-Options", "DENY".parse().unwrap());
+        
+        // XSS protection (legacy, but still useful)
+        headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
+        
+        // Referrer policy
+        headers.insert("Referrer-Policy", "strict-origin-when-cross-origin".parse().unwrap());
+        
+        // Content Security Policy (restrictive by default)
+        headers.insert(
+            "Content-Security-Policy",
+            "default-src 'self'".parse().unwrap(),
+        );
+
+        response
     }
 
     /// Handle chain-related requests
@@ -372,8 +545,10 @@ impl RestApiServer {
         path: &str,
         request_id: String,
     ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
         if method != Method::GET {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "METHOD_NOT_ALLOWED",
                 "Only GET method is supported for chain endpoints",
@@ -384,8 +559,9 @@ impl RestApiServer {
 
         match path {
             "/api/v1/chain/tip" => match chain::get_chain_tip(&server.blockchain).await {
-                Ok(data) => Self::success_response(data, request_id),
-                Err(e) => Self::error_response(
+                Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                Err(e) => Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
                     &format!("Failed to get chain tip: {}", e),
@@ -394,8 +570,9 @@ impl RestApiServer {
                 ),
             },
             "/api/v1/chain/height" => match chain::get_chain_height(&server.blockchain).await {
-                Ok(data) => Self::success_response(data, request_id),
-                Err(e) => Self::error_response(
+                Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                Err(e) => Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
                     &format!("Failed to get chain height: {}", e),
@@ -404,8 +581,9 @@ impl RestApiServer {
                 ),
             },
             "/api/v1/chain/info" => match chain::get_chain_info(&server.blockchain).await {
-                Ok(data) => Self::success_response(data, request_id),
-                Err(e) => Self::error_response(
+                Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                Err(e) => Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
                     &format!("Failed to get chain info: {}", e),
@@ -413,7 +591,8 @@ impl RestApiServer {
                     request_id,
                 ),
             },
-            _ => Self::error_response(
+            _ => Self::error_response_with_headers(
+                security_headers,
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
                 &format!("Chain endpoint not found: {}", path),
@@ -430,8 +609,10 @@ impl RestApiServer {
         path: &str,
         request_id: String,
     ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
         if method != Method::GET {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "METHOD_NOT_ALLOWED",
                 "Only GET method is supported for block endpoints",
@@ -449,7 +630,8 @@ impl RestApiServer {
             || path_parts[1] != "v1"
             || path_parts[2] != "blocks"
         {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "Invalid block endpoint path",
@@ -464,9 +646,24 @@ impl RestApiServer {
                 if let Some(height_str) = path_parts.get(4) {
                     match height_str.parse::<u64>() {
                         Ok(height) => {
-                            match blocks::get_block_by_height(&server.blockchain, height).await {
-                                Ok(data) => Self::success_response(data, request_id),
-                                Err(e) => Self::error_response(
+                            // Validate block height
+                            let validated_height = match rest_validation::validate_block_height(height) {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    return Self::error_response_with_headers(
+                                        server.security_headers_enabled,
+                                        StatusCode::BAD_REQUEST,
+                                        "BAD_REQUEST",
+                                        &format!("Invalid block height: {}", e),
+                                        None,
+                                        request_id,
+                                    );
+                                }
+                            };
+                            match blocks::get_block_by_height(&server.blockchain, validated_height).await {
+                                Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                                Err(e) => Self::error_response_with_headers(
+                                    server.security_headers_enabled,
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     "INTERNAL_ERROR",
                                     &format!("Failed to get block by height: {}", e),
@@ -475,16 +672,18 @@ impl RestApiServer {
                                 ),
                             }
                         }
-                        Err(_) => Self::error_response(
+                        Err(_) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
                             StatusCode::BAD_REQUEST,
                             "BAD_REQUEST",
-                            "Invalid height parameter",
+                            "Invalid height parameter (must be a number)",
                             None,
                             request_id,
                         ),
                     }
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        server.security_headers_enabled,
                         StatusCode::BAD_REQUEST,
                         "BAD_REQUEST",
                         "Height parameter required",
@@ -494,11 +693,27 @@ impl RestApiServer {
                 }
             }
             Some(hash) => {
+                // Validate hash format
+                let validated_hash = match rest_validation::validate_hash_string(hash) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::BAD_REQUEST,
+                            "BAD_REQUEST",
+                            &format!("Invalid block hash: {}", e),
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                
                 // Check if this is /api/v1/blocks/{hash}/transactions
                 if path_parts.get(4) == Some(&"transactions") {
-                    match blocks::get_block_transactions(&server.blockchain, hash).await {
-                        Ok(data) => Self::success_response(data, request_id),
-                        Err(e) => Self::error_response(
+                    match blocks::get_block_transactions(&server.blockchain, &validated_hash).await {
+                        Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                        Err(e) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "INTERNAL_ERROR",
                             &format!("Failed to get block transactions: {}", e),
@@ -508,9 +723,10 @@ impl RestApiServer {
                     }
                 } else {
                     // /api/v1/blocks/{hash}
-                    match blocks::get_block_by_hash(&server.blockchain, hash).await {
-                        Ok(data) => Self::success_response(data, request_id),
-                        Err(e) => Self::error_response(
+                    match blocks::get_block_by_hash(&server.blockchain, &validated_hash).await {
+                        Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                        Err(e) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "INTERNAL_ERROR",
                             &format!("Failed to get block: {}", e),
@@ -520,7 +736,8 @@ impl RestApiServer {
                     }
                 }
             }
-            None => Self::error_response(
+            None => Self::error_response_with_headers(
+                server.security_headers_enabled,
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "Block hash or height required",
@@ -538,6 +755,7 @@ impl RestApiServer {
         req: Request<Incoming>,
         request_id: String,
     ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
         // Parse path: /api/v1/transactions/{txid} or /api/v1/transactions/{txid}/confirmations
         let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -547,7 +765,8 @@ impl RestApiServer {
             || path_parts[1] != "v1"
             || path_parts[2] != "transactions"
         {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "Invalid transaction endpoint path",
@@ -559,12 +778,28 @@ impl RestApiServer {
         match method {
             Method::GET => {
                 if let Some(txid) = path_parts.get(3) {
+                    // Validate transaction ID (hash format)
+                    let validated_txid = match rest_validation::validate_hash_string(txid) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                &format!("Invalid transaction ID: {}", e),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    
                     // Check if this is /api/v1/transactions/{txid}/confirmations
                     if path_parts.get(4) == Some(&"confirmations") {
-                        match transactions::get_transaction_confirmations(&server.rawtx, txid).await
+                        match transactions::get_transaction_confirmations(&server.rawtx, &validated_txid).await
                         {
-                            Ok(data) => Self::success_response(data, request_id),
-                            Err(e) => Self::error_response(
+                            Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                            Err(e) => Self::error_response_with_headers(
+                                server.security_headers_enabled,
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "INTERNAL_ERROR",
                                 &format!("Failed to get transaction confirmations: {}", e),
@@ -574,9 +809,10 @@ impl RestApiServer {
                         }
                     } else {
                         // /api/v1/transactions/{txid}
-                        match transactions::get_transaction(&server.rawtx, txid).await {
-                            Ok(data) => Self::success_response(data, request_id),
-                            Err(e) => Self::error_response(
+                        match transactions::get_transaction(&server.rawtx, &validated_txid).await {
+                            Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                            Err(e) => Self::error_response_with_headers(
+                                server.security_headers_enabled,
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "INTERNAL_ERROR",
                                 &format!("Failed to get transaction: {}", e),
@@ -586,7 +822,8 @@ impl RestApiServer {
                         }
                     }
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        server.security_headers_enabled,
                         StatusCode::BAD_REQUEST,
                         "BAD_REQUEST",
                         "Transaction ID required",
@@ -602,7 +839,8 @@ impl RestApiServer {
                     let body = match req.collect().await {
                         Ok(b) => b.to_bytes(),
                         Err(e) => {
-                            return Self::error_response(
+                            return Self::error_response_with_headers(
+                                security_headers,
                                 StatusCode::BAD_REQUEST,
                                 "BAD_REQUEST",
                                 &format!("Failed to read request body: {}", e),
@@ -620,19 +858,25 @@ impl RestApiServer {
                         }
                     };
 
-                    if hex.is_empty() {
-                        return Self::error_response(
-                            StatusCode::BAD_REQUEST,
-                            "BAD_REQUEST",
-                            "Transaction hex required in request body",
-                            None,
-                            request_id,
-                        );
-                    }
+                    // Validate transaction hex
+                    let validated_hex = match rest_validation::validate_transaction_hex(hex) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                &format!("Invalid transaction hex: {}", e),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
 
-                    match transactions::submit_transaction(&server.rawtx, hex).await {
-                        Ok(data) => Self::success_response(data, request_id),
-                        Err(e) => Self::error_response(
+                    match transactions::submit_transaction(&server.rawtx, &validated_hex).await {
+                        Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                        Err(e) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
                             StatusCode::BAD_REQUEST,
                             "TRANSACTION_REJECTED",
                             &format!("Transaction rejected: {}", e),
@@ -641,7 +885,8 @@ impl RestApiServer {
                         ),
                     }
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        server.security_headers_enabled,
                         StatusCode::BAD_REQUEST,
                         "BAD_REQUEST",
                         "POST /api/v1/transactions expects transaction hex in body",
@@ -650,7 +895,8 @@ impl RestApiServer {
                     )
                 }
             }
-            _ => Self::error_response(
+            _ => Self::error_response_with_headers(
+                server.security_headers_enabled,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "METHOD_NOT_ALLOWED",
                 "Only GET and POST methods are supported for transaction endpoints",
@@ -667,8 +913,10 @@ impl RestApiServer {
         path: &str,
         request_id: String,
     ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
         if method != Method::GET {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "METHOD_NOT_ALLOWED",
                 "Only GET method is supported for address endpoints",
@@ -696,12 +944,29 @@ impl RestApiServer {
         }
 
         let address = path_parts[3];
+        
+        // Validate address format
+        let validated_address = match rest_validation::validate_address_string(address) {
+            Ok(a) => a,
+            Err(e) => {
+                return Self::error_response_with_headers(
+                    server.security_headers_enabled,
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    &format!("Invalid address: {}", e),
+                    None,
+                    request_id,
+                );
+            }
+        };
+        
         let action = path_parts.get(4).copied().unwrap_or("");
 
         match action {
-            "balance" => match addresses::get_address_balance(&server.blockchain, address).await {
-                Ok(data) => Self::success_response(data, request_id),
-                Err(e) => Self::error_response(
+            "balance" => match addresses::get_address_balance(&server.blockchain, &validated_address).await {
+                Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                Err(e) => Self::error_response_with_headers(
+                    server.security_headers_enabled,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
                     &format!("Failed to get address balance: {}", e),
@@ -710,9 +975,10 @@ impl RestApiServer {
                 ),
             },
             "transactions" => {
-                match addresses::get_address_transactions(&server.blockchain, address).await {
-                    Ok(data) => Self::success_response(data, request_id),
-                    Err(e) => Self::error_response(
+                match addresses::get_address_transactions(&server.blockchain, &validated_address).await {
+                    Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                    Err(e) => Self::error_response_with_headers(
+                        server.security_headers_enabled,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
                         &format!("Failed to get address transactions: {}", e),
@@ -721,9 +987,10 @@ impl RestApiServer {
                     ),
                 }
             }
-            "utxos" => match addresses::get_address_utxos(&server.blockchain, address).await {
-                Ok(data) => Self::success_response(data, request_id),
-                Err(e) => Self::error_response(
+            "utxos" => match addresses::get_address_utxos(&server.blockchain, &validated_address).await {
+                Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                Err(e) => Self::error_response_with_headers(
+                    server.security_headers_enabled,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
                     &format!("Failed to get address UTXOs: {}", e),
@@ -731,7 +998,8 @@ impl RestApiServer {
                     request_id,
                 ),
             },
-            _ => Self::error_response(
+            _ => Self::error_response_with_headers(
+                security_headers,
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
                 &format!(
@@ -751,8 +1019,10 @@ impl RestApiServer {
         path: &str,
         request_id: String,
     ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
         if method != Method::GET {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "METHOD_NOT_ALLOWED",
                 "Only GET method is supported for mempool endpoints",
@@ -769,7 +1039,8 @@ impl RestApiServer {
             || path_parts[1] != "v1"
             || path_parts[2] != "mempool"
         {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "Invalid mempool endpoint path",
@@ -782,8 +1053,9 @@ impl RestApiServer {
             None => {
                 // /api/v1/mempool - list all transactions
                 match rest_mempool::get_mempool(&server.mempool).await {
-                    Ok(data) => Self::success_response(data, request_id),
-                    Err(e) => Self::error_response(
+                    Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
                         &format!("Failed to get mempool: {}", e),
@@ -795,9 +1067,24 @@ impl RestApiServer {
             Some(&"transactions") => {
                 // /api/v1/mempool/transactions/{txid}
                 if let Some(txid) = path_parts.get(4) {
-                    match rest_mempool::get_mempool_transaction(&server.mempool, txid).await {
-                        Ok(data) => Self::success_response(data, request_id),
-                        Err(e) => Self::error_response(
+                    // Validate transaction ID
+                    let validated_txid = match rest_validation::validate_hash_string(txid) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                &format!("Invalid transaction ID: {}", e),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    match rest_mempool::get_mempool_transaction(&server.mempool, &validated_txid).await {
+                        Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                        Err(e) => Self::error_response_with_headers(
+                            security_headers,
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "INTERNAL_ERROR",
                             &format!("Failed to get mempool transaction: {}", e),
@@ -806,7 +1093,8 @@ impl RestApiServer {
                         ),
                     }
                 } else {
-                    Self::error_response(
+                    Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::BAD_REQUEST,
                         "BAD_REQUEST",
                         "Transaction ID required",
@@ -818,8 +1106,9 @@ impl RestApiServer {
             Some(&"stats") => {
                 // /api/v1/mempool/stats
                 match rest_mempool::get_mempool_stats(&server.mempool).await {
-                    Ok(data) => Self::success_response(data, request_id),
-                    Err(e) => Self::error_response(
+                    Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
                         &format!("Failed to get mempool stats: {}", e),
@@ -828,7 +1117,8 @@ impl RestApiServer {
                     ),
                 }
             }
-            _ => Self::error_response(
+            _ => Self::error_response_with_headers(
+                security_headers,
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
                 &format!("Mempool endpoint not found: {}", path),
@@ -845,8 +1135,10 @@ impl RestApiServer {
         path: &str,
         request_id: String,
     ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
         if method != Method::GET {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "METHOD_NOT_ALLOWED",
                 "Only GET method is supported for network endpoints",
@@ -863,7 +1155,8 @@ impl RestApiServer {
             || path_parts[1] != "v1"
             || path_parts[2] != "network"
         {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "Invalid network endpoint path",
@@ -874,8 +1167,9 @@ impl RestApiServer {
 
         match path_parts.get(3) {
             Some(&"info") => match rest_network::get_network_info(&server.network).await {
-                Ok(data) => Self::success_response(data, request_id),
-                Err(e) => Self::error_response(
+                Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                Err(e) => Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
                     &format!("Failed to get network info: {}", e),
@@ -884,8 +1178,9 @@ impl RestApiServer {
                 ),
             },
             Some(&"peers") => match rest_network::get_network_peers(&server.network).await {
-                Ok(data) => Self::success_response(data, request_id),
-                Err(e) => Self::error_response(
+                Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                Err(e) => Self::error_response_with_headers(
+                    security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
                     &format!("Failed to get network peers: {}", e),
@@ -893,7 +1188,8 @@ impl RestApiServer {
                     request_id,
                 ),
             },
-            _ => Self::error_response(
+            _ => Self::error_response_with_headers(
+                security_headers,
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
                 &format!(
@@ -913,8 +1209,10 @@ impl RestApiServer {
         path: &str,
         request_id: String,
     ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
         if method != Method::GET {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "METHOD_NOT_ALLOWED",
                 "Only GET method is supported for fee endpoints",
@@ -931,7 +1229,8 @@ impl RestApiServer {
             || path_parts[1] != "v1"
             || path_parts[2] != "fees"
         {
-            return Self::error_response(
+            return Self::error_response_with_headers(
+                security_headers,
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
                 "Invalid fee endpoint path",
@@ -944,8 +1243,9 @@ impl RestApiServer {
             Some(&"estimate") => {
                 // TODO: Parse query parameters for blocks (for now use default)
                 match fees::get_fee_estimate(&server.mining, None).await {
-                    Ok(data) => Self::success_response(data, request_id),
-                    Err(e) => Self::error_response(
+                    Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
                         &format!("Failed to get fee estimate: {}", e),
@@ -954,7 +1254,8 @@ impl RestApiServer {
                     ),
                 }
             }
-            _ => Self::error_response(
+            _ => Self::error_response_with_headers(
+                security_headers,
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
                 &format!("Fee endpoint not found: {}. Supported: estimate", path),
@@ -972,10 +1273,22 @@ impl RestApiServer {
         details: Option<serde_json::Value>,
         request_id: String,
     ) -> Response<Full<Bytes>> {
+        Self::error_response_with_headers(true, status, code, message, details, request_id)
+    }
+
+    /// Create an error response with security headers
+    fn error_response_with_headers(
+        security_headers_enabled: bool,
+        status: StatusCode,
+        code: &str,
+        message: &str,
+        details: Option<serde_json::Value>,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
         let error = ApiError::new(code, message, details, None, Some(request_id.clone()));
         let body = serde_json::to_string(&error).unwrap_or_else(|_| "{}".to_string());
 
-        Response::builder()
+        let mut response = Response::builder()
             .status(status)
             .header("Content-Type", "application/json")
             .header("Content-Length", body.len())
@@ -987,18 +1300,34 @@ impl RestApiServer {
                         "{\"error\":\"Internal server error\"}",
                     )))
                     .expect("Fallback response should always succeed")
-            })
+            });
+
+        // Add security headers
+        if security_headers_enabled {
+            response = Self::add_security_headers(response, true);
+        }
+
+        response
     }
 
     /// Create a success response
     fn success_response<T: serde::Serialize>(data: T, request_id: String) -> Response<Full<Bytes>> {
+        Self::success_response_with_headers(data, request_id, true)
+    }
+
+    /// Create a success response with security headers
+    fn success_response_with_headers<T: serde::Serialize>(
+        data: T,
+        request_id: String,
+        security_headers_enabled: bool,
+    ) -> Response<Full<Bytes>> {
         let response = ApiResponse::success(
             serde_json::to_value(data).unwrap_or(json!(null)),
             Some(request_id),
         );
         let body = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
 
-        Response::builder()
+        let mut http_response = Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .header("Content-Length", body.len())
@@ -1010,6 +1339,13 @@ impl RestApiServer {
                         "{\"error\":\"Internal server error\"}",
                     )))
                     .expect("Fallback response should always succeed")
-            })
+            });
+
+        // Add security headers
+        if security_headers_enabled {
+            http_response = Self::add_security_headers(http_response, true);
+        }
+
+        http_response
     }
 }

@@ -9,8 +9,6 @@ pub mod processor;
 #[cfg(feature = "bip70-http")]
 pub mod http;
 
-pub mod lightning;
-
 #[cfg(feature = "ctv")]
 pub mod covenant;
 
@@ -46,6 +44,5 @@ pub use congestion::{
     TransactionPriority,
 };
 
-pub use lightning::LightningPaymentStub;
 pub use settlement::SettlementMonitor;
 pub use state_machine::{PaymentState, PaymentStateMachine};

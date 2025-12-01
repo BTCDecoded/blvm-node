@@ -1,25 +1,47 @@
-# Simple Module Manifest
-# Example module demonstrating module system capabilities
+# ============================================================================
+# Module Manifest
+# ============================================================================
+# This file defines the module's identity, dependencies, and capabilities.
+# See docs/MODULE_SYSTEM.md for complete documentation.
 
+# ----------------------------------------------------------------------------
+# Core Identity (Required)
+# ----------------------------------------------------------------------------
 name = "simple-module"
 version = "0.1.0"
-description = "A simple example module that demonstrates module system capabilities"
-author = "BTCDecoded Team"
-
-# Entry point binary name
 entry_point = "simple-module"
 
-# Capabilities this module requires
+# ----------------------------------------------------------------------------
+# Metadata (Optional)
+# ----------------------------------------------------------------------------
+description = "A simple example module demonstrating module system capabilities"
+author = "BTCDecoded Team"
+
+# ----------------------------------------------------------------------------
+# Capabilities
+# ----------------------------------------------------------------------------
+# Permissions this module requires to function
 capabilities = [
-    "blockchain_query",
-    "event_subscription",
+    "read_blockchain",    # Query blockchain data
+    "subscribe_events",   # Receive node events
 ]
 
-# Dependencies on other modules (none for this example)
+# ----------------------------------------------------------------------------
+# Dependencies
+# ----------------------------------------------------------------------------
+# Required dependencies (module cannot load without these)
 [dependencies]
+# "bllvm-lightning" = ">=1.0.0"
 
-# Configuration schema (optional keys the module accepts)
+# Optional dependencies (module can work without these)
+[optional_dependencies]
+# "bllvm-mesh" = ">=0.5.0"
+
+# ----------------------------------------------------------------------------
+# Configuration Schema
+# ----------------------------------------------------------------------------
+# Descriptions of configuration keys this module accepts
 [config_schema]
 poll_interval = "Polling interval in seconds (default: 5)"
-log_level = "Logging level (default: info)"
+log_level = "Logging level: trace, debug, info, warn, error (default: info)"
 

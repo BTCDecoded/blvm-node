@@ -3,12 +3,13 @@
 //! Handles transaction mempool management, validation, and relay.
 
 use crate::config::{MempoolPolicyConfig, RbfConfig};
+use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
 use bllvm_protocol::mempool::{has_conflict_with_tx, replacement_checks, signals_rbf, Mempool};
 use bllvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
@@ -34,6 +35,10 @@ pub struct MempoolManager {
     utxo_set: UtxoSet,
     /// Track spent outputs to detect conflicts
     pub(crate) spent_outputs: HashSet<OutPoint>,
+    /// Event callback for mempool events (optional)
+    /// Called when transactions are added/removed from mempool
+    #[allow(dead_code)]
+    event_callback: Option<Box<dyn Fn(Hash, String, usize) + Send + Sync>>,
     /// Sorted index by fee rate (descending) - Reverse<u64> for descending order
     /// Maps fee_rate -> Vec<Hash> (multiple transactions can have same fee rate)
     /// Uses RwLock for interior mutability to allow &self methods
@@ -64,6 +69,9 @@ pub struct MempoolManager {
     /// UTXO set hash for change detection (optimization: only recalculate when UTXO set changes)
     /// Uses RwLock for interior mutability
     utxo_set_hash: RwLock<Option<u64>>,
+    /// Event publisher for mempool events (optional)
+    /// Uses Arc for shared ownership and interior mutability
+    event_publisher: RwLock<Option<Arc<EventPublisher>>>,
 }
 
 impl MempoolManager {
@@ -74,6 +82,7 @@ impl MempoolManager {
             mempool: Mempool::new(),
             utxo_set: HashMap::new(),
             spent_outputs: HashSet::new(),
+            event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
             rbf_config: RwLock::new(None),
@@ -83,6 +92,7 @@ impl MempoolManager {
             tx_dependencies: RwLock::new(HashMap::new()),
             tx_descendants: RwLock::new(HashMap::new()),
             utxo_set_hash: RwLock::new(None),
+            event_publisher: RwLock::new(None),
         }
     }
 
@@ -93,6 +103,7 @@ impl MempoolManager {
             mempool: Mempool::new(),
             utxo_set: HashMap::new(),
             spent_outputs: HashSet::new(),
+            event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
             rbf_config: RwLock::new(rbf_config),
@@ -102,7 +113,14 @@ impl MempoolManager {
             tx_dependencies: RwLock::new(HashMap::new()),
             tx_descendants: RwLock::new(HashMap::new()),
             utxo_set_hash: RwLock::new(None),
+            event_publisher: RwLock::new(None),
         }
+    }
+
+    /// Set event publisher for mempool events
+    /// Uses interior mutability so it can be called even when MempoolManager is in an Arc
+    pub fn set_event_publisher(&self, event_publisher: Option<Arc<EventPublisher>>) {
+        *self.event_publisher.write().unwrap() = event_publisher;
     }
 
     /// Set RBF configuration
@@ -1059,6 +1077,21 @@ impl MempoolManager {
             .or_default()
             .push(tx_hash);
 
+        // Publish mempool transaction added event
+        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+            let mempool_size = self.transactions.len();
+            // Convert fee_rate from u64 to f64 (satoshis per vbyte)
+            // Note: fee_rate is currently 0, will be updated later when UTXO set is available
+            let fee_rate_f64 = fee_rate as f64;
+            let tx_hash_clone = tx_hash;
+            let event_pub_clone = Arc::clone(event_pub);
+            tokio::spawn(async move {
+                event_pub_clone
+                    .publish_mempool_transaction_added(&tx_hash_clone, fee_rate_f64, mempool_size)
+                    .await;
+            });
+        }
+
         Ok(true)
     }
 
@@ -1321,6 +1354,19 @@ impl MempoolManager {
                 }
             }
 
+            // Publish mempool transaction removed event
+            if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+                let mempool_size = self.transactions.len();
+                let hash_clone = *hash;
+                let reason = "removed".to_string(); // Could be more specific: "confirmed", "expired", "replaced", "rejected"
+                let event_pub_clone = Arc::clone(event_pub);
+                tokio::spawn(async move {
+                    event_pub_clone
+                        .publish_mempool_transaction_removed(&hash_clone, reason, mempool_size)
+                        .await;
+                });
+            }
+
             true
         } else {
             false
@@ -1329,6 +1375,7 @@ impl MempoolManager {
 
     /// Clear mempool
     pub fn clear(&mut self) {
+        let cleared_count = self.transactions.len();
         self.transactions.clear();
         self.mempool.clear();
         self.spent_outputs.clear();
@@ -1336,6 +1383,17 @@ impl MempoolManager {
         self.fee_cache.write().unwrap().clear();
         self.rbf_tracking.write().unwrap().clear();
         self.tx_timestamps.write().unwrap().clear();
+        
+        // Publish mempool cleared event
+        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+            let event_pub_clone = Arc::clone(event_pub);
+            let cleared_count_clone = cleared_count;
+            tokio::spawn(async move {
+                event_pub_clone
+                    .publish_mempool_cleared(cleared_count_clone)
+                    .await;
+            });
+        }
     }
 
     /// Save mempool to disk for persistence

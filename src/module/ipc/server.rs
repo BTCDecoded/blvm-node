@@ -29,6 +29,8 @@ pub struct ModuleIpcServer {
     event_manager: Option<Arc<crate::module::api::events::EventManager>>,
     /// API hub for request routing
     api_hub: Option<Arc<tokio::sync::Mutex<ModuleApiHub>>>,
+    /// RPC request channels (module_id -> channel) for RPC endpoint registration
+    rpc_channels: Arc<tokio::sync::RwLock<HashMap<String, mpsc::UnboundedSender<(u64, serde_json::Value, mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>)>>>>,
 }
 
 /// Active connection to a module
@@ -45,6 +47,8 @@ struct ModuleConnection {
     event_tx: Option<mpsc::Sender<ModuleMessage>>,
     /// Handle to the unified writer task
     writer_task_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Channel for RPC requests to this module (for module RPC endpoints)
+    rpc_request_tx: Option<mpsc::UnboundedSender<(u64, serde_json::Value, mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>)>>,
 }
 
 impl ModuleIpcServer {
@@ -55,7 +59,14 @@ impl ModuleIpcServer {
             connections: HashMap::new(),
             event_manager: None,
             api_hub: None,
+            rpc_channels: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
+    }
+    
+    /// Get RPC request channel for a module (for RPC endpoint registration)
+    pub async fn get_rpc_channel(&self, module_id: &str) -> Option<mpsc::UnboundedSender<(u64, serde_json::Value, mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>)>> {
+        let channels = self.rpc_channels.read().await;
+        channels.get(module_id).cloned()
     }
 
     /// Set event manager for publishing events
@@ -90,6 +101,22 @@ impl ModuleIpcServer {
 
         let listener = UnixListener::bind(&self.socket_path)
             .map_err(|e| ModuleError::IpcError(format!("Failed to bind socket: {e}")))?;
+
+        // Set restrictive permissions on Unix socket (owner read/write only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600); // rw------- owner only
+            if let Err(e) = std::fs::set_permissions(&self.socket_path, perms) {
+                warn!(
+                    "Failed to set restrictive permissions on IPC socket {:?}: {}. \
+                     Socket may be accessible by other users.",
+                    self.socket_path, e
+                );
+            } else {
+                debug!("Set IPC socket permissions to 600 (owner read/write only)");
+            }
+        }
 
         info!("Module IPC server listening on {:?}", self.socket_path);
 
@@ -193,6 +220,9 @@ impl ModuleIpcServer {
         // This allows us to share the writer between response handler and event handler
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
 
+        // Create RPC request channel (for sending RPC requests from node to module)
+        let (rpc_request_tx, _rpc_request_rx) = mpsc::unbounded_channel::<(u64, serde_json::Value, mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>)>();
+
         // Create event channel for this module (events from EventManager go here)
         let (event_tx, mut event_rx) = mpsc::channel(100);
 
@@ -248,6 +278,29 @@ impl ModuleIpcServer {
             }
         });
 
+        // Initialize filesystem and storage access for this module
+        // Extract module name from module_id (format: {module_name}_{uuid})
+        let module_name = module_id.split('_').next().unwrap_or(&module_id).to_string();
+        
+        // Get base data directory - extract from module_id or use default
+        // Module ID format: {module_name}_{uuid}
+        // We'll derive the base directory from the module name
+        // The actual base directory should be passed from ModuleManager, but for now
+        // we'll use a reasonable default based on common patterns
+        let base_data_dir = std::path::PathBuf::from("data/modules");
+        let module_data_dir = base_data_dir.join(&module_name);
+        
+        // Ensure module data directory exists
+        if let Err(e) = std::fs::create_dir_all(&module_data_dir) {
+            warn!("Failed to create module data directory {:?}: {}", module_data_dir, e);
+        }
+        
+        // Initialize module filesystem and storage access
+        if let Err(e) = node_api.initialize_module(module_id.clone(), module_data_dir, base_data_dir).await {
+            warn!("Failed to initialize module {} filesystem/storage: {}", module_id, e);
+            // Continue anyway - module can still use other APIs
+        }
+        
         let mut connection = ModuleConnection {
             module_id: module_id.clone(),
             reader,
@@ -255,6 +308,7 @@ impl ModuleIpcServer {
             subscriptions: Vec::new(),
             event_tx: Some(event_tx),
             writer_task_handle: Some(writer_task_handle),
+            rpc_request_tx: Some(rpc_request_tx),
         };
 
         // Process messages from this module
@@ -368,6 +422,53 @@ impl ModuleIpcServer {
             ModuleMessage::Event(_) => {
                 warn!("Received event from module (unexpected)");
             }
+            ModuleMessage::Log(log_msg) => {
+                // Forward log message to node's logging system
+                use crate::module::ipc::protocol::LogLevel;
+                let module_id_str = log_msg.module_id.clone();
+                let message_str = log_msg.message.clone();
+                // Use tracing macros without target parameter (tracing will use default target)
+                // The module_id is included in the log message for identification
+                match log_msg.level {
+                    LogLevel::Trace => {
+                        tracing::trace!(
+                            module_id = %module_id_str,
+                            "{}",
+                            message_str
+                        );
+                    }
+                    LogLevel::Debug => {
+                        tracing::debug!(
+                            module_id = %module_id_str,
+                            "{}",
+                            message_str
+                        );
+                    }
+                    LogLevel::Info => {
+                        tracing::info!(
+                            module_id = %module_id_str,
+                            "{}",
+                            message_str
+                        );
+                    }
+                    LogLevel::Warn => {
+                        tracing::warn!(
+                            module_id = %module_id_str,
+                            "{}",
+                            message_str
+                        );
+                    }
+                    LogLevel::Error => {
+                        tracing::error!(
+                            module_id = %module_id_str,
+                            "{}",
+                            message_str
+                        );
+                    }
+                }
+                // Log messages don't require a response
+                return Ok(());
+            }
         }
 
         Ok(())
@@ -451,6 +552,258 @@ impl ModuleIpcServer {
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::SubscribeAck,
+                ))
+            }
+            // Mempool API
+            RequestPayload::GetMempoolTransactions => {
+                let txs = node_api.get_mempool_transactions().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::MempoolTransactions(txs),
+                ))
+            }
+            RequestPayload::GetMempoolTransaction { tx_hash } => {
+                let tx = node_api.get_mempool_transaction(tx_hash).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::MempoolTransaction(tx),
+                ))
+            }
+            RequestPayload::GetMempoolSize => {
+                let size = node_api.get_mempool_size().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::MempoolSize(size),
+                ))
+            }
+            // Network API
+            RequestPayload::GetNetworkStats => {
+                let stats = node_api.get_network_stats().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::NetworkStats(stats),
+                ))
+            }
+            RequestPayload::GetNetworkPeers => {
+                let peers = node_api.get_network_peers().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::NetworkPeers(peers),
+                ))
+            }
+            // Chain API
+            RequestPayload::GetChainInfo => {
+                let info = node_api.get_chain_info().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ChainInfo(info),
+                ))
+            }
+            RequestPayload::GetBlockByHeight { height } => {
+                let block = node_api.get_block_by_height(*height).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::BlockByHeight(block),
+                ))
+            }
+            // Lightning API
+            RequestPayload::GetLightningNodeUrl => {
+                let url = node_api.get_lightning_node_url().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::LightningNodeUrl(url),
+                ))
+            }
+            RequestPayload::GetLightningInfo => {
+                let info = node_api.get_lightning_info().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::LightningInfo(info),
+                ))
+            }
+            // Payment API
+            RequestPayload::GetPaymentState { payment_id } => {
+                let state = node_api.get_payment_state(payment_id).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::PaymentState(state),
+                ))
+            }
+            // Additional Mempool API
+            RequestPayload::CheckTransactionInMempool { tx_hash } => {
+                let exists = node_api.check_transaction_in_mempool(tx_hash).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::CheckTransactionInMempool(exists),
+                ))
+            }
+            RequestPayload::GetFeeEstimate { target_blocks } => {
+                let fee_rate = node_api.get_fee_estimate(*target_blocks).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::FeeEstimate(fee_rate),
+                ))
+            }
+            // Filesystem API
+            RequestPayload::ReadFile { path } => {
+                let data = node_api.read_file(path.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::FileData(data),
+                ))
+            }
+            RequestPayload::WriteFile { path, data } => {
+                node_api.write_file(path.clone(), data.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::DeleteFile { path } => {
+                node_api.delete_file(path.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::ListDirectory { path } => {
+                let entries = node_api.list_directory(path.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::DirectoryListing(entries),
+                ))
+            }
+            RequestPayload::CreateDirectory { path } => {
+                node_api.create_directory(path.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::GetFileMetadata { path } => {
+                let metadata = node_api.get_file_metadata(path.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::FileMetadata(metadata),
+                ))
+            }
+            // Storage API
+            RequestPayload::StorageOpenTree { name } => {
+                let tree_id = node_api.storage_open_tree(name.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::StorageTreeId(tree_id),
+                ))
+            }
+            RequestPayload::StorageInsert { tree_id, key, value } => {
+                node_api.storage_insert(tree_id.clone(), key.clone(), value.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::StorageGet { tree_id, key } => {
+                let value = node_api.storage_get(tree_id.clone(), key.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::StorageValue(value),
+                ))
+            }
+            RequestPayload::StorageRemove { tree_id, key } => {
+                node_api.storage_remove(tree_id.clone(), key.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::StorageContainsKey { tree_id, key } => {
+                let exists = node_api.storage_contains_key(tree_id.clone(), key.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(exists),
+                ))
+            }
+            RequestPayload::StorageIter { tree_id } => {
+                let pairs = node_api.storage_iter(tree_id.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::StorageKeyValuePairs(pairs),
+                ))
+            }
+            RequestPayload::StorageTransaction { tree_id, operations } => {
+                node_api.storage_transaction(tree_id.clone(), operations.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            // Module RPC Endpoint Registration
+            RequestPayload::RegisterRpcEndpoint { method, description } => {
+                node_api.register_rpc_endpoint(method.clone(), description.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::RpcEndpointRegistered,
+                ))
+            }
+            RequestPayload::UnregisterRpcEndpoint { method } => {
+                node_api.unregister_rpc_endpoint(method).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::RpcEndpointUnregistered,
+                ))
+            }
+            // Timers and Scheduled Tasks
+            RequestPayload::RegisterTimer { interval_seconds: _ } => {
+                // Note: Timer callbacks cannot be serialized over IPC
+                // For IPC-based timers, we need a different approach:
+                // The module would need to send a "timer_fire" request when the timer should fire
+                // For now, return an error indicating this needs a callback mechanism
+                Err(ModuleError::OperationError(
+                    "Timer registration requires callback which cannot be serialized over IPC. Use module-side timer management.".to_string()
+                ))
+            }
+            RequestPayload::CancelTimer { timer_id: _ } => {
+                // Note: Timers registered via IPC would need to be tracked differently
+                // For now, return an error
+                Err(ModuleError::OperationError(
+                    "Timer cancellation not supported over IPC. Use module-side timer management.".to_string()
+                ))
+            }
+            RequestPayload::ScheduleTask { delay_seconds: _ } => {
+                // Note: Task callbacks cannot be serialized over IPC
+                // Similar to timers, this needs a different approach
+                Err(ModuleError::OperationError(
+                    "Task scheduling requires callback which cannot be serialized over IPC. Use module-side task management.".to_string()
+                ))
+            }
+            // Metrics and Telemetry
+            RequestPayload::ReportMetric { metric } => {
+                node_api.report_metric(metric.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::MetricReported,
+                ))
+            }
+            RequestPayload::GetModuleMetrics { module_id } => {
+                let metrics = node_api.get_module_metrics(module_id).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ModuleMetrics(metrics),
+                ))
+            }
+            // Network Integration
+            RequestPayload::SendMeshPacketToPeer { peer_addr, packet_data } => {
+                node_api.send_mesh_packet_to_peer(peer_addr.clone(), packet_data.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::SendStratumV2MessageToPeer { peer_addr, message_data } => {
+                node_api.send_stratum_v2_message_to_peer(peer_addr.clone(), message_data.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
                 ))
             }
         }
