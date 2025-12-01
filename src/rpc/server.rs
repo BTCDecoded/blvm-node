@@ -1016,6 +1016,7 @@ impl RpcServer {
             "sendrawtransaction" => self.rawtx.sendrawtransaction(&params).await,
             "testmempoolaccept" => self.rawtx.testmempoolaccept(&params).await,
             "decoderawtransaction" => self.rawtx.decoderawtransaction(&params).await,
+            "createrawtransaction" => self.rawtx.createrawtransaction(&params).await,
             "gettxout" => self.rawtx.gettxout(&params).await,
             "gettxoutproof" => self.rawtx.gettxoutproof(&params).await,
             "verifytxoutproof" => self.rawtx.verifytxoutproof(&params).await,

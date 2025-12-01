@@ -14,7 +14,9 @@ pub mod chain;
 pub mod congestion;
 pub mod fees;
 pub mod mempool;
+pub mod mining;
 pub mod network;
+pub mod node;
 #[cfg(feature = "bip70-http")]
 pub mod payment;
 #[cfg(feature = "ctv")]
