@@ -57,7 +57,10 @@ impl RawTxRpc {
 
     /// Send a raw transaction to the network
     ///
-    /// Params: ["hexstring", maxfeerate (optional), maxtime (optional)]
+    /// Params: ["hexstring", maxfeerate (optional), allowhighfees (optional)]
+    /// - hexstring: Raw transaction hex
+    /// - maxfeerate: Maximum fee rate in BTC per kvB (optional, default: no limit)
+    /// - allowhighfees: Allow transactions with high fees (optional, default: false)
     pub async fn sendrawtransaction(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: sendrawtransaction");
 
@@ -69,6 +72,22 @@ impl RawTxRpc {
             "hexstring",
             Some(crate::rpc::validation::MAX_HEX_STRING_LENGTH),
         )?;
+
+        // Parse optional parameters
+        let maxfeerate_btc_per_kvb: Option<f64> = params
+            .get(1)
+            .and_then(|p| p.as_f64())
+            .or_else(|| {
+                params
+                    .get(1)
+                    .and_then(|p| p.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+            });
+        
+        let allowhighfees: bool = params
+            .get(2)
+            .and_then(|p| p.as_bool())
+            .unwrap_or(false);
 
         let tx_bytes = hex::decode(&hex_string).map_err(|e| {
             RpcError::invalid_params_with_fields(
@@ -177,6 +196,48 @@ impl RawTxRpc {
                                         "The referenced output does not exist or has already been spent",
                                         "Ensure the transaction is spending valid UTXOs",
                                         "Check that the previous transaction is confirmed"
+                                    ]
+                                }),
+                            ));
+                        }
+                    }
+
+                    // Calculate transaction fee and fee rate for maxfeerate check
+                    let fee_satoshis = mempool.calculate_transaction_fee(&tx, &utxo_set);
+                    
+                    // Calculate transaction size and vsize
+                    use bllvm_protocol::serialization::transaction::serialize_transaction;
+                    let base_size = serialize_transaction(&tx).len() as u64;
+                    // For non-SegWit transactions, weight = 4 * size, vsize = size
+                    // For SegWit, we'd need witness data, but for fee rate check we can use base size
+                    // This is a simplification - in production, we'd need full witness data
+                    let vsize = base_size; // Simplified: assume non-SegWit for now
+                    
+                    // Calculate fee rate in BTC per kvB
+                    let fee_rate_btc_per_kvb = if vsize > 0 {
+                        (fee_satoshis as f64 / vsize as f64) * 1000.0 / 100_000_000.0
+                    } else {
+                        0.0
+                    };
+
+                    // Check maxfeerate if provided and allowhighfees is false
+                    if let Some(max_feerate) = maxfeerate_btc_per_kvb {
+                        if !allowhighfees && fee_rate_btc_per_kvb > max_feerate {
+                            return Err(RpcError::with_data(
+                                RpcErrorCode::TxRejected,
+                                format!(
+                                    "Fee rate {} BTC/kvB exceeds maximum allowed {} BTC/kvB",
+                                    fee_rate_btc_per_kvb, max_feerate
+                                ),
+                                json!({
+                                    "txid": txid_hex,
+                                    "fee_rate": fee_rate_btc_per_kvb,
+                                    "max_feerate": max_feerate,
+                                    "reason": "fee_rate_too_high",
+                                    "suggestions": [
+                                        "Reduce the transaction fee",
+                                        "Use allowhighfees=true to override this check",
+                                        "Or increase the maxfeerate parameter"
                                     ]
                                 }),
                             ));
@@ -1480,6 +1541,251 @@ impl RawTxRpc {
             false, // Not in mempool
             Some("Transaction not found in mempool or blockchain"),
         ))
+    }
+
+    /// Create a raw transaction
+    ///
+    /// Params: [inputs, outputs, locktime (optional), replaceable (optional), version (optional)]
+    /// - inputs: Array of {"txid": "hex", "vout": n, "sequence": n (optional)}
+    /// - outputs: Object with address->amount pairs, or array with {"address": amount} or {"data": "hex"}
+    /// - locktime: Transaction locktime (default: 0)
+    /// - replaceable: Enable RBF (default: true)
+    /// - version: Transaction version (default: 2)
+    pub async fn createrawtransaction(&self, params: &Value) -> RpcResult<Value> {
+        debug!("RPC: createrawtransaction");
+
+        // Parse inputs
+        let inputs = params
+            .get(0)
+            .and_then(|p| p.as_array())
+            .ok_or_else(|| RpcError::missing_parameter("inputs", Some("array")))?;
+
+        // Parse outputs - can be object (address->amount) or array (with "address" or "data" keys)
+        let outputs = params
+            .get(1)
+            .ok_or_else(|| RpcError::missing_parameter("outputs", Some("object or array")))?;
+
+        // Parse optional parameters
+        let locktime = params
+            .get(2)
+            .and_then(|p| p.as_u64())
+            .unwrap_or(0);
+        let replaceable = params
+            .get(3)
+            .and_then(|p| p.as_bool())
+            .unwrap_or(true);
+        let version = params
+            .get(4)
+            .and_then(|p| p.as_u64())
+            .unwrap_or(2) as u32;
+
+        // Build transaction inputs
+        use bllvm_protocol::Transaction;
+        use bllvm_protocol::TransactionInput;
+        use bllvm_protocol::OutPoint;
+
+        let mut tx_inputs = Vec::new();
+        for (idx, input) in inputs.iter().enumerate() {
+            let input_obj = input
+                .as_object()
+                .ok_or_else(|| RpcError::invalid_params(format!("Input {} must be an object", idx)))?;
+
+            let txid_hex = input_obj
+                .get("txid")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| RpcError::invalid_params(format!("Input {} missing 'txid'", idx)))?;
+
+            let txid_bytes = hex::decode(txid_hex)
+                .map_err(|e| RpcError::invalid_params(format!("Invalid txid hex in input {}: {}", idx, e)))?;
+            if txid_bytes.len() != 32 {
+                return Err(RpcError::invalid_params(format!(
+                    "Invalid txid length in input {}: expected 32 bytes, got {}",
+                    idx,
+                    txid_bytes.len()
+                )));
+            }
+            let mut txid = [0u8; 32];
+            txid.copy_from_slice(&txid_bytes);
+
+            let vout = input_obj
+                .get("vout")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| RpcError::invalid_params(format!("Input {} missing 'vout'", idx)))?;
+
+            // Sequence: use provided value, or set based on RBF
+            let sequence = if let Some(seq_val) = input_obj.get("sequence").and_then(|v| v.as_u64()) {
+                seq_val as u32
+            } else if replaceable {
+                0xFFFFFFFD // MAX_BIP125_RBF_SEQUENCE
+            } else if locktime > 0 {
+                0xFFFFFFFE // MAX_SEQUENCE_NONFINAL
+            } else {
+                0xFFFFFFFF // SEQUENCE_FINAL
+            };
+
+            tx_inputs.push(TransactionInput {
+                prevout: OutPoint {
+                    hash: txid,
+                    index: vout,
+                },
+                script_sig: Vec::new(),
+                sequence: sequence as u64,
+            });
+        }
+
+        // Build transaction outputs
+        use bllvm_protocol::TransactionOutput;
+        let mut tx_outputs = Vec::new();
+
+        // Handle outputs - can be object (address->amount) or array
+        if let Some(outputs_obj) = outputs.as_object() {
+            // Object format: {"address": amount, ...}
+            for (key, value) in outputs_obj.iter() {
+                if key == "data" {
+                    // OP_RETURN output
+                    let data_hex = value
+                        .as_str()
+                        .ok_or_else(|| RpcError::invalid_params("'data' output must be hex string"))?;
+                    let data = hex::decode(data_hex)
+                        .map_err(|e| RpcError::invalid_params(format!("Invalid data hex: {}", e)))?;
+                    
+                    // OP_RETURN script: OP_RETURN <data>
+                    let mut script = vec![0x6a]; // OP_RETURN
+                    script.push(data.len() as u8);
+                    script.extend_from_slice(&data);
+
+                    tx_outputs.push(TransactionOutput {
+                        value: 0,
+                        script_pubkey: script,
+                    });
+                } else {
+                    // Address output
+                    let address_str = key;
+                    let amount = value
+                        .as_f64()
+                        .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))
+                        .ok_or_else(|| RpcError::invalid_params(format!("Invalid amount for address '{}'", address_str)))?;
+
+                    // Convert amount to satoshis
+                    let satoshis = (amount * 100_000_000.0) as u64;
+
+                    // Convert address to script_pubkey
+                    let script_pubkey = Self::address_to_script_pubkey(address_str)?;
+
+                    tx_outputs.push(TransactionOutput {
+                        value: satoshis as i64,
+                        script_pubkey,
+                    });
+                }
+            }
+        } else if let Some(outputs_arr) = outputs.as_array() {
+            // Array format: [{"address": amount}, {"data": "hex"}, ...]
+            for (idx, output) in outputs_arr.iter().enumerate() {
+                let output_obj = output
+                    .as_object()
+                    .ok_or_else(|| RpcError::invalid_params(format!("Output {} must be an object", idx)))?;
+
+                if let Some(data_val) = output_obj.get("data") {
+                    // OP_RETURN output
+                    let data_hex = data_val
+                        .as_str()
+                        .ok_or_else(|| RpcError::invalid_params(format!("Output {} 'data' must be hex string", idx)))?;
+                    let data = hex::decode(data_hex)
+                        .map_err(|e| RpcError::invalid_params(format!("Invalid data hex in output {}: {}", idx, e)))?;
+                    
+                    let mut script = vec![0x6a]; // OP_RETURN
+                    script.push(data.len() as u8);
+                    script.extend_from_slice(&data);
+
+                    tx_outputs.push(TransactionOutput {
+                        value: 0,
+                        script_pubkey: script,
+                    });
+                } else if let Some(addr_val) = output_obj.get("address") {
+                    // Address output
+                    let address_str = addr_val
+                        .as_str()
+                        .ok_or_else(|| RpcError::invalid_params(format!("Output {} 'address' must be string", idx)))?;
+                    
+                    // Get amount from the same object (key-value pair)
+                    let amount = output_obj
+                        .values()
+                        .find_map(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok())))
+                        .ok_or_else(|| RpcError::invalid_params(format!("Output {} missing amount", idx)))?;
+
+                    let satoshis = (amount * 100_000_000.0) as u64;
+                    let script_pubkey = Self::address_to_script_pubkey(address_str)?;
+
+                    tx_outputs.push(TransactionOutput {
+                        value: satoshis as i64,
+                        script_pubkey,
+                    });
+                } else {
+                    return Err(RpcError::invalid_params(format!(
+                        "Output {} must have either 'address' or 'data' key",
+                        idx
+                    )));
+                }
+            }
+        } else {
+            return Err(RpcError::invalid_params("Outputs must be an object or array"));
+        }
+
+        if tx_outputs.is_empty() {
+            return Err(RpcError::invalid_params("Transaction must have at least one output"));
+        }
+
+        // Build transaction
+        let tx = Transaction {
+            version,
+            inputs: tx_inputs,
+            outputs: tx_outputs,
+            lock_time: locktime as u32,
+        };
+
+        // Serialize transaction
+        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        let tx_hex = hex::encode(serialize_transaction(&tx));
+
+        Ok(json!(tx_hex))
+    }
+
+    /// Convert Bitcoin address to script_pubkey
+    /// Supports Bech32/Bech32m (SegWit/Taproot) addresses
+    /// Note: Legacy P2PKH/P2SH support requires Base58 decoding (not yet implemented)
+    fn address_to_script_pubkey(address: &str) -> Result<Vec<u8>, RpcError> {
+        use bllvm_protocol::address::BitcoinAddress;
+
+        // Try Bech32/Bech32m first
+        if let Ok(addr) = BitcoinAddress::decode(address) {
+            match (addr.witness_version, addr.witness_program.len()) {
+                // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
+                (0, 20) | (0, 32) => {
+                    let mut script = vec![0x00]; // OP_0
+                    script.extend_from_slice(&addr.witness_program);
+                    Ok(script)
+                }
+                // Taproot v1: P2TR (32 bytes)
+                (1, 32) => {
+                    let mut script = vec![0x51]; // OP_1
+                    script.extend_from_slice(&addr.witness_program);
+                    Ok(script)
+                }
+                _ => Err(RpcError::invalid_address_format(
+                    address,
+                    Some("Unsupported witness version or program length"),
+                    None,
+                )),
+            }
+        } else {
+            // Legacy address support would go here (P2PKH/P2SH)
+            // For now, return error
+            Err(RpcError::invalid_address_format(
+                address,
+                Some("Only Bech32/Bech32m addresses supported. Legacy P2PKH/P2SH support coming soon."),
+                None,
+            ))
+        }
     }
 }
 
