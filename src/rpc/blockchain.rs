@@ -371,12 +371,30 @@ impl BlockchainRpc {
                         .map(|h| Self::calculate_confirmations(h, tip_height))
                         .unwrap_or(0);
 
-                    // Calculate block size
-                    let block_size = bincode::serialize(&block).map(|b| b.len()).unwrap_or(0);
-
-                    // Calculate block weight (simplified: size * 4 for non-segwit, proper calculation for segwit)
-                    // Proper weight = base_size * 3 + total_size
-                    let block_weight = block_size * 4; // Simplified - proper weight calculation would account for witness data
+                    // Calculate block sizes
+                    // strippedsize = block size without witness data (TX_NO_WITNESS)
+                    // size = block size with witness data (TX_WITH_WITNESS)
+                    use bllvm_protocol::serialization::transaction::serialize_transaction;
+                    
+                    // Calculate stripped size: serialize block without witness data
+                    // This is the sum of all transaction sizes without witness
+                    let stripped_size: usize = block.transactions.iter()
+                        .map(|tx| serialize_transaction(tx).len())
+                        .sum::<usize>() + 80; // +80 for block header
+                    
+                    // Calculate total size: serialize block with witness data
+                    // For now, we'll use bincode serialization as approximation
+                    // In full implementation, we'd serialize with witness marker and data
+                    let total_size = bincode::serialize(&block).map(|b| b.len()).unwrap_or(stripped_size);
+                    
+                    // Use stripped_size as size if we can't determine total_size
+                    // (For non-SegWit blocks, stripped_size == total_size)
+                    let block_size = if total_size > stripped_size { total_size } else { stripped_size };
+                    
+                    // Calculate block weight: 4 * base_size + total_size (BIP141)
+                    // base_size = stripped_size (without witness)
+                    // total_size = block_size (with witness)
+                    let block_weight = (4 * stripped_size + block_size) as u64;
 
                     // Calculate median time from recent headers
                     let mediantime = if block_height.is_some() {
@@ -427,7 +445,7 @@ impl BlockchainRpc {
                         "hash": hash,
                         "confirmations": confirmations,
                         "size": block_size,
-                        "strippedsize": block_size, // Same as size for now (no witness stripping)
+                        "strippedsize": stripped_size,
                         "weight": block_weight,
                         "height": block_height.unwrap_or(0),
                         "version": block.header.version,

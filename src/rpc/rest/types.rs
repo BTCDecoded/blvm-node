@@ -114,11 +114,26 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
-/// Read and parse JSON request body
-pub async fn read_json_body(req: Request<Incoming>) -> Result<Option<Value>, hyper::Error> {
+/// Maximum request body size (1MB) - matches RPC server
+const MAX_REQUEST_SIZE: usize = 1_048_576;
+
+/// Read and parse JSON request body with size limit enforcement
+pub async fn read_json_body(req: Request<Incoming>) -> Result<Option<Value>, String> {
     use http_body_util::BodyExt;
     let (_, body) = req.into_parts();
-    let body_bytes = body.collect().await?.to_bytes();
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => return Err(format!("Failed to read request body: {}", e)),
+    };
+    
+    // Enforce maximum request size
+    if body_bytes.len() > MAX_REQUEST_SIZE {
+        return Err(format!(
+            "Request body too large: {} bytes (max: {} bytes)",
+            body_bytes.len(), MAX_REQUEST_SIZE
+        ));
+    }
+    
     if body_bytes.is_empty() {
         Ok(None)
     } else {
