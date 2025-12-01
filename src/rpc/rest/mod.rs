@@ -23,8 +23,12 @@ pub mod pool;
 pub mod server;
 pub mod transactions;
 pub mod types;
+pub mod validation;
 #[cfg(feature = "ctv")]
 #[cfg(feature = "bip70-http")]
 pub mod vault;
+
+#[cfg(test)]
+mod tests;
 
 pub use server::RestApiServer;

@@ -74,6 +74,8 @@ pub struct RpcManager {
     /// Payment state machine for CTV payment endpoints
     #[cfg(all(feature = "bip70-http", feature = "ctv"))]
     payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
+    /// Event publisher for module event notifications (optional)
+    event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
 }
 
 impl RpcManager {
@@ -104,6 +106,7 @@ impl RpcManager {
             payment_processor: None,
             #[cfg(all(feature = "bip70-http", feature = "ctv"))]
             payment_state_machine: None,
+            event_publisher: None,
         }
     }
 
@@ -124,12 +127,35 @@ impl RpcManager {
             auth_config.rate_limit_rate,
         ));
 
-        // Add tokens and certificates to auth manager (synchronously)
-        for token in auth_config.tokens {
-            if let Err(e) = auth_manager.add_token(token).await {
-                error!("Failed to add RPC auth token: {}", e);
+        // Load tokens from environment variable, token file, or config file
+        match auth_config.load_tokens() {
+            Ok(tokens) => {
+                if !tokens.is_empty() {
+                    info!("Loaded {} RPC auth token(s) from secure source", tokens.len());
+                }
+                // Add tokens to auth manager
+                for token in tokens {
+                    if let Err(e) = auth_manager.add_token(token.clone()).await {
+                        // Redact token from error message
+                        let redacted_error = auth::redact_tokens_from_log(&format!("{}", e), &[token]);
+                        error!("Failed to add RPC auth token: {}", redacted_error);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load RPC auth tokens: {}. Using tokens from config file if available.", e);
+                // Fall back to config file tokens
+                for token in auth_config.tokens {
+                    if let Err(e) = auth_manager.add_token(token.clone()).await {
+                        // Redact token from error message
+                        let redacted_error = auth::redact_tokens_from_log(&format!("{}", e), &[token]);
+                        error!("Failed to add RPC auth token: {}", redacted_error);
+                    }
+                }
             }
         }
+
+        // Add certificates to auth manager
         for cert in auth_config.certificates {
             if let Err(e) = auth_manager.add_certificate(cert).await {
                 error!("Failed to add RPC auth certificate: {}", e);
@@ -175,6 +201,15 @@ impl RpcManager {
     /// Set performance profiler
     pub fn with_profiler(mut self, profiler: Arc<PerformanceProfiler>) -> Self {
         self.profiler = Some(profiler);
+        self
+    }
+
+    /// Set event publisher for module event notifications
+    pub fn with_event_publisher(
+        mut self,
+        event_publisher: Arc<crate::node::event_publisher::EventPublisher>,
+    ) -> Self {
+        self.event_publisher = Some(event_publisher);
         self
     }
 
@@ -231,6 +266,7 @@ impl RpcManager {
             payment_processor: None,
             #[cfg(all(feature = "bip70-http", feature = "ctv"))]
             payment_state_machine: None,
+            event_publisher: None,
         }
     }
 
@@ -244,6 +280,17 @@ impl RpcManager {
     #[cfg(feature = "rest-api")]
     pub fn enable_rest_api(&mut self, rest_api_addr: SocketAddr) {
         self.rest_api_addr = Some(rest_api_addr);
+    }
+
+    /// Get the RPC server address
+    pub fn rpc_addr(&self) -> SocketAddr {
+        self.server_addr
+    }
+
+    /// Get the REST API server address (if enabled)
+    #[cfg(feature = "rest-api")]
+    pub fn rest_api_addr(&self) -> Option<SocketAddr> {
+        self.rest_api_addr
     }
 
     /// Start the RPC server(s)
@@ -275,8 +322,8 @@ impl RpcManager {
             let rawtx_rpc = Arc::new(rawtx::RawTxRpc::with_dependencies(
                 Arc::clone(storage),
                 Arc::clone(mempool),
-                None,
-                None,
+                self.metrics.clone(),
+                self.profiler.clone(),
             ));
             let mining = Arc::new(mining::MiningRpc::with_dependencies(
                 Arc::clone(storage),
@@ -412,14 +459,27 @@ impl RpcManager {
                     Arc::new(network::NetworkRpc::new())
                 };
 
-                let mut rest_server = RestApiServer::new(
-                    rest_api_addr,
-                    blockchain,
-                    network,
-                    mempool_rpc,
-                    mining,
-                    rawtx_rpc,
-                );
+                // Create REST API server with authentication if available
+                let mut rest_server = if let Some(ref auth_manager) = self.auth_manager {
+                    RestApiServer::with_auth(
+                        rest_api_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(auth_manager),
+                    )
+                } else {
+                    RestApiServer::new(
+                        rest_api_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                    )
+                };
 
                 // Set payment processor if available
                 #[cfg(feature = "bip70-http")]

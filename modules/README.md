@@ -18,19 +18,42 @@ module-name/
 ## Module Manifest (module.toml)
 
 ```toml
+# ============================================================================
+# Module Manifest
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Core Identity (Required)
+# ----------------------------------------------------------------------------
 name = "module-name"
 version = "0.1.0"
-description = "Module description"
-author = "Author name"
 entry_point = "module-binary"
 
-capabilities = ["capability1", "capability2"]
+# ----------------------------------------------------------------------------
+# Metadata (Optional)
+# ----------------------------------------------------------------------------
+description = "Module description"
+author = "Author name"
 
+# ----------------------------------------------------------------------------
+# Capabilities
+# ----------------------------------------------------------------------------
+capabilities = ["read_blockchain", "subscribe_events"]
+
+# ----------------------------------------------------------------------------
+# Dependencies
+# ----------------------------------------------------------------------------
 [dependencies]
-other-module = "0.1.0"
+"other-module" = ">=0.1.0"
 
+[optional_dependencies]
+# "optional-module" = ">=0.5.0"
+
+# ----------------------------------------------------------------------------
+# Configuration Schema (Optional)
+# ----------------------------------------------------------------------------
 [config_schema]
-config_key = "Description"
+config_key = "Description of this configuration option"
 ```
 
 ## Installing Modules

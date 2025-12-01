@@ -37,9 +37,10 @@ impl ModuleDependencies {
         let mut missing = Vec::new();
 
         for module in discovered_modules {
+            // Only check required dependencies (not optional)
             let module_deps: Vec<String> = module.manifest.dependencies.keys().cloned().collect();
 
-            // Check if all dependencies are available
+            // Check if all required dependencies are available
             for dep in &module_deps {
                 if !module_map.contains_key(dep) {
                     missing.push(dep.clone());

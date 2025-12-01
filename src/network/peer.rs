@@ -43,6 +43,11 @@ pub struct Peer {
     last_block_received: Option<u64>,
     /// Last successful transaction received (Unix timestamp)
     last_tx_received: Option<u64>,
+    /// Service flags from version message (indicates peer capabilities)
+    /// Used to filter peers by capabilities (e.g., NODE_GOVERNANCE)
+    services: u64,
+    /// Protocol version from version message
+    version: u32,
 }
 
 impl Peer {
@@ -143,6 +148,8 @@ impl Peer {
             avg_response_time_ms: 0.0,
             last_block_received: None,
             last_tx_received: None,
+            services: 0, // Service flags from version message (set when version received)
+            version: 0, // Protocol version from version message (set when version received)
         }
     }
 
@@ -307,5 +314,30 @@ impl Peer {
     /// Get connection time
     pub fn conntime(&self) -> u64 {
         self.conntime
+    }
+
+    /// Set service flags (called when version message received)
+    pub fn set_services(&mut self, services: u64) {
+        self.services = services;
+    }
+
+    /// Get service flags
+    pub fn services(&self) -> u64 {
+        self.services
+    }
+
+    /// Set protocol version (called when version message received)
+    pub fn set_version(&mut self, version: u32) {
+        self.version = version;
+    }
+
+    /// Get protocol version
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Check if peer has a specific service flag
+    pub fn has_service(&self, flag: u64) -> bool {
+        (self.services & flag) != 0
     }
 }

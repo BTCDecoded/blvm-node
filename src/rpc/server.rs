@@ -22,6 +22,8 @@ use uuid::Uuid;
 use super::payment;
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};
 use crate::node::metrics::MetricsCollector;
+use std::collections::HashMap;
+use crate::module::rpc::handler::ModuleRpcHandler;
 
 /// Maximum request body size (1MB)
 const MAX_REQUEST_SIZE: usize = 1_048_576;
@@ -43,6 +45,8 @@ pub struct RpcServer {
     auth_manager: Option<Arc<auth::RpcAuthManager>>,
     // Metrics collector (optional, for Prometheus export)
     metrics: Option<Arc<MetricsCollector>>,
+    // Module RPC endpoints (dynamic registration)
+    module_endpoints: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn ModuleRpcHandler>>>>,
 }
 
 impl RpcServer {
@@ -60,6 +64,7 @@ impl RpcServer {
             payment: None,
             auth_manager: None,
             metrics: None,
+            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -77,6 +82,7 @@ impl RpcServer {
             payment: None,
             auth_manager: Some(auth_manager),
             metrics: None,
+            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -135,6 +141,7 @@ impl RpcServer {
             payment: None,
             auth_manager: None,
             metrics: Some(metrics),
+            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -161,6 +168,7 @@ impl RpcServer {
             payment: None,
             auth_manager: Some(auth_manager),
             metrics: None,
+            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -188,6 +196,7 @@ impl RpcServer {
             payment: None,
             auth_manager: Some(auth_manager),
             metrics: Some(metrics),
+            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -212,6 +221,7 @@ impl RpcServer {
             payment: self.payment.clone(),
             auth_manager: self.auth_manager.clone(),
             metrics: self.metrics.clone(),
+            module_endpoints: Arc::clone(&self.module_endpoints),
         });
 
         loop {
@@ -265,9 +275,54 @@ impl RpcServer {
         req: Request<Incoming>,
         addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>, hyper::Error> {
+        // Extract headers before consuming request body
+        let headers = req.headers().clone();
+
         // Handle GET requests for health and metrics endpoints
         if req.method() == Method::GET {
             let path = req.uri().path();
+            
+            // Optional authentication for health/metrics (stricter for metrics)
+            if let Some(ref auth_manager) = server.auth_manager {
+                // Metrics endpoint requires authentication if auth is enabled
+                if path == "/metrics" {
+                    let auth_result = auth_manager.authenticate_request(&headers, addr).await;
+                    if let Some(error) = &auth_result.error {
+                        warn!("Metrics endpoint authentication failed from {}: {}", addr, error);
+                        return Ok(Self::http_error_response(
+                            StatusCode::UNAUTHORIZED,
+                            "Authentication required for metrics endpoint",
+                        ));
+                    }
+                    // Check rate limit for metrics (stricter)
+                    if let Some(ref user_id) = auth_result.user_id {
+                        if !auth_manager.check_rate_limit_with_endpoint(user_id, Some(addr), Some("/metrics")).await {
+                            return Ok(Self::http_error_response(
+                                StatusCode::TOO_MANY_REQUESTS,
+                                "Rate limit exceeded",
+                            ));
+                        }
+                    } else if !auth_manager.check_ip_rate_limit_with_endpoint(addr, Some("/metrics")).await {
+                        return Ok(Self::http_error_response(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "IP rate limit exceeded",
+                        ));
+                    }
+                } else if path.starts_with("/health") {
+                    // Health endpoints: optional auth, but rate limit if unauthenticated
+                    let auth_result = auth_manager.authenticate_request(&headers, addr).await;
+                    if auth_result.user_id.is_none() {
+                        // Unauthenticated health check - apply stricter rate limiting
+                        if !auth_manager.check_ip_rate_limit_with_endpoint(addr, Some(path)).await {
+                            return Ok(Self::http_error_response(
+                                StatusCode::TOO_MANY_REQUESTS,
+                                "IP rate limit exceeded",
+                            ));
+                        }
+                    }
+                }
+            }
+            
             if path == "/metrics" {
                 return Self::handle_metrics_endpoint(server).await;
             }
@@ -367,7 +422,8 @@ impl RpcServer {
 
                 // Check per-user rate limiting (for authenticated users)
                 if let Some(ref user_id) = auth_result.user_id {
-                    if !auth_manager.check_rate_limit(user_id).await {
+                    let endpoint = format!("rpc:{}", method_name);
+                    if !auth_manager.check_rate_limit_with_endpoint(user_id, Some(addr), Some(&endpoint)).await {
                         return Ok(Self::http_error_response(
                             StatusCode::TOO_MANY_REQUESTS,
                             "User rate limit exceeded",
@@ -376,7 +432,8 @@ impl RpcServer {
                 }
             } else {
                 // Unauthenticated request - check per-IP rate limit
-                if !auth_manager.check_ip_rate_limit(addr).await {
+                let endpoint = format!("rpc:{}", method_name);
+                if !auth_manager.check_ip_rate_limit_with_endpoint(addr, Some(&endpoint)).await {
                     return Ok(Self::http_error_response(
                         StatusCode::TOO_MANY_REQUESTS,
                         "IP rate limit exceeded",
@@ -432,12 +489,19 @@ impl RpcServer {
             "# No metrics available\n".to_string()
         };
 
-        Ok(Response::builder()
+        let mut response = Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain; version=0.0.4")
             .header("Content-Length", metrics_text.len())
             .body(Full::new(Bytes::from(metrics_text)))
-            .expect("Failed to build metrics response"))
+            .expect("Failed to build metrics response");
+
+        // Add security headers
+        let headers = response.headers_mut();
+        headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+        headers.insert("Cache-Control", "no-store, no-cache, must-revalidate".parse().unwrap());
+
+        Ok(response)
     }
 
     /// Format NodeMetrics as Prometheus text format
@@ -733,12 +797,19 @@ impl RpcServer {
             }
         };
 
-        Ok(Response::builder()
+        let mut response = Response::builder()
             .status(status_code)
             .header("Content-Type", "application/json")
             .header("Content-Length", body.len())
             .body(Full::new(Bytes::from(body)))
-            .expect("Failed to build health response"))
+            .expect("Failed to build health response");
+
+        // Add security headers
+        let headers = response.headers_mut();
+        headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+        headers.insert("Cache-Control", "no-store, no-cache, must-revalidate".parse().unwrap());
+
+        Ok(response)
     }
 
     /// Create HTTP error response
@@ -1325,7 +1396,79 @@ impl RpcServer {
                 }
             }
 
-            _ => Err(errors::RpcError::method_not_found(method)),
+            _ => {
+                // Check module endpoints
+                let endpoints = self.module_endpoints.read().await;
+                if let Some(handler) = endpoints.get(method) {
+                    handler.handle(params).await
+                } else {
+                    Err(errors::RpcError::method_not_found(method))
+                }
+            }
+        }
+    }
+    
+    /// Register a module RPC endpoint
+    /// 
+    /// # Arguments
+    /// * `method` - RPC method name (must have module prefix, e.g., "lightning_*")
+    /// * `handler` - Handler implementation
+    /// 
+    /// # Returns
+    /// * `Ok(())` - Success
+    /// * `Err(String)` - Error (e.g., method name conflicts with core endpoint)
+    pub async fn register_module_endpoint(
+        &self,
+        method: String,
+        handler: Arc<dyn ModuleRpcHandler>,
+    ) -> Result<(), String> {
+        // Check if method conflicts with core endpoints
+        let core_methods = [
+            "getblockchaininfo", "getblock", "getblockhash", "getblockheader",
+            "getbestblockhash", "getblockcount", "getdifficulty", "gettxoutsetinfo",
+            "verifychain", "getchaintips", "getchaintxstats", "getblockstats",
+            "pruneblockchain", "getpruneinfo", "invalidateblock", "reconsiderblock",
+            "waitfornewblock", "waitforblock", "waitforblockheight",
+            "getrawtransaction", "sendrawtransaction", "testmempoolaccept",
+            "decoderawtransaction", "gettxout", "gettxoutproof", "verifytxoutproof",
+            "getmempoolinfo", "getrawmempool", "savemempool", "getmempoolancestors",
+            "getmempooldescendants", "getmempoolentry",
+            "getnetworkinfo", "getpeerinfo", "getconnectioncount", "ping",
+            "addnode", "disconnectnode", "getnettotals", "clearbanned", "setban",
+            "listbanned", "getaddednodeinfo", "getnodeaddresses", "setnetworkactive",
+            "getmininginfo", "getblocktemplate", "submitblock", "estimatesmartfee",
+            "prioritisetransaction", "getblockfilter", "getindexinfo",
+            "getblockchainstate", "validateaddress", "getaddressinfo",
+            "gettransactiondetails", "stop", "uptime", "getmemoryinfo",
+            "getrpcinfo", "help", "logging", "gethealth", "getmetrics",
+        ];
+        
+        if core_methods.contains(&method.as_str()) {
+            return Err(format!("Cannot override core RPC method: {}", method));
+        }
+        
+        // Check module prefix (recommended but not enforced)
+        if !method.contains('_') {
+            tracing::warn!(
+                "Module RPC method '{}' does not have module prefix (recommended: 'module_method')",
+                method
+            );
+        }
+        
+        let mut endpoints = self.module_endpoints.write().await;
+        endpoints.insert(method.clone(), handler);
+        tracing::info!("Registered module RPC endpoint: {}", method);
+        Ok(())
+    }
+    
+    /// Unregister a module RPC endpoint
+    pub async fn unregister_module_endpoint(&self, method: &str) -> Result<(), String> {
+        let mut endpoints = self.module_endpoints.write().await;
+        if endpoints.remove(method).is_some() {
+            tracing::info!("Unregistered module RPC endpoint: {}", method);
+            Ok(())
+        } else {
+            Err(format!("Module RPC endpoint not found: {}", method))
         }
     }
 }
