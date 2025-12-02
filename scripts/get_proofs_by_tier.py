@@ -1,8 +1,35 @@
 #!/usr/bin/env python3
-"""Identify Kani proofs by tier (fast/medium/slow) based on unwind bounds."""
+"""Identify Kani proofs by tier (strong/fast/medium/slow) based on criticality and unwind bounds.
+
+Strong tier: Critical node proofs that MUST run on every push.
+Fast tier: unwind <= 3 or no unwind
+Medium tier: unwind 4-9
+Slow tier: unwind >= 10
+"""
 import re
 import os
 import sys
+
+# STRONG TIER: Critical proofs that run on EVERY push
+# These are the minimum set for "formally verified" node status
+# Any change to these would break Bitcoin node correctness
+STRONG_TIER_PROOFS = {
+    # Protocol Message Parsing (DoS prevention, security)
+    'verify_message_header_parsing',  # Header field extraction (critical for message parsing)
+    'verify_checksum_rejection',  # Invalid checksum rejection (prevents corrupted messages)
+    'verify_message_size_limits',  # Size limit enforcement (DoS prevention)
+    
+    # Cryptographic Operations (security foundation)
+    'verify_sha256_determinism',  # SHA256 determinism (critical for hashing)
+    'verify_sha256_length',  # SHA256 output length (critical for hash validation)
+    'verify_double_sha256_determinism',  # Double SHA256 determinism (Bitcoin standard)
+    'verify_double_sha256_length',  # Double SHA256 output length (Bitcoin standard)
+    
+    # UTXO Store Operations (consensus correctness)
+    'verify_utxo_uniqueness',  # UTXO uniqueness (prevents double-spending)
+    'verify_add_remove_consistency',  # Add/remove consistency (UTXO set integrity)
+    'verify_spent_output_tracking',  # Spent output tracking (prevents double-spending)
+}
 
 fast_proofs = []  # unwind <= 3 or no unwind
 medium_proofs = []  # unwind 4-9
@@ -24,6 +51,11 @@ for root, dirs, files in os.walk('src'):
                                     func_match = re.search(r'fn\s+(\w+)', lines[j])
                                     if func_match:
                                         proof_name = func_match.group(1)
+                                        
+                                        # Skip if this is a strong tier proof (handled separately)
+                                        if proof_name in STRONG_TIER_PROOFS:
+                                            break
+                                        
                                         # Check unwind bound (look ahead up to 15 lines from proof)
                                         unwind = None
                                         for k in range(i, min(len(lines), i+15)):
@@ -74,15 +106,18 @@ for root, dirs, files in os.walk('src'):
 
 tier = sys.argv[1] if len(sys.argv) > 1 else 'all'
 
-if tier == 'fast':
+if tier == 'strong':
+    # Strong tier: Critical proofs only (always run)
+    proofs = sorted(STRONG_TIER_PROOFS)
+elif tier == 'fast':
     proofs = fast_proofs
 elif tier == 'fast_medium':
     proofs = fast_proofs + medium_proofs
 elif tier == 'all':
-    proofs = fast_proofs + medium_proofs + slow_proofs
+    # All tier includes strong tier + fast + medium + slow
+    proofs = sorted(STRONG_TIER_PROOFS) + fast_proofs + medium_proofs + slow_proofs
 else:
     proofs = []
 
 # Output as space-separated list for shell script
 print(' '.join(sorted(proofs)))
-
