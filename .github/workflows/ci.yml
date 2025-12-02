@@ -377,7 +377,7 @@ jobs:
         run: |
           echo "🔒 Running Kani proofs - STRONG TIER (critical node proofs)..."
           echo "These proofs verify the minimum set for 'formally verified' node status"
-          echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
+          echo "Note: Running with 3 parallel jobs (strong tier is small, mostly fast proofs)"
           # Get list of strong tier proofs
           STRONG_PROOFS=$(python3 scripts/get_proofs_by_tier.py strong)
           PROOF_COUNT=$(echo "$STRONG_PROOFS" | wc -w)
@@ -395,7 +395,7 @@ jobs:
           for proof in $STRONG_PROOFS; do
             HARNESS_ARGS="$HARNESS_ARGS --harness $proof"
           done
-          cargo kani --features verify --output-format terse --solver cadical --jobs 2 $HARNESS_ARGS 2>&1 | tee "$KANI_OUTPUT_FILE" | grep -v "aborting path on assume(false)" | tee "$TEMP_OUTPUT"
+          cargo kani --features verify --output-format terse --solver cadical --jobs 3 $HARNESS_ARGS 2>&1 | tee "$KANI_OUTPUT_FILE" | grep -v "aborting path on assume(false)" | tee "$TEMP_OUTPUT"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
           if [ $EXIT_CODE -ne 0 ]; then
