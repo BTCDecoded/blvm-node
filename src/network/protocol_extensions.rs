@@ -14,7 +14,7 @@ use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
 use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::utxo_commitments::spam_filter::SpamFilter;
+use bllvm_protocol::spam_filter::SpamFilter;
 use hex;
 use std::sync::Arc;
 
@@ -146,7 +146,7 @@ pub async fn handle_get_filtered_block(
 
     // Create spam filter from preferences
     #[cfg(feature = "utxo-commitments")]
-    let spam_filter_config = bllvm_protocol::utxo_commitments::spam_filter::SpamFilterConfig {
+    let spam_filter_config = bllvm_protocol::spam_filter::SpamFilterConfig {
         filter_ordinals: message.filter_preferences.filter_ordinals,
         filter_dust: message.filter_preferences.filter_dust,
         filter_brc20: message.filter_preferences.filter_brc20,

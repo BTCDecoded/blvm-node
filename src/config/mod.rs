@@ -327,6 +327,9 @@ pub struct NodeConfig {
     /// DoS protection configuration
     pub dos_protection: Option<DosProtectionConfig>,
 
+    /// Spam-specific peer banning configuration
+    pub spam_ban: Option<SpamBanConfig>,
+
     /// Network relay configuration
     pub relay: Option<RelayConfig>,
 
@@ -1443,6 +1446,37 @@ pub struct DosProtectionConfig {
     pub ban_duration_seconds: u64,
 }
 
+/// Spam-specific peer banning configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpamBanConfig {
+    /// Number of spam transactions before auto-ban
+    /// Default: 10
+    #[serde(default = "default_spam_ban_threshold")]
+    pub spam_ban_threshold: usize,
+
+    /// Ban duration in seconds for spam violations
+    /// Default: 3600 (1 hour)
+    #[serde(default = "default_spam_ban_duration")]
+    pub spam_ban_duration_seconds: u64,
+}
+
+fn default_spam_ban_threshold() -> usize {
+    10
+}
+
+fn default_spam_ban_duration() -> u64 {
+    3600 // 1 hour
+}
+
+impl Default for SpamBanConfig {
+    fn default() -> Self {
+        Self {
+            spam_ban_threshold: 10,
+            spam_ban_duration_seconds: 3600,
+        }
+    }
+}
+
 fn default_dos_max_connections_per_window() -> usize {
     10
 }
@@ -1793,6 +1827,10 @@ pub enum EvictionStrategy {
 
     /// Hybrid: Combine fee rate and age
     Hybrid,
+
+    /// SpamFirst: Evict spam transactions first (when mempool is full)
+    /// Requires spam filter to be enabled
+    SpamFirst,
 }
 
 /// Mempool policy configuration
@@ -1849,6 +1887,26 @@ pub struct MempoolPolicyConfig {
     /// Mempool persistence file path
     #[serde(default = "default_mempool_persistence_path")]
     pub mempool_persistence_path: String,
+
+    /// Transaction rate limit burst size (max transactions in burst)
+    /// Default: 10
+    #[serde(default = "default_tx_rate_limit_burst")]
+    pub tx_rate_limit_burst: u32,
+
+    /// Transaction rate limit per second
+    /// Default: 1 tx/sec
+    #[serde(default = "default_tx_rate_limit_per_sec")]
+    pub tx_rate_limit_per_sec: u32,
+
+    /// Transaction byte rate limit per second (bytes per second per peer)
+    /// Default: 100,000 bytes/sec (100 KB/s)
+    #[serde(default = "default_tx_byte_rate_limit")]
+    pub tx_byte_rate_limit: u64,
+
+    /// Transaction byte rate limit burst size (max bytes in burst)
+    /// Default: 1,000,000 bytes (1 MB)
+    #[serde(default = "default_tx_byte_rate_burst")]
+    pub tx_byte_rate_burst: u64,
 }
 
 fn default_max_mempool_mb() -> u64 {
@@ -1899,6 +1957,22 @@ fn default_mempool_persistence_path() -> String {
     "data/mempool.dat".to_string()
 }
 
+fn default_tx_rate_limit_burst() -> u32 {
+    10
+}
+
+fn default_tx_rate_limit_per_sec() -> u32 {
+    1
+}
+
+fn default_tx_byte_rate_limit() -> u64 {
+    100_000 // 100 KB/s
+}
+
+fn default_tx_byte_rate_burst() -> u64 {
+    1_000_000 // 1 MB
+}
+
 impl Default for MempoolPolicyConfig {
     fn default() -> Self {
         Self {
@@ -1915,6 +1989,10 @@ impl Default for MempoolPolicyConfig {
             mempool_expiry_hours: 336,
             persist_mempool: false,
             mempool_persistence_path: "data/mempool.dat".to_string(),
+            tx_rate_limit_burst: 10,
+            tx_rate_limit_per_sec: 1,
+            tx_byte_rate_limit: 100_000,
+            tx_byte_rate_burst: 1_000_000,
         }
     }
 }
