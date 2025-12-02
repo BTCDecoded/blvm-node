@@ -23,9 +23,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 # Protocol abstraction layer - Use local path for development
 # This transitively provides bllvm-consensus, so we only need this one dependency
 # For local development, use path dependency
-bllvm-protocol = { path = "../bllvm-protocol" }
+bllvm-protocol = { path = "../blvm-protocol" }
 # Direct dependency on bllvm-consensus for CTV feature (CTV functions not re-exported by protocol)
-bllvm-consensus = { path = "../bllvm-consensus", optional = true }
+bllvm-consensus = { path = "../blvm-consensus", optional = true }
 
 # Storage layer - EXACT VERSIONS for security
 sled = { version = "=0.34.7", optional = true }
@@ -213,8 +213,8 @@ lto = "thin"
 codegen-units = 16
 
 # Benchmark targets
-# Benchmarks have been moved to bllvm-bench crate
-# See: https://github.com/BTCDecoded/bllvm-bench
+# Benchmarks have been moved to blvm-bench crate
+# See: https://github.com/BTCDecoded/blvm-bench
 
 # Local development: Use .cargo/config.toml to override dependencies with local paths
 # This allows you to develop against local changes in bllvm-protocol without publishing
