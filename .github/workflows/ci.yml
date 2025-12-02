@@ -274,6 +274,8 @@ jobs:
     needs: setup
     runs-on: [self-hosted, Linux, X64, perf]
     timeout-minutes: 360  # 6 hours for all proofs
+    outputs:
+      proof_tier: ${{ steps.set_tier_output.outputs.tier }}
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -482,11 +484,57 @@ jobs:
           path: kani_output.txt
           retention-days: 90
       
-      - name: Run Kani proofs (Fast + Medium - manual only)
-        if: steps.proof_tier.outputs.tier == 'fast_medium'
+      - name: Set proof tier output
+        id: set_tier_output
         run: |
-          echo "🔍 Running Kani proofs - Fast + Medium tier (unwind <= 9)..."
-          echo "Note: Strong tier already ran above. This runs additional fast + medium proofs."
+          echo "tier=${{ steps.proof_tier.outputs.tier }}" >> $GITHUB_OUTPUT
+
+  provision-spot-runner:
+    name: Provision Spot Runner
+    needs: [verify]
+    if: |
+      needs.verify.outputs.proof_tier == 'fast_medium' ||
+      needs.verify.outputs.proof_tier == 'all'
+    uses: BTCDecoded/blvm/.github/workflows/provision-spot-runner.yml@main
+    with:
+      repo_name: blvm-node
+      ami_id: ${{ secrets.KANI_RUNNER_AMI_ID }}
+      instance_type: c6i.4xlarge
+      runner_labels: 'self-hosted, Linux, X64, spot, kani'
+      workload_type: kani
+    secrets: inherit
+
+  verify-medium-slow:
+    name: Verify (Medium + Slow Proofs on Spot Runner)
+    needs: [verify, provision-spot-runner]
+    runs-on: [self-hosted, Linux, X64, spot, kani]
+    timeout-minutes: 360  # 6 hours for medium + slow proofs
+    if: |
+      needs.verify.outputs.proof_tier == 'fast_medium' ||
+      needs.verify.outputs.proof_tier == 'all'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      
+      - name: Verify Kani is available
+        run: |
+          if command -v kani &> /dev/null; then
+            echo "✅ Found kani command: $(which kani)"
+            kani --version
+          else
+            echo "❌ Kani not found on runner"
+            exit 1
+          fi
+      
+      - name: Run Kani proofs (Fast + Medium on Spot Runner)
+        if: needs.verify.outputs.proof_tier == 'fast_medium'
+        run: |
+          echo "🔍 Running Kani proofs - Fast + Medium tier (unwind <= 9) on spot runner..."
+          echo "Note: Strong tier already ran on regular runner. This runs additional fast + medium proofs."
           echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
           # Get list of fast + medium proofs (strong tier excluded automatically)
           FAST_MEDIUM_PROOFS=$(python3 scripts/get_proofs_by_tier.py fast_medium)
@@ -497,7 +545,7 @@ jobs:
             exit 0
           fi
           TEMP_OUTPUT=$(mktemp)
-          KANI_OUTPUT_FILE="kani_output.txt"
+          KANI_OUTPUT_FILE="kani_spot_output.txt"
           trap "rm -f $TEMP_OUTPUT" EXIT
           set +e
           # Build harness filter arguments
@@ -519,52 +567,58 @@ jobs:
               exit $EXIT_CODE
             fi
           fi
-          echo "✅ Fast + Medium proofs verified successfully"
+          echo "✅ Fast + Medium proofs verified successfully on spot runner"
           # Hash the Kani output for attestation (only on main branch)
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             KANI_OUTPUT_HASH=$(sha256sum "$KANI_OUTPUT_FILE" | cut -d' ' -f1)
-            echo "kani_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_ENV
-            echo "kani_verified=true" >> $GITHUB_ENV
-            echo "kani_proofs=$PROOF_COUNT" >> $GITHUB_ENV
-            echo "Kani output hash: $KANI_OUTPUT_HASH"
+            echo "kani_spot_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_ENV
+            echo "kani_spot_verified=true" >> $GITHUB_ENV
+            echo "kani_spot_proofs=$PROOF_COUNT" >> $GITHUB_ENV
+            echo "Kani spot runner output hash: $KANI_OUTPUT_HASH"
           fi
       
-      - name: Upload Kani output for attestation (Fast + Medium)
-        if: steps.proof_tier.outputs.tier == 'fast_medium' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: kani-attestation-data
-          path: kani_output.txt
-          retention-days: 90
-      
-      - name: Run Kani proofs (All - manual only)
-        if: steps.proof_tier.outputs.tier == 'all'
+      - name: Run Kani proofs (All on Spot Runner)
+        if: needs.verify.outputs.proof_tier == 'all'
         timeout-minutes: 360  # 6 hours - all proofs can take 4-6 hours
         run: |
-          echo "🐌 Running Kani proofs - All tier (all unwind bounds)..."
+          echo "🐌 Running Kani proofs - All tier (all unwind bounds) on spot runner..."
+          echo "Note: Strong tier already ran on regular runner. This runs all remaining proofs."
           echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
           echo "This includes slow proofs (unwind >= 10) which take significantly longer"
           echo "Expected duration: 4-6 hours for all proofs"
           echo "Job timeout: 360 minutes (6 hours)"
+          # Get all proofs except strong tier
+          # This means getting slow tier (unwind >= 10) plus any medium not in strong
+          SLOW_PROOFS=$(python3 scripts/get_proofs_by_tier.py slow)
+          FAST_MEDIUM_PROOFS=$(python3 scripts/get_proofs_by_tier.py fast_medium)
+          PROOFS="$SLOW_PROOFS $FAST_MEDIUM_PROOFS"
+          PROOF_COUNT=$(echo "$PROOFS" | wc -w)
+          echo "Found $PROOF_COUNT proofs to run (all unwind bounds, strong tier excluded)"
+          if [ "$PROOF_COUNT" -eq 0 ]; then
+            echo "⚠️  No additional proofs found (all may be in strong tier)"
+            exit 0
+          fi
           TEMP_OUTPUT=$(mktemp)
-          KANI_OUTPUT_FILE="kani_output.txt"
+          KANI_OUTPUT_FILE="kani_spot_output.txt"
           trap "rm -f $TEMP_OUTPUT" EXIT
           set +e
-          # Run all proofs (no filter) and save full output
-          # Note: This can take 4-6 hours for all proofs
-          cargo kani --features verify --output-format terse --solver cadical --jobs 2 2>&1 | tee "$KANI_OUTPUT_FILE" | grep -v "aborting path on assume(false)" | tee "$TEMP_OUTPUT"
+          # Build harness filter arguments
+          HARNESS_ARGS=""
+          for proof in $PROOFS; do
+            HARNESS_ARGS="$HARNESS_ARGS --harness $proof"
+          done
+          cargo kani --features verify --output-format terse --solver cadical --jobs 2 $HARNESS_ARGS 2>&1 | tee "$KANI_OUTPUT_FILE" | grep -v "aborting path on assume(false)" | tee "$TEMP_OUTPUT"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
           if [ $EXIT_CODE -ne 0 ]; then
             if [ $EXIT_CODE -eq 143 ]; then
               echo "⚠️  All Kani proofs were terminated (exit code 143 = SIGTERM)"
               echo "This usually means the job timed out or was killed due to resource limits"
-              echo "The 'all' tier can take 4-6 hours to complete"
+              echo "The 'all' tier with all proofs can take 4-6 hours to complete"
               echo "Consider:"
               echo "  1. Increasing the job timeout (currently 360 minutes)"
               echo "  2. Running proofs in smaller batches"
               echo "  3. Using a runner with more memory/CPU"
-              echo "  4. Running only fast+medium proofs for PRs"
               exit $EXIT_CODE
             else
               echo "❌ All Kani proofs failed (exit code: $EXIT_CODE)"
@@ -572,21 +626,36 @@ jobs:
               exit $EXIT_CODE
             fi
           fi
-          echo "✅ All Kani proofs verified successfully"
-          # Hash the Kani output for attestation
-          KANI_OUTPUT_HASH=$(sha256sum "$KANI_OUTPUT_FILE" | cut -d' ' -f1)
-          echo "kani_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_ENV
-          echo "kani_verified=true" >> $GITHUB_ENV
-          echo "kani_proofs=72" >> $GITHUB_ENV
-          echo "Kani output hash: $KANI_OUTPUT_HASH"
+          echo "✅ All Kani proofs verified successfully on spot runner"
+          # Hash the Kani output for attestation (only on main branch)
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            KANI_OUTPUT_HASH=$(sha256sum "$KANI_OUTPUT_FILE" | cut -d' ' -f1)
+            echo "kani_spot_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_ENV
+            echo "kani_spot_verified=true" >> $GITHUB_ENV
+            echo "kani_spot_proofs=$PROOF_COUNT" >> $GITHUB_ENV
+            echo "Kani spot runner output hash: $KANI_OUTPUT_HASH"
+          fi
       
-      - name: Upload Kani output for attestation
-        if: steps.proof_tier.outputs.tier == 'all' && github.ref == 'refs/heads/main'
+      - name: Upload Kani output for attestation (Spot Runner)
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: kani-attestation-data
-          path: kani_output.txt
+          name: kani-spot-attestation-data
+          path: kani_spot_output.txt
           retention-days: 90
+
+  cleanup-spot-runner:
+    name: Cleanup Spot Runner
+    needs: [verify-medium-slow]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop EC2 Runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          label: ${{ needs.provision-spot-runner.outputs.runner_label }}
 
   fmt:
     name: Format
