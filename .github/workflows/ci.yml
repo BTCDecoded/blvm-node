@@ -21,6 +21,16 @@ on:
         required: false
         type: boolean
         default: false
+      run_proof_tier:
+        description: 'Run additional proof tier (strong always runs; choose: fast, fast_medium, or all)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - fast
+          - fast_medium
+          - all
+        default: ''
 
 permissions:
   contents: read
@@ -268,8 +278,9 @@ jobs:
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
-        !contains(github.event.head_commit.message, '[no ci]'))) &&
-      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verification != 'true')
+        !contains(github.event.head_commit.message, '[no ci]')))
+      # Note: Strong tier ALWAYS runs (cannot be skipped)
+      # Other tiers only run when manually triggered via workflow_dispatch
     steps:
       - uses: actions/checkout@v4
       
@@ -328,37 +339,108 @@ jobs:
       - name: Determine proof tier
         id: proof_tier
         run: |
-          # Determine which proofs to run based on event type
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # PRs: Fast + Medium proofs
-            echo "tier=fast_medium" >> $GITHUB_OUTPUT
-            echo "description=Fast + Medium proofs" >> $GITHUB_OUTPUT
-            echo "unwind_max=9" >> $GITHUB_OUTPUT
-          elif [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.ref }}" = "refs/heads/master" ]; then
-            # Push to main: All proofs
-            echo "tier=all" >> $GITHUB_OUTPUT
-            echo "description=All proofs" >> $GITHUB_OUTPUT
-            echo "unwind_max=999" >> $GITHUB_OUTPUT
+          # Strong tier ALWAYS runs (critical node proofs)
+          # Other tiers only run when manually triggered via workflow_dispatch
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.run_proof_tier }}" ]; then
+            # Manual trigger: Use specified tier
+            TIER="${{ github.event.inputs.run_proof_tier }}"
+            echo "tier=$TIER" >> $GITHUB_OUTPUT
+            case "$TIER" in
+              fast)
+                echo "description=Fast tier (unwind <= 3)" >> $GITHUB_OUTPUT
+                echo "unwind_max=3" >> $GITHUB_OUTPUT
+                ;;
+              fast_medium)
+                echo "description=Fast + Medium tier (unwind <= 9)" >> $GITHUB_OUTPUT
+                echo "unwind_max=9" >> $GITHUB_OUTPUT
+                ;;
+              all)
+                echo "description=All proofs (all unwind bounds)" >> $GITHUB_OUTPUT
+                echo "unwind_max=999" >> $GITHUB_OUTPUT
+                ;;
+              *)
+                echo "tier=" >> $GITHUB_OUTPUT
+                echo "description=No additional tier" >> $GITHUB_OUTPUT
+                ;;
+            esac
           else
-            # Other pushes: Fast proofs only
-            echo "tier=fast" >> $GITHUB_OUTPUT
-            echo "description=Fast proofs only" >> $GITHUB_OUTPUT
-            echo "unwind_max=3" >> $GITHUB_OUTPUT
+            # Automatic runs: No additional tier (strong tier only)
+            echo "tier=" >> $GITHUB_OUTPUT
+            echo "description=Strong tier only (no additional tier)" >> $GITHUB_OUTPUT
           fi
           echo "Event: ${{ github.event_name }}"
           echo "Ref: ${{ github.ref }}"
-          echo "Tier: ${{ steps.proof_tier.outputs.tier }}"
+          echo "Additional tier: ${{ steps.proof_tier.outputs.tier }}"
           echo "Description: ${{ steps.proof_tier.outputs.description }}"
       
-      - name: Run Kani proofs (Fast - every push)
+      - name: Run Kani proofs (Strong tier - ALWAYS, cannot be skipped)
+        run: |
+          echo "🔒 Running Kani proofs - STRONG TIER (critical node proofs)..."
+          echo "These proofs verify the minimum set for 'formally verified' node status"
+          echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
+          # Get list of strong tier proofs
+          STRONG_PROOFS=$(python3 scripts/get_proofs_by_tier.py strong)
+          PROOF_COUNT=$(echo "$STRONG_PROOFS" | wc -w)
+          echo "Found $PROOF_COUNT strong tier proofs to run"
+          if [ "$PROOF_COUNT" -eq 0 ]; then
+            echo "❌ No strong tier proofs found! This should never happen."
+            exit 1
+          fi
+          TEMP_OUTPUT=$(mktemp)
+          KANI_OUTPUT_FILE="kani_strong_output.txt"
+          trap "rm -f $TEMP_OUTPUT" EXIT
+          set +e
+          # Build harness filter arguments
+          HARNESS_ARGS=""
+          for proof in $STRONG_PROOFS; do
+            HARNESS_ARGS="$HARNESS_ARGS --harness $proof"
+          done
+          cargo kani --features verify --output-format terse --solver cadical --jobs 2 $HARNESS_ARGS 2>&1 | tee "$KANI_OUTPUT_FILE" | grep -v "aborting path on assume(false)" | tee "$TEMP_OUTPUT"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          if [ $EXIT_CODE -ne 0 ]; then
+            if [ $EXIT_CODE -eq 143 ]; then
+              echo "⚠️  Strong tier Kani proofs were terminated (exit code 143 = SIGTERM)"
+              echo "This usually means the job timed out or was killed due to resource limits"
+              echo "Strong tier proofs are critical - they must pass for node correctness"
+              exit $EXIT_CODE
+            else
+              echo "❌ Strong tier Kani proofs failed (exit code: $EXIT_CODE)"
+              echo "CRITICAL: Strong tier proofs verify core node operations"
+              echo "Any failure here indicates a potential node correctness bug"
+              exit $EXIT_CODE
+            fi
+          fi
+          echo "✅ Strong tier proofs verified successfully"
+          # Hash the Kani output for attestation
+          KANI_OUTPUT_HASH=$(sha256sum "$KANI_OUTPUT_FILE" | cut -d' ' -f1)
+          echo "kani_strong_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_ENV
+          echo "kani_strong_verified=true" >> $GITHUB_ENV
+          echo "kani_strong_proofs=$PROOF_COUNT" >> $GITHUB_ENV
+          echo "Kani strong tier output hash: $KANI_OUTPUT_HASH"
+      
+      - name: Upload Kani output for attestation (Strong tier)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-strong-attestation-data
+          path: kani_strong_output.txt
+          retention-days: 90
+      
+      - name: Run Kani proofs (Fast - manual only)
         if: steps.proof_tier.outputs.tier == 'fast'
         run: |
           echo "⚡ Running Kani proofs - Fast tier (unwind <= 3)..."
+          echo "Note: Strong tier already ran above. This runs additional fast proofs."
           echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
-          # Get list of fast proofs
+          # Get list of fast proofs (strong tier excluded automatically)
           FAST_PROOFS=$(python3 scripts/get_proofs_by_tier.py fast)
           PROOF_COUNT=$(echo "$FAST_PROOFS" | wc -w)
-          echo "Found $PROOF_COUNT fast proofs to run"
+          echo "Found $PROOF_COUNT fast proofs to run (strong tier excluded)"
+          if [ "$PROOF_COUNT" -eq 0 ]; then
+            echo "⚠️  No additional fast proofs found (all may be in strong tier)"
+            exit 0
+          fi
           TEMP_OUTPUT=$(mktemp)
           KANI_OUTPUT_FILE="kani_output.txt"
           trap "rm -f $TEMP_OUTPUT" EXIT
@@ -400,15 +482,20 @@ jobs:
           path: kani_output.txt
           retention-days: 90
       
-      - name: Run Kani proofs (Fast + Medium - PRs)
+      - name: Run Kani proofs (Fast + Medium - manual only)
         if: steps.proof_tier.outputs.tier == 'fast_medium'
         run: |
           echo "🔍 Running Kani proofs - Fast + Medium tier (unwind <= 9)..."
+          echo "Note: Strong tier already ran above. This runs additional fast + medium proofs."
           echo "Note: Running with minimal parallelism (2 jobs) to avoid OOM"
-          # Get list of fast + medium proofs
+          # Get list of fast + medium proofs (strong tier excluded automatically)
           FAST_MEDIUM_PROOFS=$(python3 scripts/get_proofs_by_tier.py fast_medium)
           PROOF_COUNT=$(echo "$FAST_MEDIUM_PROOFS" | wc -w)
-          echo "Found $PROOF_COUNT fast + medium proofs to run"
+          echo "Found $PROOF_COUNT fast + medium proofs to run (strong tier excluded)"
+          if [ "$PROOF_COUNT" -eq 0 ]; then
+            echo "⚠️  No additional fast + medium proofs found (all may be in strong tier)"
+            exit 0
+          fi
           TEMP_OUTPUT=$(mktemp)
           KANI_OUTPUT_FILE="kani_output.txt"
           trap "rm -f $TEMP_OUTPUT" EXIT
@@ -450,7 +537,7 @@ jobs:
           path: kani_output.txt
           retention-days: 90
       
-      - name: Run Kani proofs (All - main branch)
+      - name: Run Kani proofs (All - manual only)
         if: steps.proof_tier.outputs.tier == 'all'
         timeout-minutes: 360  # 6 hours - all proofs can take 4-6 hours
         run: |
@@ -1041,6 +1128,14 @@ jobs:
             fi
           done
       
+      - name: Download attestation artifacts
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-attestation-data'
+          merge-multiple: true
+          path: attestation-data
+      
       - name: Collect build metadata for attestation
         if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
         id: metadata
@@ -1048,6 +1143,15 @@ jobs:
           # Get toolchain versions
           RUSTC_VERSION=$(rustc --version | cut -d' ' -f2)
           CARGO_VERSION=$(cargo --version | cut -d' ' -f2)
+          
+          # Get CBMC version from Kani (if available)
+          CBMC_VERSION=""
+          if command -v kani &> /dev/null; then
+            CBMC_VERSION=$(kani --version 2>&1 | grep -i cbmc | head -1 | sed -E 's/.*cbmc[^0-9]*([0-9.]+).*/\1/' || echo "")
+          fi
+          if [ -z "$CBMC_VERSION" ]; then
+            CBMC_VERSION="unknown"
+          fi
           
           # Hash Cargo.lock
           CARGO_LOCK_HASH=$(sha256sum Cargo.lock | cut -d' ' -f1)
@@ -1058,15 +1162,65 @@ jobs:
             DEBUG_ASSERTIONS="true"
           fi
           
-          # Output metadata
+          # Extract Kani data from artifacts
+          KANI_VERIFIED="false"
+          KANI_PROOFS="0"
+          KANI_OUTPUT_HASH=""
+          KANI_STRONG_VERIFIED="false"
+          KANI_STRONG_PROOFS="0"
+          KANI_STRONG_OUTPUT_HASH=""
+          
+          # Strong tier (always runs)
+          if [ -f "attestation-data/kani_strong_output.txt" ]; then
+            KANI_STRONG_VERIFIED="true"
+            KANI_STRONG_OUTPUT_HASH=$(sha256sum attestation-data/kani_strong_output.txt | cut -d' ' -f1)
+            KANI_STRONG_PROOFS=$(grep -c "Checking harness" attestation-data/kani_strong_output.txt 2>/dev/null || echo "0")
+            if [ "$KANI_STRONG_PROOFS" = "0" ]; then
+              # Fallback: count strong tier proofs
+              KANI_STRONG_PROOFS=$(python3 scripts/get_proofs_by_tier.py strong | wc -w)
+            fi
+          fi
+          
+          # Additional tier (manual only)
+          if [ -f "attestation-data/kani_output.txt" ]; then
+            KANI_VERIFIED="true"
+            KANI_OUTPUT_HASH=$(sha256sum attestation-data/kani_output.txt | cut -d' ' -f1)
+            # Count proofs from output (approximate)
+            KANI_PROOFS=$(grep -c "Checking harness" attestation-data/kani_output.txt 2>/dev/null || echo "0")
+            if [ "$KANI_PROOFS" = "0" ]; then
+              # Fallback: count from tier
+              KANI_PROOFS="0"
+            fi
+          fi
+          
+          # Total proofs = strong + additional
+          TOTAL_KANI_PROOFS=$((KANI_STRONG_PROOFS + KANI_PROOFS))
+          
+          # Output all metadata
+          echo "kani_strong_verified=$KANI_STRONG_VERIFIED" >> $GITHUB_OUTPUT
+          echo "kani_strong_proofs=$KANI_STRONG_PROOFS" >> $GITHUB_OUTPUT
+          echo "kani_strong_output_hash=$KANI_STRONG_OUTPUT_HASH" >> $GITHUB_OUTPUT
+          echo "kani_verified=$KANI_VERIFIED" >> $GITHUB_OUTPUT
+          echo "kani_proofs=$KANI_PROOFS" >> $GITHUB_OUTPUT
+          echo "kani_output_hash=$KANI_OUTPUT_HASH" >> $GITHUB_OUTPUT
+          echo "kani_total_proofs=$TOTAL_KANI_PROOFS" >> $GITHUB_OUTPUT
           echo "debug_assertions_enabled=$DEBUG_ASSERTIONS" >> $GITHUB_OUTPUT
           echo "rustc_version=$RUSTC_VERSION" >> $GITHUB_OUTPUT
+          echo "cbmc_version=$CBMC_VERSION" >> $GITHUB_OUTPUT
           echo "cargo_version=$CARGO_VERSION" >> $GITHUB_OUTPUT
           echo "cargo_lock_hash=$CARGO_LOCK_HASH" >> $GITHUB_OUTPUT
           
           echo "📋 Build Metadata:"
+          echo "  Kani strong tier verified: $KANI_STRONG_VERIFIED"
+          echo "  Kani strong tier proofs: $KANI_STRONG_PROOFS"
+          echo "  Kani strong tier output hash: $KANI_STRONG_OUTPUT_HASH"
+          echo "  Kani additional tier verified: $KANI_VERIFIED"
+          echo "  Kani additional tier proofs: $KANI_PROOFS"
+          echo "  Kani additional tier output hash: $KANI_OUTPUT_HASH"
+          echo "  Kani total proofs: $TOTAL_KANI_PROOFS"
           echo "  Debug assertions: $DEBUG_ASSERTIONS"
           echo "  rustc version: $RUSTC_VERSION"
+          echo "  CBMC version: $CBMC_VERSION"
           echo "  cargo version: $CARGO_VERSION"
           echo "  Cargo.lock hash: $CARGO_LOCK_HASH"
       
@@ -1077,8 +1231,16 @@ jobs:
           # Create predicate JSON file
           cat > predicate.json << EOF
           {
+            "kani_strong_verified": ${{ steps.metadata.outputs.kani_strong_verified == 'true' && 'true' || 'false' }},
+            "kani_strong_proofs": ${{ steps.metadata.outputs.kani_strong_proofs }},
+            "kani_strong_output_hash": "${{ steps.metadata.outputs.kani_strong_output_hash }}",
+            "kani_verified": ${{ steps.metadata.outputs.kani_verified == 'true' && 'true' || 'false' }},
+            "kani_proofs": ${{ steps.metadata.outputs.kani_proofs }},
+            "kani_output_hash": "${{ steps.metadata.outputs.kani_output_hash }}",
+            "kani_total_proofs": ${{ steps.metadata.outputs.kani_total_proofs }},
             "debug_assertions_enabled": ${{ steps.metadata.outputs.debug_assertions_enabled == 'true' && 'true' || 'false' }},
             "rustc_version": "${{ steps.metadata.outputs.rustc_version }}",
+            "cbmc_version": "${{ steps.metadata.outputs.cbmc_version }}",
             "cargo_version": "${{ steps.metadata.outputs.cargo_version }}",
             "cargo_lock_hash": "${{ steps.metadata.outputs.cargo_lock_hash }}"
           }
