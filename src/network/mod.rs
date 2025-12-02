@@ -303,6 +303,57 @@ impl PeerRateLimiter {
     }
 }
 
+/// Byte rate limiter for peer transaction byte rate limiting
+pub struct PeerByteRateLimiter {
+    /// Current number of bytes available
+    bytes: u64,
+    /// Maximum burst size (initial byte count)
+    burst_limit: u64,
+    /// Bytes per second refill rate
+    rate: u64,
+    /// Last refill timestamp (Unix seconds)
+    last_refill: u64,
+}
+
+impl PeerByteRateLimiter {
+    /// Create a new byte rate limiter
+    pub fn new(burst_limit: u64, rate: u64) -> Self {
+        let now = current_timestamp();
+        Self {
+            bytes: burst_limit,
+            burst_limit,
+            rate,
+            last_refill: now,
+        }
+    }
+
+    /// Check if bytes can be consumed and consume them
+    pub fn check_and_consume(&mut self, bytes: u64) -> bool {
+        self.refill();
+        if self.bytes >= bytes {
+            self.bytes -= bytes;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Refill bytes based on elapsed time
+    fn refill(&mut self) {
+        let now = current_timestamp();
+
+        if now > self.last_refill {
+            let elapsed = now - self.last_refill;
+            let bytes_to_add = (elapsed as u64) * self.rate;
+            self.bytes = self
+                .bytes
+                .saturating_add(bytes_to_add)
+                .min(self.burst_limit);
+            self.last_refill = now;
+        }
+    }
+}
+
 /// Connection manager for handling network connections
 /// Note: This is deprecated - use Transport abstraction instead
 pub struct ConnectionManager {
@@ -393,6 +444,14 @@ pub struct NetworkManager {
     connections_per_ip: Arc<Mutex<HashMap<std::net::IpAddr, usize>>>,
     /// Per-peer message rate limiting (token bucket)
     peer_message_rates: Arc<Mutex<HashMap<SocketAddr, PeerRateLimiter>>>,
+    /// Per-peer transaction rate limiting (separate from message rate limiting)
+    peer_tx_rate_limiters: Arc<Mutex<HashMap<SocketAddr, PeerRateLimiter>>>,
+    /// Per-peer transaction byte rate limiting (bytes per second)
+    peer_tx_byte_rate_limiters: Arc<Mutex<HashMap<SocketAddr, PeerByteRateLimiter>>>,
+    /// Mempool policy configuration for rate limits
+    mempool_policy_config: Option<Arc<crate::config::MempoolPolicyConfig>>,
+    /// Spam ban configuration
+    spam_ban_config: Option<Arc<crate::config::SpamBanConfig>>,
     /// Network statistics
     /// Optimization: Use AtomicU64 for lock-free updates
     bytes_sent: Arc<AtomicU64>,
@@ -413,6 +472,9 @@ pub struct NetworkManager {
     pending_ban_shares: Arc<Mutex<Vec<(SocketAddr, u64, String)>>>, // (addr, unban_timestamp, reason)
     /// Ban list sharing configuration
     ban_list_sharing_config: Option<crate::config::BanListSharingConfig>,
+    /// Spam violation tracking per peer (for spam-specific banning)
+    /// Maps SocketAddr -> violation count
+    peer_spam_violations: Arc<Mutex<HashMap<SocketAddr, usize>>>,
     /// Governance message relay configuration
     #[cfg(feature = "governance")]
     governance_config: Option<crate::config::GovernanceConfig>,
@@ -573,6 +635,11 @@ impl NetworkManager {
             ban_list: Arc::new(RwLock::new(HashMap::new())),
             connections_per_ip: Arc::new(Mutex::new(HashMap::new())),
             peer_message_rates: Arc::new(Mutex::new(HashMap::new())),
+            peer_tx_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            peer_tx_byte_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            mempool_policy_config: config.and_then(|c| c.mempool_policy.as_ref()).map(|c| Arc::new(c.clone())),
+            spam_ban_config: config.and_then(|c| c.spam_ban.as_ref()).map(|c| Arc::new(c.clone())),
+            peer_spam_violations: Arc::new(Mutex::new(HashMap::new())),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
@@ -3008,6 +3075,13 @@ impl NetworkManager {
                             TransportAddr::Iroh(_) => None,
                         } {
                             rates.remove(&sock_addr);
+                            // Also clean up transaction rate limiters and spam violations
+                            let mut tx_rates = self.peer_tx_rate_limiters.lock().await;
+                            tx_rates.remove(&sock_addr);
+                            let mut byte_rates = self.peer_tx_byte_rate_limiters.lock().await;
+                            byte_rates.remove(&sock_addr);
+                            let mut spam_violations = self.peer_spam_violations.lock().await;
+                            spam_violations.remove(&sock_addr);
                         }
                     }
 
@@ -3563,6 +3637,76 @@ impl NetworkManager {
         }
         
         let parsed = ProtocolParser::parse_message(&data)?;
+
+        // Check transaction rate limiting for Tx messages
+        if let ProtocolMessage::Tx(_) = &parsed {
+            let (burst, rate) = self.mempool_policy_config.as_ref()
+                .map(|cfg| (cfg.tx_rate_limit_burst, cfg.tx_rate_limit_per_sec))
+                .unwrap_or((10, 1)); // Default: 10 burst, 1 tx/sec
+
+            let should_process = {
+                let mut tx_rates = self.peer_tx_rate_limiters.lock().await;
+                let limiter = tx_rates.entry(peer_addr).or_insert_with(|| {
+                    PeerRateLimiter::new(burst, rate)
+                });
+                limiter.check_and_consume()
+            };
+
+            if !should_process {
+                warn!("Transaction rate limit exceeded for peer {}, dropping transaction", peer_addr);
+                return Ok(()); // Drop transaction
+            }
+
+            // Check byte rate limiting
+            let (byte_burst, byte_rate) = self.mempool_policy_config.as_ref()
+                .map(|cfg| (cfg.tx_byte_rate_burst, cfg.tx_byte_rate_limit))
+                .unwrap_or((1_000_000, 100_000)); // Default: 1 MB burst, 100 KB/s
+
+            let tx_bytes = data.len() as u64;
+            let should_process_bytes = {
+                let mut byte_rates = self.peer_tx_byte_rate_limiters.lock().await;
+                let limiter = byte_rates.entry(peer_addr).or_insert_with(|| {
+                    PeerByteRateLimiter::new(byte_burst, byte_rate)
+                });
+                limiter.check_and_consume(tx_bytes)
+            };
+
+            if !should_process_bytes {
+                warn!("Transaction byte rate limit exceeded for peer {} ({} bytes), dropping transaction", peer_addr, tx_bytes);
+                return Ok(()); // Drop transaction
+            }
+
+            // Check if transaction is spam and track violations
+            use bllvm_consensus::spam_filter::SpamFilter;
+            
+            // Parse transaction from data to check if it's spam
+            if let Ok(tx_msg) = bincode::deserialize::<crate::network::protocol::TxMessage>(&data[4..]) {
+                let tx = &tx_msg.transaction;
+                let spam_filter = SpamFilter::new();
+                let result = spam_filter.is_spam(tx);
+                
+                if result.is_spam {
+                    // Track spam violation
+                    let mut violations = self.peer_spam_violations.lock().await;
+                    let violation_count = violations.entry(peer_addr).or_insert(0);
+                    *violation_count += 1;
+                    let current_count = *violation_count;
+                    drop(violations);
+                    
+                    // Check if we should ban this peer
+                    if let Some(ban_config) = self.spam_ban_config.as_ref() {
+                        if current_count >= ban_config.spam_ban_threshold {
+                            let unban_timestamp = crate::utils::current_timestamp() + ban_config.spam_ban_duration_seconds;
+                            warn!("Auto-banning peer {} for spam violations ({} violations, unban at {})", peer_addr, current_count, unban_timestamp);
+                            self.ban_peer(peer_addr, unban_timestamp);
+                            return Ok(()); // Drop transaction and ban peer
+                        }
+                    }
+                    
+                    debug!("Spam transaction from peer {} (violation count: {})", peer_addr, current_count);
+                }
+            }
+        }
 
         // Handle special cases that don't go through protocol layer
         match parsed {

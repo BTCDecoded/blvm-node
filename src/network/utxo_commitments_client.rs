@@ -464,10 +464,10 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                         spam_summary: {
                                             // Convert network::protocol::SpamSummary to bllvm_protocol::SpamSummary
                                             let network_summary = &filtered_block_msg.spam_summary;
-                                            bllvm_protocol::utxo_commitments::spam_filter::SpamSummary {
+                                            bllvm_protocol::spam_filter::SpamSummary {
                                                 filtered_count: network_summary.filtered_count,
                                                 filtered_size: network_summary.filtered_size,
-                                                by_type: bllvm_protocol::utxo_commitments::spam_filter::SpamBreakdown {
+                                                by_type: bllvm_protocol::spam_filter::SpamBreakdown {
                                                     ordinals: network_summary.by_type.ordinals,
                                                     inscriptions: network_summary.by_type.inscriptions,
                                                     dust: network_summary.by_type.dust,
