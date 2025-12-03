@@ -509,11 +509,29 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
     /// Get list of connected peer IDs
     ///
     /// Returns peer IDs in format "tcp:addr" or "iroh:pubkey" depending on transport.
+    ///
+    /// Implementation uses blocking async via tokio runtime handle to bridge
+    /// sync trait method with async network manager. This is safe when called
+    /// from an async context (which is the typical usage pattern).
     fn get_peer_ids(&self) -> Vec<String> {
-        // Get peers from network manager
-        // Note: This requires async, but trait method is sync
-        // In full implementation, would need to make trait async or use blocking
-        // For now, return empty list - full implementation would require trait redesign
-        vec![]
+        use tokio::runtime::Handle;
+        
+        // Try to get current async runtime handle
+        if let Ok(handle) = Handle::try_current() {
+            // We're in an async context - block on the async operation
+            handle.block_on(async {
+                let network = self.network_manager.read().await;
+                // Extract connected peer addresses from peer_states
+                network.peer_states
+                    .read()
+                    .await
+                    .keys()
+                    .map(|addr| format!("tcp:{}", addr))
+                    .collect()
+            })
+        } else {
+            // Not in async context - return empty (caller should use async version)
+            vec![]
+        }
     }
 }

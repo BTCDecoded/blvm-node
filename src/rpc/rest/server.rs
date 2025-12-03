@@ -1241,8 +1241,23 @@ impl RestApiServer {
 
         match path_parts.get(3) {
             Some(&"estimate") => {
-                // TODO: Parse query parameters for blocks (for now use default)
-                match fees::get_fee_estimate(&server.mining, None).await {
+                // Parse query parameters for target blocks
+                // Format: /api/v1/fees/estimate?blocks=6
+                let target_blocks = request.uri().query()
+                    .and_then(|q| {
+                        q.split('&')
+                            .find_map(|param| {
+                                let mut parts = param.split('=');
+                                if parts.next() == Some("blocks") {
+                                    parts.next().and_then(|v| v.parse::<u64>().ok())
+                                } else {
+                                    None
+                                }
+                            })
+                    })
+                    .unwrap_or(6); // Default to 6 blocks if not specified
+
+                match fees::get_fee_estimate(&server.mining, Some(target_blocks)).await {
                     Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
                     Err(e) => Self::error_response_with_headers(
                         security_headers,

@@ -776,6 +776,53 @@ async fn test_txindex_lookup_paths() {
     }));
 }
 
+#[cfg(feature = "redb")]
+#[test]
+fn test_redb_tree_clear() {
+    // Test redb clear() implementation
+    use bllvm_node::storage::database::{create_database, default_backend, Database, Tree};
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_arc: std::sync::Arc<dyn Database> =
+        std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
+
+    // Open a valid table (redb requires pre-defined tables)
+    // Use "blocks" table which is always available
+    let tree = db_arc.open_tree("blocks").unwrap();
+
+    // Insert some test data
+    let test_data = vec![
+        (b"key1".to_vec(), b"value1".to_vec()),
+        (b"key2".to_vec(), b"value2".to_vec()),
+        (b"key3".to_vec(), b"value3".to_vec()),
+    ];
+
+    for (key, value) in &test_data {
+        tree.insert(key, value).unwrap();
+    }
+
+    // Verify data was inserted
+    assert_eq!(tree.len().unwrap(), 3);
+    assert!(tree.contains_key(b"key1").unwrap());
+    assert!(tree.contains_key(b"key2").unwrap());
+    assert!(tree.contains_key(b"key3").unwrap());
+
+    // Clear the tree
+    tree.clear().unwrap();
+
+    // Verify tree is empty
+    assert_eq!(tree.len().unwrap(), 0);
+    assert!(!tree.contains_key(b"key1").unwrap());
+    assert!(!tree.contains_key(b"key2").unwrap());
+    assert!(!tree.contains_key(b"key3").unwrap());
+
+    // Verify we can still insert after clearing
+    tree.insert(b"new_key", b"new_value").unwrap();
+    assert_eq!(tree.len().unwrap(), 1);
+    assert!(tree.contains_key(b"new_key").unwrap());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_storage_integration_workflow() {
     let temp_dir = TempDir::new().unwrap();

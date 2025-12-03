@@ -665,8 +665,8 @@ impl RawTxRpc {
                     .collect();
                 
                 // Convert to wtxids (hex strings)
-                // Note: For now, we use txid as wtxid (correct for non-SegWit)
-                // In full implementation, we'd need to store witness data in mempool
+                // For non-SegWit transactions, txid equals wtxid (by definition)
+                // For SegWit transactions, wtxid would require witness data storage in mempool
                 includes = ancestor_txids.iter()
                     .map(|hash| hex::encode(hash))
                     .collect();

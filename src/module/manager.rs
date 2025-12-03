@@ -532,11 +532,99 @@ impl ModuleManager {
                     // Try to load config from TOML file
                     match std::fs::read_to_string(&config_path) {
                         Ok(contents) => {
-                            // Parse TOML config - for now just use empty, could enhance later
-                            // TODO: Parse TOML config properly
+                            // Parse TOML config
+                            match toml::from_str::<toml::Value>(&contents) {
+                                Ok(toml_value) => {
+                                    // Convert TOML value to HashMap<String, String>
+                                    // This handles nested structures by flattening keys
+                                    fn flatten_toml_value(
+                                        value: &toml::Value,
+                                        prefix: &str,
+                                        result: &mut HashMap<String, String>,
+                                    ) {
+                                        match value {
+                                            toml::Value::String(s) => {
+                                                result.insert(
+                                                    if prefix.is_empty() {
+                                                        "value".to_string()
+                                                    } else {
+                                                        prefix.to_string()
+                                                    },
+                                                    s.clone(),
+                                                );
+                                            }
+                                            toml::Value::Integer(i) => {
+                                                result.insert(
+                                                    if prefix.is_empty() {
+                                                        "value".to_string()
+                                                    } else {
+                                                        prefix.to_string()
+                                                    },
+                                                    i.to_string(),
+                                                );
+                                            }
+                                            toml::Value::Float(f) => {
+                                                result.insert(
+                                                    if prefix.is_empty() {
+                                                        "value".to_string()
+                                                    } else {
+                                                        prefix.to_string()
+                                                    },
+                                                    f.to_string(),
+                                                );
+                                            }
+                                            toml::Value::Boolean(b) => {
+                                                result.insert(
+                                                    if prefix.is_empty() {
+                                                        "value".to_string()
+                                                    } else {
+                                                        prefix.to_string()
+                                                    },
+                                                    b.to_string(),
+                                                );
+                                            }
+                                            toml::Value::Table(table) => {
+                                                for (key, val) in table {
+                                                    let new_prefix = if prefix.is_empty() {
+                                                        key.clone()
+                                                    } else {
+                                                        format!("{}.{}", prefix, key)
+                                                    };
+                                                    flatten_toml_value(val, &new_prefix, result);
+                                                }
+                                            }
+                                            toml::Value::Array(arr) => {
+                                                for (idx, val) in arr.iter().enumerate() {
+                                                    let new_prefix = format!("{}[{}]", prefix, idx);
+                                                    flatten_toml_value(val, &new_prefix, result);
+                                                }
+                                            }
+                                            toml::Value::Datetime(dt) => {
+                                                result.insert(
+                                                    if prefix.is_empty() {
+                                                        "value".to_string()
+                                                    } else {
+                                                        prefix.to_string()
+                                                    },
+                                                    dt.to_string(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    let mut config_map = HashMap::new();
+                                    flatten_toml_value(&toml_value, "", &mut config_map);
+                                    config_map
+                                }
+                                Err(e) => {
+                                    warn!("Failed to parse TOML config from {}: {}", config_path.display(), e);
+                                    HashMap::new()
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to read TOML config from {}: {}", config_path.display(), e);
                             HashMap::new()
                         }
-                        Err(_) => HashMap::new(),
                     }
                 } else {
                     HashMap::new()

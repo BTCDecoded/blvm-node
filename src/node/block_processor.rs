@@ -5,6 +5,7 @@
 
 use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
+use crate::utils::current_timestamp;
 use anyhow::Result;
 use bllvm_protocol::serialization::deserialize_block_with_witnesses;
 use bllvm_protocol::validation::ProtocolValidationContext;
@@ -15,8 +16,22 @@ use std::sync::Arc;
 
 /// Parse a block from Bitcoin wire format and extract witness data
 pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Witness>)> {
-    deserialize_block_with_witnesses(data)
-        .map_err(|e| anyhow::anyhow!("Failed to parse block from wire format: {}", e))
+    let (block, witnesses) = deserialize_block_with_witnesses(data)
+        .map_err(|e| anyhow::anyhow!("Failed to parse block from wire format: {}", e))?;
+
+    // Validate that consensus serialization matches the original wire size
+    // Uses consensus serialization through bllvm_protocol::serialization re-exports.
+    let include_witness = true;
+    if !bllvm_protocol::serialization::block::validate_block_serialized_size(
+        &block,
+        &witnesses,
+        include_witness,
+        data.len(),
+    ) {
+        anyhow::bail!("Block size mismatch: serialized block does not match wire size");
+    }
+
+    Ok((block, witnesses))
 }
 
 /// Store a block with its witnesses and update recent headers
@@ -108,8 +123,21 @@ pub fn validate_block_with_context(
         .ok()
         .filter(|headers| !headers.is_empty());
 
-    // Create protocol validation context
-    let context = ProtocolValidationContext::new(protocol.get_protocol_version(), height)?;
+    // Compute median time-past (BIP113) from recent headers, if available
+    let median_time_past = recent_headers
+        .as_ref()
+        .map(|headers| bllvm_consensus::bip113::get_median_time_past(headers))
+        .unwrap_or(0);
+
+    // Use the node's time utility as the single source of network time.
+    // This can later be upgraded to adjusted network time without touching consensus.
+    let network_time = current_timestamp();
+
+    // Create protocol validation context and populate time fields
+    let mut context =
+        ProtocolValidationContext::new(protocol.get_protocol_version(), height)?;
+    context.median_time_past = median_time_past;
+    context.network_time = network_time;
 
     // Validate block with protocol validation
     let (result, new_utxo_set) = protocol.validate_and_connect_block(

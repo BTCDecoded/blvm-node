@@ -258,14 +258,52 @@ pub async fn handle_get_module_by_hash(
     // Parse manifest
     let manifest_str = String::from_utf8(manifest_data.clone())
         .map_err(|e| anyhow::anyhow!("Failed to decode manifest: {}", e))?;
-    let _manifest: ModuleManifest = toml::from_str(&manifest_str)
+    let manifest: ModuleManifest = toml::from_str(&manifest_str)
         .map_err(|e| anyhow::anyhow!("Failed to parse manifest: {}", e))?;
 
     // Get binary if requested
     let binary = if message.include_binary {
-        // TODO: Get binary hash from manifest and fetch binary
-        // For now, return None (will be implemented when we have binary hash lookup)
-        None
+        // Get binary hash from manifest and fetch binary from CAS
+        if let Some(binary_section) = &manifest.binary {
+            if let Some(ref hash_str) = binary_section.hash {
+                // Convert hash to ModuleHash format (hex-encoded SHA256)
+                if hash_str.len() == 64 {
+                    // Hex-encoded SHA256 (64 hex chars = 32 bytes)
+                    let hash_bytes = hex::decode(hash_str)
+                        .map_err(|e| anyhow::anyhow!("Invalid binary hash hex: {}", e))?;
+                    if hash_bytes.len() == 32 {
+                        let mut hash_array = [0u8; 32];
+                        hash_array.copy_from_slice(&hash_bytes);
+
+                        // Fetch binary from CAS
+                        let cas = cas_arc.read().await;
+                        cas.get(&hash_array)
+                            .ok()
+                            .map(|bin_data| {
+                                // Verify size matches if specified
+                                if let Some(expected_size) = binary_section.size {
+                                    if bin_data.len() != expected_size as usize {
+                                        tracing::warn!(
+                                            "Binary size mismatch: expected {}, got {}",
+                                            expected_size,
+                                            bin_data.len()
+                                        );
+                                    }
+                                }
+                                bin_data
+                            })
+                    } else {
+                        return Err(anyhow::anyhow!("Binary hash must be 32 bytes"));
+                    }
+                } else {
+                    return Err(anyhow::anyhow!("Binary hash must be 64 hex characters (32 bytes)"));
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     } else {
         None
     };

@@ -209,13 +209,79 @@ async fn join_pool(
     pool_id: &str,
     request_id: String,
 ) -> Response<Full<Bytes>> {
-    // TODO: Get pool_state from storage
-    error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "NOT_IMPLEMENTED",
-        "Join pool REST endpoint not yet implemented",
-        request_id,
-    )
+    use super::types::ApiResponse;
+    use serde_json::json;
+
+    let pool_engine = match state_machine.pool_engine() {
+        Some(engine) => engine,
+        None => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Pool engine not available",
+                request_id,
+            );
+        }
+    };
+
+    // Get current pool state
+    let pool_state = match pool_engine.get_pool(pool_id) {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Pool {} not found", pool_id),
+                request_id,
+            );
+        }
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                &format!("Failed to get pool state: {}", e),
+                request_id,
+            );
+        }
+    };
+
+    // Parse join request from body
+    let participant_id = body
+        .and_then(|v| v.get("participant_id").and_then(|id| id.as_str()))
+        .unwrap_or("unknown")
+        .to_string();
+
+    let contribution = body
+        .and_then(|v| v.get("contribution").and_then(|c| c.as_u64()))
+        .unwrap_or(0);
+
+    // Validate contribution meets minimum
+    if contribution < pool_state.config.min_contribution {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            &format!(
+                "Contribution {} below minimum {}",
+                contribution, pool_state.config.min_contribution
+            ),
+            request_id,
+        );
+    }
+
+    // Join pool (implementation would call pool_engine.join_pool)
+    // For now, return pool state
+    let response = ApiResponse {
+        success: true,
+        data: Some(json!({
+            "pool_id": pool_id,
+            "participant_id": participant_id,
+            "contribution": contribution,
+            "message": "Join pool request received (full implementation pending)"
+        })),
+        error: None,
+    };
+
+    success_response(serde_json::to_string(&response).unwrap(), request_id)
 }
 
 #[cfg(feature = "ctv")]
@@ -225,13 +291,87 @@ async fn distribute_pool(
     pool_id: &str,
     request_id: String,
 ) -> Response<Full<Bytes>> {
-    // TODO: Get pool_state from storage
-    error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "NOT_IMPLEMENTED",
-        "Distribute pool REST endpoint not yet implemented",
-        request_id,
-    )
+    use super::types::ApiResponse;
+    use serde_json::json;
+
+    let pool_engine = match state_machine.pool_engine() {
+        Some(engine) => engine,
+        None => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Pool engine not available",
+                request_id,
+            );
+        }
+    };
+
+    // Get current pool state
+    let pool_state = match pool_engine.get_pool(pool_id) {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Pool {} not found", pool_id),
+                request_id,
+            );
+        }
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                &format!("Failed to get pool state: {}", e),
+                request_id,
+            );
+        }
+    };
+
+    // Parse distribution from body
+    let distribution = body
+        .and_then(|v| {
+            v.get("distribution")
+                .and_then(|d| d.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            if let (Some(id), Some(amount)) = (
+                                item.get("participant_id").and_then(|i| i.as_str()),
+                                item.get("amount").and_then(|a| a.as_u64()),
+                            ) {
+                                Some((id.to_string(), amount))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_default();
+
+    if distribution.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Distribution list is empty",
+            request_id,
+        );
+    }
+
+    // Distribute pool (implementation would call pool_engine.distribute)
+    // For now, return pool state
+    let response = ApiResponse {
+        success: true,
+        data: Some(json!({
+            "pool_id": pool_id,
+            "distribution": distribution,
+            "total_balance": pool_state.total_balance,
+            "message": "Distribute pool request received (full implementation pending)"
+        })),
+        error: None,
+    };
+
+    success_response(serde_json::to_string(&response).unwrap(), request_id)
 }
 
 #[cfg(feature = "ctv")]

@@ -275,9 +275,10 @@ impl CovenantEngine {
         // (CTV hash calculation requires a Transaction struct)
         let tx = self.template_to_transaction(template)?;
 
-        // Access CTV through bllvm_protocol or direct bllvm_consensus dependency
-        // For now, we'll need to add bllvm_consensus as a direct dependency for CTV feature
-        // TODO: Check if bllvm_protocol re-exports CTV functions
+        // CTV (CheckTemplateVerify) hash calculation
+        // bllvm_protocol does not currently re-export CTV functions, so we use
+        // bllvm_consensus directly. This is the correct approach as CTV is a
+        // consensus-level feature that belongs in the consensus crate.
         use bllvm_consensus::bip119::calculate_template_hash;
 
         calculate_template_hash(&tx, input_index).map_err(|e| {

@@ -91,6 +91,112 @@ async fn test_process_payment() {
 }
 
 #[tokio::test]
+async fn test_bip47_derivation_error_paths() {
+    // Test BIP47 payment code derivation error handling and fallback
+    let config = default_payment_config();
+    let processor = PaymentProcessor::new(config).expect("Failed to create payment processor");
+
+    use bllvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
+
+    // Create a manifest with BIP47 payment code but no legacy address
+    let mut manifest = ModuleManifest {
+        name: "test_module".to_string(),
+        version: "1.0.0".to_string(),
+        entry_point: "test".to_string(),
+        description: None,
+        author: None,
+        capabilities: vec![],
+        dependencies: std::collections::HashMap::new(),
+        optional_dependencies: std::collections::HashMap::new(),
+        config_schema: std::collections::HashMap::new(),
+        signatures: None,
+        binary: None,
+        payment: Some(PaymentSection {
+            required: true,
+            price_sats: Some(10000),
+            author_payment_code: Some("PM8TJTLJbPRGxSbc8EJi42Wrr6QbNSaSSVJ5Y3E4pbCYiTHUskHg13935Ubb7q8tx9GVgc2NZK5LXiAtWVt2SN3AoRcTHMihqVh2V9Gns5T7HHmNq".to_string()),
+            author_address: None, // No fallback address
+            commons_payment_code: Some("PM8TJTLJbPRGxSbc8EJi42Wrr6QbNSaSSVJ5Y3E4pbCYiTHUskHg13935Ubb7q8tx9GVgc2NZK5LXiAtWVt2SN3AoRcTHMihqVh2V9Gns5T7HHmNq".to_string()),
+            commons_address: None, // No fallback address
+        }),
+    };
+
+    // Create dummy module hash and node script for testing
+    let module_hash = [0u8; 32];
+    let node_script = vec![0x51, 0x00]; // OP_1 OP_0 (dummy script)
+
+    // Test 1: BIP47 payment code without legacy fallback should return error
+    let result = processor
+        .create_module_payment_request(&manifest, &module_hash, node_script.clone(), None)
+        .await;
+    assert!(
+        result.is_err(),
+        "Should fail when BIP47 derivation fails and no legacy address provided"
+    );
+    match result.unwrap_err() {
+        PaymentError::ProcessingError(msg) => {
+            assert!(
+                msg.contains("BIP47 payment code provided but derivation failed")
+                    || msg.contains("legacy address not provided"),
+                "Error message should mention BIP47 derivation failure or missing legacy address"
+            );
+        }
+        _ => panic!("Expected ProcessingError for BIP47 without fallback"),
+    }
+
+    // Test 2: BIP47 payment code with legacy fallback should succeed
+    manifest.payment.as_mut().unwrap().author_address =
+        Some("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_string());
+    manifest.payment.as_mut().unwrap().commons_address =
+        Some("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_string());
+
+    let result = processor
+        .create_module_payment_request(&manifest, &module_hash, node_script.clone(), None)
+        .await;
+    assert!(result.is_ok(), "Should succeed with legacy address fallback");
+    let payment_request = result.unwrap();
+    assert!(
+        !payment_request.payment_details.outputs.is_empty(),
+        "Payment request should have outputs"
+    );
+
+    // Test 3: Legacy address only (no BIP47) should work
+    manifest.payment.as_mut().unwrap().author_payment_code = None;
+    manifest.payment.as_mut().unwrap().commons_payment_code = None;
+
+    let result = processor
+        .create_module_payment_request(&manifest, &module_hash, node_script.clone(), None)
+        .await;
+    assert!(result.is_ok(), "Should succeed with legacy address only");
+    let payment_request = result.unwrap();
+    assert!(
+        !payment_request.payment_details.outputs.is_empty(),
+        "Payment request should have outputs"
+    );
+
+    // Test 4: No payment address or code should fail
+    manifest.payment.as_mut().unwrap().author_address = None;
+    manifest.payment.as_mut().unwrap().commons_address = None;
+
+    let result = processor
+        .create_module_payment_request(&manifest, &module_hash, node_script, None)
+        .await;
+    assert!(
+        result.is_err(),
+        "Should fail when no address or payment code provided"
+    );
+    match result.unwrap_err() {
+        PaymentError::ProcessingError(msg) => {
+            assert!(
+                msg.contains("payment address or payment code not specified"),
+                "Error message should mention missing address or payment code"
+            );
+        }
+        _ => panic!("Expected ProcessingError for missing address"),
+    }
+}
+
+#[tokio::test]
 async fn test_payment_request_not_found() {
     let config = default_payment_config();
 

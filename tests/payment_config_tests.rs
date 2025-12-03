@@ -26,6 +26,11 @@ fn test_payment_config_defaults() {
         config.merchant_key, None,
         "Merchant key should be None by default"
     );
+    assert_eq!(
+        config.network,
+        Some("mainnet".to_string()),
+        "Network should default to mainnet"
+    );
 }
 
 #[test]
@@ -243,6 +248,7 @@ fn test_payment_config_serialization() {
     let config = PaymentConfig {
         p2p_enabled: true,
         http_enabled: false,
+        network: Some("testnet".to_string()),
         merchant_key: Some("test_key".to_string()),
         payment_store_path: "test/path".to_string(),
         module_payments_enabled: true,
@@ -254,6 +260,7 @@ fn test_payment_config_serialization() {
 
     assert_eq!(deserialized.p2p_enabled, config.p2p_enabled);
     assert_eq!(deserialized.http_enabled, config.http_enabled);
+    assert_eq!(deserialized.network, config.network);
     assert_eq!(deserialized.merchant_key, config.merchant_key);
     assert_eq!(deserialized.payment_store_path, config.payment_store_path);
     assert_eq!(
@@ -291,6 +298,7 @@ fn test_payment_config_toml_parsing() {
     let toml_str = r#"
         p2p_enabled = true
         http_enabled = false
+        network = "regtest"
         payment_store_path = "custom/path"
         module_payments_enabled = true
     "#;
@@ -298,6 +306,7 @@ fn test_payment_config_toml_parsing() {
     let config: PaymentConfig = toml::from_str(toml_str).expect("Should parse TOML");
     assert_eq!(config.p2p_enabled, true);
     assert_eq!(config.http_enabled, false);
+    assert_eq!(config.network, Some("regtest".to_string()));
     assert_eq!(config.payment_store_path, "custom/path");
     assert_eq!(config.module_payments_enabled, true);
 }
@@ -324,6 +333,11 @@ fn test_payment_config_toml_with_defaults() {
     assert_eq!(
         config.module_payments_enabled, true,
         "Should use default for missing field"
+    );
+    assert_eq!(
+        config.network,
+        Some("mainnet".to_string()),
+        "Should use default network (mainnet) for missing field"
     );
 }
 
@@ -365,6 +379,7 @@ async fn test_payment_processor_with_custom_config() {
     let config = PaymentConfig {
         p2p_enabled: true,
         http_enabled: false,
+        network: Some("testnet".to_string()),
         payment_store_path: "test/payments".to_string(),
         module_payments_enabled: true,
         merchant_key: None,
