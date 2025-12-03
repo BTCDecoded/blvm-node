@@ -276,6 +276,7 @@ jobs:
     timeout-minutes: 360  # 6 hours for all proofs
     outputs:
       proof_tier: ${{ steps.set_tier_output.outputs.tier }}
+      ami_id: ${{ secrets.KANI_RUNNER_AMI_ID }}
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -498,11 +499,16 @@ jobs:
     uses: BTCDecoded/blvm/.github/workflows/provision-spot-runner.yml@main
     with:
       repo_name: blvm-node
-      ami_id: ${{ secrets.KANI_RUNNER_AMI_ID }}
+      ami_id: ${{ needs.verify.outputs.ami_id }}
       instance_type: c6i.4xlarge
       runner_labels: 'self-hosted, Linux, X64, spot, kani'
       workload_type: kani
-    secrets: inherit
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      AWS_SUBNET_ID: ${{ secrets.AWS_SUBNET_ID }}
+      AWS_SECURITY_GROUP_ID: ${{ secrets.AWS_SECURITY_GROUP_ID }}
 
   verify-medium-slow:
     name: Verify (Medium + Slow Proofs on Spot Runner)
