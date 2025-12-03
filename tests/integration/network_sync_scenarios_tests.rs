@@ -7,10 +7,10 @@
 //! - Sync error handling
 //! - Chain reorganization scenarios
 
-use bllvm_node::node::Node;
-use bllvm_node::node::sync::{SyncCoordinator, SyncState, SyncStateMachine};
-use bllvm_node::ProtocolVersion;
-use bllvm_protocol::BlockHeader;
+use blvm_node::node::Node;
+use blvm_node::node::sync::{SyncCoordinator, SyncState, SyncStateMachine};
+use blvm_node::ProtocolVersion;
+use blvm_protocol::BlockHeader;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::timeout;

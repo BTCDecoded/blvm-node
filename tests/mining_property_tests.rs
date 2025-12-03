@@ -2,12 +2,12 @@
 //!
 //! Uses proptest to verify invariants and properties that should hold for all inputs.
 
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_node::rpc::mining::MiningRpc;
-use bllvm_node::storage::Storage;
-use bllvm_protocol::serialization::serialize_transaction;
-use bllvm_protocol::types::{BlockHeader, OutPoint, TransactionInput, TransactionOutput};
-use bllvm_protocol::Transaction;
+use blvm_node::node::mempool::MempoolManager;
+use blvm_node::rpc::mining::MiningRpc;
+use blvm_node::storage::Storage;
+use blvm_protocol::serialization::serialize_transaction;
+use blvm_protocol::types::{BlockHeader, OutPoint, TransactionInput, TransactionOutput};
+use blvm_protocol::Transaction;
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
 use sha2::{Digest, Sha256};

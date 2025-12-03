@@ -8,10 +8,10 @@
 
 #![cfg(all(feature = "ctv", feature = "bip70-http"))]
 
-use bllvm_node::config::PaymentConfig;
-use bllvm_node::payment::processor::PaymentProcessor;
-use bllvm_node::payment::state_machine::PaymentStateMachine;
-use bllvm_node::storage::Storage;
+use blvm_node::config::PaymentConfig;
+use blvm_node::payment::processor::PaymentProcessor;
+use blvm_node::payment::state_machine::PaymentStateMachine;
+use blvm_node::storage::Storage;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -31,7 +31,7 @@ fn create_test_state_machine_with_storage() -> (Arc<PaymentStateMachine>, TempDi
             .with_congestion_manager(
                 None, // No mempool for unit tests
                 Some(storage_arc),
-                bllvm_node::payment::congestion::BatchConfig::default(),
+                blvm_node::payment::congestion::BatchConfig::default(),
             ),
     );
     (state_machine, temp_dir)
@@ -59,7 +59,7 @@ async fn test_vault_complete_lifecycle() {
             vault_id,
             deposit_amount,
             withdrawal_script.clone(),
-            bllvm_node::payment::vault::VaultConfig {
+            blvm_node::payment::vault::VaultConfig {
                 withdrawal_delay_blocks: 144,
                 require_unvault: true,
                 ..Default::default()
@@ -71,7 +71,7 @@ async fn test_vault_complete_lifecycle() {
     assert_eq!(vault_state.deposit_amount, deposit_amount);
     assert_eq!(
         vault_state.state,
-        bllvm_node::payment::vault::VaultLifecycle::Deposited
+        blvm_node::payment::vault::VaultLifecycle::Deposited
     );
 
     // Step 2: Unvault
@@ -82,7 +82,7 @@ async fn test_vault_complete_lifecycle() {
 
     assert_eq!(
         unvaulted_state.state,
-        bllvm_node::payment::vault::VaultLifecycle::Unvaulting
+        blvm_node::payment::vault::VaultLifecycle::Unvaulting
     );
 
     // Step 3: Mark as unvaulted (simulating on-chain confirmation)
@@ -94,7 +94,7 @@ async fn test_vault_complete_lifecycle() {
 
     assert!(matches!(
         unvaulted_state.state,
-        bllvm_node::payment::vault::VaultLifecycle::Unvaulted { .. }
+        blvm_node::payment::vault::VaultLifecycle::Unvaulted { .. }
     ));
 
     // Step 4: Withdraw (after delay)
@@ -110,7 +110,7 @@ async fn test_vault_complete_lifecycle() {
 
     assert_eq!(
         withdrawn_state.state,
-        bllvm_node::payment::vault::VaultLifecycle::Withdrawing
+        blvm_node::payment::vault::VaultLifecycle::Withdrawing
     );
     assert!(withdrawn_state.withdrawal_covenant.is_some());
 }
@@ -133,7 +133,7 @@ async fn test_vault_recovery_path() {
             vault_id,
             deposit_amount,
             withdrawal_script,
-            bllvm_node::payment::vault::VaultConfig {
+            blvm_node::payment::vault::VaultConfig {
                 recovery_script: Some(vec![0x51, 0x87]), // OP_1, OP_EQUAL
                 ..Default::default()
             },
@@ -148,7 +148,7 @@ async fn test_vault_recovery_path() {
 
     assert_eq!(
         recovered_state.state,
-        bllvm_node::payment::vault::VaultLifecycle::Recovered
+        blvm_node::payment::vault::VaultLifecycle::Recovered
     );
 }
 
@@ -176,7 +176,7 @@ async fn test_pool_complete_workflow() {
         .create_pool(
             pool_id,
             initial_participants,
-            bllvm_node::payment::pool::PoolConfig::default(),
+            blvm_node::payment::pool::PoolConfig::default(),
         )
         .expect("Pool creation should succeed");
 
@@ -230,7 +230,7 @@ async fn test_pool_exit_workflow() {
         .create_pool(
             pool_id,
             initial_participants,
-            bllvm_node::payment::pool::PoolConfig::default(),
+            blvm_node::payment::pool::PoolConfig::default(),
         )
         .expect("Pool creation should succeed");
 
@@ -268,13 +268,13 @@ async fn test_congestion_complete_workflow() {
     assert_eq!(batch.transactions.len(), 0);
 
     // Step 2: Add transactions to batch
-    let tx1 = bllvm_node::payment::congestion::PendingTransaction {
+    let tx1 = blvm_node::payment::congestion::PendingTransaction {
         tx_id: "tx_1".to_string(),
-        outputs: vec![bllvm_protocol::payment::PaymentOutput {
+        outputs: vec![blvm_protocol::payment::PaymentOutput {
             script: vec![0x51, 0x87],
             amount: Some(10000),
         }],
-        priority: bllvm_node::payment::congestion::TransactionPriority::Normal,
+        priority: blvm_node::payment::congestion::TransactionPriority::Normal,
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -318,7 +318,7 @@ async fn test_vault_and_pool_integration() {
             vault_id,
             100000,
             vec![0x51, 0x87],
-            bllvm_node::payment::vault::VaultConfig::default(),
+            blvm_node::payment::vault::VaultConfig::default(),
         )
         .expect("Vault creation should succeed");
 
@@ -332,7 +332,7 @@ async fn test_vault_and_pool_integration() {
         .create_pool(
             pool_id,
             vec![("participant_1".to_string(), 10000, vec![0x51, 0x87])],
-            bllvm_node::payment::pool::PoolConfig::default(),
+            blvm_node::payment::pool::PoolConfig::default(),
         )
         .expect("Pool creation should succeed");
 
@@ -366,7 +366,7 @@ async fn test_state_persistence() {
             vault_id,
             100000,
             vec![0x51, 0x87],
-            bllvm_node::payment::vault::VaultConfig::default(),
+            blvm_node::payment::vault::VaultConfig::default(),
         )
         .expect("Vault creation should succeed");
 
@@ -396,7 +396,7 @@ async fn test_state_persistence() {
             .with_congestion_manager(
                 None,
                 Some(storage_arc),
-                bllvm_node::payment::congestion::BatchConfig::default(),
+                blvm_node::payment::congestion::BatchConfig::default(),
             ),
     );
 

@@ -2,7 +2,7 @@
 //!
 //! Tests for BIP21 URI parsing and OS-level registration.
 
-use bllvm_node::bip21::{Bip21Error, BitcoinUri};
+use blvm_node::bip21::{Bip21Error, BitcoinUri};
 
 #[test]
 fn test_bip21_uri_parsing_basic() {

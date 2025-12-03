@@ -2,8 +2,8 @@
 //!
 //! Tests permission enforcement, permission checking, and security boundaries.
 
-use bllvm_node::module::ipc::protocol::RequestPayload;
-use bllvm_node::module::security::permissions::*;
+use blvm_node::module::ipc::protocol::RequestPayload;
+use blvm_node::module::security::permissions::*;
 
 #[test]
 fn test_permission_set_empty() {
@@ -74,7 +74,7 @@ fn test_permission_checker_read_utxo_requires_permission() {
 
     // Default permissions include ReadUTXO
     let payload = RequestPayload::GetUtxo {
-        outpoint: bllvm_protocol::OutPoint {
+        outpoint: blvm_protocol::OutPoint {
             hash: [0u8; 32],
             index: 0,
         },

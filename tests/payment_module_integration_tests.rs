@@ -3,12 +3,12 @@
 //! Tests the full module payment flow including payment request creation,
 //! payment verification, and the 75/15/10 split.
 
-use bllvm_node::config::PaymentConfig;
-use bllvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
-use bllvm_node::module::security::signing::ModuleSigner;
-use bllvm_node::payment::processor::{PaymentError, PaymentProcessor};
-use bllvm_protocol::address::{BitcoinAddress, Network};
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_node::config::PaymentConfig;
+use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
+use blvm_node::module::security::signing::ModuleSigner;
+use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
+use blvm_protocol::address::{BitcoinAddress, Network};
+use blvm_protocol::payment::PaymentOutput;
 use secp256k1::{Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -55,7 +55,7 @@ fn create_manifest_with_payment(
     let pubkey_hex = hex::encode(pubkey.serialize());
 
     // Create signature section first (needed for payment verification)
-    use bllvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
+    use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
     let signature_section = SignatureSection {
         maintainers: vec![MaintainerSignature {
             name: "test-maintainer".to_string(),

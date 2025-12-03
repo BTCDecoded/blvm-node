@@ -2,9 +2,9 @@
 //!
 //! Tests the core payment processing logic that works for both HTTP and P2P.
 
-use bllvm_node::config::PaymentConfig;
-use bllvm_node::payment::processor::{PaymentError, PaymentProcessor};
-use bllvm_protocol::payment::{Payment, PaymentOutput, PaymentRequest};
+use blvm_node::config::PaymentConfig;
+use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
+use blvm_protocol::payment::{Payment, PaymentOutput, PaymentRequest};
 use sha2::{Digest, Sha256};
 
 fn default_payment_config() -> PaymentConfig {
@@ -96,7 +96,7 @@ async fn test_bip47_derivation_error_paths() {
     let config = default_payment_config();
     let processor = PaymentProcessor::new(config).expect("Failed to create payment processor");
 
-    use bllvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
+    use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
 
     // Create a manifest with BIP47 payment code but no legacy address
     let mut manifest = ModuleManifest {
@@ -153,7 +153,10 @@ async fn test_bip47_derivation_error_paths() {
     let result = processor
         .create_module_payment_request(&manifest, &module_hash, node_script.clone(), None)
         .await;
-    assert!(result.is_ok(), "Should succeed with legacy address fallback");
+    assert!(
+        result.is_ok(),
+        "Should succeed with legacy address fallback"
+    );
     let payment_request = result.unwrap();
     assert!(
         !payment_request.payment_details.outputs.is_empty(),

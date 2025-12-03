@@ -2,7 +2,7 @@
 //!
 //! Tests for async lock helpers.
 
-use bllvm_node::utils::{with_lock, with_read_lock, with_write_lock, try_with_lock_timeout};
+use blvm_node::utils::{with_lock, with_read_lock, with_write_lock, try_with_lock_timeout};
 use tokio::sync::{Mutex, RwLock};
 use std::time::Duration;
 

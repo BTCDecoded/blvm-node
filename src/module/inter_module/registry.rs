@@ -27,7 +27,7 @@ impl ModuleApiRegistry {
             method_routing: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Register a module API
     ///
     /// # Arguments
@@ -39,28 +39,34 @@ impl ModuleApiRegistry {
         api: Arc<dyn ModuleAPI>,
     ) -> Result<(), ModuleError> {
         info!("Registering API for module: {}", module_id);
-        
+
         let methods = api.list_methods();
         let api_version = api.api_version();
-        
+
         debug!(
             "Module {} API v{} exposes {} methods: {:?}",
-            module_id, api_version, methods.len(), methods
+            module_id,
+            api_version,
+            methods.len(),
+            methods
         );
-        
+
         // Store the API
         {
             let mut apis = self.apis.write().await;
             apis.insert(module_id.clone(), api);
         }
-        
+
         // Register method routing
         {
             let mut routing = self.method_routing.write().await;
             for method in methods {
                 let full_method_name = format!("{}::{}", module_id, method);
-                routing.insert(full_method_name.clone(), (module_id.clone(), method.clone()));
-                
+                routing.insert(
+                    full_method_name.clone(),
+                    (module_id.clone(), method.clone()),
+                );
+
                 // Also allow routing by just method name if unique
                 // (will be overridden if another module uses same method name)
                 if !routing.contains_key(&method) {
@@ -68,35 +74,35 @@ impl ModuleApiRegistry {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Unregister a module API
     pub async fn unregister_api(&self, module_id: &str) -> Result<(), ModuleError> {
         info!("Unregistering API for module: {}", module_id);
-        
+
         // Remove from APIs
         {
             let mut apis = self.apis.write().await;
             apis.remove(module_id);
         }
-        
+
         // Remove from routing
         {
             let mut routing = self.method_routing.write().await;
             routing.retain(|_, (mid, _)| mid != module_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Get API for a module
     pub async fn get_api(&self, module_id: &str) -> Option<Arc<dyn ModuleAPI>> {
         let apis = self.apis.read().await;
         apis.get(module_id).cloned()
     }
-    
+
     /// Route a method call to the appropriate module
     ///
     /// # Arguments
@@ -108,13 +114,13 @@ impl ModuleApiRegistry {
         let routing = self.method_routing.read().await;
         routing.get(method_name).cloned()
     }
-    
+
     /// List all registered modules
     pub async fn list_modules(&self) -> Vec<String> {
         let apis = self.apis.read().await;
         apis.keys().cloned().collect()
     }
-    
+
     /// Get methods exposed by a module
     pub async fn get_module_methods(&self, module_id: &str) -> Option<Vec<String>> {
         let apis = self.apis.read().await;
@@ -127,5 +133,3 @@ impl Default for ModuleApiRegistry {
         Self::new()
     }
 }
-
-

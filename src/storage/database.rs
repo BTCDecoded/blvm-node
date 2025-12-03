@@ -475,16 +475,26 @@ mod redb_impl {
             let keys: Vec<Vec<u8>> = {
                 let read_txn = self.db.begin_read()?;
                 let table = read_txn.open_table(*self.table_def)?;
-                table
-                    .iter()?
-                    .filter_map(|item| {
-                        item.ok()
-                            .map(|(key, _)| {
-                                // Convert redb::Value to Vec<u8> for key
-                                key.value().as_bytes().map(|b| b.to_vec()).unwrap_or_default()
-                            })
-                    })
-                    .collect()
+                let mut collected_keys = Vec::new();
+                // Collect all keys from the iterator
+                match table.range::<&[u8]>(..) {
+                    Ok(range_iter) => {
+                        for item_result in range_iter {
+                            match item_result {
+                                Ok((key, _)) => {
+                                    collected_keys.push(key.value().to_vec());
+                                }
+                                Err(e) => {
+                                    return Err(anyhow::anyhow!("Redb iteration error: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Failed to create range: {}", e));
+                    }
+                }
+                collected_keys
             };
 
             // Delete all keys in write transaction

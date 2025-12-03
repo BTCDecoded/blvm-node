@@ -1,6 +1,6 @@
 //! Tests for circuit breaker
 
-use bllvm_node::utils::circuit_breaker::{CircuitBreaker, CircuitState};
+use blvm_node::utils::circuit_breaker::{CircuitBreaker, CircuitState};
 use std::thread;
 use std::time::Duration;
 

@@ -3,7 +3,7 @@
 //! Tests for complex configuration scenarios, invalid configurations,
 //! and edge cases in configuration parsing and validation.
 
-use bllvm_node::config::*;
+use blvm_node::config::*;
 use std::collections::HashMap;
 
 #[test]
@@ -31,9 +31,9 @@ fn test_config_with_all_transport_preferences() {
         let deserialized: NodeConfig = serde_json::from_str(&json).unwrap();
 
         // TransportPreferenceConfig doesn't implement PartialEq, so compare via conversion
-        let deserialized_pref: bllvm_node::network::transport::TransportPreference =
+        let deserialized_pref: blvm_node::network::transport::TransportPreference =
             deserialized.transport_preference.into();
-        let expected_pref: bllvm_node::network::transport::TransportPreference = preference.into();
+        let expected_pref: blvm_node::network::transport::TransportPreference = preference.into();
         assert_eq!(deserialized_pref, expected_pref);
     }
 }
@@ -303,9 +303,9 @@ fn test_config_roundtrip_complex_scenario() {
     let deserialized: NodeConfig = serde_json::from_str(&json).unwrap();
 
     // Verify all settings
-    let deserialized_pref: bllvm_node::network::transport::TransportPreference =
+    let deserialized_pref: blvm_node::network::transport::TransportPreference =
         deserialized.transport_preference.into();
-    let expected: bllvm_node::network::transport::TransportPreference =
+    let expected: blvm_node::network::transport::TransportPreference =
         TransportPreferenceConfig::TcpOnly.into();
     assert_eq!(deserialized_pref, expected);
     assert_eq!(
@@ -361,7 +361,7 @@ fn test_config_defaults_after_partial_deserialization() {
     let config: NodeConfig = serde_json::from_str(partial_json).unwrap();
 
     // Missing fields should use defaults
-    let pref: bllvm_node::network::transport::TransportPreference =
+    let pref: blvm_node::network::transport::TransportPreference =
         config.transport_preference.into();
     assert!(pref.allows_tcp());
     // Other fields should have defaults (modules may be None, which is fine)

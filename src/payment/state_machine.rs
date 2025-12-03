@@ -142,7 +142,7 @@ impl PaymentStateMachine {
             vault_engine,
             pool_engine,
             congestion_manager: None, // Will be initialized with mempool/storage if needed
-            network_sender: None, // Will be set by NetworkManager
+            network_sender: None,     // Will be set by NetworkManager
         }
     }
 
@@ -376,7 +376,7 @@ impl PaymentStateMachine {
             if let Some(ref sender) = self.network_sender {
                 use crate::network::protocol::{ProtocolMessage, ProtocolParser};
                 use crate::network::NetworkMessage;
-                
+
                 // Create PaymentProof message
                 let payment_proof_msg = crate::network::protocol::PaymentProofMessage {
                     request_id: 0, // Not used for broadcast
@@ -384,9 +384,9 @@ impl PaymentStateMachine {
                     covenant_proof: covenant_proof.clone(),
                     transaction_template: None, // Optional, can be added if needed
                 };
-                
+
                 let protocol_msg = ProtocolMessage::PaymentProof(payment_proof_msg);
-                
+
                 // Serialize message
                 match ProtocolParser::serialize_message(&protocol_msg) {
                     Ok(serialized) => {
@@ -408,11 +408,13 @@ impl PaymentStateMachine {
                             // The state is updated and the message is serialized, ready for the caller to send
                             sent_count += 1;
                         }
-                        
+
                         if sent_count > 0 {
                             info!(
                                 "Payment proof sent to {} of {} peers for payment: {}",
-                                sent_count, peers.len(), payment_request_id
+                                sent_count,
+                                peers.len(),
+                                payment_request_id
                             );
                         }
                     }

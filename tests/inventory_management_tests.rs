@@ -1,8 +1,8 @@
 //! Tests for inventory management
 
-use bllvm_node::network::inventory::{InventoryManager, MSG_BLOCK, MSG_TX};
-use bllvm_node::network::protocol::InventoryItem;
-use bllvm_node::Hash;
+use blvm_node::network::inventory::{InventoryManager, MSG_BLOCK, MSG_TX};
+use blvm_node::network::protocol::InventoryItem;
+use blvm_node::Hash;
 
 fn create_test_hash(byte: u8) -> Hash {
     let mut hash = [0u8; 32];

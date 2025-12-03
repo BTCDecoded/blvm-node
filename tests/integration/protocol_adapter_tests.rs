@@ -1,11 +1,11 @@
 //! Integration tests for protocol adapter
 
 use anyhow::Result;
-use bllvm_node::network::{
+use blvm_node::network::{
     protocol_adapter::ProtocolAdapter,
     transport::TransportType,
 };
-use bllvm_protocol::network::{
+use blvm_protocol::network::{
     NetworkMessage, VersionMessage, NetworkAddress, PingMessage, PongMessage,
 };
 

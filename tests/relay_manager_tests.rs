@@ -1,7 +1,7 @@
 //! Tests for relay manager
 
-use bllvm_node::network::relay::{RelayManager, RelayPolicies};
-use bllvm_node::Hash;
+use blvm_node::network::relay::{RelayManager, RelayPolicies};
+use blvm_node::Hash;
 
 fn create_test_hash(byte: u8) -> Hash {
     let mut hash = [0u8; 32];

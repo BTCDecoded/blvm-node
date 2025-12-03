@@ -1,6 +1,6 @@
 //! Tests for module loader
 
-use bllvm_node::module::loader::ModuleLoader;
+use blvm_node::module::loader::ModuleLoader;
 use tempfile::TempDir;
 
 // Note: ModuleManifest and DiscoveredModule construction is complex

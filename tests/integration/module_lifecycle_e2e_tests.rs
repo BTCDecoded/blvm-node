@@ -3,9 +3,9 @@
 //! Tests complete module lifecycle including discovery, loading, initialization,
 //! runtime operation, and unloading.
 
-use bllvm_node::module::manager::ModuleManager;
-use bllvm_node::module::api::node_api::NodeApiImpl;
-use bllvm_node::storage::Storage;
+use blvm_node::module::manager::ModuleManager;
+use blvm_node::module::api::node_api::NodeApiImpl;
+use blvm_node::storage::Storage;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};

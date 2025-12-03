@@ -2,8 +2,8 @@
 //!
 //! Tests request validation to ensure modules cannot modify consensus.
 
-use bllvm_node::module::ipc::protocol::RequestPayload;
-use bllvm_node::module::security::validator::RequestValidator;
+use blvm_node::module::ipc::protocol::RequestPayload;
+use blvm_node::module::security::validator::RequestValidator;
 
 #[test]
 fn test_validator_allows_read_operations() {
@@ -18,7 +18,7 @@ fn test_validator_allows_read_operations() {
         RequestPayload::GetChainTip,
         RequestPayload::GetBlockHeight,
         RequestPayload::GetUtxo {
-            outpoint: bllvm_protocol::OutPoint {
+            outpoint: blvm_protocol::OutPoint {
                 hash: [0u8; 32],
                 index: 0,
             },
@@ -30,7 +30,7 @@ fn test_validator_allows_read_operations() {
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),
-            bllvm_node::module::security::validator::ValidationResult::Allowed
+            blvm_node::module::security::validator::ValidationResult::Allowed
         );
     }
 }
@@ -49,13 +49,13 @@ fn test_validator_allows_handshake() {
     assert!(result.is_ok());
     assert_eq!(
         result.unwrap(),
-        bllvm_node::module::security::validator::ValidationResult::Allowed
+        blvm_node::module::security::validator::ValidationResult::Allowed
     );
 }
 
 #[test]
 fn test_validator_allows_subscribe_events() {
-    use bllvm_node::module::traits::EventType;
+    use blvm_node::module::traits::EventType;
     let validator = RequestValidator::new();
 
     let payload = RequestPayload::SubscribeEvents {
@@ -66,7 +66,7 @@ fn test_validator_allows_subscribe_events() {
     assert!(result.is_ok());
     assert_eq!(
         result.unwrap(),
-        bllvm_node::module::security::validator::ValidationResult::Allowed
+        blvm_node::module::security::validator::ValidationResult::Allowed
     );
 }
 

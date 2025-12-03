@@ -23,11 +23,13 @@ pub fn redact_auth_header(msg: &str) -> String {
     // Simple regex-like replacement for "Authorization: Bearer <token>"
     // This is a simple implementation - for more complex patterns, consider using regex crate
     let mut redacted = msg.to_string();
-    
+
     // Find and replace "Authorization: Bearer <anything>" patterns
     // This is a simple approach - in production, might want to use regex for more accuracy
     if let Some(start) = redacted.find("Authorization: Bearer ") {
-        if let Some(end) = redacted[start..].find(|c: char| c == '\n' || c == '\r' || c == '"' || c == '\'') {
+        if let Some(end) =
+            redacted[start..].find(|c: char| c == '\n' || c == '\r' || c == '"' || c == '\'')
+        {
             let token_start = start + "Authorization: Bearer ".len();
             let token_end = start + end;
             if token_end > token_start {
@@ -41,7 +43,7 @@ pub fn redact_auth_header(msg: &str) -> String {
             }
         }
     }
-    
+
     redacted
 }
 

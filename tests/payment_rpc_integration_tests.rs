@@ -7,11 +7,11 @@
 
 #![cfg(all(feature = "ctv", feature = "bip70-http"))]
 
-use bllvm_node::config::PaymentConfig;
-use bllvm_node::payment::processor::PaymentProcessor;
-use bllvm_node::payment::state_machine::PaymentStateMachine;
-use bllvm_node::rpc::payment::PaymentRpc;
-use bllvm_node::storage::Storage;
+use blvm_node::config::PaymentConfig;
+use blvm_node::payment::processor::PaymentProcessor;
+use blvm_node::payment::state_machine::PaymentStateMachine;
+use blvm_node::rpc::payment::PaymentRpc;
+use blvm_node::storage::Storage;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -24,7 +24,7 @@ fn create_test_payment_rpc() -> PaymentRpc {
     let state_machine = Arc::new(PaymentStateMachine::new(processor).with_congestion_manager(
         None, // No mempool for unit tests
         None, // No storage for congestion manager
-        bllvm_node::payment::congestion::BatchConfig::default(),
+        blvm_node::payment::congestion::BatchConfig::default(),
     ));
     PaymentRpc::with_state_machine(state_machine)
 }
@@ -44,7 +44,7 @@ fn create_test_payment_rpc_with_storage() -> (PaymentRpc, TempDir) {
             .with_congestion_manager(
                 None,              // No mempool for unit tests
                 Some(storage_arc), // Pass storage for congestion manager
-                bllvm_node::payment::congestion::BatchConfig::default(),
+                blvm_node::payment::congestion::BatchConfig::default(),
             ),
     );
     (PaymentRpc::with_state_machine(state_machine), temp_dir)

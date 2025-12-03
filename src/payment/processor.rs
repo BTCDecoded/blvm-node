@@ -180,11 +180,7 @@ impl PaymentProcessor {
         };
 
         // Create payment request using existing BIP70 implementation
-        let mut payment_request = PaymentRequest::new(
-            network_str.to_string(),
-            outputs,
-            timestamp,
-        );
+        let mut payment_request = PaymentRequest::new(network_str.to_string(), outputs, timestamp);
 
         // Set merchant data if provided
         if let Some(data) = merchant_data {
@@ -449,11 +445,11 @@ impl PaymentProcessor {
                         PaymentError::ProcessingError(
                             "BIP47 payment code provided but derivation failed, and legacy address not provided".to_string(),
                         )
-                    })?
+                    })?.to_string()
                 }
             }
         } else if let Some(ref addr) = payment.author_address {
-            addr
+            addr.to_string()
         } else {
             return Err(PaymentError::ProcessingError(
                 "Module author payment address or payment code not specified in manifest"
@@ -475,11 +471,11 @@ impl PaymentProcessor {
                         PaymentError::ProcessingError(
                             "BIP47 payment code provided but derivation failed, and legacy address not provided".to_string(),
                         )
-                    })?
+                    })?.to_string()
                 }
             }
         } else if let Some(ref addr) = payment.commons_address {
-            addr
+            addr.to_string()
         } else {
             return Err(PaymentError::ProcessingError(
                 "Commons governance payment address or payment code not specified in manifest"
@@ -499,8 +495,8 @@ impl PaymentProcessor {
 
             let valid = signer
                 .verify_payment_addresses(
-                    author_address_str,
-                    commons_address_str,
+                    &author_address_str,
+                    &commons_address_str,
                     price_sats,
                     payment_sig,
                     &public_keys,
@@ -531,12 +527,12 @@ impl PaymentProcessor {
         }
 
         // Decode addresses to script pubkeys
-        let author_address = BitcoinAddress::decode(author_address_str).map_err(|e| {
-            PaymentError::ProcessingError(format!("Invalid author address format: {}", e))
+        let author_address = BitcoinAddress::decode(&author_address_str).map_err(|e| {
+            PaymentError::ProcessingError(format!("Invalid author address format: {:?}", e))
         })?;
 
-        let commons_address = BitcoinAddress::decode(commons_address_str).map_err(|e| {
-            PaymentError::ProcessingError(format!("Invalid commons address format: {}", e))
+        let commons_address = BitcoinAddress::decode(&commons_address_str).map_err(|e| {
+            PaymentError::ProcessingError(format!("Invalid commons address format: {:?}", e))
         })?;
 
         // Convert addresses to script pubkeys

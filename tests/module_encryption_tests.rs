@@ -3,11 +3,11 @@
 //! Tests the encryption/decryption functionality for paid modules,
 //! including key derivation, encryption/decryption round-trips, and storage.
 
-use bllvm_node::module::encryption::{
+use blvm_node::module::encryption::{
     load_encrypted_module, store_decrypted_module, store_encrypted_module, EncryptedModuleMetadata,
     ModuleEncryption,
 };
-use bllvm_node::module::traits::ModuleError;
+use blvm_node::module::traits::ModuleError;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tempfile::TempDir;

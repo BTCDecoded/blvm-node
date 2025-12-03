@@ -1,7 +1,7 @@
 //! Tests for Module Manifest Validator
 
-use bllvm_node::module::registry::manifest::ModuleManifest;
-use bllvm_node::module::validation::manifest_validator::{ManifestValidator, ValidationResult};
+use blvm_node::module::registry::manifest::ModuleManifest;
+use blvm_node::module::validation::manifest_validator::{ManifestValidator, ValidationResult};
 use std::collections::HashMap;
 
 fn create_valid_manifest() -> ModuleManifest {
@@ -295,7 +295,7 @@ fn test_manifest_validator_multiple_errors() {
 
 #[test]
 fn test_validate_module_signature() {
-    use bllvm_node::module::validation::manifest_validator::validate_module_signature;
+    use blvm_node::module::validation::manifest_validator::validate_module_signature;
     use std::path::PathBuf;
 
     let manifest = create_valid_manifest();

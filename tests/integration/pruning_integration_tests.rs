@@ -1,8 +1,8 @@
 //! Integration tests for pruning functionality
 
-use bllvm_node::config::{PruningConfig, PruningMode};
-use bllvm_node::storage::Storage;
-use bllvm_protocol::{Block, BlockHeader};
+use blvm_node::config::{PruningConfig, PruningMode};
+use blvm_node::storage::Storage;
+use blvm_protocol::{Block, BlockHeader};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -42,7 +42,7 @@ async fn test_pruning_integration_normal_mode() {
     
     let storage = Storage::with_backend_and_pruning(
         temp_dir.path(),
-        bllvm_node::storage::database::DatabaseBackend::Sled,
+        blvm_node::storage::database::DatabaseBackend::Sled,
         Some(pruning_config),
     ).unwrap();
     
@@ -97,7 +97,7 @@ async fn test_pruning_integration_auto_prune() {
     
     let storage = Storage::with_backend_and_pruning(
         temp_dir.path(),
-        bllvm_node::storage::database::DatabaseBackend::Sled,
+        blvm_node::storage::database::DatabaseBackend::Sled,
         Some(pruning_config),
     ).unwrap();
     
@@ -137,7 +137,7 @@ async fn test_pruning_integration_ibd_protection() {
     
     let storage = Storage::with_backend_and_pruning(
         temp_dir.path(),
-        bllvm_node::storage::database::DatabaseBackend::Sled,
+        blvm_node::storage::database::DatabaseBackend::Sled,
         Some(pruning_config),
     ).unwrap();
     
@@ -175,7 +175,7 @@ async fn test_pruning_integration_custom_mode() {
     
     let storage = Storage::with_backend_and_pruning(
         temp_dir.path(),
-        bllvm_node::storage::database::DatabaseBackend::Sled,
+        blvm_node::storage::database::DatabaseBackend::Sled,
         Some(pruning_config),
     ).unwrap();
     
@@ -213,7 +213,7 @@ async fn test_pruning_integration_get_stats() {
     
     let storage = Storage::with_backend_and_pruning(
         temp_dir.path(),
-        bllvm_node::storage::database::DatabaseBackend::Sled,
+        blvm_node::storage::database::DatabaseBackend::Sled,
         Some(pruning_config),
     ).unwrap();
     
@@ -244,7 +244,7 @@ async fn test_pruning_integration_disabled_mode() {
     
     let storage = Storage::with_backend_and_pruning(
         temp_dir.path(),
-        bllvm_node::storage::database::DatabaseBackend::Sled,
+        blvm_node::storage::database::DatabaseBackend::Sled,
         Some(pruning_config),
     ).unwrap();
     

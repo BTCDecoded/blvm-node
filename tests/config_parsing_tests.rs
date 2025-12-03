@@ -1,6 +1,6 @@
 //! Tests for configuration parsing and validation
 
-use bllvm_node::config::{
+use blvm_node::config::{
     BanListSharingConfig, DosProtectionConfig, IndexingConfig, IndexingStrategy, ModuleConfig,
     ModuleResourceLimitsConfig, NetworkTimingConfig, NodeConfig, PruningConfig, PruningMode,
     RequestTimeoutConfig, RpcAuthConfig, StorageConfig, TransportPreferenceConfig,
@@ -426,20 +426,20 @@ fn test_transport_preference_config_variants() {
     // TransportPreferenceConfig doesn't implement PartialEq, so we can't use assert_eq!
     // Instead, test via conversion to TransportPreference
     let tcp = TransportPreferenceConfig::TcpOnly;
-    let pref: bllvm_node::network::transport::TransportPreference = tcp.into();
+    let pref: blvm_node::network::transport::TransportPreference = tcp.into();
     assert!(pref.allows_tcp());
 
     #[cfg(feature = "quinn")]
     {
         let quinn = TransportPreferenceConfig::QuinnOnly;
-        let pref: bllvm_node::network::transport::TransportPreference = quinn.into();
+        let pref: blvm_node::network::transport::TransportPreference = quinn.into();
         assert!(pref.allows_quinn());
     }
 
     #[cfg(feature = "iroh")]
     {
         let iroh = TransportPreferenceConfig::IrohOnly;
-        let pref: bllvm_node::network::transport::TransportPreference = iroh.into();
+        let pref: blvm_node::network::transport::TransportPreference = iroh.into();
         assert!(pref.allows_iroh());
     }
 }

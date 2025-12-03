@@ -7,16 +7,16 @@
 
 #![cfg(all(feature = "ctv", feature = "bip70-http", feature = "rest-api"))]
 
-use bllvm_node::config::PaymentConfig;
-use bllvm_node::payment::processor::PaymentProcessor;
-use bllvm_node::payment::state_machine::PaymentStateMachine;
+use blvm_node::config::PaymentConfig;
+use blvm_node::payment::processor::PaymentProcessor;
+use blvm_node::payment::state_machine::PaymentStateMachine;
 #[cfg(feature = "rest-api")]
-use bllvm_node::rpc::rest::congestion::handle_congestion_request;
+use blvm_node::rpc::rest::congestion::handle_congestion_request;
 #[cfg(feature = "rest-api")]
-use bllvm_node::rpc::rest::pool::handle_pool_request;
+use blvm_node::rpc::rest::pool::handle_pool_request;
 #[cfg(feature = "rest-api")]
-use bllvm_node::rpc::rest::vault::handle_vault_request;
-use bllvm_node::storage::Storage;
+use blvm_node::rpc::rest::vault::handle_vault_request;
+use blvm_node::storage::Storage;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};
@@ -48,7 +48,7 @@ fn create_test_state_machine_with_storage() -> (Arc<PaymentStateMachine>, TempDi
             .with_congestion_manager(
                 None,
                 Some(storage_arc),
-                bllvm_node::payment::congestion::BatchConfig::default(),
+                blvm_node::payment::congestion::BatchConfig::default(),
             ),
     );
     (state_machine, temp_dir)

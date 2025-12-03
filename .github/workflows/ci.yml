@@ -648,7 +648,7 @@ jobs:
     name: Cleanup Spot Runner
     needs: [verify-medium-slow]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, builds]
     steps:
       - name: Stop EC2 Runner
         uses: machulav/ec2-github-runner@v2
@@ -731,8 +731,7 @@ jobs:
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
-        !contains(github.event.head_commit.message, '[no ci]'))) &&
-      ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+        !contains(github.event.head_commit.message, '[no ci]')))
     steps:
       - uses: actions/checkout@v4
       
@@ -753,11 +752,7 @@ jobs:
           # These are transitive dependencies that can't be easily fixed without
           # updating iroh-net to 0.28+ (deprecated, requires API changes)
           # See Cargo.toml security note for details
-          cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 || {
-            echo "These are in iroh-net feature (not enabled by default)"
-            echo "See Cargo.toml for details on how to address them"
-            exit 0  # Don't fail CI for optional feature vulnerabilities
-          }
+          cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071
 
   build:
     name: Build

@@ -139,7 +139,7 @@ async fn add_to_batch(
 ) -> Response<Full<Bytes>> {
     use super::types::ApiResponse;
     use crate::payment::congestion::{PendingTransaction, TransactionPriority};
-    use bllvm_protocol::payment::PaymentOutput;
+    use blvm_protocol::payment::PaymentOutput;
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -158,15 +158,11 @@ async fn add_to_batch(
     // Parse transaction from body
     let outputs = body
         .and_then(|v| {
-            v.get("outputs")
-                .and_then(|o| o.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            serde_json::from_value::<PaymentOutput>(item.clone()).ok()
-                        })
-                        .collect::<Vec<_>>()
-                })
+            v.get("outputs").and_then(|o| o.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|item| serde_json::from_value::<PaymentOutput>(item.clone()).ok())
+                    .collect::<Vec<_>>()
+            })
         })
         .unwrap_or_default();
 
@@ -190,8 +186,7 @@ async fn add_to_batch(
         _ => TransactionPriority::Normal,
     };
 
-    let deadline = body
-        .and_then(|v| v.get("deadline").and_then(|d| d.as_u64()));
+    let deadline = body.and_then(|v| v.get("deadline").and_then(|d| d.as_u64()));
 
     let tx_id = body
         .and_then(|v| v.get("tx_id").and_then(|id| id.as_str()))

@@ -1,10 +1,10 @@
 //! Unit tests for Mining RPC methods
 
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_node::rpc::mining::MiningRpc;
-use bllvm_node::storage::Storage;
-use bllvm_protocol::serialization::serialize_transaction;
-use bllvm_protocol::{BlockHeader, OutPoint, Transaction, UTXO};
+use blvm_node::node::mempool::MempoolManager;
+use blvm_node::rpc::mining::MiningRpc;
+use blvm_node::storage::Storage;
+use blvm_protocol::serialization::serialize_transaction;
+use blvm_protocol::{BlockHeader, OutPoint, Transaction, UTXO};
 use std::sync::Arc;
 use tempfile::TempDir;
 // Sha256 not needed directly in tests
@@ -38,7 +38,7 @@ async fn get_block_template_safe(
 
 /// Helper function to set up a minimal chain with at least 2 blocks for difficulty adjustment
 fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error::Error>> {
-    use bllvm_protocol::Block;
+    use blvm_protocol::Block;
     use sha2::{Digest, Sha256};
 
     // Initialize with genesis block (use valid bits with very low exponent to allow adjustment)
@@ -58,8 +58,8 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
         header: genesis_header.clone(),
         transactions: vec![Transaction {
             version: 1,
-            inputs: bllvm_protocol::tx_inputs![],
-            outputs: bllvm_protocol::tx_outputs![],
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![],
             lock_time: 0,
         }]
         .into_boxed_slice(),
@@ -106,8 +106,8 @@ fn setup_minimal_chain(storage: &Arc<Storage>) -> Result<(), Box<dyn std::error:
             header: block_header.clone(),
             transactions: vec![Transaction {
                 version: 1,
-                inputs: bllvm_protocol::tx_inputs![],
-                outputs: bllvm_protocol::tx_outputs![],
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![],
                 lock_time: 0,
             }]
             .into_boxed_slice(),
@@ -361,15 +361,15 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
     // Using a simple coinbase transaction structure
     let tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![bllvm_protocol::types::TransactionInput {
-            prevout: bllvm_protocol::types::OutPoint {
+        inputs: blvm_protocol::tx_inputs![blvm_protocol::types::TransactionInput {
+            prevout: blvm_protocol::types::OutPoint {
                 hash: [0u8; 32],
                 index: 0xffffffff,
             },
             script_sig: vec![0x03, 0x00, 0x00, 0x00], // Minimal coinbase script
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![bllvm_protocol::types::TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![blvm_protocol::types::TransactionOutput {
             value: 5000000000,
             script_pubkey: vec![
                 0x41, 0x04, 0x67, 0x8a, 0xfd, 0xb0, 0xfe, 0x55, 0x48, 0x27, 0x19, 0x67, 0xf1, 0xa6,

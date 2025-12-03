@@ -1,8 +1,8 @@
 //! Tests for Storage Arc refactoring
 
-use bllvm_node::network::chain_access::NodeChainAccess;
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_node::storage::Storage;
+use blvm_node::network::chain_access::NodeChainAccess;
+use blvm_node::node::mempool::MempoolManager;
+use blvm_node::storage::Storage;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -36,7 +36,7 @@ fn test_node_chain_access_creation() {
 
     // Verify it works
     let hash = [0u8; 32];
-    use bllvm_protocol::network::ChainStateAccess;
+    use blvm_protocol::network::ChainStateAccess;
     let has_object = chain_access.has_object(&hash);
     assert!(!has_object); // Empty storage, so should be false
 }

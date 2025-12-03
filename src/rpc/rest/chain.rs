@@ -82,7 +82,11 @@ pub async fn get_index_info(blockchain: &BlockchainRpc, index_name: Option<&str>
 }
 
 /// Verify chain
-pub async fn verify_chain(blockchain: &BlockchainRpc, checklevel: Option<u64>, numblocks: Option<u64>) -> Result<Value> {
+pub async fn verify_chain(
+    blockchain: &BlockchainRpc,
+    checklevel: Option<u64>,
+    numblocks: Option<u64>,
+) -> Result<Value> {
     let params = json!([]);
     let result = blockchain.verify_chain(checklevel, numblocks).await?;
     Ok(result)

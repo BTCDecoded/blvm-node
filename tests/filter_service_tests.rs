@@ -1,10 +1,10 @@
 //! Tests for filter service (BIP157/158)
 
-use bllvm_node::network::filter_service::BlockFilterService;
-use bllvm_protocol::bip157::FilterHeader;
-use bllvm_protocol::tx_inputs;
-use bllvm_protocol::tx_outputs;
-use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use blvm_node::network::filter_service::BlockFilterService;
+use blvm_protocol::bip157::FilterHeader;
+use blvm_protocol::tx_inputs;
+use blvm_protocol::tx_outputs;
+use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 
 fn create_test_block(height: u32) -> Block {
     Block {

@@ -13,6 +13,8 @@ pub mod server;
 
 #[cfg(unix)]
 pub use client::ModuleIpcClient;
-pub use protocol::{EventMessage, EventPayload, MessageType, ModuleMessage, RequestMessage, ResponseMessage};
+pub use protocol::{
+    EventMessage, EventPayload, MessageType, ModuleMessage, RequestMessage, ResponseMessage,
+};
 #[cfg(unix)]
 pub use server::ModuleIpcServer;

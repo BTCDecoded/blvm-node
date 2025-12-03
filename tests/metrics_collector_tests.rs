@@ -1,6 +1,6 @@
 //! Tests for metrics collector
 
-use bllvm_node::node::metrics::{
+use blvm_node::node::metrics::{
     DosMetrics, MetricsCollector, NetworkMetrics, PerformanceMetrics, RpcMetrics, StorageMetrics,
     SystemMetrics,
 };

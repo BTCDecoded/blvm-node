@@ -1,8 +1,8 @@
 //! Tests for module process spawner
 
-use bllvm_node::config::ModuleResourceLimitsConfig;
-use bllvm_node::module::process::spawner::ModuleProcessSpawner;
-use bllvm_node::module::traits::ModuleContext;
+use blvm_node::config::ModuleResourceLimitsConfig;
+use blvm_node::module::process::spawner::ModuleProcessSpawner;
+use blvm_node::module::traits::ModuleContext;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tempfile::TempDir;

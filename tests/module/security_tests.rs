@@ -2,8 +2,8 @@
 //!
 //! Tests for sandboxing, permissions, and security boundaries.
 
-use bllvm_node::tests::module::test_utils::*;
-use bllvm_node::module::sandbox::{FileSystemSandbox, NetworkSandbox};
+use blvm_node::tests::module::test_utils::*;
+use blvm_node::module::sandbox::{FileSystemSandbox, NetworkSandbox};
 
 #[test]
 fn test_filesystem_sandbox() {
@@ -34,8 +34,8 @@ fn test_network_sandbox() {
 
 #[test]
 fn test_manifest_validation() {
-    use bllvm_node::module::validation::ManifestValidator;
-    use bllvm_node::module::registry::manifest::ModuleManifest;
+    use blvm_node::module::validation::ManifestValidator;
+    use blvm_node::module::registry::manifest::ModuleManifest;
     
     let validator = ManifestValidator::new();
     
@@ -67,7 +67,7 @@ fn test_manifest_validation() {
     };
     
     // Validate manifests
-    use bllvm_node::module::validation::ValidationResult;
+    use blvm_node::module::validation::ValidationResult;
     let valid_result = validator.validate(&valid_manifest);
     assert!(matches!(valid_result, ValidationResult::Valid));
     

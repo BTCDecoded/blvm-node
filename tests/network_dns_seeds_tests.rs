@@ -1,6 +1,6 @@
 //! Tests for DNS Seeds
 
-use bllvm_node::network::dns_seeds::{resolve_dns_seeds, MAINNET_DNS_SEEDS, TESTNET_DNS_SEEDS};
+use blvm_node::network::dns_seeds::{resolve_dns_seeds, MAINNET_DNS_SEEDS, TESTNET_DNS_SEEDS};
 
 #[tokio::test]
 async fn test_dns_seeds_constants() {

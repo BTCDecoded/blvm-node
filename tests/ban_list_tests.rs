@@ -1,7 +1,7 @@
 //! Tests for ban list sharing and merging
 
-use bllvm_node::network::ban_list_merging::*;
-use bllvm_node::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
+use blvm_node::network::ban_list_merging::*;
+use blvm_node::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn create_test_ban_entry(ip: [u8; 16], port: u16, unban_timestamp: u64) -> BanEntry {

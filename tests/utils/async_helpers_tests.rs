@@ -2,7 +2,7 @@
 //!
 //! Tests for async operation utilities.
 
-use bllvm_node::utils::{delay_before, ignore_error, collect_results, with_timeout_opt};
+use blvm_node::utils::{delay_before, ignore_error, collect_results, with_timeout_opt};
 use std::time::Duration;
 use tokio::time::Instant;
 

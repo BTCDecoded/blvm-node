@@ -1,18 +1,18 @@
 //! Tests for mining coordinator
 
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_node::node::miner::{MiningCoordinator, MiningEngine, TransactionSelector};
-use bllvm_protocol::tx_inputs;
-use bllvm_protocol::Transaction;
+use blvm_node::node::mempool::MempoolManager;
+use blvm_node::node::miner::{MiningCoordinator, MiningEngine, TransactionSelector};
+use blvm_protocol::tx_inputs;
+use blvm_protocol::Transaction;
 use std::sync::Arc;
 use tempfile::TempDir;
 
 fn create_test_transaction() -> Transaction {
-    use bllvm_protocol::TransactionOutput;
+    use blvm_protocol::TransactionOutput;
     Transaction {
         version: 1,
         inputs: tx_inputs![],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x76, 0xa9, 0x14, 0x88, 0xac],
         }],
@@ -156,7 +156,7 @@ async fn test_mining_coordinator_generate_block_template() {
 #[tokio::test]
 async fn test_mining_coordinator_generate_block_template_with_storage() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = Arc::new(bllvm_node::storage::Storage::new(temp_dir.path()).unwrap());
+    let storage = Arc::new(blvm_node::storage::Storage::new(temp_dir.path()).unwrap());
     let mempool = create_test_mempool();
     let mut coordinator = MiningCoordinator::new(mempool, Some(storage));
 

@@ -1,6 +1,6 @@
 //! Tests for RPC batch request edge cases
 
-use bllvm_node::rpc::server::RpcServer;
+use blvm_node::rpc::server::RpcServer;
 use serde_json::{json, Value};
 
 // Helper to create a test RPC server

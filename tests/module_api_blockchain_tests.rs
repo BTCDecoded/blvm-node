@@ -1,9 +1,9 @@
 //! Comprehensive tests for blockchain API module
 
-use bllvm_node::module::api::blockchain::BlockchainApi;
-use bllvm_node::storage::Storage;
-use bllvm_protocol::{tx_inputs, tx_outputs};
-use bllvm_protocol::{
+use blvm_node::module::api::blockchain::BlockchainApi;
+use blvm_node::storage::Storage;
+use blvm_protocol::{tx_inputs, tx_outputs};
+use blvm_protocol::{
     Block, BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO,
 };
 use std::sync::Arc;
@@ -263,7 +263,7 @@ async fn test_get_transaction_with_data() {
         lock_time: 0,
     };
 
-    let tx_hash = bllvm_protocol::block::calculate_tx_id(&tx);
+    let tx_hash = blvm_protocol::block::calculate_tx_id(&tx);
     let block_hash = [0u8; 32];
     storage
         .transactions()
@@ -294,7 +294,7 @@ async fn test_has_transaction_with_data() {
         lock_time: 0,
     };
 
-    let tx_hash = bllvm_protocol::block::calculate_tx_id(&tx);
+    let tx_hash = blvm_protocol::block::calculate_tx_id(&tx);
     let block_hash = [0u8; 32];
     storage
         .transactions()

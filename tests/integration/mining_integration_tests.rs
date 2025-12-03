@@ -1,11 +1,11 @@
 //! Integration tests for mining functionality
 
-use bllvm_node::rpc::mining::MiningRpc;
-use bllvm_node::storage::Storage;
-use bllvm_node::node::mempool::MempoolManager;
+use blvm_node::rpc::mining::MiningRpc;
+use blvm_node::storage::Storage;
+use blvm_node::node::mempool::MempoolManager;
 use std::sync::Arc;
 use tempfile::TempDir;
-use bllvm_protocol::types::{BlockHeader, Transaction, UtxoSet, OutPoint, UTXO};
+use blvm_protocol::types::{BlockHeader, Transaction, UtxoSet, OutPoint, UTXO};
 use serde_json::json;
 mod common;
 use common::*;

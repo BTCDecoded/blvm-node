@@ -159,7 +159,10 @@ impl EventPublisher {
         fee_rate: f64,
         mempool_size: usize,
     ) {
-        debug!("Publishing MempoolTransactionAdded event for tx {:?}", tx_hash);
+        debug!(
+            "Publishing MempoolTransactionAdded event for tx {:?}",
+            tx_hash
+        );
 
         let payload = EventPayload::MempoolTransactionAdded {
             tx_hash: *tx_hash,
@@ -183,7 +186,10 @@ impl EventPublisher {
         reason: String,
         mempool_size: usize,
     ) {
-        debug!("Publishing MempoolTransactionRemoved event for tx {:?}", tx_hash);
+        debug!(
+            "Publishing MempoolTransactionRemoved event for tx {:?}",
+            tx_hash
+        );
 
         let payload = EventPayload::MempoolTransactionRemoved {
             tx_hash: *tx_hash,
@@ -207,7 +213,10 @@ impl EventPublisher {
         new_fee_rate: f64,
         mempool_size: usize,
     ) {
-        debug!("Publishing FeeRateChanged event: {} -> {}", old_fee_rate, new_fee_rate);
+        debug!(
+            "Publishing FeeRateChanged event: {} -> {}",
+            old_fee_rate, new_fee_rate
+        );
 
         let payload = EventPayload::FeeRateChanged {
             old_fee_rate,
@@ -275,7 +284,10 @@ impl EventPublisher {
         height: u64,
         miner_id: Option<String>,
     ) {
-        debug!("Publishing BlockMined event for block {:?} at height {}", block_hash, height);
+        debug!(
+            "Publishing BlockMined event for block {:?} at height {}",
+            block_hash, height
+        );
 
         let payload = EventPayload::BlockMined {
             block_hash: *block_hash,
@@ -625,11 +637,7 @@ impl EventPublisher {
     // === Mempool Events ===
 
     /// Publish mempool threshold exceeded event
-    pub async fn publish_mempool_threshold_exceeded(
-        &self,
-        current_size: usize,
-        threshold: usize,
-    ) {
+    pub async fn publish_mempool_threshold_exceeded(&self, current_size: usize, threshold: usize) {
         let payload = EventPayload::MempoolThresholdExceeded {
             current_size,
             threshold,
@@ -895,11 +903,7 @@ impl EventPublisher {
     }
 
     /// Publish headers sync completed event
-    pub async fn publish_headers_sync_completed(
-        &self,
-        final_height: u64,
-        duration_seconds: u64,
-    ) {
+    pub async fn publish_headers_sync_completed(&self, final_height: u64, duration_seconds: u64) {
         let payload = EventPayload::HeadersSyncCompleted {
             final_height,
             duration_seconds,
@@ -955,11 +959,7 @@ impl EventPublisher {
     }
 
     /// Publish block sync completed event
-    pub async fn publish_block_sync_completed(
-        &self,
-        final_height: u64,
-        duration_seconds: u64,
-    ) {
+    pub async fn publish_block_sync_completed(&self, final_height: u64, duration_seconds: u64) {
         let payload = EventPayload::BlockSyncCompleted {
             final_height,
             duration_seconds,
@@ -1015,12 +1015,7 @@ impl EventPublisher {
     }
 
     /// Publish mining job created event
-    pub async fn publish_mining_job_created(
-        &self,
-        job_id: &str,
-        prev_hash: &Hash,
-        height: u64,
-    ) {
+    pub async fn publish_mining_job_created(&self, job_id: &str, prev_hash: &Hash, height: u64) {
         let payload = EventPayload::MiningJobCreated {
             job_id: job_id.to_string(),
             prev_hash: *prev_hash,
@@ -1111,7 +1106,7 @@ impl EventPublisher {
             warn!("Failed to publish MiningPoolDisconnected event: {}", e);
         }
     }
-    
+
     /// Generic event publishing method (for any event type)
     /// Publish configuration loaded/changed event
     ///
@@ -1122,7 +1117,10 @@ impl EventPublisher {
         changed_sections: Vec<String>,
         config_json: Option<String>,
     ) {
-        debug!("Publishing ConfigLoaded event for sections: {:?}", changed_sections);
+        debug!(
+            "Publishing ConfigLoaded event for sections: {:?}",
+            changed_sections
+        );
 
         let payload = EventPayload::ConfigLoaded {
             changed_sections,
@@ -1143,7 +1141,10 @@ impl EventPublisher {
     ///
     /// Modules should clean up gracefully when receiving this event.
     pub async fn publish_node_shutdown(&self, reason: String, timeout_seconds: u64) {
-        debug!("Publishing NodeShutdown event: reason={}, timeout={}s", reason, timeout_seconds);
+        debug!(
+            "Publishing NodeShutdown event: reason={}, timeout={}s",
+            reason, timeout_seconds
+        );
 
         let payload = EventPayload::NodeShutdown {
             reason,
@@ -1173,8 +1174,8 @@ impl EventPublisher {
     pub async fn publish_data_maintenance(
         &self,
         operation: String, // "flush", "cleanup", or "both"
-        urgency: String,    // "low", "medium", or "high"
-        reason: String,     // "periodic", "shutdown", "low_disk", "manual"
+        urgency: String,   // "low", "medium", or "high"
+        reason: String,    // "periodic", "shutdown", "low_disk", "manual"
         target_age_days: Option<u64>,
         timeout_seconds: Option<u64>,
     ) {
@@ -1240,7 +1241,10 @@ impl EventPublisher {
         node_healthy: bool,
         health_report: Option<String>,
     ) {
-        debug!("Publishing HealthCheck event: type={}, healthy={}", check_type, node_healthy);
+        debug!(
+            "Publishing HealthCheck event: type={}, healthy={}",
+            check_type, node_healthy
+        );
 
         let payload = EventPayload::HealthCheck {
             check_type,
@@ -1258,7 +1262,11 @@ impl EventPublisher {
     }
 
     /// Generic event publisher (for custom events)
-    pub async fn publish_event(&self, event_type: EventType, payload: EventPayload) -> Result<(), crate::module::traits::ModuleError> {
+    pub async fn publish_event(
+        &self,
+        event_type: EventType,
+        payload: EventPayload,
+    ) -> Result<(), crate::module::traits::ModuleError> {
         self.event_manager.publish_event(event_type, payload).await
     }
 }

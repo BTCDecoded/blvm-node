@@ -655,8 +655,9 @@ impl RpcAuthConfig {
 
         // Priority 2: Token file
         if let Some(ref token_file) = self.token_file {
-            let content = std::fs::read_to_string(token_file)
-                .map_err(|e| anyhow::anyhow!("Failed to read token file {:?}: {}", token_file, e))?;
+            let content = std::fs::read_to_string(token_file).map_err(|e| {
+                anyhow::anyhow!("Failed to read token file {:?}: {}", token_file, e)
+            })?;
             let tokens: Vec<String> = content
                 .lines()
                 .map(|s| s.trim().to_string())
@@ -1299,9 +1300,8 @@ impl NodeConfig {
         let mut warnings = Vec::new();
 
         // Helper to check if address is localhost
-        let is_localhost = |addr: &SocketAddr| {
-            addr.ip().is_loopback() || addr.ip().to_string() == "127.0.0.1"
-        };
+        let is_localhost =
+            |addr: &SocketAddr| addr.ip().is_loopback() || addr.ip().to_string() == "127.0.0.1";
 
         // Check RPC authentication
         if let Some(ref rpc_auth) = self.rpc_auth {
@@ -2044,6 +2044,7 @@ impl Default for PaymentConfig {
         Self {
             p2p_enabled: true,
             http_enabled: false,
+            network: default_network(),
             merchant_key: None,
             node_payment_address: None,
             payment_store_path: "data/payments".to_string(),

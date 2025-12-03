@@ -2,7 +2,7 @@
 
 #[cfg(feature = "rest-api")]
 mod tests {
-    use bllvm_node::rpc::rest::types::{ApiError, ApiResponse, ErrorDetails, ResponseMeta};
+    use blvm_node::rpc::rest::types::{ApiError, ApiResponse, ErrorDetails, ResponseMeta};
     use serde_json::json;
     use std::collections::HashMap;
 

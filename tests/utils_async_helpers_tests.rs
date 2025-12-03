@@ -2,7 +2,7 @@
 //!
 //! Tests for async operation utilities.
 
-use bllvm_node::utils::async_helpers::{
+use blvm_node::utils::async_helpers::{
     collect_results, delay_before, ignore_error, with_timeout_opt,
 };
 use std::time::Duration;

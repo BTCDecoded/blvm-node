@@ -3,8 +3,8 @@
 //! Tests message ID deduplication, timestamp validation, request ID tracking,
 //! and cleanup functionality.
 
-use bllvm_node::network::replay_protection::{ReplayError, ReplayProtection};
-use bllvm_node::utils::current_timestamp;
+use blvm_node::network::replay_protection::{ReplayError, ReplayProtection};
+use blvm_node::utils::current_timestamp;
 use std::time::Duration;
 
 #[tokio::test]
@@ -148,8 +148,8 @@ fn test_timestamp_validation_with_custom_tolerance() {
 async fn test_cleanup_message_ids() {
     let protection = ReplayProtection::with_config(
         Duration::from_millis(100), // cleanup every 100ms
-        Duration::from_millis(200),  // message IDs expire after 200ms
-        Duration::from_millis(500),  // request IDs expire after 500ms
+        Duration::from_millis(200), // message IDs expire after 200ms
+        Duration::from_millis(500), // request IDs expire after 500ms
         300,
     );
 
@@ -245,20 +245,14 @@ async fn test_concurrent_message_ids() {
     }
 
     // Only one should succeed, the rest should fail
-    let successes = results.iter().filter(|r| {
-        if let Ok(Ok(_)) = r {
-            true
-        } else {
-            false
-        }
-    }).count();
-    let failures = results.iter().filter(|r| {
-        if let Ok(Err(_)) = r {
-            true
-        } else {
-            false
-        }
-    }).count();
+    let successes = results
+        .iter()
+        .filter(|r| if let Ok(Ok(_)) = r { true } else { false })
+        .count();
+    let failures = results
+        .iter()
+        .filter(|r| if let Ok(Err(_)) = r { true } else { false })
+        .count();
 
     assert_eq!(successes, 1, "Only one concurrent check should succeed");
     assert_eq!(failures, 9, "Nine concurrent checks should fail");
@@ -273,9 +267,7 @@ async fn test_concurrent_request_ids() {
     let mut handles = vec![];
     for _ in 0..10 {
         let protection = Arc::clone(&protection);
-        let handle = tokio::spawn(async move {
-            protection.check_request_id(9999).await
-        });
+        let handle = tokio::spawn(async move { protection.check_request_id(9999).await });
         handles.push(handle);
     }
 
@@ -286,20 +278,14 @@ async fn test_concurrent_request_ids() {
     }
 
     // Only one should succeed, the rest should fail
-    let successes = results.iter().filter(|r| {
-        if let Ok(Ok(_)) = r {
-            true
-        } else {
-            false
-        }
-    }).count();
-    let failures = results.iter().filter(|r| {
-        if let Ok(Err(_)) = r {
-            true
-        } else {
-            false
-        }
-    }).count();
+    let successes = results
+        .iter()
+        .filter(|r| if let Ok(Ok(_)) = r { true } else { false })
+        .count();
+    let failures = results
+        .iter()
+        .filter(|r| if let Ok(Err(_)) = r { true } else { false })
+        .count();
 
     assert_eq!(successes, 1, "Only one concurrent check should succeed");
     assert_eq!(failures, 9, "Nine concurrent checks should fail");
@@ -352,4 +338,3 @@ async fn test_request_id_expires_after_cleanup() {
     // Should be able to reuse the request ID now
     assert!(protection.check_request_id(request_id).await.is_ok());
 }
-

@@ -1,14 +1,14 @@
 //! Integration tests for transport abstraction layer
 
 use anyhow::Result;
-use bllvm_node::network::{
+use blvm_node::network::{
     transport::{Transport, TransportType, TransportPreference, TransportAddr},
     tcp_transport::TcpTransport,
     NetworkManager,
 };
 
 #[cfg(feature = "quinn")]
-use bllvm_node::network::quinn_transport::QuinnTransport;
+use blvm_node::network::quinn_transport::QuinnTransport;
 use std::net::SocketAddr;
 
 #[tokio::test]

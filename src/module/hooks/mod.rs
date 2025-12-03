@@ -6,4 +6,3 @@
 pub mod manager;
 
 pub use manager::HookManager;
-

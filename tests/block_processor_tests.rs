@@ -1,12 +1,12 @@
 //! Tests for block processing and validation
 
-use bllvm_node::node::block_processor::{
+use blvm_node::node::block_processor::{
     parse_block_from_wire, prepare_block_validation_context, store_block_with_context,
     store_block_with_context_and_index, validate_block_with_context,
 };
-use bllvm_node::storage::Storage;
-use bllvm_node::{Block, BlockHeader, UtxoSet};
-use bllvm_protocol::{segwit::Witness, BitcoinProtocolEngine, ProtocolVersion};
+use blvm_node::storage::Storage;
+use blvm_node::{Block, BlockHeader, UtxoSet};
+use blvm_protocol::{segwit::Witness, BitcoinProtocolEngine, ProtocolVersion};
 use std::sync::Arc;
 use tempfile::TempDir;
 

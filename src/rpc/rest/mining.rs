@@ -15,7 +15,11 @@ pub async fn get_mining_info(mining: &MiningRpc) -> Result<Value> {
 }
 
 /// Get block template
-pub async fn get_block_template(mining: &MiningRpc, rules: Option<Vec<&str>>, capabilities: Option<Vec<&str>>) -> Result<Value> {
+pub async fn get_block_template(
+    mining: &MiningRpc,
+    rules: Option<Vec<&str>>,
+    capabilities: Option<Vec<&str>>,
+) -> Result<Value> {
     let mut params = json!([]);
     if let Some(r) = rules {
         params.as_array_mut().unwrap().push(json!(r));
@@ -33,4 +37,3 @@ pub async fn submit_block(mining: &MiningRpc, hex: &str) -> Result<Value> {
     let result = mining.submit_block(&params).await?;
     Ok(result)
 }
-

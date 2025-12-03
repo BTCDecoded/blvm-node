@@ -1,8 +1,8 @@
 //! Hook manager for calling module hooks with timeouts
 
+use crate::module::traits::{MempoolSize, ModuleHooks};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
-use crate::module::traits::{ModuleHooks, MempoolSize};
 
 /// Hook manager that calls module hooks with timeouts
 pub struct HookManager {
@@ -13,29 +13,29 @@ pub struct HookManager {
 impl HookManager {
     /// Create a new hook manager
     pub fn new() -> Self {
-        Self {
-            hooks: Vec::new(),
-        }
+        Self { hooks: Vec::new() }
     }
-    
+
     /// Register hooks for a module
     pub fn register_hooks(&mut self, module_id: String, hooks: Arc<dyn ModuleHooks>) {
         self.hooks.push((module_id, hooks));
     }
-    
+
     /// Unregister hooks for a module
     pub fn unregister_hooks(&mut self, module_id: &str) {
         self.hooks.retain(|(id, _)| id != module_id);
     }
-    
+
     /// Get cached fee estimate from modules
     /// Returns the first non-None value, or None if no module provides a cache
     pub async fn get_fee_estimate_cached(&self, target_blocks: u32) -> Option<u64> {
         for (module_id, hooks) in &self.hooks {
             match timeout(
                 Duration::from_millis(100),
-                hooks.get_fee_estimate_cached(target_blocks)
-            ).await {
+                hooks.get_fee_estimate_cached(target_blocks),
+            )
+            .await
+            {
                 Ok(Ok(Some(estimate))) => {
                     tracing::debug!(
                         "Module {} provided cached fee estimate: {}",
@@ -49,39 +49,26 @@ impl HookManager {
                     continue;
                 }
                 Ok(Err(e)) => {
-                    tracing::debug!(
-                        "Module {} hook error: {}",
-                        module_id,
-                        e
-                    );
+                    tracing::debug!("Module {} hook error: {}", module_id, e);
                     continue;
                 }
                 Err(_) => {
                     // Timeout - module unresponsive, try next
-                    tracing::debug!(
-                        "Module {} hook timeout",
-                        module_id
-                    );
+                    tracing::debug!("Module {} hook timeout", module_id);
                     continue;
                 }
             }
         }
         None
     }
-    
+
     /// Get cached mempool stats from modules
     /// Returns the first non-None value, or None if no module provides a cache
     pub async fn get_mempool_stats_cached(&self) -> Option<MempoolSize> {
         for (module_id, hooks) in &self.hooks {
-            match timeout(
-                Duration::from_millis(50),
-                hooks.get_mempool_stats_cached()
-            ).await {
+            match timeout(Duration::from_millis(50), hooks.get_mempool_stats_cached()).await {
                 Ok(Ok(Some(stats))) => {
-                    tracing::debug!(
-                        "Module {} provided cached mempool stats",
-                        module_id
-                    );
+                    tracing::debug!("Module {} provided cached mempool stats", module_id);
                     return Some(stats);
                 }
                 Ok(Ok(None)) => {
@@ -89,19 +76,12 @@ impl HookManager {
                     continue;
                 }
                 Ok(Err(e)) => {
-                    tracing::debug!(
-                        "Module {} hook error: {}",
-                        module_id,
-                        e
-                    );
+                    tracing::debug!("Module {} hook error: {}", module_id, e);
                     continue;
                 }
                 Err(_) => {
                     // Timeout - module unresponsive, try next
-                    tracing::debug!(
-                        "Module {} hook timeout",
-                        module_id
-                    );
+                    tracing::debug!("Module {} hook timeout", module_id);
                     continue;
                 }
             }
@@ -115,4 +95,3 @@ impl Default for HookManager {
         Self::new()
     }
 }
-

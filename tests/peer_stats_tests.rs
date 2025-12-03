@@ -1,6 +1,6 @@
 //! Tests for peer statistics tracking
 
-use bllvm_node::network::peer::Peer;
+use blvm_node::network::peer::Peer;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 

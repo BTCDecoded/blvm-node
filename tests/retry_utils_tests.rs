@@ -1,6 +1,6 @@
 //! Tests for retry utilities
 
-use bllvm_node::utils::retry::{retry_with_backoff, RetryConfig};
+use blvm_node::utils::retry::{retry_with_backoff, RetryConfig};
 use std::time::Duration;
 
 #[test]

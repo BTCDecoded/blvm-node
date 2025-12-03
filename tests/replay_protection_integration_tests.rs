@@ -5,12 +5,12 @@
 //! - Ban list messages
 //! - Async request messages (GetFilteredBlock, GetModule)
 
-use bllvm_node::network::protocol::{
+use blvm_node::network::protocol::{
     BanListMessage, EconomicNodeForkDecisionMessage, EconomicNodeRegistrationMessage,
     EconomicNodeVetoMessage, GetFilteredBlockMessage, GetModuleMessage,
 };
-use bllvm_node::network::replay_protection::ReplayProtection;
-use bllvm_node::utils::current_timestamp;
+use blvm_node::network::replay_protection::ReplayProtection;
+use blvm_node::utils::current_timestamp;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -51,10 +51,7 @@ async fn test_governance_message_timestamp_validation() {
     let now = current_timestamp() as i64;
 
     // Valid timestamp (current)
-    assert!(protection
-        .check_message_id(message_id, now)
-        .await
-        .is_ok());
+    assert!(protection.check_message_id(message_id, now).await.is_ok());
     assert!(ReplayProtection::validate_timestamp(now, 3600).is_ok());
 
     // Invalid timestamp (too old)
@@ -135,17 +132,11 @@ async fn test_governance_messages_different_ids() {
     // Multiple different governance messages should all pass
     for i in 0..10 {
         let message_id = format!("gov-msg-{}", i);
-        assert!(protection
-            .check_message_id(&message_id, now)
-            .await
-            .is_ok());
+        assert!(protection.check_message_id(&message_id, now).await.is_ok());
     }
 
     // But replaying any of them should fail
-    assert!(protection
-        .check_message_id("gov-msg-5", now)
-        .await
-        .is_err());
+    assert!(protection.check_message_id("gov-msg-5", now).await.is_err());
 }
 
 #[tokio::test]
@@ -192,5 +183,3 @@ async fn test_replay_protection_cleanup_allows_reuse() {
         .is_ok());
     assert!(protection.check_request_id(request_id).await.is_ok());
 }
-
-

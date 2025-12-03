@@ -2,9 +2,9 @@
 //!
 //! Tests for event publisher functionality including module events and ZMQ.
 
-use bllvm_node::module::api::events::EventManager;
-use bllvm_node::node::event_publisher::EventPublisher;
-use bllvm_node::{Block, Hash, Transaction};
+use blvm_node::module::api::events::EventManager;
+use blvm_node::node::event_publisher::EventPublisher;
+use blvm_node::{Block, Hash, Transaction};
 use std::sync::Arc;
 
 #[test]
@@ -19,7 +19,7 @@ fn test_event_publisher_creation() {
 #[cfg(feature = "zmq")]
 #[test]
 fn test_event_publisher_with_zmq() {
-    use bllvm_node::zmq::publisher::{ZmqConfig, ZmqPublisher};
+    use blvm_node::zmq::publisher::{ZmqConfig, ZmqPublisher};
 
     let event_manager = Arc::new(EventManager::new());
     let zmq_config = ZmqConfig::default();
@@ -39,7 +39,7 @@ async fn test_event_publisher_new_block() {
 
     // Create a test block
     let block = Block {
-        header: bllvm_protocol::BlockHeader {
+        header: blvm_protocol::BlockHeader {
             version: 1,
             prev_block_hash: [0u8; 32],
             merkle_root: [0u8; 32],

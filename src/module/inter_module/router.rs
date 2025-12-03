@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::module::inter_module::api::{ModuleApiRequest, ModuleApiResponse};
 use crate::module::inter_module::registry::ModuleApiRegistry;
 use crate::module::ipc::server::ModuleIpcServer;
 use crate::module::manager::ModuleManager;
@@ -31,19 +30,22 @@ impl ModuleRouter {
             module_manager: None,
         }
     }
-    
+
     /// Set IPC server reference
     pub fn with_ipc_server(mut self, ipc_server: Arc<tokio::sync::Mutex<ModuleIpcServer>>) -> Self {
         self.ipc_server = Some(ipc_server);
         self
     }
-    
+
     /// Set module manager reference (for dependency validation)
-    pub fn with_module_manager(mut self, module_manager: Arc<tokio::sync::Mutex<ModuleManager>>) -> Self {
+    pub fn with_module_manager(
+        mut self,
+        module_manager: Arc<tokio::sync::Mutex<ModuleManager>>,
+    ) -> Self {
         self.module_manager = Some(module_manager);
         self
     }
-    
+
     /// Route a module-to-module API call
     ///
     /// # Arguments
@@ -77,26 +79,29 @@ impl ModuleRouter {
                 }
             }
         };
-        
+
         debug!(
             "Routing call: {} -> {}::{}",
             caller_module_id, target_id, actual_method
         );
-        
+
         // Validate dependencies and health at runtime (if module manager is available)
         if let Some(module_manager) = &self.module_manager {
             let manager = module_manager.lock().await;
             // Extract module name from target_id (format: {module_name}_{uuid})
             let target_module_name = target_id.split('_').next().unwrap_or(&target_id);
-            
+
             // Validate required dependencies
-            if let Err(e) = manager.validate_module_dependencies(target_module_name).await {
+            if let Err(e) = manager
+                .validate_module_dependencies(target_module_name)
+                .await
+            {
                 return Err(ModuleError::OperationError(format!(
                     "Dependency validation failed for module '{}': {}",
                     target_id, e
                 )));
             }
-            
+
             // Check target module health (don't allow calls to unhealthy modules)
             use crate::module::process::monitor::ModuleHealth;
             if let Some(state) = manager.get_module_state(target_module_name).await {
@@ -107,7 +112,7 @@ impl ModuleRouter {
                     crate::module::traits::ModuleState::Error(err) => ModuleHealth::Crashed(err),
                     crate::module::traits::ModuleState::Stopping => ModuleHealth::Unresponsive,
                 };
-                
+
                 match health {
                     ModuleHealth::Healthy => {
                         // OK to proceed
@@ -121,16 +126,17 @@ impl ModuleRouter {
                 }
             }
         }
-        
+
         // Get the API implementation
-        let api = self.registry.get_api(&target_id).await
-            .ok_or_else(|| ModuleError::OperationError(format!(
+        let api = self.registry.get_api(&target_id).await.ok_or_else(|| {
+            ModuleError::OperationError(format!(
                 "Module '{}' not found or has no API registered",
                 target_id
-            )))?;
-        
+            ))
+        })?;
+
         // Call the API
-        api.handle_request(&actual_method, params, caller_module_id).await
+        api.handle_request(&actual_method, params, caller_module_id)
+            .await
     }
 }
-

@@ -3,8 +3,8 @@
 //! Tests compile-time feature flag behavior for HTTP BIP70 support.
 //! Verifies that HTTP endpoints are conditionally compiled and P2P is always available.
 
-use bllvm_node::config::PaymentConfig;
-use bllvm_node::payment::processor::{PaymentError, PaymentProcessor};
+use blvm_node::config::PaymentConfig;
+use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
 
 #[test]
 fn test_p2p_always_available() {
@@ -69,7 +69,7 @@ fn test_http_feature_disabled() {
 fn test_http_endpoints_conditional_compilation() {
     // Test that HTTP handler functions exist when feature is enabled
     // Module exists - compilation succeeds
-    use bllvm_node::payment::http;
+    use blvm_node::payment::http;
     assert!(true, "HTTP handler module is conditionally compiled");
 }
 
@@ -78,12 +78,12 @@ fn test_http_endpoints_conditional_compilation() {
 fn test_payment_module_http_available() {
     // Test that payment module exports HTTP handlers when feature enabled
     // This verifies conditional compilation in mod.rs
-    use bllvm_node::payment;
+    use blvm_node::payment;
 
     // Verify HTTP module is available
     #[cfg(feature = "bip70-http")]
     {
-        use bllvm_node::payment::http;
+        use blvm_node::payment::http;
         // Module exists - compilation succeeds
         assert!(true, "HTTP payment module is available with feature");
     }
@@ -180,7 +180,7 @@ fn test_rest_api_server_payment_processor_method() {
     // This is a compile-time test - if the method doesn't exist, compilation fails
     #[cfg(all(feature = "bip70-http", feature = "rest-api"))]
     {
-        use bllvm_node::rpc::rest::server::RestApiServer;
+        use blvm_node::rpc::rest::server::RestApiServer;
         // Method exists - compilation succeeds
         assert!(
             true,
@@ -239,7 +239,7 @@ fn test_p2p_independent_of_features() {
 fn test_http_handler_functions_exist() {
     // Test that HTTP handler functions are available when feature enabled
     // This is a compile-time test
-    use bllvm_node::payment::http;
+    use blvm_node::payment::http;
     // Module exists - compilation succeeds
     assert!(true, "HTTP handler functions exist when feature enabled");
 }

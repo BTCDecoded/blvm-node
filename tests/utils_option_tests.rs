@@ -2,9 +2,7 @@
 //!
 //! Tests for Option helper functions.
 
-use bllvm_node::utils::option::{
-    map_or_default, option_to_result, or_else, unwrap_or_default_with,
-};
+use blvm_node::utils::option::{map_or_default, option_to_result, or_else, unwrap_or_default_with};
 
 #[test]
 fn test_unwrap_or_default_with_some() {

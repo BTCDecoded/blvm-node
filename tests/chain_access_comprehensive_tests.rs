@@ -2,11 +2,11 @@
 //!
 //! Tests for chain state access patterns and NodeChainAccess implementation.
 
-use bllvm_node::network::chain_access::NodeChainAccess;
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_node::storage::Storage;
-use bllvm_protocol::network::ChainStateAccess;
-use bllvm_protocol::Hash;
+use blvm_node::network::chain_access::NodeChainAccess;
+use blvm_node::node::mempool::MempoolManager;
+use blvm_node::storage::Storage;
+use blvm_protocol::network::ChainStateAccess;
+use blvm_protocol::Hash;
 use std::sync::Arc;
 
 fn create_test_storage() -> Arc<Storage> {

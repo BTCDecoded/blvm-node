@@ -2,12 +2,12 @@
 //!
 //! Forwards RPC requests to modules via IPC and returns responses.
 
+use crate::module::rpc::handler::ModuleRpcHandler;
+use crate::rpc::errors::RpcError;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use crate::module::rpc::handler::ModuleRpcHandler;
-use crate::rpc::errors::RpcError;
 
 /// IPC-based RPC handler that forwards requests to modules
 pub struct IpcRpcHandler {
@@ -26,7 +26,11 @@ impl IpcRpcHandler {
     pub fn new(
         module_id: String,
         method: String,
-        request_tx: mpsc::UnboundedSender<(u64, Value, mpsc::UnboundedSender<Result<Value, RpcError>>)>,
+        request_tx: mpsc::UnboundedSender<(
+            u64,
+            Value,
+            mpsc::UnboundedSender<Result<Value, RpcError>>,
+        )>,
     ) -> Self {
         Self {
             module_id,
@@ -47,14 +51,17 @@ impl ModuleRpcHandler for IpcRpcHandler {
             *id = current.wrapping_add(1);
             current
         };
-        
+
         // Create response channel
         let (response_tx, mut response_rx) = mpsc::unbounded_channel();
-        
+
         // Send request to module
-        self.request_tx.send((correlation_id, params, response_tx))
-            .map_err(|_| RpcError::internal_error("Failed to send RPC request to module".to_string()))?;
-        
+        self.request_tx
+            .send((correlation_id, params, response_tx))
+            .map_err(|_| {
+                RpcError::internal_error("Failed to send RPC request to module".to_string())
+            })?;
+
         // Wait for response with timeout
         tokio::select! {
             result = response_rx.recv() => {
@@ -70,4 +77,3 @@ impl ModuleRpcHandler for IpcRpcHandler {
         }
     }
 }
-

@@ -1,8 +1,8 @@
 //! Tests for message bridge
 
-use bllvm_node::network::message_bridge::MessageBridge;
-use bllvm_node::network::transport::TransportType;
-use bllvm_protocol::network::{
+use blvm_node::network::message_bridge::MessageBridge;
+use blvm_node::network::transport::TransportType;
+use blvm_protocol::network::{
     NetworkAddress, NetworkMessage, NetworkResponse, PingMessage, VersionMessage,
 };
 

@@ -1,6 +1,6 @@
 //! Integration tests for ban list functionality
 
-use bllvm_node::network::NetworkManager;
+use blvm_node::network::NetworkManager;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 

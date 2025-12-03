@@ -277,26 +277,26 @@ pub async fn handle_get_module_by_hash(
 
                         // Fetch binary from CAS
                         let cas = cas_arc.read().await;
-                        cas.get(&hash_array)
-                            .ok()
-                            .map(|bin_data| {
-                                // Verify size matches if specified
-                                if let Some(expected_size) = binary_section.size {
-                                    if bin_data.len() != expected_size as usize {
-                                        tracing::warn!(
-                                            "Binary size mismatch: expected {}, got {}",
-                                            expected_size,
-                                            bin_data.len()
-                                        );
-                                    }
+                        cas.get(&hash_array).ok().map(|bin_data| {
+                            // Verify size matches if specified
+                            if let Some(expected_size) = binary_section.size {
+                                if bin_data.len() != expected_size as usize {
+                                    tracing::warn!(
+                                        "Binary size mismatch: expected {}, got {}",
+                                        expected_size,
+                                        bin_data.len()
+                                    );
                                 }
-                                bin_data
-                            })
+                            }
+                            bin_data
+                        })
                     } else {
                         return Err(anyhow::anyhow!("Binary hash must be 32 bytes"));
                     }
                 } else {
-                    return Err(anyhow::anyhow!("Binary hash must be 64 hex characters (32 bytes)"));
+                    return Err(anyhow::anyhow!(
+                        "Binary hash must be 64 hex characters (32 bytes)"
+                    ));
                 }
             } else {
                 None

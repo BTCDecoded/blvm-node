@@ -2,12 +2,12 @@
 
 #[cfg(unix)]
 mod tests {
-    use bllvm_node::module::api::events::EventManager;
-    use bllvm_node::module::ipc::client::ModuleIpcClient;
-    use bllvm_node::module::ipc::protocol::{RequestMessage, ResponsePayload};
-    use bllvm_node::module::ipc::server::ModuleIpcServer;
-    use bllvm_node::module::traits::{EventType, ModuleError, NodeAPI};
-    use bllvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+    use blvm_node::module::api::events::EventManager;
+    use blvm_node::module::ipc::client::ModuleIpcClient;
+    use blvm_node::module::ipc::protocol::{RequestMessage, ResponsePayload};
+    use blvm_node::module::ipc::server::ModuleIpcServer;
+    use blvm_node::module::traits::{EventType, ModuleError, NodeAPI};
+    use blvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::time::{sleep, Duration};
@@ -90,7 +90,7 @@ mod tests {
             &self,
             _event_types: Vec<EventType>,
         ) -> Result<
-            tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>,
+            tokio::sync::mpsc::Receiver<blvm_node::module::ipc::protocol::ModuleMessage>,
             ModuleError,
         > {
             let (_tx, rx) = tokio::sync::mpsc::channel(100);
@@ -123,8 +123,8 @@ mod tests {
         let correlation_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test-module".to_string(),
                 module_name: "Test Module".to_string(),
                 version: "1.0.0".to_string(),
@@ -164,8 +164,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),
@@ -208,8 +208,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),
@@ -251,8 +251,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),
@@ -294,8 +294,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),
@@ -337,8 +337,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),
@@ -381,8 +381,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),
@@ -425,8 +425,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),
@@ -473,8 +473,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),
@@ -518,8 +518,8 @@ mod tests {
         let handshake_id = client.next_correlation_id();
         let handshake = RequestMessage {
             correlation_id: handshake_id,
-            request_type: bllvm_node::module::ipc::protocol::MessageType::Handshake,
-            payload: bllvm_node::module::ipc::protocol::RequestPayload::Handshake {
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
                 module_id: "test".to_string(),
                 module_name: "Test".to_string(),
                 version: "1.0.0".to_string(),

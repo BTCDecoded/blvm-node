@@ -1,8 +1,8 @@
 //! Tests for protocol adapter
 
-use bllvm_node::network::protocol_adapter::ProtocolAdapter;
-use bllvm_node::network::transport::TransportType;
-use bllvm_protocol::network::{
+use blvm_node::network::protocol_adapter::ProtocolAdapter;
+use blvm_node::network::transport::TransportType;
+use blvm_protocol::network::{
     NetworkAddress, NetworkMessage, PingMessage, PongMessage, VersionMessage,
 };
 

@@ -76,17 +76,13 @@ pub trait ModuleHooks: Send + Sync {
     /// Hook called when getting fee estimate
     /// Return Some(u64) to use cached value, None to calculate normally
     /// Timeout: 100ms (fail fast if module unresponsive)
-    async fn get_fee_estimate_cached(
-        &self,
-        target_blocks: u32,
-    ) -> Result<Option<u64>, ModuleError>;
-    
+    async fn get_fee_estimate_cached(&self, target_blocks: u32)
+        -> Result<Option<u64>, ModuleError>;
+
     /// Hook called when getting mempool stats
     /// Return Some(MempoolStats) to use cached value, None to calculate normally
     /// Timeout: 50ms (fail fast if module unresponsive)
-    async fn get_mempool_stats_cached(
-        &self,
-    ) -> Result<Option<MempoolSize>, ModuleError>;
+    async fn get_mempool_stats_cached(&self) -> Result<Option<MempoolSize>, ModuleError>;
 }
 
 /// Module trait that all modules must implement
@@ -210,50 +206,56 @@ pub trait NodeAPI: Send + Sync {
         &self,
         event_types: Vec<EventType>,
     ) -> Result<tokio::sync::mpsc::Receiver<ModuleMessage>, ModuleError>;
-    
+
     // === Mempool API Methods ===
     /// Get all transaction hashes in mempool
     async fn get_mempool_transactions(&self) -> Result<Vec<Hash>, ModuleError>;
-    
+
     /// Get a transaction from mempool by hash
-    async fn get_mempool_transaction(&self, tx_hash: &Hash) -> Result<Option<Transaction>, ModuleError>;
-    
+    async fn get_mempool_transaction(
+        &self,
+        tx_hash: &Hash,
+    ) -> Result<Option<Transaction>, ModuleError>;
+
     /// Get mempool size information
     async fn get_mempool_size(&self) -> Result<MempoolSize, ModuleError>;
-    
+
     // === Network API Methods ===
     /// Get network statistics
     async fn get_network_stats(&self) -> Result<NetworkStats, ModuleError>;
-    
+
     /// Get list of connected peers
     async fn get_network_peers(&self) -> Result<Vec<PeerInfo>, ModuleError>;
-    
+
     // === Chain API Methods ===
     /// Get chain information (tip, height, difficulty, etc.)
     async fn get_chain_info(&self) -> Result<ChainInfo, ModuleError>;
-    
+
     /// Get block by height
     async fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, ModuleError>;
-    
+
     // === Lightning API Methods (for Lightning module) ===
     /// Get Lightning node connection info
     async fn get_lightning_node_url(&self) -> Result<Option<String>, ModuleError>;
-    
+
     /// Get Lightning node information
     async fn get_lightning_info(&self) -> Result<Option<LightningInfo>, ModuleError>;
-    
+
     // === Payment API Methods ===
     /// Get payment state by payment ID
-    async fn get_payment_state(&self, payment_id: &str) -> Result<Option<PaymentState>, ModuleError>;
-    
+    async fn get_payment_state(
+        &self,
+        payment_id: &str,
+    ) -> Result<Option<PaymentState>, ModuleError>;
+
     // === Additional Mempool API Methods ===
     /// Check if a transaction is in the mempool
     async fn check_transaction_in_mempool(&self, tx_hash: &Hash) -> Result<bool, ModuleError>;
-    
+
     /// Get fee estimate for target confirmation blocks
     /// Returns fee rate in satoshis per vbyte
     async fn get_fee_estimate(&self, target_blocks: u32) -> Result<u64, ModuleError>;
-    
+
     // === Module RPC Endpoint Registration ===
     /// Register a JSON-RPC endpoint
     /// Method name must have module prefix (e.g., "lightning_*", "stratum_*")
@@ -263,10 +265,10 @@ pub trait NodeAPI: Send + Sync {
         method: String,
         description: String,
     ) -> Result<(), ModuleError>;
-    
+
     /// Unregister an RPC endpoint (on module shutdown)
     async fn unregister_rpc_endpoint(&self, method: &str) -> Result<(), ModuleError>;
-    
+
     // === Timers and Scheduled Tasks ===
     /// Register a periodic timer
     /// Returns a timer ID that can be used to cancel
@@ -276,13 +278,13 @@ pub trait NodeAPI: Send + Sync {
         interval_seconds: u64,
         callback: Arc<dyn crate::module::timers::manager::TimerCallback>,
     ) -> Result<crate::module::timers::manager::TimerId, ModuleError>;
-    
+
     /// Cancel a registered timer
     async fn cancel_timer(
         &self,
         timer_id: crate::module::timers::manager::TimerId,
     ) -> Result<(), ModuleError>;
-    
+
     /// Schedule a one-time task
     /// Callback is async and can call NodeAPI methods
     async fn schedule_task(
@@ -290,61 +292,92 @@ pub trait NodeAPI: Send + Sync {
         delay_seconds: u64,
         callback: Arc<dyn crate::module::timers::manager::TaskCallback>,
     ) -> Result<crate::module::timers::manager::TaskId, ModuleError>;
-    
+
     // === Metrics and Telemetry ===
     /// Report a metric to the node
-    async fn report_metric(&self, metric: crate::module::metrics::manager::Metric) -> Result<(), ModuleError>;
-    
+    async fn report_metric(
+        &self,
+        metric: crate::module::metrics::manager::Metric,
+    ) -> Result<(), ModuleError>;
+
     /// Get module metrics (for RPC/metrics endpoint)
-    async fn get_module_metrics(&self, module_id: &str) -> Result<Vec<crate::module::metrics::manager::Metric>, ModuleError>;
-    
+    async fn get_module_metrics(
+        &self,
+        module_id: &str,
+    ) -> Result<Vec<crate::module::metrics::manager::Metric>, ModuleError>;
+
     /// Get aggregated metrics from all modules
-    async fn get_all_metrics(&self) -> Result<std::collections::HashMap<String, Vec<crate::module::metrics::manager::Metric>>, ModuleError>;
-    
+    async fn get_all_metrics(
+        &self,
+    ) -> Result<
+        std::collections::HashMap<String, Vec<crate::module::metrics::manager::Metric>>,
+        ModuleError,
+    >;
+
     // === Filesystem API Methods ===
     /// Read a file from the module's data directory
     /// Path must be within the module's sandboxed data directory
     async fn read_file(&self, path: String) -> Result<Vec<u8>, ModuleError>;
-    
+
     /// Write data to a file in the module's data directory
     /// Path must be within the module's sandboxed data directory
     async fn write_file(&self, path: String, data: Vec<u8>) -> Result<(), ModuleError>;
-    
+
     /// Delete a file from the module's data directory
     async fn delete_file(&self, path: String) -> Result<(), ModuleError>;
-    
+
     /// List directory contents
     async fn list_directory(&self, path: String) -> Result<Vec<String>, ModuleError>;
-    
+
     /// Create a directory in the module's data directory
     async fn create_directory(&self, path: String) -> Result<(), ModuleError>;
-    
+
     /// Get file metadata (size, type, timestamps)
-    async fn get_file_metadata(&self, path: String) -> Result<crate::module::ipc::protocol::FileMetadata, ModuleError>;
-    
+    async fn get_file_metadata(
+        &self,
+        path: String,
+    ) -> Result<crate::module::ipc::protocol::FileMetadata, ModuleError>;
+
     // === Storage API Methods ===
     /// Open a storage tree (isolated per module)
     /// Returns a tree ID that can be used for subsequent operations
     async fn storage_open_tree(&self, name: String) -> Result<String, ModuleError>;
-    
+
     /// Insert a key-value pair into storage
-    async fn storage_insert(&self, tree_id: String, key: Vec<u8>, value: Vec<u8>) -> Result<(), ModuleError>;
-    
+    async fn storage_insert(
+        &self,
+        tree_id: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<(), ModuleError>;
+
     /// Get a value from storage by key
-    async fn storage_get(&self, tree_id: String, key: Vec<u8>) -> Result<Option<Vec<u8>>, ModuleError>;
-    
+    async fn storage_get(
+        &self,
+        tree_id: String,
+        key: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, ModuleError>;
+
     /// Remove a key-value pair from storage
     async fn storage_remove(&self, tree_id: String, key: Vec<u8>) -> Result<(), ModuleError>;
-    
+
     /// Check if a key exists in storage
-    async fn storage_contains_key(&self, tree_id: String, key: Vec<u8>) -> Result<bool, ModuleError>;
-    
+    async fn storage_contains_key(
+        &self,
+        tree_id: String,
+        key: Vec<u8>,
+    ) -> Result<bool, ModuleError>;
+
     /// Iterate over all key-value pairs in storage
     async fn storage_iter(&self, tree_id: String) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ModuleError>;
-    
+
     /// Execute a transaction (atomic batch of operations)
-    async fn storage_transaction(&self, tree_id: String, operations: Vec<crate::module::ipc::protocol::StorageOperation>) -> Result<(), ModuleError>;
-    
+    async fn storage_transaction(
+        &self,
+        tree_id: String,
+        operations: Vec<crate::module::ipc::protocol::StorageOperation>,
+    ) -> Result<(), ModuleError>;
+
     /// Initialize filesystem and storage access for a module
     /// Called when a module connects to set up per-module sandbox and storage
     async fn initialize_module(
@@ -353,19 +386,19 @@ pub trait NodeAPI: Send + Sync {
         module_data_dir: std::path::PathBuf,
         base_data_dir: std::path::PathBuf,
     ) -> Result<(), ModuleError>;
-    
+
     // === Module Discovery API Methods ===
     /// Discover all available modules
     /// Returns list of module information for all loaded modules
     async fn discover_modules(&self) -> Result<Vec<ModuleInfo>, ModuleError>;
-    
+
     /// Get information about a specific module
     /// Returns None if module is not loaded
     async fn get_module_info(&self, module_id: &str) -> Result<Option<ModuleInfo>, ModuleError>;
-    
+
     /// Check if a module is available (loaded and running)
     async fn is_module_available(&self, module_id: &str) -> Result<bool, ModuleError>;
-    
+
     // === Module Event Publishing ===
     /// Publish an event (modules can publish to other modules)
     /// Event will be delivered to all modules subscribed to the event type
@@ -374,7 +407,7 @@ pub trait NodeAPI: Send + Sync {
         event_type: EventType,
         payload: EventPayload,
     ) -> Result<(), ModuleError>;
-    
+
     // === Module-to-Module Communication ===
     /// Call an API method on another module
     ///
@@ -391,7 +424,7 @@ pub trait NodeAPI: Send + Sync {
         method: &str,
         params: Vec<u8>,
     ) -> Result<Vec<u8>, ModuleError>;
-    
+
     /// Register a module API for other modules to call
     ///
     /// # Arguments
@@ -400,10 +433,10 @@ pub trait NodeAPI: Send + Sync {
         &self,
         api: Arc<dyn crate::module::inter_module::api::ModuleAPI>,
     ) -> Result<(), ModuleError>;
-    
+
     /// Unregister a module API
     async fn unregister_module_api(&self) -> Result<(), ModuleError>;
-    
+
     // === Network Integration ===
     /// Send mesh packet to a module (for network layer integration)
     /// This allows the network layer to route mesh packets to the mesh module
@@ -413,7 +446,7 @@ pub trait NodeAPI: Send + Sync {
         packet_data: Vec<u8>,
         peer_addr: String,
     ) -> Result<(), ModuleError>;
-    
+
     /// Send mesh packet to a network peer
     /// This allows modules to send mesh packets to network peers
     async fn send_mesh_packet_to_peer(
@@ -421,7 +454,7 @@ pub trait NodeAPI: Send + Sync {
         peer_addr: String,
         packet_data: Vec<u8>,
     ) -> Result<(), ModuleError>;
-    
+
     /// Send Stratum V2 message to peer (miner)
     /// This allows the Stratum V2 module to send messages to miners
     async fn send_stratum_v2_message_to_peer(
@@ -429,14 +462,19 @@ pub trait NodeAPI: Send + Sync {
         peer_addr: String,
         message_data: Vec<u8>,
     ) -> Result<(), ModuleError>;
-    
+
     // === Module Health & Monitoring ===
     /// Get health status of a module
-    async fn get_module_health(&self, module_id: &str) -> Result<Option<crate::module::process::monitor::ModuleHealth>, ModuleError>;
-    
+    async fn get_module_health(
+        &self,
+        module_id: &str,
+    ) -> Result<Option<crate::module::process::monitor::ModuleHealth>, ModuleError>;
+
     /// Get health status of all modules
-    async fn get_all_module_health(&self) -> Result<Vec<(String, crate::module::process::monitor::ModuleHealth)>, ModuleError>;
-    
+    async fn get_all_module_health(
+        &self,
+    ) -> Result<Vec<(String, crate::module::process::monitor::ModuleHealth)>, ModuleError>;
+
     /// Report module health (for modules to self-report)
     async fn report_module_health(
         &self,
@@ -456,7 +494,7 @@ pub enum EventType {
     BlockDisconnected,
     /// Chain reorganization occurred
     ChainReorg,
-    
+
     // === Payment Events (for Lightning module) ===
     /// Payment request created
     PaymentRequestCreated,
@@ -474,7 +512,7 @@ pub enum EventType {
     ChannelOpened,
     /// Lightning channel closed
     ChannelClosed,
-    
+
     // === Mining Events (for Stratum V2 module) ===
     /// Block mined successfully
     BlockMined,
@@ -484,7 +522,7 @@ pub enum EventType {
     MiningDifficultyChanged,
     /// Mining job created
     MiningJobCreated,
-    
+
     // === Mesh Networking Events ===
     /// Mesh packet received from network
     MeshPacketReceived,
@@ -499,7 +537,7 @@ pub enum EventType {
     MiningPoolConnected,
     /// Mining pool disconnected
     MiningPoolDisconnected,
-    
+
     // === Governance Events (for Governance module) ===
     /// Governance proposal created
     GovernanceProposalCreated,
@@ -523,7 +561,7 @@ pub enum EventType {
     VetoThresholdReached,
     /// Governance fork detected
     GovernanceForkDetected,
-    
+
     // === Network Events (for Mesh module) ===
     /// Peer connected
     PeerConnected,
@@ -559,7 +597,7 @@ pub enum EventType {
     DoSAttackDetected,
     /// Rate limit exceeded
     RateLimitExceeded,
-    
+
     // === Consensus Events ===
     /// Block validation started
     BlockValidationStarted,
@@ -581,7 +619,7 @@ pub enum EventType {
     SoftForkLockedIn,
     /// Consensus rule violation detected
     ConsensusRuleViolation,
-    
+
     // === Sync Events ===
     /// Headers sync started
     HeadersSyncStarted,
@@ -597,7 +635,7 @@ pub enum EventType {
     BlockSyncCompleted,
     /// Sync state changed (Initial → Headers → Blocks → Synced)
     SyncStateChanged,
-    
+
     // === Mempool Events ===
     /// Transaction added to mempool
     MempoolTransactionAdded,
@@ -609,7 +647,7 @@ pub enum EventType {
     FeeRateChanged,
     /// Mempool cleared
     MempoolCleared,
-    
+
     // === Storage Events ===
     /// Storage read operation
     StorageRead,
@@ -621,7 +659,7 @@ pub enum EventType {
     DatabaseBackupStarted,
     /// Database backup completed
     DatabaseBackupCompleted,
-    
+
     // === Module Lifecycle Events ===
     /// Module loaded successfully
     ModuleLoaded,
@@ -639,12 +677,12 @@ pub enum EventType {
     ModuleHealthChanged,
     /// Module state changed
     ModuleStateChanged,
-    
+
     // === Configuration Events ===
     /// Node configuration loaded/changed
     /// Modules can subscribe to this to react to config changes
     ConfigLoaded,
-    
+
     // === Node Lifecycle Events ===
     /// Node is shutting down (modules should clean up gracefully)
     NodeShutdown,
@@ -652,7 +690,7 @@ pub enum EventType {
     NodeShutdownCompleted,
     /// Node startup completed (all components initialized)
     NodeStartupCompleted,
-    
+
     // === Maintenance Events ===
     /// Maintenance operation started (modules can prepare)
     MaintenanceStarted,
@@ -664,13 +702,13 @@ pub enum EventType {
     DataMaintenance,
     /// Health check performed (modules can report their health)
     HealthCheck,
-    
+
     // === Resource Management Events ===
     /// Disk space is low (modules should clean up data)
     DiskSpaceLow,
     /// Resource limit warning (modules should reduce usage)
     ResourceLimitWarning,
-    
+
     // === Dandelion++ Events ===
     /// Transaction entered stem phase
     DandelionStemStarted,
@@ -680,7 +718,7 @@ pub enum EventType {
     DandelionFluffed,
     /// Stem path expired
     DandelionStemPathExpired,
-    
+
     // === Compact Blocks Events ===
     /// Compact block received
     CompactBlockReceived,
@@ -688,7 +726,7 @@ pub enum EventType {
     BlockReconstructionStarted,
     /// Block reconstruction completed
     BlockReconstructionCompleted,
-    
+
     // === FIBRE Events ===
     /// Block encoded for FIBRE
     FibreBlockEncoded,
@@ -696,25 +734,25 @@ pub enum EventType {
     FibreBlockSent,
     /// FIBRE peer registered
     FibrePeerRegistered,
-    
+
     // === Package Relay Events ===
     /// Transaction package received
     PackageReceived,
     /// Transaction package rejected
     PackageRejected,
-    
+
     // === UTXO Commitments Events ===
     /// UTXO commitment received
     UtxoCommitmentReceived,
     /// UTXO commitment verified
     UtxoCommitmentVerified,
-    
+
     // === Ban List Sharing Events ===
     /// Ban list shared with peer
     BanListShared,
     /// Ban list received from peer
     BanListReceived,
-    
+
     // === Module Registry Events ===
     /// Module discovered
     ModuleDiscovered,

@@ -1,11 +1,11 @@
 //! Tests for IPC protocol message serialization and deserialization
 
-use bllvm_node::module::ipc::protocol::{
+use blvm_node::module::ipc::protocol::{
     CorrelationId, EventMessage, EventPayload, MessageType, ModuleMessage, RequestMessage,
     RequestPayload, ResponseMessage, ResponsePayload,
 };
-use bllvm_node::module::traits::EventType;
-use bllvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use blvm_node::module::traits::EventType;
+use blvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 
 #[test]
 fn test_request_message_serialization() {

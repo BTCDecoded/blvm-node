@@ -3,7 +3,7 @@
 //! Tests token-based authentication, certificate-based authentication,
 //! and all authentication edge cases.
 
-use bllvm_node::rpc::auth::{AuthToken, RpcAuthManager, RpcRateLimiter, UserId};
+use blvm_node::rpc::auth::{AuthToken, RpcAuthManager, RpcRateLimiter, UserId};
 use std::net::SocketAddr;
 
 #[test]

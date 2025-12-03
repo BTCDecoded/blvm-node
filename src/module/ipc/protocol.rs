@@ -405,7 +405,7 @@ pub struct LogMessage {
     pub level: LogLevel,
     pub module_id: String,
     pub message: String,
-    pub target: String,  // Module name or component
+    pub target: String, // Module name or component
     pub timestamp: u64,
 }
 
@@ -423,11 +423,22 @@ pub enum LogLevel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventPayload {
     // === Core Blockchain Events ===
-    NewBlock { block_hash: Hash, height: u64 },
-    NewTransaction { tx_hash: Hash },
-    BlockDisconnected { hash: Hash, height: u64 },
-    ChainReorg { old_tip: Hash, new_tip: Hash },
-    
+    NewBlock {
+        block_hash: Hash,
+        height: u64,
+    },
+    NewTransaction {
+        tx_hash: Hash,
+    },
+    BlockDisconnected {
+        hash: Hash,
+        height: u64,
+    },
+    ChainReorg {
+        old_tip: Hash,
+        new_tip: Hash,
+    },
+
     // === Payment Events ===
     PaymentRequestCreated {
         payment_id: String,
@@ -466,7 +477,7 @@ pub enum EventPayload {
         channel_id: String,
         reason: String,
     },
-    
+
     // === Mining Events ===
     BlockMined {
         block_hash: Hash,
@@ -506,7 +517,7 @@ pub enum EventPayload {
         pool_url: String,
         reason: String,
     },
-    
+
     // === Governance Events ===
     GovernanceProposalCreated {
         proposal_id: String,
@@ -566,10 +577,10 @@ pub enum EventPayload {
         ruleset_version: String,
         adoption_count: usize,
     },
-    
+
     // === Network Events ===
     PeerConnected {
-        peer_addr: String, // SocketAddr as string for serialization
+        peer_addr: String,      // SocketAddr as string for serialization
         transport_type: String, // "tcp", "quinn", "iroh", "mesh"
         services: u64,
         version: u32,
@@ -607,7 +618,7 @@ pub enum EventPayload {
         failed: usize,
     },
     RouteDiscovered {
-        destination: Vec<u8>, // Node ID or address
+        destination: Vec<u8>,    // Node ID or address
         route_path: Vec<String>, // SocketAddrs as strings
         route_cost: u64,
     },
@@ -639,7 +650,7 @@ pub enum EventPayload {
     DoSAttackDetected {
         peer_addr: String,
         attack_type: String, // "flood", "spam", "resource_exhaustion"
-        severity: String, // "low", "medium", "high", "critical"
+        severity: String,    // "low", "medium", "high", "critical"
     },
     RateLimitExceeded {
         peer_addr: String,
@@ -647,7 +658,7 @@ pub enum EventPayload {
         current_rate: f64,
         limit: f64,
     },
-    
+
     // === Consensus Events ===
     BlockValidationStarted {
         block_hash: Hash,
@@ -698,7 +709,7 @@ pub enum EventPayload {
         tx_hash: Option<Hash>,
         error: String,
     },
-    
+
     // === Sync Events ===
     HeadersSyncStarted {
         start_height: u64,
@@ -730,7 +741,7 @@ pub enum EventPayload {
         old_state: String, // "Initial", "Headers", "Blocks", "Synced"
         new_state: String,
     },
-    
+
     // === Mempool Events ===
     MempoolTransactionAdded {
         tx_hash: Hash,
@@ -754,7 +765,7 @@ pub enum EventPayload {
     MempoolCleared {
         cleared_count: usize,
     },
-    
+
     // === Storage Events ===
     StorageRead {
         operation: String,
@@ -778,7 +789,7 @@ pub enum EventPayload {
         size_bytes: u64,
         duration_seconds: u64,
     },
-    
+
     // === Module Lifecycle Events ===
     ModuleLoaded {
         module_name: String,
@@ -817,7 +828,7 @@ pub enum EventPayload {
         old_state: String,
         new_state: String,
     },
-    
+
     // === Configuration Events ===
     ConfigLoaded {
         /// Configuration sections that changed (e.g., ["network", "governance"])
@@ -825,7 +836,7 @@ pub enum EventPayload {
         /// Full config as JSON string (for modules that need full config)
         config_json: Option<String>,
     },
-    
+
     // === Node Lifecycle Events ===
     NodeShutdown {
         /// Shutdown reason (e.g., "signal", "rpc", "error")
@@ -843,7 +854,7 @@ pub enum EventPayload {
         /// Components initialized
         components: Vec<String>,
     },
-    
+
     // === Maintenance Events ===
     MaintenanceStarted {
         /// Maintenance type (e.g., "backup", "cleanup", "prune")
@@ -881,7 +892,7 @@ pub enum EventPayload {
         /// Health report (optional JSON string)
         health_report: Option<String>,
     },
-    
+
     // === Resource Management Events ===
     DiskSpaceLow {
         /// Available space in bytes
@@ -905,7 +916,7 @@ pub enum EventPayload {
         /// Warning threshold percentage
         threshold_percent: f64,
     },
-    
+
     // === Dandelion++ Events ===
     DandelionStemStarted {
         tx_hash: Hash,
@@ -924,7 +935,7 @@ pub enum EventPayload {
     DandelionStemPathExpired {
         peer_addr: String,
     },
-    
+
     // === Compact Blocks Events ===
     CompactBlockReceived {
         block_hash: Hash,
@@ -941,7 +952,7 @@ pub enum EventPayload {
         success: bool,
         missing_txs: usize,
     },
-    
+
     // === FIBRE Events ===
     FibreBlockEncoded {
         block_hash: Hash,
@@ -957,7 +968,7 @@ pub enum EventPayload {
     FibrePeerRegistered {
         peer_addr: String,
     },
-    
+
     // === Package Relay Events ===
     PackageReceived {
         package_id: Vec<u8>,
@@ -969,7 +980,7 @@ pub enum EventPayload {
         reason: String,
         peer_addr: String,
     },
-    
+
     // === UTXO Commitments Events ===
     UtxoCommitmentReceived {
         block_hash: Hash,
@@ -983,7 +994,7 @@ pub enum EventPayload {
         commitment_hash: Hash,
         valid: bool,
     },
-    
+
     // === Ban List Sharing Events ===
     BanListShared {
         peer_addr: String,
@@ -993,7 +1004,7 @@ pub enum EventPayload {
         peer_addr: String,
         ban_count: usize,
     },
-    
+
     // === Module Registry Events ===
     ModuleDiscovered {
         module_name: String,

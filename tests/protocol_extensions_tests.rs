@@ -2,12 +2,10 @@
 //!
 //! Tests for UTXO commitments protocol extensions.
 
-use bllvm_node::network::protocol::{
-    FilterPreferences, GetFilteredBlockMessage, GetUTXOSetMessage,
-};
-use bllvm_node::network::protocol_extensions::{handle_get_filtered_block, handle_get_utxo_set};
-use bllvm_node::storage::Storage;
-use bllvm_node::{Block, BlockHeader, Transaction};
+use blvm_node::network::protocol::{FilterPreferences, GetFilteredBlockMessage, GetUTXOSetMessage};
+use blvm_node::network::protocol_extensions::{handle_get_filtered_block, handle_get_utxo_set};
+use blvm_node::storage::Storage;
+use blvm_node::{Block, BlockHeader, Transaction};
 use std::sync::Arc;
 
 fn create_test_storage() -> Arc<Storage> {

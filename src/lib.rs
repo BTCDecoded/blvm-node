@@ -131,9 +131,7 @@ impl ReferenceNode {
     }
 
     /// Get mempool manager (if available)
-    pub fn mempool_manager(
-        &self,
-    ) -> Option<&std::sync::Arc<crate::node::mempool::MempoolManager>> {
+    pub fn mempool_manager(&self) -> Option<&std::sync::Arc<crate::node::mempool::MempoolManager>> {
         self.mempool_manager.as_ref()
     }
 }

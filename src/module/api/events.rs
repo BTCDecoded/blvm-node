@@ -45,10 +45,10 @@ impl EventManager {
     }
 
     /// Subscribe a module to events
-    /// 
+    ///
     /// When a module subscribes, it will receive ModuleLoaded events for all already-loaded modules
     /// to ensure consistency (hotloaded modules know about existing modules).
-    /// 
+    ///
     /// ModuleLoaded events are only published AFTER subscription (after startup is complete).
     /// This ensures consistent event ordering: subscription -> ModuleLoaded.
     pub async fn subscribe_module(
@@ -78,7 +78,11 @@ impl EventManager {
         }
 
         // Extract module name from module_id (format: {module_name}_{uuid})
-        let subscribing_module_name = module_id.split('_').next().unwrap_or(&module_id).to_string();
+        let subscribing_module_name = module_id
+            .split('_')
+            .next()
+            .unwrap_or(&module_id)
+            .to_string();
 
         // If module subscribes to ModuleLoaded:
         // 1. Send it events for all already-loaded modules (hotloaded modules get existing modules)
@@ -86,16 +90,18 @@ impl EventManager {
         //    This ensures ModuleLoaded only happens AFTER subscription (startup complete)
         let should_publish_loaded = if event_types.contains(&EventType::ModuleLoaded) {
             use crate::module::ipc::protocol::{EventMessage, EventPayload, ModuleMessage};
-            
+
             // Collect already-loaded modules to send (clone data before dropping lock)
-            let already_loaded: Vec<(String, String)> = loaded_modules.iter()
+            let already_loaded: Vec<(String, String)> = loaded_modules
+                .iter()
                 .map(|(name, (version, _))| (name.clone(), version.clone()))
                 .collect();
-            
+
             // Check if this module is loaded (for publishing ModuleLoaded after subscription)
-            let module_version = loaded_modules.get(&subscribing_module_name)
+            let module_version = loaded_modules
+                .get(&subscribing_module_name)
                 .map(|(version, _)| version.clone());
-            
+
             // Send all already-loaded modules to this newly subscribing module
             for (module_name, version) in &already_loaded {
                 let payload = EventPayload::ModuleLoaded {
@@ -111,18 +117,18 @@ impl EventManager {
                     warn!("Failed to send ModuleLoaded event for {} to newly subscribing module {} (channel full)", module_name, module_id);
                 }
             }
-            
+
             // Return version if module is loaded (for publishing after dropping locks)
             module_version
         } else {
             None
         };
-        
+
         // Drop all locks before publishing (to avoid deadlock)
         drop(loaded_modules);
         drop(subscribers);
         drop(channels);
-        
+
         // Now publish ModuleLoaded for this newly subscribing module (if it's loaded)
         // This ensures ModuleLoaded only happens AFTER subscription (startup complete)
         // Other already-subscribed modules will receive this event
@@ -134,9 +140,15 @@ impl EventManager {
             };
             // Publish to all subscribers (including the newly subscribing module)
             if let Err(e) = self.publish_event(EventType::ModuleLoaded, payload).await {
-                warn!("Failed to publish ModuleLoaded event for newly subscribing module {}: {}", subscribing_module_name, e);
+                warn!(
+                    "Failed to publish ModuleLoaded event for newly subscribing module {}: {}",
+                    subscribing_module_name, e
+                );
             } else {
-                info!("Published ModuleLoaded event for {} (after subscription)", subscribing_module_name);
+                info!(
+                    "Published ModuleLoaded event for {} (after subscription)",
+                    subscribing_module_name
+                );
             }
         }
 
@@ -158,7 +170,7 @@ impl EventManager {
         for subscribers_list in subscribers.values_mut() {
             subscribers_list.retain(|id| id != module_id);
         }
-        
+
         // Clean up delivery statistics
         stats.remove(module_id);
 
@@ -204,7 +216,7 @@ impl EventManager {
         // Send to all subscribed modules without holding locks
         let mut failed_modules = Vec::new();
         let mut stats_updates = Vec::new();
-        
+
         for (module_id, sender) in channels_snapshot {
             let event_msg_clone = Arc::clone(&event_message);
             // Use try_send to avoid blocking if channel is full or receiver is dropped
@@ -214,20 +226,26 @@ impl EventManager {
                     stats_updates.push((module_id.clone(), true, false));
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    warn!("Event channel full for module {} (event: {:?}), event dropped", module_id, event_type);
+                    warn!(
+                        "Event channel full for module {} (event: {:?}), event dropped",
+                        module_id, event_type
+                    );
                     // Track channel full (but don't remove subscription - module might catch up)
                     stats_updates.push((module_id.clone(), false, true));
                     // Don't add to failed_modules - module is still alive, just slow
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    warn!("Event channel closed for module {} (event: {:?}), removing subscription", module_id, event_type);
+                    warn!(
+                        "Event channel closed for module {} (event: {:?}), removing subscription",
+                        module_id, event_type
+                    );
                     // Track failed delivery and mark for removal
                     stats_updates.push((module_id.clone(), false, false));
                     failed_modules.push(module_id);
                 }
             }
         }
-        
+
         // Update delivery statistics
         {
             let mut stats = self.delivery_stats.lock().await;

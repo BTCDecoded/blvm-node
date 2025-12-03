@@ -2,8 +2,8 @@
 //!
 //! Tests PaymentConfig and RestApiConfig validation, defaults, and behavior.
 
-use bllvm_node::config::{PaymentConfig, RestApiConfig};
-use bllvm_node::payment::processor::{PaymentError, PaymentProcessor};
+use blvm_node::config::{PaymentConfig, RestApiConfig};
+use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
 
 #[test]
 fn test_payment_config_defaults() {

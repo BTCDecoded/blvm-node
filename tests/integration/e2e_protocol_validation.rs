@@ -3,12 +3,12 @@
 //! These tests verify that protocol validation is always applied when processing
 //! blocks and transactions through the full stack (consensus → protocol → node).
 
-use bllvm_node::node::block_processor::{
+use blvm_node::node::block_processor::{
     parse_block_from_wire, prepare_block_validation_context, validate_block_with_context,
 };
-use bllvm_node::storage::Storage;
-use bllvm_protocol::validation::ProtocolValidationContext;
-use bllvm_protocol::{BitcoinProtocolEngine, Block, ProtocolVersion, UtxoSet, ValidationResult};
+use blvm_node::storage::Storage;
+use blvm_protocol::validation::ProtocolValidationContext;
+use blvm_protocol::{BitcoinProtocolEngine, Block, ProtocolVersion, UtxoSet, ValidationResult};
 use tempfile::TempDir;
 
 /// Test that protocol validation is applied during block processing
@@ -21,7 +21,7 @@ fn test_protocol_validation_applied() {
 
     // Create a simple block (will fail validation but tests the path)
     let block = Block {
-        header: bllvm_protocol::BlockHeader {
+        header: blvm_protocol::BlockHeader {
             version: 1,
             prev_block_hash: [0u8; 32],
             merkle_root: [0u8; 32],
@@ -103,7 +103,7 @@ fn test_validate_and_connect_block_uses_protocol_validation() {
 
     // Create a simple block
     let block = Block {
-        header: bllvm_protocol::BlockHeader {
+        header: blvm_protocol::BlockHeader {
             version: 1,
             prev_block_hash: [0u8; 32],
             merkle_root: [0u8; 32],

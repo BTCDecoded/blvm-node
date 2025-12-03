@@ -56,7 +56,11 @@ pub async fn get_logging(control: &ControlRpc) -> Result<Value> {
 }
 
 /// Set logging
-pub async fn set_logging(control: &ControlRpc, include: Option<Vec<String>>, exclude: Option<Vec<String>>) -> Result<Value> {
+pub async fn set_logging(
+    control: &ControlRpc,
+    include: Option<Vec<String>>,
+    exclude: Option<Vec<String>>,
+) -> Result<Value> {
     let mut params = json!([]);
     if let Some(inc) = include {
         params.as_array_mut().unwrap().push(json!(inc));
@@ -74,4 +78,3 @@ pub async fn stop_node(control: &ControlRpc) -> Result<Value> {
     let result = control.stop(&params).await?;
     Ok(result)
 }
-

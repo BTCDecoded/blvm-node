@@ -290,7 +290,8 @@ impl MempoolManager {
                 self.evict_hybrid(target_size_mb, target_tx_count).await?;
             }
             crate::config::EvictionStrategy::SpamFirst => {
-                self.evict_spam_first(target_size_mb, target_tx_count).await?;
+                self.evict_spam_first(target_size_mb, target_tx_count)
+                    .await?;
             }
         }
 
@@ -613,84 +614,84 @@ impl MempoolManager {
         target_size_mb: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
         use blvm_consensus::spam_filter::SpamFilter;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
 
         // Get all transactions, classify as spam or not
-            let spam_filter = SpamFilter::new();
-            let mut spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
-            let mut non_spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
+        let spam_filter = SpamFilter::new();
+        let mut spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
+        let mut non_spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
 
-            let fee_cache = self.fee_cache.read().unwrap();
-            for (hash, tx) in &self.transactions {
-                let size = serialize_transaction(tx).len();
-                let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
+        let fee_cache = self.fee_cache.read().unwrap();
+        for (hash, tx) in &self.transactions {
+            let size = serialize_transaction(tx).len();
+            let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
 
-                // Check if transaction is spam
-                let result = spam_filter.is_spam(tx);
-                if result.is_spam {
-                    spam_txs.push((*hash, fee_rate, size));
-                } else {
-                    non_spam_txs.push((*hash, fee_rate, size));
-                }
+            // Check if transaction is spam
+            let result = spam_filter.is_spam(tx);
+            if result.is_spam {
+                spam_txs.push((*hash, fee_rate, size));
+            } else {
+                non_spam_txs.push((*hash, fee_rate, size));
             }
-            drop(fee_cache);
+        }
+        drop(fee_cache);
 
-            // Sort spam transactions by fee rate (lowest first - evict first)
-            spam_txs.sort_by_key(|(_, fee_rate, _)| *fee_rate);
+        // Sort spam transactions by fee rate (lowest first - evict first)
+        spam_txs.sort_by_key(|(_, fee_rate, _)| *fee_rate);
 
-            // Sort non-spam transactions by fee rate (lowest first - evict last)
-            non_spam_txs.sort_by_key(|(_, fee_rate, _)| *fee_rate);
+        // Sort non-spam transactions by fee rate (lowest first - evict last)
+        non_spam_txs.sort_by_key(|(_, fee_rate, _)| *fee_rate);
 
-            // Evict spam transactions first, then non-spam if needed
-            let mut current_size_mb = self.calculate_mempool_size_mb();
-            let mut current_tx_count = self.transactions.len();
+        // Evict spam transactions first, then non-spam if needed
+        let mut current_size_mb = self.calculate_mempool_size_mb();
+        let mut current_tx_count = self.transactions.len();
 
-            // First, evict spam transactions
-            for (hash, _fee_rate, size) in spam_txs {
-                if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                    break;
-                }
-
-                // Don't evict if it has descendants
-                let has_descendants = {
-                    let descendants = self.tx_descendants.read().unwrap();
-                    descendants
-                        .get(&hash)
-                        .map(|d| !d.is_empty())
-                        .unwrap_or(false)
-                };
-
-                if !has_descendants {
-                    debug!("Evicting spam transaction {}", hex::encode(hash));
-                    self.remove_transaction(&hash);
-                    current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-                    current_tx_count -= 1;
-                }
+        // First, evict spam transactions
+        for (hash, _fee_rate, size) in spam_txs {
+            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
+                break;
             }
 
-            // If still over limits, evict non-spam transactions (lowest fee rate first)
-            for (hash, _fee_rate, size) in non_spam_txs {
-                if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                    break;
-                }
+            // Don't evict if it has descendants
+            let has_descendants = {
+                let descendants = self.tx_descendants.read().unwrap();
+                descendants
+                    .get(&hash)
+                    .map(|d| !d.is_empty())
+                    .unwrap_or(false)
+            };
 
-                // Don't evict if it has descendants
-                let has_descendants = {
-                    let descendants = self.tx_descendants.read().unwrap();
-                    descendants
-                        .get(&hash)
-                        .map(|d| !d.is_empty())
-                        .unwrap_or(false)
-                };
-
-                if !has_descendants {
-                    debug!("Evicting non-spam transaction {}", hex::encode(hash));
-                    self.remove_transaction(&hash);
-                    current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-                    current_tx_count -= 1;
-                }
+            if !has_descendants {
+                debug!("Evicting spam transaction {}", hex::encode(hash));
+                self.remove_transaction(&hash);
+                current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
+                current_tx_count -= 1;
             }
+        }
+
+        // If still over limits, evict non-spam transactions (lowest fee rate first)
+        for (hash, _fee_rate, size) in non_spam_txs {
+            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
+                break;
+            }
+
+            // Don't evict if it has descendants
+            let has_descendants = {
+                let descendants = self.tx_descendants.read().unwrap();
+                descendants
+                    .get(&hash)
+                    .map(|d| !d.is_empty())
+                    .unwrap_or(false)
+            };
+
+            if !has_descendants {
+                debug!("Evicting non-spam transaction {}", hex::encode(hash));
+                self.remove_transaction(&hash);
+                current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
+                current_tx_count -= 1;
+            }
+        }
 
         Ok(())
     }
@@ -1474,7 +1475,7 @@ impl MempoolManager {
         self.fee_cache.write().unwrap().clear();
         self.rbf_tracking.write().unwrap().clear();
         self.tx_timestamps.write().unwrap().clear();
-        
+
         // Publish mempool cleared event
         if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
             let event_pub_clone = Arc::clone(event_pub);
