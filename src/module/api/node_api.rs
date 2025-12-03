@@ -529,7 +529,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?;
         
         Ok(MempoolSize {
             transaction_count,

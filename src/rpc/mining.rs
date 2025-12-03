@@ -637,8 +637,22 @@ impl MiningRpc {
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex data: {e}")))?;
 
         // Deserialize block
-        let (block, _witnesses) = deserialize_block_with_witnesses(&block_bytes)
+        let (block, witnesses) = deserialize_block_with_witnesses(&block_bytes)
             .map_err(|e| RpcError::invalid_params(format!("Failed to deserialize block: {e}")))?;
+
+        // Validate serialized size to match consensus serialization (defensive check)
+        // Uses consensus serialization via bllvm_protocol::serialization re-exports.
+        let include_witness = true;
+        if !bllvm_protocol::serialization::block::validate_block_serialized_size(
+            &block,
+            &witnesses,
+            include_witness,
+            block_bytes.len(),
+        ) {
+            return Err(RpcError::invalid_params(
+                "Block size mismatch: serialized block does not match wire size".to_string(),
+            ));
+        }
 
         // Get current chain state
         let height = self
@@ -652,7 +666,26 @@ impl MiningRpc {
         // 1. Block extends current tip
         // 2. Block is not already in chain
         // 3. Block is not orphaned
-        match self.consensus.validate_block(&block, utxo_set, height) {
+        // For direct RPC validation, use a minimal time context derived from the node's
+        // unified time utility. This keeps consensus validation decoupled from the
+        // underlying clock implementation.
+        let network_time = current_timestamp();
+        let time_context = Some(bllvm_consensus::types::TimeContext {
+            network_time,
+            // This RPC path does not compute median time-past; callers that need
+            // full consensus-equivalent validation should use the block processor.
+            median_time_past: 0,
+        });
+        let network = match self.protocol.get_protocol_version() {
+            bllvm_protocol::ProtocolVersion::BitcoinV1 => bllvm_consensus::types::Network::Mainnet,
+            bllvm_protocol::ProtocolVersion::Testnet3 => bllvm_consensus::types::Network::Testnet,
+            bllvm_protocol::ProtocolVersion::Regtest => bllvm_consensus::types::Network::Regtest,
+        };
+
+        match self
+            .consensus
+            .validate_block_with_time_context(&block, &[], utxo_set, height, time_context, network)
+        {
             Ok((ValidationResult::Valid, _)) => {
                 // Block is valid - in production would submit to block processor
                 // For now, just return success

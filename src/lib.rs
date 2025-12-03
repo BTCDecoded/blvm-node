@@ -68,7 +68,12 @@ pub use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 /// Main reference node implementation
 pub struct ReferenceNode {
     protocol: BitcoinProtocolEngine,
-    // TODO: Add other components as they're implemented
+    /// Storage for blockchain data (optional, can be added via builder pattern)
+    storage: Option<std::sync::Arc<crate::storage::Storage>>,
+    /// Network manager for P2P connections (optional, can be added via builder pattern)
+    network_manager: Option<std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>>,
+    /// Mempool manager for transaction handling (optional, can be added via builder pattern)
+    mempool_manager: Option<std::sync::Arc<crate::node::mempool::MempoolManager>>,
 }
 
 impl ReferenceNode {
@@ -78,12 +83,58 @@ impl ReferenceNode {
         let version = version.unwrap_or(ProtocolVersion::Regtest);
         Ok(Self {
             protocol: BitcoinProtocolEngine::new(version)?,
+            storage: None,
+            network_manager: None,
+            mempool_manager: None,
         })
+    }
+
+    /// Create with storage
+    pub fn with_storage(mut self, storage: std::sync::Arc<crate::storage::Storage>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Create with network manager
+    pub fn with_network_manager(
+        mut self,
+        network_manager: std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>,
+    ) -> Self {
+        self.network_manager = Some(network_manager);
+        self
+    }
+
+    /// Create with mempool manager
+    pub fn with_mempool_manager(
+        mut self,
+        mempool_manager: std::sync::Arc<crate::node::mempool::MempoolManager>,
+    ) -> Self {
+        self.mempool_manager = Some(mempool_manager);
+        self
     }
 
     /// Get the protocol engine
     pub fn protocol(&self) -> &BitcoinProtocolEngine {
         &self.protocol
+    }
+
+    /// Get storage (if available)
+    pub fn storage(&self) -> Option<&std::sync::Arc<crate::storage::Storage>> {
+        self.storage.as_ref()
+    }
+
+    /// Get network manager (if available)
+    pub fn network_manager(
+        &self,
+    ) -> Option<&std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>> {
+        self.network_manager.as_ref()
+    }
+
+    /// Get mempool manager (if available)
+    pub fn mempool_manager(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::node::mempool::MempoolManager>> {
+        self.mempool_manager.as_ref()
     }
 }
 

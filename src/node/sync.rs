@@ -453,6 +453,38 @@ impl MockBlockProvider {
     }
 }
 
+/// Run UTXO commitments initial sync
+///
+/// Orchestrates the consensus initial sync algorithm using the node's network manager.
+/// This function wires together:
+/// - Network client (UtxoCommitmentsClient)
+/// - Peer information from network manager
+/// - Header chain from storage
+/// - Consensus initial sync algorithm
+#[cfg(feature = "utxo-commitments")]
+pub async fn run_utxo_commitments_initial_sync(
+    network_manager: std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>,
+    headers: &[bllvm_consensus::BlockHeader],
+    peers: Vec<(
+        bllvm_consensus::utxo_commitments::peer_consensus::PeerInfo,
+        String,
+    )>,
+) -> anyhow::Result<bllvm_consensus::utxo_commitments::data_structures::UtxoCommitment> {
+    use crate::network::utxo_commitments_client::UtxoCommitmentsClient;
+    use bllvm_consensus::utxo_commitments::initial_sync::InitialSync;
+    use bllvm_consensus::utxo_commitments::peer_consensus::ConsensusConfig;
+
+    let client = UtxoCommitmentsClient::new(std::sync::Arc::clone(&network_manager));
+    let config = ConsensusConfig::default();
+    let initial_sync = InitialSync::new(config);
+
+    let commitment = initial_sync
+        .execute_initial_sync(&peers, headers, &client)
+        .await?;
+
+    Ok(commitment)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -36,6 +36,8 @@ fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
 #[derive(Clone)]
 pub struct BlockchainRpc {
     storage: Option<Arc<Storage>>,
+    /// Protocol engine for network/chain information
+    protocol: Option<Arc<bllvm_protocol::BitcoinProtocolEngine>>,
 }
 
 impl Default for BlockchainRpc {
@@ -47,14 +49,41 @@ impl Default for BlockchainRpc {
 impl BlockchainRpc {
     /// Create a new blockchain RPC handler
     pub fn new() -> Self {
-        Self { storage: None }
+        Self {
+            storage: None,
+            protocol: None,
+        }
     }
 
     /// Create with dependencies
     pub fn with_dependencies(storage: Arc<Storage>) -> Self {
         Self {
             storage: Some(storage),
+            protocol: None,
         }
+    }
+
+    /// Create with dependencies including protocol engine
+    pub fn with_dependencies_and_protocol(
+        storage: Arc<Storage>,
+        protocol: Arc<bllvm_protocol::BitcoinProtocolEngine>,
+    ) -> Self {
+        Self {
+            storage: Some(storage),
+            protocol: Some(protocol),
+        }
+    }
+
+    /// Get chain name from protocol version
+    fn get_chain_name(&self) -> &str {
+        self.protocol
+            .as_ref()
+            .map(|p| match p.get_protocol_version() {
+                bllvm_protocol::ProtocolVersion::BitcoinV1 => "mainnet",
+                bllvm_protocol::ProtocolVersion::Testnet3 => "testnet",
+                bllvm_protocol::ProtocolVersion::Regtest => "regtest",
+            })
+            .unwrap_or("regtest") // Default fallback
     }
 
     /// Calculate difficulty from bits (compact target format)
@@ -1785,7 +1814,7 @@ impl BlockchainRpc {
                 .unwrap_or_else(|| ZERO_HASH_STR.to_string());
 
             Ok(json!({
-                "chain": "regtest", // TODO: Get from config
+                "chain": self.get_chain_name(),
                 "blocks": height,
                 "headers": height,
                 "bestblockhash": hex::encode(tip_hash),

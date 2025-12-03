@@ -264,13 +264,106 @@ impl ModuleRegistry {
     /// Verify and create module entry from fetched data
     async fn verify_and_create_entry(
         &self,
-        _data: HashMap<String, serde_json::Value>,
+        data: HashMap<String, serde_json::Value>,
     ) -> Result<ModuleEntry, ModuleError> {
-        // TODO: Parse and verify fetched data
-        // For now, return error (will be implemented in Phase 2)
-        Err(ModuleError::OperationError(
-            "Entry verification not yet implemented".to_string(),
-        ))
+        // Parse required fields from fetched data
+        let name = data
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ModuleError::OperationError("Missing 'name' field".to_string()))?
+            .to_string();
+
+        let version = data
+            .get("version")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ModuleError::OperationError("Missing 'version' field".to_string()))?
+            .to_string();
+
+        // Parse hashes (hex-encoded)
+        let hash_str = data
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ModuleError::OperationError("Missing 'hash' field".to_string()))?;
+
+        let manifest_hash_str = data
+            .get("manifest_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ModuleError::OperationError("Missing 'manifest_hash' field".to_string()))?;
+
+        let binary_hash_str = data
+            .get("binary_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ModuleError::OperationError("Missing 'binary_hash' field".to_string()))?;
+
+        // Decode hashes from hex
+        let hash = hex::decode(hash_str)
+            .map_err(|e| ModuleError::OperationError(format!("Invalid hash hex: {}", e)))?
+            .try_into()
+            .map_err(|_| ModuleError::OperationError("Hash must be 32 bytes".to_string()))?;
+
+        let manifest_hash = hex::decode(manifest_hash_str)
+            .map_err(|e| ModuleError::OperationError(format!("Invalid manifest_hash hex: {}", e)))?
+            .try_into()
+            .map_err(|_| ModuleError::OperationError("Manifest hash must be 32 bytes".to_string()))?;
+
+        let binary_hash = hex::decode(binary_hash_str)
+            .map_err(|e| ModuleError::OperationError(format!("Invalid binary_hash hex: {}", e)))?
+            .try_into()
+            .map_err(|_| ModuleError::OperationError("Binary hash must be 32 bytes".to_string()))?;
+
+        // Parse manifest (TOML string or JSON object)
+        let manifest = if let Some(manifest_str) = data.get("manifest").and_then(|v| v.as_str()) {
+            toml::from_str::<ModuleManifest>(manifest_str)
+                .map_err(|e| ModuleError::OperationError(format!("Invalid manifest TOML: {}", e)))?
+        } else if let Some(manifest_obj) = data.get("manifest") {
+            // Try parsing as JSON and converting to TOML format
+            serde_json::from_value::<ModuleManifest>(manifest_obj.clone())
+                .map_err(|e| ModuleError::OperationError(format!("Invalid manifest JSON: {}", e)))?
+        } else {
+            return Err(ModuleError::OperationError("Missing 'manifest' field".to_string()));
+        };
+
+        // Verify manifest hash matches
+        let cas = self.cas.read().await;
+        let manifest_bytes = toml::to_string(&manifest)
+            .map_err(|e| ModuleError::OperationError(format!("Failed to serialize manifest: {}", e)))?
+            .into_bytes();
+        if !cas.verify(&manifest_bytes, &manifest_hash) {
+            return Err(ModuleError::CryptoError(
+                "Manifest hash verification failed".to_string(),
+            ));
+        }
+
+        // Parse binary if provided
+        let binary = data
+            .get("binary")
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| hex::decode(s).ok())
+                    .or_else(|| v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| item.as_u64().map(|n| n as u8))
+                            .collect()
+                    }))
+            })
+            .and_then(|bin_data| {
+                // Verify binary hash if binary is provided
+                if cas.verify(&bin_data, &binary_hash) {
+                    Some(bin_data)
+                } else {
+                    None
+                }
+            });
+
+        Ok(ModuleEntry {
+            hash,
+            name,
+            version,
+            manifest_hash,
+            binary_hash,
+            manifest,
+            binary,
+        })
     }
 
     /// Load module entry from cache

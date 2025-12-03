@@ -470,11 +470,35 @@ mod redb_impl {
         }
 
         fn clear(&self) -> Result<()> {
-            // Redb doesn't have a direct clear() method
-            // Range from iter() doesn't implement Iterator as expected
-            // For now, we'll skip the clear implementation
-            // TODO: Implement proper Range iteration for clear()
-            // This can be implemented later when Range API is better understood
+            // Redb clear implementation: delete all entries in a write transaction
+            // We need to collect keys in a read transaction first, then delete in write transaction
+            let keys: Vec<Vec<u8>> = {
+                let read_txn = self.db.begin_read()?;
+                let table = read_txn.open_table(*self.table_def)?;
+                table
+                    .iter()?
+                    .filter_map(|item| {
+                        item.ok()
+                            .map(|(key, _)| {
+                                // Convert redb::Value to Vec<u8> for key
+                                key.value().as_bytes().map(|b| b.to_vec()).unwrap_or_default()
+                            })
+                    })
+                    .collect()
+            };
+
+            // Delete all keys in write transaction
+            if !keys.is_empty() {
+                let write_txn = self.db.begin_write()?;
+                {
+                    let mut table = write_txn.open_table(*self.table_def)?;
+                    for key in keys {
+                        // Remove using key as &[u8] (same API as remove() method above)
+                        let _ = table.remove(key.as_slice());
+                    }
+                }
+                write_txn.commit()?;
+            }
             Ok(())
         }
 

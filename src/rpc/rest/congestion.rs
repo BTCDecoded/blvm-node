@@ -137,13 +137,103 @@ async fn add_to_batch(
     batch_id: &str,
     request_id: String,
 ) -> Response<Full<Bytes>> {
-    // TODO: Implement add_to_batch REST
-    error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "NOT_IMPLEMENTED",
-        "Add to batch REST endpoint not yet implemented",
-        request_id,
-    )
+    use super::types::ApiResponse;
+    use crate::payment::congestion::{PendingTransaction, TransactionPriority};
+    use bllvm_protocol::payment::PaymentOutput;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let congestion_manager = match state_machine.congestion_manager() {
+        Some(manager) => manager,
+        None => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Congestion manager not available",
+                request_id,
+            );
+        }
+    };
+
+    // Parse transaction from body
+    let outputs = body
+        .and_then(|v| {
+            v.get("outputs")
+                .and_then(|o| o.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            serde_json::from_value::<PaymentOutput>(item.clone()).ok()
+                        })
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_default();
+
+    if outputs.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Transaction outputs are required",
+            request_id,
+        );
+    }
+
+    let priority_str = body
+        .and_then(|v| v.get("priority").and_then(|p| p.as_str()))
+        .unwrap_or("normal");
+
+    let priority = match priority_str.to_lowercase().as_str() {
+        "urgent" => TransactionPriority::Urgent,
+        "high" => TransactionPriority::High,
+        "low" => TransactionPriority::Low,
+        _ => TransactionPriority::Normal,
+    };
+
+    let deadline = body
+        .and_then(|v| v.get("deadline").and_then(|d| d.as_u64()));
+
+    let tx_id = body
+        .and_then(|v| v.get("tx_id").and_then(|id| id.as_str()))
+        .unwrap_or("unknown")
+        .to_string();
+
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let pending_tx = PendingTransaction {
+        tx_id,
+        outputs,
+        priority,
+        created_at,
+        deadline,
+    };
+
+    // Add to batch
+    let mut manager = congestion_manager.lock().await;
+    match manager.add_to_batch(batch_id, pending_tx) {
+        Ok(_) => {
+            let batch = manager.get_batch(batch_id);
+            let response = ApiResponse {
+                success: true,
+                data: Some(json!({
+                    "batch_id": batch_id,
+                    "transaction_count": batch.map(|b| b.transactions.len()).unwrap_or(0),
+                    "message": "Transaction added to batch successfully"
+                })),
+                error: None,
+            };
+            success_response(serde_json::to_string(&response).unwrap(), request_id)
+        }
+        Err(e) => error_response(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            &format!("Failed to add to batch: {}", e),
+            request_id,
+        ),
+    }
 }
 
 #[cfg(feature = "ctv")]

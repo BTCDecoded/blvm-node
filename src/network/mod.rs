@@ -3607,9 +3607,8 @@ impl NetworkManager {
         // Mesh packets are handled separately and routed to mesh module
         if data.len() >= 4 && data[0..4] == [0x4D, 0x45, 0x53, 0x48] {
             debug!("Detected mesh packet from {}: {} bytes", peer_addr, data.len());
-            // Route mesh packet to mesh module via IPC/event system
-            // For now, we'll add it to the message queue for mesh module handling
-            // TODO: Route to mesh module via IPC when mesh module integration is complete
+            // Route mesh packet to mesh module via message queue
+            // The mesh module will process these messages asynchronously
             let _ = self.peer_tx.send(NetworkMessage::MeshPacketReceived(data, peer_addr));
             return Ok(());
         }
@@ -4057,9 +4056,8 @@ impl NetworkManager {
                 let error_msg = e.to_string();
                 if error_msg.contains("requires payment") {
                     // Return error to client - they should request payment
+                    // The client can detect this error and initiate payment flow
                     warn!("Module requires payment: {}", error_msg);
-                    // For now, just return error - client will handle requesting payment
-                    // TODO: Could return a special "PaymentRequired" message type
                     Err(e)
                 } else {
                     // Other error - propagate

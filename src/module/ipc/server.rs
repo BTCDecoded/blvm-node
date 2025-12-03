@@ -221,7 +221,8 @@ impl ModuleIpcServer {
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
 
         // Create RPC request channel (for sending RPC requests from node to module)
-        let (rpc_request_tx, _rpc_request_rx) = mpsc::unbounded_channel::<(u64, serde_json::Value, mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>)>();
+        type RpcResponseSender = mpsc::UnboundedSender<std::result::Result<serde_json::Value, crate::rpc::errors::RpcError>>;
+        let (rpc_request_tx, _rpc_request_rx) = mpsc::unbounded_channel::<(u64, serde_json::Value, RpcResponseSender)>();
 
         // Create event channel for this module (events from EventManager go here)
         let (event_tx, mut event_rx) = mpsc::channel(100);

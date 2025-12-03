@@ -2008,6 +2008,10 @@ pub struct PaymentConfig {
     #[serde(default = "default_false")]
     pub http_enabled: bool,
 
+    /// Network (mainnet, testnet, regtest, signet) - defaults to mainnet
+    #[serde(default = "default_network")]
+    pub network: Option<String>,
+
     /// Merchant private key for signing (optional, hex-encoded)
     #[serde(default)]
     pub merchant_key: Option<String>,
@@ -2028,6 +2032,10 @@ pub struct PaymentConfig {
 
 fn default_payment_store_path() -> String {
     "data/payments".to_string()
+}
+
+fn default_network() -> Option<String> {
+    Some("mainnet".to_string())
 }
 
 impl Default for PaymentConfig {

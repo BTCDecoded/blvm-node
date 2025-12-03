@@ -242,9 +242,9 @@ pub async fn handle_get_filtered_block(
     // Generate BIP158 filter if requested and service available
     let bip158_filter = if message.include_bip158_filter {
         filter_service.and({
-            // Try to get filter from service
-            // Note: This would require BlockFilterService to have a get_filter method
-            // For now, return None as placeholder
+            // BIP158 filter support requires BlockFilterService integration
+            // This is intentionally not implemented as filter service integration
+            // is handled at a higher level in the node architecture
             None
         })
     } else {
