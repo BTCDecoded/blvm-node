@@ -10,8 +10,8 @@
 
 #[cfg(kani)]
 mod kani_proofs {
-    use bllvm_protocol::network::{NetworkMessage, PeerState, VersionMessage};
-    use bllvm_protocol::NetworkAddress;
+    use blvm_protocol::network::{NetworkMessage, PeerState, VersionMessage};
+    use blvm_protocol::NetworkAddress;
     use kani::*;
 
     /// Proof limits for state machine operations

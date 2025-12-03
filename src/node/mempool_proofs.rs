@@ -11,7 +11,7 @@
 #[cfg(kani)]
 mod kani_proofs {
     use crate::node::mempool::MempoolManager;
-    use bllvm_protocol::{OutPoint, Transaction, UtxoSet};
+    use blvm_protocol::{OutPoint, Transaction, UtxoSet};
     use kani::*;
     use std::collections::HashMap;
 
@@ -30,8 +30,8 @@ mod kani_proofs {
 
     /// Helper to create bounded transaction
     fn create_bounded_transaction(input_count: usize, output_count: usize) -> Transaction {
-        use bllvm_protocol::TransactionInput;
-        use bllvm_protocol::TransactionOutput;
+        use blvm_protocol::TransactionInput;
+        use blvm_protocol::TransactionOutput;
 
         let mut inputs = Vec::new();
         for i in 0..input_count {
@@ -101,7 +101,7 @@ mod kani_proofs {
 
         // Simulate adding first transaction by manually updating spent_outputs
         // This verifies the conflict detection logic without async complexity
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
         let tx1_hash = calculate_tx_id(&tx1);
         mempool.transactions.insert(tx1_hash, tx1.clone());
         for input in &tx1.inputs {
@@ -138,7 +138,7 @@ mod kani_proofs {
 
         // Simulate adding transaction by manually updating state
         // This verifies the conflict prevention logic without async complexity
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
         mempool.transactions.insert(tx_hash, tx.clone());
 
@@ -195,7 +195,7 @@ mod kani_proofs {
 
         // Simulate adding transaction by manually updating state
         // This verifies the spent output tracking logic
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
         mempool.transactions.insert(tx_hash, tx.clone());
 
@@ -242,7 +242,7 @@ mod kani_proofs {
 
             utxo_set.insert(
                 input.prevout.clone(),
-                bllvm_protocol::UTXO {
+                blvm_protocol::UTXO {
                     value: input_value,
                     script_pubkey: vec![0u8; 25],
                     height: 0,
@@ -286,7 +286,7 @@ mod kani_proofs {
             for input in &tx.inputs {
                 utxo_set.insert(
                     input.prevout.clone(),
-                    bllvm_protocol::UTXO {
+                    blvm_protocol::UTXO {
                         value: 10000, // Fixed input value
                         script_pubkey: vec![0u8; 25],
                         height: 0,
@@ -301,7 +301,7 @@ mod kani_proofs {
         // Note: We can't directly modify outputs, so we'll verify the prioritization logic
 
         // Simulate adding both transactions by manually updating state
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
         let tx1_hash = calculate_tx_id(&tx1);
         let tx2_hash = calculate_tx_id(&tx2);
         mempool.transactions.insert(tx1_hash, tx1.clone());
@@ -364,7 +364,7 @@ mod kani_proofs {
 
             utxo_set.insert(
                 input.prevout.clone(),
-                bllvm_protocol::UTXO {
+                blvm_protocol::UTXO {
                     value: input_value,
                     script_pubkey: vec![0u8; 25],
                     height: 0,

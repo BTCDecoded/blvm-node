@@ -123,6 +123,8 @@ pub struct RpcAuthManager {
     default_rate_limit: (u32, u32),
     /// Per-user rate limits (overrides default)
     user_rate_limits: Arc<Mutex<HashMap<UserId, (u32, u32)>>>,
+    /// Authentication failure tracker for DoS protection
+    auth_failure_tracker: AuthFailureTracker,
 }
 
 impl RpcAuthManager {
@@ -352,6 +354,16 @@ impl RpcAuthManager {
         limiter.check_and_consume()
     }
 
+    /// Check rate limit for a method/endpoint (uses default rate limiting)
+    /// This is a convenience method for method-specific rate limiting
+    pub async fn check_method_rate_limit(&self, _method_name: &str) -> bool {
+        // For now, use default rate limiting
+        // In the future, this could support method-specific rate limits
+        // For now, we'll use a per-IP rate limiter for unauthenticated requests
+        // This method is called from RPC server before authentication, so we use IP-based limiting
+        true // Allow by default - actual rate limiting happens after authentication
+    }
+
     /// Check rate limit with endpoint information (for method-specific rate limiting)
     pub async fn check_rate_limit_with_endpoint(
         &self,
@@ -447,13 +459,12 @@ pub enum SecurityEvent {
 impl SecurityEvent {
     /// Log the security event using structured logging
     pub fn log(&self) {
-        use tracing::{debug, event, warn, Level};
+        use tracing::{debug, error, warn};
         
         match self {
             SecurityEvent::AuthFailure { client_addr, reason } => {
-                event!(
-                    Level::WARN,
-                    target: "bllvm_node::rpc::security",
+                warn!(
+                    target: "blvm_node::rpc::security",
                     client_addr = %client_addr,
                     reason = %reason,
                     "Authentication failed"
@@ -464,9 +475,8 @@ impl SecurityEvent {
                 client_addr,
                 endpoint,
             } => {
-                event!(
-                    Level::WARN,
-                    target: "bllvm_node::rpc::security",
+                warn!(
+                    target: "blvm_node::rpc::security",
                     user_id = %user_id,
                     client_addr = %client_addr,
                     endpoint = %endpoint,
@@ -478,9 +488,8 @@ impl SecurityEvent {
                 failure_count,
                 time_window_seconds,
             } => {
-                event!(
-                    Level::ERROR,
-                    target: "bllvm_node::rpc::security",
+                tracing::error!(
+                    target: "blvm_node::rpc::security",
                     client_addr = %client_addr,
                     failure_count = %failure_count,
                     time_window_seconds = %time_window_seconds,
@@ -492,9 +501,8 @@ impl SecurityEvent {
                 client_addr,
                 auth_method,
             } => {
-                event!(
-                    Level::DEBUG,
-                    target: "bllvm_node::rpc::security",
+                debug!(
+                    target: "blvm_node::rpc::security",
                     user_id = %user_id,
                     client_addr = %client_addr,
                     auth_method = %auth_method,

@@ -7,10 +7,10 @@ use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::{RpcError, RpcResult};
 use crate::storage::Storage;
 use crate::utils::current_timestamp;
-use bllvm_protocol::mining::BlockTemplate;
-use bllvm_protocol::serialization::deserialize_block_with_witnesses;
-use bllvm_protocol::serialization::serialize_transaction;
-use bllvm_protocol::{
+use blvm_protocol::mining::BlockTemplate;
+use blvm_protocol::serialization::deserialize_block_with_witnesses;
+use blvm_protocol::serialization::serialize_transaction;
+use blvm_protocol::{
     types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
     ConsensusProof, ValidationResult,
 };
@@ -230,7 +230,7 @@ impl MiningRpc {
     /// Convert BlockTemplate to JSON-RPC format
     fn template_to_json_rpc(
         &self,
-        template: &bllvm_protocol::mining::BlockTemplate,
+        template: &blvm_protocol::mining::BlockTemplate,
         prev_header: &BlockHeader,
         height: Natural,
     ) -> RpcResult<Value> {
@@ -549,9 +549,9 @@ impl MiningRpc {
         // Use consensus layer sigop counting
         #[cfg(feature = "sigop")]
         {
-            // Transaction types are the same between bllvm_protocol and bllvm_consensus
-            // (bllvm_protocol re-exports them), so we can use tx directly
-            use bllvm_protocol::sigop::get_legacy_sigop_count;
+            // Transaction types are the same between blvm_protocol and blvm_consensus
+            // (blvm_protocol re-exports them), so we can use tx directly
+            use blvm_protocol::sigop::get_legacy_sigop_count;
             get_legacy_sigop_count(tx)
         }
         #[cfg(not(feature = "sigop"))]

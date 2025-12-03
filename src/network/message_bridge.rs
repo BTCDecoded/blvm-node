@@ -6,7 +6,7 @@
 use crate::network::protocol_adapter::ProtocolAdapter;
 use crate::network::transport::TransportType;
 use anyhow::Result;
-use bllvm_protocol::network::{NetworkMessage as ConsensusNetworkMessage, NetworkResponse};
+use blvm_protocol::network::{NetworkMessage as ConsensusNetworkMessage, NetworkResponse};
 use tracing::debug;
 
 /// Message bridge for connecting consensus-proof message processing
@@ -76,7 +76,7 @@ impl MessageBridge {
     ///
     /// NOTE: This is a future integration point. To fully implement, this would:
     /// 1. Take `&BitcoinProtocolEngine`, `&mut PeerState`, and `Option<&dyn ChainStateAccess>`
-    /// 2. Call `bllvm_protocol::network::process_network_message()` with these parameters
+    /// 2. Call `blvm_protocol::network::process_network_message()` with these parameters
     /// 3. Convert the `NetworkResponse` to wire format messages using `extract_send_messages()`
     ///
     /// For now, this method only handles message conversion, not processing.

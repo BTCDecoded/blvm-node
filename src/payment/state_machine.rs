@@ -200,7 +200,7 @@ impl PaymentStateMachine {
     /// Payment request ID and optional covenant proof
     pub async fn create_payment_request(
         &self,
-        outputs: Vec<bllvm_protocol::payment::PaymentOutput>,
+        outputs: Vec<blvm_protocol::payment::PaymentOutput>,
         merchant_data: Option<Vec<u8>>,
         create_covenant: bool,
     ) -> Result<(String, Option<CovenantProof>), PaymentError> {

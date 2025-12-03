@@ -33,9 +33,7 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-#[cfg(feature = "rest-api")]
-use tracing::warn;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[cfg(feature = "rest-api")]
 use crate::rpc::rest::RestApiServer;

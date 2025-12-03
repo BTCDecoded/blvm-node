@@ -273,8 +273,8 @@ impl Storage {
     /// This should be called after a block is stored to index all its transactions
     pub fn index_block(
         &self,
-        block: &bllvm_protocol::Block,
-        block_hash: &bllvm_protocol::Hash,
+        block: &blvm_protocol::Block,
+        block_hash: &blvm_protocol::Hash,
         block_height: u64,
     ) -> Result<()> {
         self.txindex.index_block(block, block_hash, block_height)

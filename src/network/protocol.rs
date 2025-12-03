@@ -4,7 +4,7 @@
 
 use crate::network::transport::TransportType;
 use anyhow::Result;
-use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
 
 /// Bitcoin protocol constants
@@ -188,7 +188,7 @@ impl VersionMessage {
 
     /// Check if peer supports BIP157 compact block filters
     pub fn supports_compact_filters(&self) -> bool {
-        use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
         (self.services & NODE_COMPACT_FILTERS) != 0
     }
 
@@ -311,7 +311,7 @@ impl SendCmpctMessage {
 
     /// Check if peer also supports BIP157 filters (based on version message services)
     pub fn supports_filters(&self, peer_services: u64) -> bool {
-        use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
         (peer_services & NODE_COMPACT_FILTERS) != 0
     }
 }
@@ -538,7 +538,7 @@ pub struct GetPaymentRequestMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentRequestMessage {
     /// Payment request details (from bip70 module)
-    pub payment_request: bllvm_protocol::payment::PaymentRequest,
+    pub payment_request: blvm_protocol::payment::PaymentRequest,
     /// Signature over payment_request by merchant's Bitcoin key
     #[serde(with = "serde_bytes")]
     pub merchant_signature: Vec<u8>,
@@ -558,7 +558,7 @@ pub struct PaymentRequestMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentMessage {
     /// Payment details (from payment protocol module)
-    pub payment: bllvm_protocol::payment::Payment,
+    pub payment: blvm_protocol::payment::Payment,
     /// Payment ID (echo from PaymentRequest)
     #[serde(with = "serde_bytes")]
     pub payment_id: Vec<u8>,
@@ -571,7 +571,7 @@ pub struct PaymentMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentACKMessage {
     /// Payment acknowledgment (from payment protocol module)
-    pub payment_ack: bllvm_protocol::payment::PaymentACK,
+    pub payment_ack: blvm_protocol::payment::PaymentACK,
     /// Payment ID (echo from Payment)
     #[serde(with = "serde_bytes")]
     pub payment_id: Vec<u8>,
@@ -815,7 +815,7 @@ impl ProtocolParser {
         match command.as_str() {
             "version" => {
                 // Use proper Bitcoin wire format deserialization for version messages
-                use bllvm_protocol::wire::deserialize_version;
+                use blvm_protocol::wire::deserialize_version;
 
                 let version_msg = deserialize_version(payload)?;
 
@@ -932,8 +932,8 @@ impl ProtocolParser {
             ProtocolMessage::Version(msg) => {
                 // Use proper Bitcoin wire format for version messages
                 // Convert to bllvm-protocol format and use its wire serialization
-                use bllvm_protocol::network::{NetworkAddress, VersionMessage};
-                use bllvm_protocol::wire::serialize_version;
+                use blvm_protocol::network::{NetworkAddress, VersionMessage};
+                use blvm_protocol::wire::serialize_version;
 
                 let version_msg = VersionMessage {
                     version: msg.version as u32,
@@ -1028,6 +1028,7 @@ impl ProtocolParser {
             ProtocolMessage::ModuleInv(msg) => ("moduleinv", bincode::serialize(msg)?),
             ProtocolMessage::GetModuleList(msg) => ("getmodulelist", bincode::serialize(msg)?),
             ProtocolMessage::ModuleList(msg) => ("modulelist", bincode::serialize(msg)?),
+            ProtocolMessage::MeshPacket(_) => return Err(anyhow::anyhow!("MeshPacket handled separately")),
         };
 
         let mut message = Vec::new();

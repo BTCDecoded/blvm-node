@@ -5,7 +5,7 @@
 use crate::storage::database::{Database, Tree};
 use crate::storage::hashing::sha256;
 use anyhow::Result;
-use bllvm_protocol::{Hash, Transaction};
+use blvm_protocol::{Hash, Transaction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -113,7 +113,7 @@ impl TxIndex {
     /// Address indexes are built on-demand when queried
     pub fn index_block(
         &self,
-        block: &bllvm_protocol::Block,
+        block: &blvm_protocol::Block,
         block_hash: &Hash,
         block_height: u64,
     ) -> Result<()> {
@@ -137,7 +137,7 @@ impl TxIndex {
         tx_index: u32,
     ) -> Result<()> {
         // Use the standard transaction ID calculation from bllvm-protocol
-        let tx_hash = bllvm_protocol::block::calculate_tx_id(tx);
+        let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
 
         // Pre-serialize all data before database writes (batch optimization)
         let tx_data = bincode::serialize(tx)?;
@@ -646,7 +646,7 @@ impl TxIndex {
     fn calculate_tx_hash(&self, tx: &Transaction) -> Hash {
         // Use the optimized transaction ID calculation from consensus layer
         // This benefits from serialization caching and hash caching
-        bllvm_protocol::block::calculate_tx_id(tx)
+        blvm_protocol::block::calculate_tx_id(tx)
     }
 
     /// Encode integer as Bitcoin varint

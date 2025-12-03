@@ -1,13 +1,13 @@
 [package]
-name = "bllvm-node"
+name = "blvm-node"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bitcoin Commons Team"]
-description = "Bitcoin Commons BLLVM: Minimal Bitcoin node implementation using bllvm-protocol and bllvm-consensus"
+description = "Bitcoin Commons BLVM: Minimal Bitcoin node implementation using blvm-protocol and blvm-consensus"
 license = "MIT"
-repository = "https://github.com/BTCDecoded/bllvm-node"
+repository = "https://github.com/BTCDecoded/blvm-node"
 homepage = "https://btcdecoded.org"
-documentation = "https://docs.rs/bllvm-node"
+documentation = "https://docs.rs/blvm-node"
 keywords = ["bitcoin", "node", "blockchain", "cryptocurrency", "p2p"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
 rust-version = "1.82"
@@ -21,11 +21,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # Protocol abstraction layer - Use local path for development
-# This transitively provides bllvm-consensus, so we only need this one dependency
+# This transitively provides blvm-consensus, so we only need this one dependency
 # For local development, use path dependency
-bllvm-protocol = { path = "../blvm-protocol" }
-# Direct dependency on bllvm-consensus for CTV feature (CTV functions not re-exported by protocol)
-bllvm-consensus = { path = "../blvm-consensus", optional = true }
+blvm-protocol = { path = "../blvm-protocol" }
+# Direct dependency on blvm-consensus for CTV feature (CTV functions not re-exported by protocol)
+blvm-consensus = { path = "../blvm-consensus", optional = true }
 
 # Storage layer - EXACT VERSIONS for security
 sled = { version = "=0.34.7", optional = true }
@@ -140,7 +140,7 @@ default = ["sysinfo", "redb", "nix", "libc", "production", "governance", "zmq"]
 # Note: utxo-commitments removed from default - it's experimental only
 iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
-utxo-commitments = ["bllvm-protocol/utxo-commitments"]
+utxo-commitments = ["blvm-protocol/utxo-commitments"]
 stratum-v2 = []
 # Block filtering (BIP158)
 bip158 = []
@@ -157,11 +157,11 @@ redb = ["dep:redb"]
 nix = ["dep:nix", "dep:libc"]
 libc = ["dep:libc"]
 # Production optimizations (parallel block validation, etc.)
-production = ["bllvm-protocol/production", "dep:rayon", "dep:lru", "dep:bllvm-consensus"]
+production = ["blvm-protocol/production", "dep:rayon", "dep:lru", "dep:blvm-consensus"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF
 dandelion = []
-# CTV (BIP119 CheckTemplateVerify) - passed through from bllvm-protocol
-ctv = ["bllvm-protocol/ctv", "dep:bllvm-consensus"]
+# CTV (BIP119 CheckTemplateVerify) - passed through from blvm-protocol
+ctv = ["blvm-protocol/ctv", "dep:blvm-consensus"]
 # Governance webhook integration
 governance = ["dep:reqwest"]
 # ZeroMQ notification support
@@ -217,7 +217,7 @@ codegen-units = 16
 # See: https://github.com/BTCDecoded/blvm-bench
 
 # Local development: Use .cargo/config.toml to override dependencies with local paths
-# This allows you to develop against local changes in bllvm-protocol without publishing
+# This allows you to develop against local changes in blvm-protocol without publishing
 # For CI jobs that checkout dependencies, .cargo/config.toml is created automatically
 
 

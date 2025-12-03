@@ -12,7 +12,7 @@ use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTi
 use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
 use anyhow::Result;
-use bllvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult};
+use blvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;

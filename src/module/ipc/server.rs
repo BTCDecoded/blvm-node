@@ -392,6 +392,10 @@ impl ModuleIpcServer {
                                 "Module {} subscribed to events: {:?}",
                                 module_id, event_types
                             );
+                            // Note: subscribe_module() handles:
+                            // 1. Sending already-loaded modules to this newly subscribing module
+                            // 2. Publishing ModuleLoaded for this module (if loaded) AFTER subscription
+                            // This ensures ModuleLoaded only happens after startup is complete
                         }
                     }
                 }
@@ -514,6 +518,10 @@ impl ModuleIpcServer {
                     ResponsePayload::Transaction(tx),
                 ))
             }
+            _ => Ok(ResponseMessage::error(
+                request.correlation_id,
+                format!("Unimplemented request payload: {:?}", request.payload),
+            )),
             RequestPayload::HasTransaction { hash } => {
                 let exists = node_api.has_transaction(hash).await?;
                 Ok(ResponseMessage::success(

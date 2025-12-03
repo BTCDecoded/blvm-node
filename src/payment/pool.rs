@@ -462,7 +462,7 @@ impl PoolEngine {
 
         #[cfg(feature = "ctv")]
         {
-            use bllvm_protocol::payment::PaymentOutput;
+            use blvm_protocol::payment::PaymentOutput;
 
             let mut total_distributed = 0u64;
             let mut distribution_outputs = Vec::new();
@@ -590,7 +590,7 @@ impl PoolEngine {
                 )));
             }
 
-            use bllvm_protocol::payment::PaymentOutput;
+            use blvm_protocol::payment::PaymentOutput;
 
             // Create exit covenant
             let exit_outputs = vec![PaymentOutput {
@@ -665,7 +665,7 @@ impl PoolEngine {
         pool_id: &str,
         participants: &[PoolParticipant],
     ) -> Result<CovenantProof, PaymentError> {
-        use bllvm_protocol::payment::PaymentOutput;
+        use blvm_protocol::payment::PaymentOutput;
 
         let outputs: Vec<PaymentOutput> = participants
             .iter()

@@ -79,6 +79,21 @@ pub enum MessageType {
     // Additional Mempool API
     CheckTransactionInMempool,
     GetFeeEstimate,
+    // Filesystem API
+    ReadFile,
+    WriteFile,
+    DeleteFile,
+    ListDirectory,
+    CreateDirectory,
+    GetFileMetadata,
+    // Storage API
+    StorageOpenTree,
+    StorageInsert,
+    StorageGet,
+    StorageRemove,
+    StorageContainsKey,
+    StorageIter,
+    StorageTransaction,
     // Module RPC Endpoint Registration
     RegisterRpcEndpoint,
     UnregisterRpcEndpoint,
@@ -104,6 +119,9 @@ pub enum MessageType {
     GetModuleHealth,
     GetAllModuleHealth,
     ReportModuleHealth,
+    // Network Integration
+    SendMeshPacketToPeer,
+    SendStratumV2MessageToPeer,
     /// Log message from module
     Log,
     /// Response messages
@@ -511,6 +529,19 @@ pub enum EventPayload {
         node_type: String, // "miner", "exchange", "service"
         hashpower_percent: Option<f64>,
     },
+    EconomicNodeStatus {
+        request_id: String,
+        query_type: String, // "status", "hashpower", "uptime"
+        node_id: Option<String>,
+        response_data: Option<String>, // JSON string with status data
+    },
+    EconomicNodeForkDecision {
+        message_id: String,
+        ruleset_version: String,
+        decision: String, // "adopt", "reject", "abstain"
+        node_id: String,
+        timestamp: u64,
+    },
     EconomicNodeVeto {
         proposal_id: String,
         node_id: String,
@@ -768,6 +799,10 @@ pub enum EventPayload {
     ModuleStopped {
         module_name: String,
     },
+    MeshPacketReceived {
+        packet_data: Vec<u8>,
+        peer_addr: String, // Serialized SocketAddr as string
+    },
     ModuleCrashed {
         module_name: String,
         error: String,
@@ -781,6 +816,94 @@ pub enum EventPayload {
         module_name: String,
         old_state: String,
         new_state: String,
+    },
+    
+    // === Configuration Events ===
+    ConfigLoaded {
+        /// Configuration sections that changed (e.g., ["network", "governance"])
+        changed_sections: Vec<String>,
+        /// Full config as JSON string (for modules that need full config)
+        config_json: Option<String>,
+    },
+    
+    // === Node Lifecycle Events ===
+    NodeShutdown {
+        /// Shutdown reason (e.g., "signal", "rpc", "error")
+        reason: String,
+        /// Graceful shutdown timeout in seconds
+        timeout_seconds: u64,
+    },
+    NodeShutdownCompleted {
+        /// Shutdown duration in milliseconds
+        duration_ms: u64,
+    },
+    NodeStartupCompleted {
+        /// Startup duration in milliseconds
+        duration_ms: u64,
+        /// Components initialized
+        components: Vec<String>,
+    },
+    
+    // === Maintenance Events ===
+    MaintenanceStarted {
+        /// Maintenance type (e.g., "backup", "cleanup", "prune")
+        maintenance_type: String,
+        /// Estimated duration in seconds (if known)
+        estimated_duration_seconds: Option<u64>,
+    },
+    MaintenanceCompleted {
+        /// Maintenance type
+        maintenance_type: String,
+        /// Success status
+        success: bool,
+        /// Duration in milliseconds
+        duration_ms: u64,
+        /// Results/statistics (optional JSON string)
+        results: Option<String>,
+    },
+    DataMaintenance {
+        /// Maintenance operation type: "cleanup" (delete old data), "flush" (write pending data), or "both"
+        operation: String,
+        /// Urgency level: "low" (periodic), "medium" (scheduled), "high" (shutdown/low-disk)
+        urgency: String,
+        /// Reason for maintenance (e.g., "periodic", "shutdown", "low_disk", "manual")
+        reason: String,
+        /// Target age for cleanup in days (if operation includes cleanup)
+        target_age_days: Option<u64>,
+        /// Timeout in seconds (for high urgency operations)
+        timeout_seconds: Option<u64>,
+    },
+    HealthCheck {
+        /// Health check type (e.g., "periodic", "manual", "startup")
+        check_type: String,
+        /// Node health status
+        node_healthy: bool,
+        /// Health report (optional JSON string)
+        health_report: Option<String>,
+    },
+    
+    // === Resource Management Events ===
+    DiskSpaceLow {
+        /// Available space in bytes
+        available_bytes: u64,
+        /// Total space in bytes
+        total_bytes: u64,
+        /// Percentage free
+        percent_free: f64,
+        /// Disk path
+        disk_path: String,
+    },
+    ResourceLimitWarning {
+        /// Resource type (e.g., "memory", "cpu", "disk", "network")
+        resource_type: String,
+        /// Current usage percentage
+        usage_percent: f64,
+        /// Current usage value
+        current_usage: u64,
+        /// Limit value
+        limit: u64,
+        /// Warning threshold percentage
+        threshold_percent: f64,
     },
     
     // === Dandelion++ Events ===

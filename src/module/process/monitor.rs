@@ -19,7 +19,7 @@ pub struct ModuleProcessMonitor {
 }
 
 /// Module health status
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModuleHealth {
     /// Module is healthy
     Healthy,

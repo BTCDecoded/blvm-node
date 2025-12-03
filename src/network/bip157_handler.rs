@@ -10,7 +10,7 @@ use crate::network::protocol::{
 };
 use crate::storage::Storage;
 use anyhow::{anyhow, Result};
-use bllvm_protocol::Hash;
+use blvm_protocol::Hash;
 use std::sync::Arc;
 
 /// Handle GetCfilters request
@@ -116,7 +116,7 @@ pub fn handle_getcfheaders(
         .get_prev_filter_header(request.start_height)
         .unwrap_or({
             // Genesis filter header (all zeros)
-            bllvm_protocol::bip157::FilterHeader {
+            blvm_protocol::bip157::FilterHeader {
                 filter_hash: [0u8; 32],
                 prev_header_hash: [0u8; 32],
             }

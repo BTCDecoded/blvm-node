@@ -3,13 +3,13 @@
 #[cfg(all(test, feature = "zmq"))]
 mod tests {
     use crate::zmq::{ZmqConfig, ZmqPublisher};
-    use bllvm_protocol::{Block, Hash, Transaction};
+    use blvm_protocol::{Block, Hash, Transaction};
     use std::time::Duration;
     use tokio::time::timeout;
     use zmq::{Context, SUB};
 
     fn create_test_block() -> Block {
-        use bllvm_protocol::BlockHeader;
+        use blvm_protocol::BlockHeader;
         Block {
             header: BlockHeader {
                 version: 1,
@@ -24,7 +24,7 @@ mod tests {
     }
 
     fn create_test_transaction() -> Transaction {
-        use bllvm_protocol::{tx_inputs, tx_outputs};
+        use blvm_protocol::{tx_inputs, tx_outputs};
         Transaction {
             version: 1,
             inputs: tx_inputs![],

@@ -1113,6 +1113,151 @@ impl EventPublisher {
     }
     
     /// Generic event publishing method (for any event type)
+    /// Publish configuration loaded/changed event
+    ///
+    /// Modules can subscribe to this to react to config changes.
+    /// This is called when node configuration is loaded or updated.
+    pub async fn publish_config_loaded(
+        &self,
+        changed_sections: Vec<String>,
+        config_json: Option<String>,
+    ) {
+        debug!("Publishing ConfigLoaded event for sections: {:?}", changed_sections);
+
+        let payload = EventPayload::ConfigLoaded {
+            changed_sections,
+            config_json,
+        };
+
+        // Publish to module event system
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::ConfigLoaded, payload)
+            .await
+        {
+            warn!("Failed to publish ConfigLoaded event: {}", e);
+        }
+    }
+
+    /// Publish node shutdown event
+    ///
+    /// Modules should clean up gracefully when receiving this event.
+    pub async fn publish_node_shutdown(&self, reason: String, timeout_seconds: u64) {
+        debug!("Publishing NodeShutdown event: reason={}, timeout={}s", reason, timeout_seconds);
+
+        let payload = EventPayload::NodeShutdown {
+            reason,
+            timeout_seconds,
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::NodeShutdown, payload)
+            .await
+        {
+            warn!("Failed to publish NodeShutdown event: {}", e);
+        }
+    }
+
+    /// Publish data maintenance event (unified cleanup/flush)
+    ///
+    /// Modules should perform the requested maintenance operation:
+    /// - "flush": Flush pending writes (for shutdown, urgent operations)
+    /// - "cleanup": Delete old data (for periodic maintenance, low disk)
+    /// - "both": Both flush and cleanup
+    ///
+    /// Urgency levels:
+    /// - "low": Periodic maintenance, can be done asynchronously
+    /// - "medium": Scheduled maintenance, should complete soon
+    /// - "high": Urgent (shutdown, low disk), must complete quickly
+    pub async fn publish_data_maintenance(
+        &self,
+        operation: String, // "flush", "cleanup", or "both"
+        urgency: String,    // "low", "medium", or "high"
+        reason: String,     // "periodic", "shutdown", "low_disk", "manual"
+        target_age_days: Option<u64>,
+        timeout_seconds: Option<u64>,
+    ) {
+        debug!(
+            "Publishing DataMaintenance event: operation={}, urgency={}, reason={}",
+            operation, urgency, reason
+        );
+
+        let payload = EventPayload::DataMaintenance {
+            operation,
+            urgency,
+            reason,
+            target_age_days,
+            timeout_seconds,
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::DataMaintenance, payload)
+            .await
+        {
+            warn!("Failed to publish DataMaintenance event: {}", e);
+        }
+    }
+
+    /// Publish disk space low event
+    ///
+    /// Modules should clean up data when disk space is low.
+    pub async fn publish_disk_space_low(
+        &self,
+        available_bytes: u64,
+        total_bytes: u64,
+        percent_free: f64,
+        disk_path: String,
+    ) {
+        debug!(
+            "Publishing DiskSpaceLow event: available={} bytes, total={} bytes, percent_free={:.2}%",
+            available_bytes, total_bytes, percent_free
+        );
+
+        let payload = EventPayload::DiskSpaceLow {
+            available_bytes,
+            total_bytes,
+            percent_free,
+            disk_path,
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::DiskSpaceLow, payload)
+            .await
+        {
+            warn!("Failed to publish DiskSpaceLow event: {}", e);
+        }
+    }
+
+    /// Publish health check event
+    ///
+    /// Modules can report their health status when receiving this event.
+    pub async fn publish_health_check(
+        &self,
+        check_type: String,
+        node_healthy: bool,
+        health_report: Option<String>,
+    ) {
+        debug!("Publishing HealthCheck event: type={}, healthy={}", check_type, node_healthy);
+
+        let payload = EventPayload::HealthCheck {
+            check_type,
+            node_healthy,
+            health_report,
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::HealthCheck, payload)
+            .await
+        {
+            warn!("Failed to publish HealthCheck event: {}", e);
+        }
+    }
+
+    /// Generic event publisher (for custom events)
     pub async fn publish_event(&self, event_type: EventType, payload: EventPayload) -> Result<(), crate::module::traits::ModuleError> {
         self.event_manager.publish_event(event_type, payload).await
     }
@@ -1122,6 +1267,8 @@ impl EventPublisher {
 // - EventManager is already Sync (uses Arc internally)
 // - ZmqPublisher's Socket is only accessed through async methods which are Send
 // - All operations are async and don't require synchronous access to the Socket
-// This is a workaround for ZMQ's Socket type not being Sync, but the actual usage is safe.
+// This is a workaround for ZMQ's Socket type not being Sync/Send, but the actual usage is safe.
 #[cfg(feature = "zmq")]
 unsafe impl Sync for EventPublisher {}
+#[cfg(feature = "zmq")]
+unsafe impl Send for EventPublisher {}

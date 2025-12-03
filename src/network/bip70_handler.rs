@@ -8,7 +8,7 @@ use crate::network::protocol::{
 };
 use crate::payment::processor::PaymentProcessor;
 use anyhow::Result;
-use bllvm_protocol::payment::Bip70Error;
+use blvm_protocol::payment::Bip70Error;
 use hex;
 use std::sync::Arc;
 
@@ -77,7 +77,7 @@ pub async fn handle_payment(
 
 /// Validate PaymentRequest message from P2P network
 pub fn validate_payment_request_message(msg: &PaymentRequestMessage) -> Result<(), Bip70Error> {
-    use bllvm_protocol::payment::PaymentProtocolClient;
+    use blvm_protocol::payment::PaymentProtocolClient;
     PaymentProtocolClient::validate_payment_request(
         &msg.payment_request,
         Some(&msg.merchant_pubkey),
@@ -89,7 +89,7 @@ pub fn validate_payment_ack_message(
     ack: &PaymentACKMessage,
     merchant_pubkey: &[u8],
 ) -> Result<(), Bip70Error> {
-    use bllvm_protocol::payment::PaymentProtocolClient;
+    use blvm_protocol::payment::PaymentProtocolClient;
     PaymentProtocolClient::validate_payment_ack(
         &ack.payment_ack,
         &ack.merchant_signature,

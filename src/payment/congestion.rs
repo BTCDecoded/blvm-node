@@ -10,7 +10,7 @@ use crate::node::mempool::MempoolManager;
 use crate::payment::covenant::{CovenantEngine, CovenantProof};
 use crate::payment::processor::PaymentError;
 use crate::storage::Storage;
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_protocol::payment::PaymentOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;

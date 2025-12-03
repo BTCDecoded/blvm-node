@@ -9,7 +9,7 @@ use crate::payment::processor::PaymentError;
 use crate::payment::state_machine::PaymentStateMachine;
 use crate::storage::Storage;
 use crate::{Hash, Transaction};
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_protocol::payment::PaymentOutput;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -281,7 +281,7 @@ impl SettlementMonitor {
         expected_outputs: &[PaymentOutput],
     ) -> bool {
         // Convert expected outputs to transaction outputs for comparison
-        use bllvm_consensus::types::{ByteString, Integer, TransactionOutput};
+        use blvm_consensus::types::{ByteString, Integer, TransactionOutput};
         let expected_tx_outputs: Vec<TransactionOutput> = expected_outputs
             .iter()
             .filter_map(|po| {

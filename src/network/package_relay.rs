@@ -14,7 +14,7 @@
 //! - More efficient validation (package as unit)
 
 use crate::network::txhash::calculate_txid;
-use bllvm_protocol::{Hash, Transaction};
+use blvm_protocol::{Hash, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
@@ -142,7 +142,7 @@ impl TransactionPackage {
     /// Create a new transaction package with UTXO set for fee calculation
     pub fn new_with_utxo_set(
         transactions: Vec<Transaction>,
-        utxo_set: Option<&bllvm_protocol::UtxoSet>,
+        utxo_set: Option<&blvm_protocol::UtxoSet>,
     ) -> Result<Self, PackageError> {
         if transactions.is_empty() {
             return Err(PackageError::EmptyPackage);

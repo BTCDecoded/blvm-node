@@ -13,7 +13,7 @@ path = ".."
 
 [dependencies]
 libfuzzer-sys = "0.4"
-bllvm-consensus = { path = "../../bllvm-consensus" }
+blvm-consensus = { path = "../../blvm-consensus" }
 
 # Prevent warnings in generated code
 [profile.release]

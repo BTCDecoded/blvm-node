@@ -4,7 +4,7 @@
 
 use crate::utils::current_timestamp;
 use anyhow::Result;
-use bllvm_protocol::{Block, BlockHeader, Transaction};
+use blvm_protocol::{Block, BlockHeader, Transaction};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -24,7 +24,7 @@ pub trait MempoolProvider: Send + Sync {
     fn get_prioritized_transactions(
         &self,
         limit: usize,
-        utxo_set: &bllvm_protocol::UtxoSet,
+        utxo_set: &blvm_protocol::UtxoSet,
     ) -> Vec<Transaction>;
 
     /// Remove transaction from mempool
@@ -71,7 +71,7 @@ impl TransactionSelector {
     pub fn select_transactions(
         &self,
         mempool: &dyn MempoolProvider,
-        utxo_set: &bllvm_protocol::UtxoSet,
+        utxo_set: &blvm_protocol::UtxoSet,
     ) -> Vec<Transaction> {
         let mut selected = Vec::new();
         let mut current_size = 0;
@@ -245,7 +245,7 @@ impl MiningEngine {
         self.block_template = Some(template.clone());
 
         // Use consensus layer to mine the block (actual PoW)
-        use bllvm_protocol::ConsensusProof;
+        use blvm_protocol::ConsensusProof;
         let consensus = ConsensusProof::new();
 
         // Calculate max attempts per thread based on difficulty
@@ -276,10 +276,10 @@ impl MiningEngine {
         &mut self,
         template: Block,
         max_attempts_per_thread: u64,
-        _consensus: &bllvm_protocol::ConsensusProof,
+        _consensus: &blvm_protocol::ConsensusProof,
     ) -> Result<Block> {
-        use bllvm_protocol::mining::MiningResult;
-        use bllvm_protocol::pow::check_proof_of_work;
+        use blvm_protocol::mining::MiningResult;
+        use blvm_protocol::pow::check_proof_of_work;
         use tokio::sync::oneshot;
 
         // Calculate nonce range per thread
@@ -357,9 +357,9 @@ impl MiningEngine {
     fn handle_mining_result(
         &mut self,
         mined_block: Block,
-        result: bllvm_protocol::mining::MiningResult,
+        result: blvm_protocol::mining::MiningResult,
     ) -> Result<Block> {
-        use bllvm_protocol::mining::MiningResult;
+        use blvm_protocol::mining::MiningResult;
 
         match result {
             MiningResult::Success => {
@@ -565,7 +565,7 @@ impl MiningCoordinator {
                 .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?
         } else {
             // No storage - use empty UTXO set (will result in 0 fees)
-            bllvm_protocol::UtxoSet::new()
+            blvm_protocol::UtxoSet::new()
         };
 
         // Select transactions from mempool (with UTXO set for accurate fee calculation)
@@ -583,7 +583,7 @@ impl MiningCoordinator {
         all_transactions.extend(transactions);
 
         // Calculate merkle root from transactions (we own all_transactions, so we can mutate it)
-        use bllvm_protocol::mining::calculate_merkle_root;
+        use blvm_protocol::mining::calculate_merkle_root;
         let merkle_root = calculate_merkle_root(&all_transactions)
             .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {}", e))?;
 
@@ -614,9 +614,9 @@ impl MiningCoordinator {
         &self,
         height: u64,
         selected_transactions: &[Transaction],
-        utxo_set: &bllvm_protocol::UtxoSet,
+        utxo_set: &blvm_protocol::UtxoSet,
     ) -> Result<Transaction> {
-        use bllvm_protocol::ConsensusProof;
+        use blvm_protocol::ConsensusProof;
 
         // 1. Get block subsidy from consensus layer
         let consensus = ConsensusProof::new();
@@ -645,8 +645,8 @@ impl MiningCoordinator {
         // 4. Create coinbase transaction
         Ok(Transaction {
             version: 1,
-            inputs: bllvm_protocol::tx_inputs![],
-            outputs: bllvm_protocol::tx_outputs![bllvm_protocol::TransactionOutput {
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
                 value: coinbase_value as i64,
                 script_pubkey: vec![
                     0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -804,7 +804,7 @@ impl MempoolProvider for MockMempoolProvider {
     fn get_prioritized_transactions(
         &self,
         limit: usize,
-        _utxo_set: &bllvm_protocol::UtxoSet,
+        _utxo_set: &blvm_protocol::UtxoSet,
     ) -> Vec<Transaction> {
         // Mock implementation ignores UTXO set and uses pre-calculated priorities
         self.prioritized_transactions
@@ -827,7 +827,7 @@ impl MempoolProvider for MockMempoolProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bllvm_protocol::TransactionOutput;
+    use blvm_protocol::TransactionOutput;
 
     #[test]
     fn test_transaction_selector_creation() {
@@ -859,7 +859,7 @@ mod tests {
         mempool.add_transaction(tx2);
         mempool.add_transaction(tx3);
 
-        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::new();
         let selected = selector.select_transactions(&mempool, &empty_utxo_set);
         assert!(!selected.is_empty());
         assert!(selected.len() <= 3);
@@ -932,7 +932,7 @@ mod tests {
             assert_ne!(mined_block.header.nonce, template.header.nonce); // Nonce should change
 
             // Verify proof of work
-            use bllvm_protocol::pow::check_proof_of_work;
+            use blvm_protocol::pow::check_proof_of_work;
             let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
             assert!(pow_valid, "Mined block should have valid proof of work");
 
@@ -959,7 +959,7 @@ mod tests {
             assert_eq!(mined_block.header.version, template.header.version);
 
             // Verify proof of work
-            use bllvm_protocol::pow::check_proof_of_work;
+            use blvm_protocol::pow::check_proof_of_work;
             let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
             assert!(pow_valid, "Mined block should have valid proof of work");
 
@@ -990,7 +990,7 @@ mod tests {
             assert_ne!(mined_block.header.nonce, template.header.nonce);
 
             // Verify proof of work
-            use bllvm_protocol::pow::check_proof_of_work;
+            use blvm_protocol::pow::check_proof_of_work;
             let pow_valid = check_proof_of_work(&mined_block.header).unwrap();
             assert!(pow_valid, "Mined block should have valid proof of work");
 
@@ -1044,7 +1044,7 @@ mod tests {
         let mempool = MockMempoolProvider::new();
         assert_eq!(mempool.get_mempool_size(), 0);
         assert!(mempool.get_transactions().is_empty());
-        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::new();
         assert!(mempool
             .get_prioritized_transactions(10, &empty_utxo_set)
             .is_empty());
@@ -1063,7 +1063,7 @@ mod tests {
         assert_eq!(mempool.get_mempool_size(), 2);
         assert_eq!(mempool.get_transactions().len(), 2);
 
-        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::new();
         let prioritized = mempool.get_prioritized_transactions(10, &empty_utxo_set);
         assert_eq!(prioritized.len(), 2);
 
@@ -1090,7 +1090,7 @@ mod tests {
         mempool.add_transaction(tx_high_fee);
         mempool.add_transaction(tx_medium_fee);
 
-        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::new();
         let prioritized = mempool.get_prioritized_transactions(10, &empty_utxo_set);
         assert_eq!(prioritized.len(), 3);
 
@@ -1250,7 +1250,7 @@ mod tests {
         let coordinator = MiningCoordinator::new(mempool, None);
 
         // Test coinbase creation with no transactions (subsidy only)
-        let empty_utxo_set = bllvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::new();
         let coinbase = coordinator
             .create_coinbase_transaction(0, &[], &empty_utxo_set)
             .await;
@@ -1267,10 +1267,10 @@ mod tests {
 
     // Helper functions for tests
     fn create_test_transaction(version: i32, output_value: u64) -> Transaction {
-        use bllvm_protocol::{OutPoint, TransactionInput};
+        use blvm_protocol::{OutPoint, TransactionInput};
         Transaction {
             version: version as u64,
-            inputs: bllvm_protocol::tx_inputs![TransactionInput {
+            inputs: blvm_protocol::tx_inputs![TransactionInput {
                 prevout: OutPoint {
                     hash: [0u8; 32],
                     index: 0,
@@ -1281,7 +1281,7 @@ mod tests {
                 ],
                 sequence: 0xffffffff,
             }],
-            outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
                 value: output_value as i64,
                 script_pubkey: vec![
                     0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

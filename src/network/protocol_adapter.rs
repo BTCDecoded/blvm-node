@@ -5,7 +5,7 @@
 
 use crate::network::transport::TransportType;
 use anyhow::Result;
-use bllvm_protocol::network::NetworkMessage as ConsensusNetworkMessage;
+use blvm_protocol::network::NetworkMessage as ConsensusNetworkMessage;
 
 #[cfg(feature = "production")]
 use std::collections::hash_map::DefaultHasher;
@@ -139,8 +139,8 @@ impl ProtocolAdapter {
         let payload = match &protocol_msg {
             crate::network::protocol::ProtocolMessage::Version(v) => {
                 // Use proper Bitcoin wire format for version messages
-                use bllvm_protocol::network::{NetworkAddress, VersionMessage};
-                use bllvm_protocol::wire::serialize_version;
+                use blvm_protocol::network::{NetworkAddress, VersionMessage};
+                use blvm_protocol::wire::serialize_version;
 
                 let version_msg = VersionMessage {
                     version: v.version as u32,
@@ -186,7 +186,7 @@ impl ProtocolAdapter {
         // Optimization: Use optimized SHA256 in production
         #[cfg(feature = "production")]
         let checksum_bytes = {
-            use bllvm_consensus::crypto::OptimizedSha256;
+            use blvm_consensus::crypto::OptimizedSha256;
             let hasher = OptimizedSha256::new();
             hasher.hash256(&payload)
         };
@@ -308,7 +308,7 @@ impl ProtocolAdapter {
         msg: &crate::network::protocol::ProtocolMessage,
     ) -> Result<ConsensusNetworkMessage> {
         use crate::network::protocol::ProtocolMessage;
-        use bllvm_protocol::network::{
+        use blvm_protocol::network::{
             NetworkAddress as ConsensusNetworkAddress, PingMessage as ConsensusPingMessage,
             PongMessage as ConsensusPongMessage, VersionMessage as ConsensusVersionMessage,
         };
@@ -383,6 +383,9 @@ impl ProtocolAdapter {
             ConsensusNetworkMessage::FilteredBlock(_) => "filteredblock",
             ConsensusNetworkMessage::GetBanList(_) => "getbanlist",
             ConsensusNetworkMessage::BanList(_) => "banlist",
+            ConsensusNetworkMessage::EconomicNodeRegistration(_) => "economic_node_registration",
+            ConsensusNetworkMessage::EconomicNodeVeto(_) => "economic_node_veto",
+            ConsensusNetworkMessage::EconomicNodeStatus(_) => "economic_node_status",
         }
     }
 }

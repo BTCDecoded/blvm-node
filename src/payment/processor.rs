@@ -5,7 +5,7 @@
 
 use crate::config::PaymentConfig;
 use crate::module::registry::client::ModuleRegistry;
-use bllvm_protocol::payment::{
+use blvm_protocol::payment::{
     Payment, PaymentACK, PaymentOutput, PaymentProtocolServer, PaymentRequest,
 };
 use serde_json::json;
@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 ///
 /// Handles SegWit (P2WPKH, P2WSH) and Taproot (P2TR) addresses.
 fn address_to_script_pubkey(
-    address: &bllvm_protocol::address::BitcoinAddress,
+    address: &blvm_protocol::address::BitcoinAddress,
 ) -> Result<Vec<u8>, PaymentError> {
     match (address.witness_version, address.witness_program.len()) {
         // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
@@ -394,7 +394,7 @@ impl PaymentProcessor {
         merchant_key: Option<&secp256k1::SecretKey>,
     ) -> Result<PaymentRequest, PaymentError> {
         use crate::module::security::signing::ModuleSigner;
-        use bllvm_protocol::address::BitcoinAddress;
+        use blvm_protocol::address::BitcoinAddress;
 
         // Extract payment configuration from manifest
         let payment = manifest.payment.as_ref().ok_or_else(|| {

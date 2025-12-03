@@ -4,7 +4,7 @@
 
 use crate::storage::database::{Database, Tree};
 use anyhow::Result;
-use bllvm_protocol::{BlockHeader, Hash};
+use blvm_protocol::{BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -399,7 +399,7 @@ impl ChainState {
         &self,
         block_hash: &Hash,
         height: u64,
-        utxo_set: &bllvm_protocol::UtxoSet,
+        utxo_set: &blvm_protocol::UtxoSet,
         transaction_count: u64,
     ) -> Result<()> {
         use crate::storage::hashing::double_sha256;

@@ -233,6 +233,9 @@ impl ModuleApiHub {
                 let tip = self.node_api.get_chain_tip().await?;
                 ResponsePayload::Hash(tip)
             }
+            _ => return Err(crate::module::traits::ModuleError::OperationError(
+                format!("Unimplemented request payload: {:?}", request.payload)
+            )),
             RequestPayload::GetBlockHeight => {
                 let height = self.node_api.get_block_height().await?;
                 ResponsePayload::U64(height)
@@ -444,7 +447,7 @@ impl ModuleApiHub {
                 ResponsePayload::AllModuleHealth(health)
             }
             RequestPayload::ReportModuleHealth { health } => {
-                self.node_api.report_module_health(*health).await?;
+                self.node_api.report_module_health(health.clone()).await?;
                 ResponsePayload::HealthReported
             }
             // Network Integration
@@ -561,7 +564,7 @@ impl ModuleApiHub {
         use tracing::{info, warn};
         if success {
             info!(
-                target: "bllvm_node::module::audit",
+                target: "blvm_node::module::audit",
                 module_id = %module_id,
                 api_call = %api_call,
                 timestamp = timestamp,
@@ -569,7 +572,7 @@ impl ModuleApiHub {
             );
         } else {
             warn!(
-                target: "bllvm_node::module::audit",
+                target: "blvm_node::module::audit",
                 module_id = %module_id,
                 api_call = %api_call,
                 timestamp = timestamp,

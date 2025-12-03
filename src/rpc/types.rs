@@ -3,7 +3,7 @@
 //! Common types and utilities used across RPC methods.
 
 use serde::{Deserialize, Serialize};
-// use bllvm_protocol::{Block, Transaction, Hash};
+// use blvm_protocol::{Block, Transaction, Hash};
 
 /// RPC error response
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

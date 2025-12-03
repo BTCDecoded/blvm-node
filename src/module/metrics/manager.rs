@@ -81,7 +81,7 @@ impl MetricsManager {
         
         for (module_id, module_metrics) in metrics.iter() {
             for metric in module_metrics {
-                let metric_name = format!("bllvm_module_{}", metric.name.replace('-', "_"));
+                let metric_name = format!("blvm_module_{}", metric.name.replace('-', "_"));
                 let labels_str = if metric.labels.is_empty() {
                     format!("module_id=\"{}\"", module_id)
                 } else {

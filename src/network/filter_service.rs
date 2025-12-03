@@ -4,9 +4,9 @@
 //! Maintains filter header chain for efficient verification.
 
 use anyhow::{anyhow, Result};
-use bllvm_protocol::bip157;
-use bllvm_protocol::bip158::{build_block_filter, CompactBlockFilter};
-use bllvm_protocol::{Block, BlockHeader, Hash};
+use blvm_protocol::bip157;
+use blvm_protocol::bip158::{build_block_filter, CompactBlockFilter};
+use blvm_protocol::{Block, BlockHeader, Hash};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 

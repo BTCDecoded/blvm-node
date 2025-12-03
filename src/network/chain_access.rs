@@ -6,8 +6,8 @@
 use crate::node::mempool::MempoolManager;
 use crate::storage::{blockstore::BlockStore, txindex::TxIndex};
 use anyhow::Result;
-use bllvm_protocol::network::{ChainObject, ChainStateAccess};
-use bllvm_protocol::{BlockHeader, Hash, Transaction};
+use blvm_protocol::network::{ChainObject, ChainStateAccess};
+use blvm_protocol::{BlockHeader, Hash, Transaction};
 use std::sync::Arc;
 
 /// Chain state access implementation that bridges node storage to protocol layer
@@ -107,20 +107,20 @@ impl ChainStateAccess for NodeChainAccess {
 ///
 /// Example usage in a network handler:
 /// ```rust,ignore
-/// use bllvm_protocol::network::{process_network_message, PeerState, ChainStateAccess};
-/// use bllvm_protocol::BitcoinProtocolEngine;
-/// use bllvm_node::network::chain_access::NodeChainAccess;
+/// use blvm_protocol::network::{process_network_message, PeerState, ChainStateAccess};
+/// use blvm_protocol::BitcoinProtocolEngine;
+/// use blvm_node::network::chain_access::NodeChainAccess;
 /// use std::collections::HashMap;
-/// use bllvm_protocol::UTXO;
+/// use blvm_protocol::UTXO;
 /// use std::sync::Arc;
 ///
 /// // In your message handler:
-/// // let protocol_engine = BitcoinProtocolEngine::new(bllvm_protocol::ProtocolVersion::Regtest)?;
+/// // let protocol_engine = BitcoinProtocolEngine::new(blvm_protocol::ProtocolVersion::Regtest)?;
 /// // let message = /* your network message */;
 /// // let mut peer_state = PeerState::default();
-/// // let storage = Arc::new(bllvm_node::storage::Storage::new("data")?);
+/// // let storage = Arc::new(blvm_node::storage::Storage::new("data")?);
 /// // let tx_index = storage.transactions();
-/// // let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+/// // let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
 /// // let chain_access = NodeChainAccess::new(storage.blocks(), tx_index, mempool);
 /// // let utxo_set: HashMap<_, UTXO> = HashMap::new();
 /// // let height = 0u64;
@@ -134,14 +134,14 @@ impl ChainStateAccess for NodeChainAccess {
 /// // )?;
 /// ```
 pub fn process_protocol_message(
-    engine: &bllvm_protocol::BitcoinProtocolEngine,
-    message: &bllvm_protocol::network::NetworkMessage,
-    peer_state: &mut bllvm_protocol::network::PeerState,
+    engine: &blvm_protocol::BitcoinProtocolEngine,
+    message: &blvm_protocol::network::NetworkMessage,
+    peer_state: &mut blvm_protocol::network::PeerState,
     chain_access: &NodeChainAccess,
-    utxo_set: Option<&bllvm_protocol::UtxoSet>,
+    utxo_set: Option<&blvm_protocol::UtxoSet>,
     height: Option<u64>,
-) -> Result<bllvm_protocol::network::NetworkResponse> {
-    use bllvm_protocol::network::{process_network_message, ChainStateAccess};
+) -> Result<blvm_protocol::network::NetworkResponse> {
+    use blvm_protocol::network::{process_network_message, ChainStateAccess};
 
     process_network_message(
         engine,

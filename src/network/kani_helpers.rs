@@ -83,7 +83,7 @@ macro_rules! assume_addr_message_bounds {
 #[macro_export]
 macro_rules! assume_block_message_bounds {
     ($msg:expr) => {
-        use bllvm_consensus::kani_helpers::assume_block_bounds;
+        use blvm_consensus::kani_helpers::assume_block_bounds;
         assume_block_bounds!($msg.block, 2, 2); // Bound block (max 2 txs, 2 inputs/outputs each)
         kani::assume($msg.witnesses.len() <= 10); // Bound witnesses
     };
@@ -95,7 +95,7 @@ macro_rules! assume_block_message_bounds {
 #[macro_export]
 macro_rules! assume_tx_message_bounds {
     ($msg:expr) => {
-        use bllvm_consensus::kani_helpers::assume_transaction_bounds;
+        use blvm_consensus::kani_helpers::assume_transaction_bounds;
         assume_transaction_bounds!($msg.transaction);
     };
 }

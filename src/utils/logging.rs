@@ -10,14 +10,14 @@
 //!
 //! ## Main Node
 //! ```rust
-//! use bllvm_node::utils::init_logging;
+//! use blvm_node::utils::init_logging;
 //!
 //! init_logging(None); // Uses RUST_LOG or defaults to "info"
 //! ```
 //!
 //! ## Module
 //! ```rust
-//! use bllvm_node::utils::init_module_logging;
+//! use blvm_node::utils::init_module_logging;
 //!
 //! init_module_logging("my_module", None); // Module gets its own filter
 //! ```
@@ -33,12 +33,12 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 /// - Uses `EnvFilter::from_default_env()` for proper RUST_LOG handling
 ///
 /// # Arguments
-/// * `filter` - Optional log filter from config (e.g., "info", "debug", "bllvm_node=debug,network=trace")
+/// * `filter` - Optional log filter from config (e.g., "info", "debug", "blvm_node=debug,network=trace")
 ///   If None, uses RUST_LOG environment variable or defaults to "info"
 ///
 /// # Example
 /// ```rust
-/// use bllvm_node::utils::init_logging;
+/// use blvm_node::utils::init_logging;
 ///
 /// // Use RUST_LOG (standard) or default to "info"
 /// init_logging(None);
@@ -94,11 +94,11 @@ pub fn init_logging(filter: Option<&str>) {
 /// * `module_name` - Name of the module (e.g., "lightning", "lnbits")
 /// * `filter` - Optional log filter from config. If None, uses:
 ///   - RUST_LOG if set (standard, takes precedence)
-///   - Otherwise: "{module_name}=info,bllvm_node::module=debug"
+///   - Otherwise: "{module_name}=info,blvm_node::module=debug"
 ///
 /// # Example
 /// ```rust
-/// use bllvm_node::utils::init_module_logging;
+/// use blvm_node::utils::init_module_logging;
 ///
 /// // Default module logging (respects RUST_LOG)
 /// init_module_logging("lightning", None);
@@ -111,7 +111,7 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
     let mut env_filter = EnvFilter::from_default_env();
 
     // Default filter for modules: module at info, node module communication at debug
-    let default_filter = format!("{}={},bllvm_node::module=debug", module_name, "info");
+    let default_filter = format!("{}={},blvm_node::module=debug", module_name, "info");
 
     // If RUST_LOG is not set, use config filter or default
     if std::env::var("RUST_LOG").is_err() {
@@ -146,7 +146,7 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
 ///
 /// # Example
 /// ```rust
-/// use bllvm_node::utils::init_json_logging;
+/// use blvm_node::utils::init_json_logging;
 ///
 /// init_json_logging(None);
 /// ```
@@ -160,7 +160,7 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
 ///
 /// # Example
 /// ```rust
-/// use bllvm_node::utils::init_json_logging;
+/// use blvm_node::utils::init_json_logging;
 ///
 /// init_json_logging(None);
 /// ```
@@ -203,8 +203,8 @@ pub fn init_json_logging(filter: Option<&str>) {
 ///
 /// # Example
 /// ```rust
-/// use bllvm_node::utils::init_logging_from_config;
-/// use bllvm_node::config::NodeConfig;
+/// use blvm_node::utils::init_logging_from_config;
+/// use blvm_node::config::NodeConfig;
 ///
 /// let config = NodeConfig::default();
 /// init_logging_from_config(config.logging.as_ref());

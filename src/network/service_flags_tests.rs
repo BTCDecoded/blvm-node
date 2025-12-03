@@ -4,7 +4,7 @@
 mod tests {
     use super::super::protocol::VersionMessage;
     use super::super::protocol::{NODE_UTXO_COMMITMENTS, NODE_BAN_LIST_SHARING, NODE_PACKAGE_RELAY, NODE_FIBRE};
-    use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
+    use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
     use crate::network::protocol::NetworkAddress;
 
     fn create_version_message(services: u64) -> VersionMessage {

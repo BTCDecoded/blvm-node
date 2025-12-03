@@ -46,5 +46,6 @@ pub fn redact_auth_header(msg: &str) -> String {
 }
 
 // Re-export types and implementation from auth_impl module
+#[path = "auth_impl.rs"]
 mod auth_impl;
 pub use auth_impl::*;
