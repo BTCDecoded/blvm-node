@@ -3,6 +3,7 @@
 //! Provides message ID deduplication, timestamp validation, and request ID tracking
 //! to prevent replay attacks on custom protocol messages.
 
+use crate::utils::current_timestamp;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,7 +11,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Instant};
 use tracing::{debug, warn};
-use crate::utils::current_timestamp;
 
 /// Replay protection errors
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +51,7 @@ impl ReplayProtection {
             Duration::from_secs(300),  // cleanup every 5 minutes
             Duration::from_secs(3600), // message IDs expire after 1 hour
             Duration::from_secs(300),  // request IDs expire after 5 minutes
-            300,                        // 5 minute future tolerance
+            300,                       // 5 minute future tolerance
         )
     }
 
@@ -126,11 +126,7 @@ impl ReplayProtection {
 
         // Check future tolerance
         if timestamp > (now + future_tolerance as i64) {
-            return Err(ReplayError::TimestampTooFuture(
-                timestamp - now,
-                future_tolerance,
-            )
-            .into());
+            return Err(ReplayError::TimestampTooFuture(timestamp - now, future_tolerance).into());
         }
 
         // Check max age
@@ -151,11 +147,7 @@ impl ReplayProtection {
 
         // Check future tolerance
         if timestamp > (now + future_tolerance as i64) {
-            return Err(ReplayError::TimestampTooFuture(
-                timestamp - now,
-                future_tolerance,
-            )
-            .into());
+            return Err(ReplayError::TimestampTooFuture(timestamp - now, future_tolerance).into());
         }
 
         // Check max age
@@ -240,10 +232,16 @@ mod tests {
         let message_id = "test-message-id-123";
 
         // First check should succeed
-        assert!(protection.check_message_id(message_id, current_timestamp() as i64).await.is_ok());
+        assert!(protection
+            .check_message_id(message_id, current_timestamp() as i64)
+            .await
+            .is_ok());
 
         // Second check should fail (duplicate)
-        assert!(protection.check_message_id(message_id, current_timestamp() as i64).await.is_err());
+        assert!(protection
+            .check_message_id(message_id, current_timestamp() as i64)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -279,13 +277,16 @@ mod tests {
     async fn test_cleanup() {
         let protection = ReplayProtection::with_config(
             Duration::from_millis(100), // cleanup every 100ms
-            Duration::from_millis(200),  // message IDs expire after 200ms
-            Duration::from_millis(200),  // request IDs expire after 200ms
+            Duration::from_millis(200), // message IDs expire after 200ms
+            Duration::from_millis(200), // request IDs expire after 200ms
             300,
         );
 
         // Add some entries
-        protection.check_message_id("msg1", current_timestamp() as i64).await.unwrap();
+        protection
+            .check_message_id("msg1", current_timestamp() as i64)
+            .await
+            .unwrap();
         protection.check_request_id(1).await.unwrap();
 
         // Wait for cleanup
@@ -297,5 +298,3 @@ mod tests {
         assert_eq!(req_count, 0);
     }
 }
-
-

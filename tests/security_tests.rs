@@ -2,12 +2,12 @@
 //!
 //! Tests DoS protection, rate limiting, ban list, and message size validation.
 
-use bllvm_node::network::*;
+use blvm_node::network::*;
 use std::net::SocketAddr;
 
 #[tokio::test]
 async fn test_message_size_validation() {
-    use bllvm_node::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH;
+    use blvm_node::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH;
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);
@@ -15,7 +15,7 @@ async fn test_message_size_validation() {
     // Test that oversized messages are rejected
     // This is tested at the TransportConnection level, but we can verify
     // the protocol parser also validates size
-    use bllvm_node::network::protocol::ProtocolParser;
+    use blvm_node::network::protocol::ProtocolParser;
 
     // Create a message that's too large
     let oversized_data = vec![0u8; MAX_PROTOCOL_MESSAGE_LENGTH + 1];

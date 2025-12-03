@@ -30,7 +30,18 @@ pub struct ModuleIpcServer {
     /// API hub for request routing
     api_hub: Option<Arc<tokio::sync::Mutex<ModuleApiHub>>>,
     /// RPC request channels (module_id -> channel) for RPC endpoint registration
-    rpc_channels: Arc<tokio::sync::RwLock<HashMap<String, mpsc::UnboundedSender<(u64, serde_json::Value, mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>)>>>>,
+    rpc_channels: Arc<
+        tokio::sync::RwLock<
+            HashMap<
+                String,
+                mpsc::UnboundedSender<(
+                    u64,
+                    serde_json::Value,
+                    mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
+                )>,
+            >,
+        >,
+    >,
 }
 
 /// Active connection to a module
@@ -48,7 +59,13 @@ struct ModuleConnection {
     /// Handle to the unified writer task
     writer_task_handle: Option<tokio::task::JoinHandle<()>>,
     /// Channel for RPC requests to this module (for module RPC endpoints)
-    rpc_request_tx: Option<mpsc::UnboundedSender<(u64, serde_json::Value, mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>)>>,
+    rpc_request_tx: Option<
+        mpsc::UnboundedSender<(
+            u64,
+            serde_json::Value,
+            mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
+        )>,
+    >,
 }
 
 impl ModuleIpcServer {
@@ -62,9 +79,18 @@ impl ModuleIpcServer {
             rpc_channels: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Get RPC request channel for a module (for RPC endpoint registration)
-    pub async fn get_rpc_channel(&self, module_id: &str) -> Option<mpsc::UnboundedSender<(u64, serde_json::Value, mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>)>> {
+    pub async fn get_rpc_channel(
+        &self,
+        module_id: &str,
+    ) -> Option<
+        mpsc::UnboundedSender<(
+            u64,
+            serde_json::Value,
+            mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
+        )>,
+    > {
         let channels = self.rpc_channels.read().await;
         channels.get(module_id).cloned()
     }
@@ -221,8 +247,11 @@ impl ModuleIpcServer {
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
 
         // Create RPC request channel (for sending RPC requests from node to module)
-        type RpcResponseSender = mpsc::UnboundedSender<std::result::Result<serde_json::Value, crate::rpc::errors::RpcError>>;
-        let (rpc_request_tx, _rpc_request_rx) = mpsc::unbounded_channel::<(u64, serde_json::Value, RpcResponseSender)>();
+        type RpcResponseSender = mpsc::UnboundedSender<
+            std::result::Result<serde_json::Value, crate::rpc::errors::RpcError>,
+        >;
+        let (rpc_request_tx, _rpc_request_rx) =
+            mpsc::unbounded_channel::<(u64, serde_json::Value, RpcResponseSender)>();
 
         // Create event channel for this module (events from EventManager go here)
         let (event_tx, mut event_rx) = mpsc::channel(100);
@@ -281,8 +310,12 @@ impl ModuleIpcServer {
 
         // Initialize filesystem and storage access for this module
         // Extract module name from module_id (format: {module_name}_{uuid})
-        let module_name = module_id.split('_').next().unwrap_or(&module_id).to_string();
-        
+        let module_name = module_id
+            .split('_')
+            .next()
+            .unwrap_or(&module_id)
+            .to_string();
+
         // Get base data directory - extract from module_id or use default
         // Module ID format: {module_name}_{uuid}
         // We'll derive the base directory from the module name
@@ -290,18 +323,27 @@ impl ModuleIpcServer {
         // we'll use a reasonable default based on common patterns
         let base_data_dir = std::path::PathBuf::from("data/modules");
         let module_data_dir = base_data_dir.join(&module_name);
-        
+
         // Ensure module data directory exists
         if let Err(e) = std::fs::create_dir_all(&module_data_dir) {
-            warn!("Failed to create module data directory {:?}: {}", module_data_dir, e);
+            warn!(
+                "Failed to create module data directory {:?}: {}",
+                module_data_dir, e
+            );
         }
-        
+
         // Initialize module filesystem and storage access
-        if let Err(e) = node_api.initialize_module(module_id.clone(), module_data_dir, base_data_dir).await {
-            warn!("Failed to initialize module {} filesystem/storage: {}", module_id, e);
+        if let Err(e) = node_api
+            .initialize_module(module_id.clone(), module_data_dir, base_data_dir)
+            .await
+        {
+            warn!(
+                "Failed to initialize module {} filesystem/storage: {}",
+                module_id, e
+            );
             // Continue anyway - module can still use other APIs
         }
-        
+
         let mut connection = ModuleConnection {
             module_id: module_id.clone(),
             reader,
@@ -704,8 +746,14 @@ impl ModuleIpcServer {
                     ResponsePayload::StorageTreeId(tree_id),
                 ))
             }
-            RequestPayload::StorageInsert { tree_id, key, value } => {
-                node_api.storage_insert(tree_id.clone(), key.clone(), value.clone()).await?;
+            RequestPayload::StorageInsert {
+                tree_id,
+                key,
+                value,
+            } => {
+                node_api
+                    .storage_insert(tree_id.clone(), key.clone(), value.clone())
+                    .await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),
@@ -719,14 +767,18 @@ impl ModuleIpcServer {
                 ))
             }
             RequestPayload::StorageRemove { tree_id, key } => {
-                node_api.storage_remove(tree_id.clone(), key.clone()).await?;
+                node_api
+                    .storage_remove(tree_id.clone(), key.clone())
+                    .await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),
                 ))
             }
             RequestPayload::StorageContainsKey { tree_id, key } => {
-                let exists = node_api.storage_contains_key(tree_id.clone(), key.clone()).await?;
+                let exists = node_api
+                    .storage_contains_key(tree_id.clone(), key.clone())
+                    .await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(exists),
@@ -739,16 +791,26 @@ impl ModuleIpcServer {
                     ResponsePayload::StorageKeyValuePairs(pairs),
                 ))
             }
-            RequestPayload::StorageTransaction { tree_id, operations } => {
-                node_api.storage_transaction(tree_id.clone(), operations.clone()).await?;
+            RequestPayload::StorageTransaction {
+                tree_id,
+                operations,
+            } => {
+                node_api
+                    .storage_transaction(tree_id.clone(), operations.clone())
+                    .await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),
                 ))
             }
             // Module RPC Endpoint Registration
-            RequestPayload::RegisterRpcEndpoint { method, description } => {
-                node_api.register_rpc_endpoint(method.clone(), description.clone()).await?;
+            RequestPayload::RegisterRpcEndpoint {
+                method,
+                description,
+            } => {
+                node_api
+                    .register_rpc_endpoint(method.clone(), description.clone())
+                    .await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::RpcEndpointRegistered,
@@ -762,7 +824,9 @@ impl ModuleIpcServer {
                 ))
             }
             // Timers and Scheduled Tasks
-            RequestPayload::RegisterTimer { interval_seconds: _ } => {
+            RequestPayload::RegisterTimer {
+                interval_seconds: _,
+            } => {
                 // Note: Timer callbacks cannot be serialized over IPC
                 // For IPC-based timers, we need a different approach:
                 // The module would need to send a "timer_fire" request when the timer should fire
@@ -775,7 +839,8 @@ impl ModuleIpcServer {
                 // Note: Timers registered via IPC would need to be tracked differently
                 // For now, return an error
                 Err(ModuleError::OperationError(
-                    "Timer cancellation not supported over IPC. Use module-side timer management.".to_string()
+                    "Timer cancellation not supported over IPC. Use module-side timer management."
+                        .to_string(),
                 ))
             }
             RequestPayload::ScheduleTask { delay_seconds: _ } => {
@@ -801,15 +866,25 @@ impl ModuleIpcServer {
                 ))
             }
             // Network Integration
-            RequestPayload::SendMeshPacketToPeer { peer_addr, packet_data } => {
-                node_api.send_mesh_packet_to_peer(peer_addr.clone(), packet_data.clone()).await?;
+            RequestPayload::SendMeshPacketToPeer {
+                peer_addr,
+                packet_data,
+            } => {
+                node_api
+                    .send_mesh_packet_to_peer(peer_addr.clone(), packet_data.clone())
+                    .await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),
                 ))
             }
-            RequestPayload::SendStratumV2MessageToPeer { peer_addr, message_data } => {
-                node_api.send_stratum_v2_message_to_peer(peer_addr.clone(), message_data.clone()).await?;
+            RequestPayload::SendStratumV2MessageToPeer {
+                peer_addr,
+                message_data,
+            } => {
+                node_api
+                    .send_stratum_v2_message_to_peer(peer_addr.clone(), message_data.clone())
+                    .await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),

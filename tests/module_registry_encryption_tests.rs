@@ -2,16 +2,16 @@
 //!
 //! Tests encrypted/decrypted module serving based on payment state.
 
-use bllvm_node::config::PaymentConfig;
-use bllvm_node::module::encryption::{
+use blvm_node::config::PaymentConfig;
+use blvm_node::module::encryption::{
     load_encrypted_module, store_encrypted_module, EncryptedModuleMetadata, ModuleEncryption,
 };
-use bllvm_node::module::registry::client::ModuleRegistry;
-use bllvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
-use bllvm_node::network::module_registry_extensions::handle_get_module;
-use bllvm_node::network::protocol::GetModuleMessage;
-use bllvm_node::payment::processor::PaymentProcessor;
-use bllvm_node::payment::state_machine::{PaymentState, PaymentStateMachine};
+use blvm_node::module::registry::client::ModuleRegistry;
+use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
+use blvm_node::network::module_registry_extensions::handle_get_module;
+use blvm_node::network::protocol::GetModuleMessage;
+use blvm_node::payment::processor::PaymentProcessor;
+use blvm_node::payment::state_machine::{PaymentState, PaymentStateMachine};
 use secp256k1::{Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ use tempfile::TempDir;
 
 /// Helper to create a test manifest with payment
 fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
-    use bllvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
+    use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
 
     let secp = Secp256k1::new();
     let test_key = SecretKey::from_slice(&[1; 32]).unwrap();
@@ -79,8 +79,8 @@ async fn create_mock_registry(
     module_name: &str,
     _module_binary: &[u8],
 ) -> Arc<ModuleRegistry> {
-    use bllvm_node::module::registry::cache::{CachedModule, LocalCache};
-    use bllvm_node::module::registry::cas::ContentAddressableStorage;
+    use blvm_node::module::registry::cache::{CachedModule, LocalCache};
+    use blvm_node::module::registry::cas::ContentAddressableStorage;
 
     let cache_dir = temp_dir.path().join("cache");
     let cas_dir = temp_dir.path().join("cas");
@@ -285,7 +285,7 @@ async fn test_handle_get_module_payment_confirmed_serves_decrypted() {
     let state_machine = Arc::new(PaymentStateMachine::new(processor));
 
     // Set payment state to Settled (confirmed)
-    use bllvm_node::Hash;
+    use blvm_node::Hash;
     let tx_hash = [0u8; 32];
     let block_hash = [0u8; 32];
     state_machine

@@ -1,6 +1,6 @@
 //! Tests for process sandbox
 
-use bllvm_node::module::sandbox::process::{
+use blvm_node::module::sandbox::process::{
     ProcessSandbox, ResourceLimits, ResourceUsage, SandboxConfig,
 };
 use tempfile::TempDir;
@@ -78,7 +78,7 @@ fn test_sandbox_config_with_resource_limits() {
     let data_dir = temp_dir.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
 
-    let resource_limits_config = bllvm_node::config::ModuleResourceLimitsConfig {
+    let resource_limits_config = blvm_node::config::ModuleResourceLimitsConfig {
         default_max_cpu_percent: 75,
         default_max_memory_bytes: 1024 * 1024 * 1024,
         default_max_file_descriptors: 512,

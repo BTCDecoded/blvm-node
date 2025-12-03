@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::time::{Duration, Instant};
 
-use bllvm_node::network::dandelion::{Clock, DandelionPhase, DandelionRelay};
+use blvm_node::network::dandelion::{Clock, DandelionPhase, DandelionRelay};
 
 #[derive(Clone)]
 struct TestClock {

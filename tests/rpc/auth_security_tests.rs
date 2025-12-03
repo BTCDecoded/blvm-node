@@ -3,7 +3,7 @@
 //! Tests security boundaries, authentication bypass attempts,
 //! and edge cases that could lead to security vulnerabilities.
 
-use bllvm_node::rpc::auth::{RpcAuthManager, AuthToken, UserId};
+use blvm_node::rpc::auth::{RpcAuthManager, AuthToken, UserId};
 use std::net::SocketAddr;
 use hyper::HeaderMap;
 

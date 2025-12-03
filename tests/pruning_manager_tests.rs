@@ -1,9 +1,9 @@
 //! Tests for pruning manager
 
-use bllvm_node::config::{PruningConfig, PruningMode};
-use bllvm_node::storage::blockstore::BlockStore;
-use bllvm_node::storage::database::create_database;
-use bllvm_node::storage::pruning::PruningManager;
+use blvm_node::config::{PruningConfig, PruningMode};
+use blvm_node::storage::blockstore::BlockStore;
+use blvm_node::storage::database::create_database;
+use blvm_node::storage::pruning::PruningManager;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -12,7 +12,7 @@ fn create_test_blockstore() -> (TempDir, Arc<BlockStore>) {
     let db = Arc::from(
         create_database(
             temp_dir.path(),
-            bllvm_node::storage::database::DatabaseBackend::Redb,
+            blvm_node::storage::database::DatabaseBackend::Redb,
         )
         .unwrap(),
     );

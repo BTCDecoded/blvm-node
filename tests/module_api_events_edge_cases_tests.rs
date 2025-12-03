@@ -2,9 +2,9 @@
 //!
 //! Stress tests and edge cases for event publishing: queue overflow, concurrent publishing.
 
-use bllvm_node::module::api::events::EventManager;
-use bllvm_node::module::ipc::protocol::EventPayload;
-use bllvm_node::module::traits::EventType;
+use blvm_node::module::api::events::EventManager;
+use blvm_node::module::ipc::protocol::EventPayload;
+use blvm_node::module::traits::EventType;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 

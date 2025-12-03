@@ -1,16 +1,16 @@
 //! Tests for Compact Block Relay (BIP152)
 
-use bllvm_node::network::compact_blocks::{calculate_short_tx_id, calculate_tx_hash, CompactBlock};
-use bllvm_node::network::transport::TransportType;
-use bllvm_node::{Block, BlockHeader, Hash, Transaction};
-use bllvm_protocol::tx_inputs;
-use bllvm_protocol::tx_outputs;
+use blvm_node::network::compact_blocks::{calculate_short_tx_id, calculate_tx_hash, CompactBlock};
+use blvm_node::network::transport::TransportType;
+use blvm_node::{Block, BlockHeader, Hash, Transaction};
+use blvm_protocol::tx_inputs;
+use blvm_protocol::tx_outputs;
 
 fn create_test_transaction() -> Transaction {
     Transaction {
         version: 1,
         inputs: tx_inputs![],
-        outputs: tx_outputs![bllvm_protocol::TransactionOutput {
+        outputs: tx_outputs![blvm_protocol::TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51], // OP_1
         }],
@@ -71,7 +71,7 @@ fn test_short_tx_id_different_transactions() {
     let tx2 = Transaction {
         version: 2, // Different version
         inputs: tx_inputs![],
-        outputs: tx_outputs![bllvm_protocol::TransactionOutput {
+        outputs: tx_outputs![blvm_protocol::TransactionOutput {
             value: 2000, // Different value
             script_pubkey: vec![0x51],
         }],
@@ -149,7 +149,7 @@ fn test_compact_block_serialization() {
 #[test]
 fn test_should_prefer_compact_blocks_tcp() {
     let should_prefer =
-        bllvm_node::network::compact_blocks::should_prefer_compact_blocks(TransportType::Tcp);
+        blvm_node::network::compact_blocks::should_prefer_compact_blocks(TransportType::Tcp);
     // TCP doesn't necessarily prefer compact blocks
     assert!(should_prefer == false || should_prefer == true); // Just verify it returns a bool
 }
@@ -157,7 +157,7 @@ fn test_should_prefer_compact_blocks_tcp() {
 #[test]
 fn test_recommended_compact_block_version() {
     let version =
-        bllvm_node::network::compact_blocks::recommended_compact_block_version(TransportType::Tcp);
+        blvm_node::network::compact_blocks::recommended_compact_block_version(TransportType::Tcp);
     // Should return a valid version (1 or 2)
     assert!(version == 1 || version == 2);
 }
@@ -166,7 +166,7 @@ fn test_recommended_compact_block_version() {
 fn test_negotiate_optimizations() {
     let peer_services = 0u64;
     let (compact_version, prefer_compact, supports_filters) =
-        bllvm_node::network::compact_blocks::negotiate_optimizations(
+        blvm_node::network::compact_blocks::negotiate_optimizations(
             TransportType::Tcp,
             peer_services,
         );
@@ -179,7 +179,7 @@ fn test_negotiate_optimizations() {
 
 #[test]
 fn test_is_quic_transport() {
-    let is_quic = bllvm_node::network::compact_blocks::is_quic_transport(TransportType::Tcp);
+    let is_quic = blvm_node::network::compact_blocks::is_quic_transport(TransportType::Tcp);
     // TCP is not QUIC
     assert_eq!(is_quic, false);
 }

@@ -464,15 +464,15 @@ impl MockBlockProvider {
 #[cfg(feature = "utxo-commitments")]
 pub async fn run_utxo_commitments_initial_sync(
     network_manager: std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>,
-    headers: &[bllvm_consensus::BlockHeader],
+    headers: &[blvm_consensus::BlockHeader],
     peers: Vec<(
-        bllvm_consensus::utxo_commitments::peer_consensus::PeerInfo,
+        blvm_consensus::utxo_commitments::peer_consensus::PeerInfo,
         String,
     )>,
-) -> anyhow::Result<bllvm_consensus::utxo_commitments::data_structures::UtxoCommitment> {
+) -> anyhow::Result<blvm_consensus::utxo_commitments::data_structures::UtxoCommitment> {
     use crate::network::utxo_commitments_client::UtxoCommitmentsClient;
-    use bllvm_consensus::utxo_commitments::initial_sync::InitialSync;
-    use bllvm_consensus::utxo_commitments::peer_consensus::ConsensusConfig;
+    use blvm_consensus::utxo_commitments::initial_sync::InitialSync;
+    use blvm_consensus::utxo_commitments::peer_consensus::ConsensusConfig;
 
     let client = UtxoCommitmentsClient::new(std::sync::Arc::clone(&network_manager));
     let config = ConsensusConfig::default();

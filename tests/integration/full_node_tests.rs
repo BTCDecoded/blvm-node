@@ -3,7 +3,7 @@
 //! Tests the complete node lifecycle from startup to shutdown,
 //! including all major components working together.
 
-use bllvm_node::node::Node;
+use blvm_node::node::Node;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::timeout;

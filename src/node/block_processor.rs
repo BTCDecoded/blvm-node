@@ -22,7 +22,7 @@ pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Witness>)> {
     // Validate that consensus serialization matches the original wire size
     // Uses consensus serialization through bllvm_protocol::serialization re-exports.
     let include_witness = true;
-    if !bllvm_protocol::serialization::block::validate_block_serialized_size(
+    if !blvm_protocol::serialization::block::validate_block_serialized_size(
         &block,
         &witnesses,
         include_witness,
@@ -126,7 +126,7 @@ pub fn validate_block_with_context(
     // Compute median time-past (BIP113) from recent headers, if available
     let median_time_past = recent_headers
         .as_ref()
-        .map(|headers| bllvm_consensus::bip113::get_median_time_past(headers))
+        .map(|headers| blvm_consensus::bip113::get_median_time_past(headers))
         .unwrap_or(0);
 
     // Use the node's time utility as the single source of network time.
@@ -134,10 +134,13 @@ pub fn validate_block_with_context(
     let network_time = current_timestamp();
 
     // Create protocol validation context and populate time fields
-    let mut context =
-        ProtocolValidationContext::new(protocol.get_protocol_version(), height)?;
-    context.median_time_past = median_time_past;
-    context.network_time = network_time;
+    let mut context = ProtocolValidationContext::new(protocol.get_protocol_version(), height)?;
+    context
+        .context_data
+        .insert("median_time_past".to_string(), median_time_past.to_string());
+    context
+        .context_data
+        .insert("network_time".to_string(), network_time.to_string());
 
     // Validate block with protocol validation
     let (result, new_utxo_set) = protocol.validate_and_connect_block(

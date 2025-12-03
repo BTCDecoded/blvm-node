@@ -1,11 +1,11 @@
 //! Integration tests for message bridge
 
 use anyhow::Result;
-use bllvm_node::network::{
+use blvm_node::network::{
     message_bridge::MessageBridge,
     transport::TransportType,
 };
-use bllvm_protocol::network::{
+use blvm_protocol::network::{
     NetworkMessage, NetworkResponse, VersionMessage, NetworkAddress, PingMessage,
 };
 

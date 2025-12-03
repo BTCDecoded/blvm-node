@@ -1,9 +1,9 @@
 //! Tests for BIP70 payment verification and signing
 
-use bllvm_node::network::protocol::PaymentMessage;
-use bllvm_protocol::payment::{Payment, PaymentOutput, PaymentProtocolServer, PaymentRequest};
-use bllvm_protocol::serialization::transaction::serialize_transaction;
-use bllvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+use blvm_node::network::protocol::PaymentMessage;
+use blvm_protocol::payment::{Payment, PaymentOutput, PaymentProtocolServer, PaymentRequest};
+use blvm_protocol::serialization::transaction::serialize_transaction;
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 use secp256k1::{Secp256k1, SecretKey};
 
 #[test]
@@ -20,7 +20,7 @@ fn test_payment_verification() {
     // Create a payment transaction
     let tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -28,7 +28,7 @@ fn test_payment_verification() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51], // Matches payment request
         }],
@@ -79,7 +79,7 @@ fn test_payment_ack_signing() {
     // Create payment
     let tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -87,7 +87,7 @@ fn test_payment_ack_signing() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51],
         }],

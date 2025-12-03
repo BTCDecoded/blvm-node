@@ -44,7 +44,11 @@ pub async fn get_block_transactions(blockchain: &BlockchainRpc, hash: &str) -> R
 }
 
 /// Get block header
-pub async fn get_block_header(blockchain: &BlockchainRpc, hash: &str, verbose: bool) -> Result<Value> {
+pub async fn get_block_header(
+    blockchain: &BlockchainRpc,
+    hash: &str,
+    verbose: bool,
+) -> Result<Value> {
     let header = blockchain.get_block_header(hash, verbose).await?;
     Ok(header)
 }
@@ -57,7 +61,11 @@ pub async fn get_block_stats(blockchain: &BlockchainRpc, hash_or_height: &str) -
 }
 
 /// Get block filter (BIP158)
-pub async fn get_block_filter(blockchain: &BlockchainRpc, hash: &str, filtertype: Option<&str>) -> Result<Value> {
+pub async fn get_block_filter(
+    blockchain: &BlockchainRpc,
+    hash: &str,
+    filtertype: Option<&str>,
+) -> Result<Value> {
     let params = if let Some(ft) = filtertype {
         json!([hash, ft])
     } else {

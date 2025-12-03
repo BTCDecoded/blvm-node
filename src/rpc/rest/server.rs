@@ -206,7 +206,10 @@ impl RestApiServer {
 
             // Check per-user rate limiting (for authenticated users)
             if let Some(ref user_id) = auth_result.user_id {
-                if !auth_manager.check_rate_limit_with_endpoint(user_id, Some(addr), Some(path)).await {
+                if !auth_manager
+                    .check_rate_limit_with_endpoint(user_id, Some(addr), Some(path))
+                    .await
+                {
                     warn!("REST API rate limit exceeded for user from {}", addr);
                     return Ok(Self::error_response_with_headers(
                         server.security_headers_enabled,
@@ -219,7 +222,10 @@ impl RestApiServer {
                 }
             } else {
                 // Unauthenticated request - check per-IP rate limit
-                if !auth_manager.check_ip_rate_limit_with_endpoint(addr, Some(path)).await {
+                if !auth_manager
+                    .check_ip_rate_limit_with_endpoint(addr, Some(path))
+                    .await
+                {
                     return Ok(Self::error_response_with_headers(
                         server.security_headers_enabled,
                         StatusCode::TOO_MANY_REQUESTS,
@@ -234,7 +240,10 @@ impl RestApiServer {
             // Check per-endpoint rate limiting (stricter for write operations)
             let endpoint = Self::get_endpoint_for_rate_limiting(path);
             if !auth_manager.check_method_rate_limit(&endpoint).await {
-                warn!("REST API endpoint rate limit exceeded: {} from {}", endpoint, addr);
+                warn!(
+                    "REST API endpoint rate limit exceeded: {} from {}",
+                    endpoint, addr
+                );
                 return Ok(Self::error_response_with_headers(
                     server.security_headers_enabled,
                     StatusCode::TOO_MANY_REQUESTS,
@@ -493,7 +502,10 @@ impl RestApiServer {
         // Extract endpoint category for rate limiting
         if path.starts_with("/api/v1/transactions") {
             "rest_transactions".to_string()
-        } else if path.starts_with("/api/v1/payments") || path.starts_with("/api/v1/vaults") || path.starts_with("/api/v1/pools") {
+        } else if path.starts_with("/api/v1/payments")
+            || path.starts_with("/api/v1/vaults")
+            || path.starts_with("/api/v1/pools")
+        {
             "rest_payments".to_string() // Write operations - stricter limits
         } else if path.starts_with("/api/v1/addresses") {
             "rest_addresses".to_string()
@@ -516,19 +528,22 @@ impl RestApiServer {
         }
 
         let headers = response.headers_mut();
-        
+
         // Prevent MIME type sniffing
         headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
-        
+
         // Prevent clickjacking
         headers.insert("X-Frame-Options", "DENY".parse().unwrap());
-        
+
         // XSS protection (legacy, but still useful)
         headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
-        
+
         // Referrer policy
-        headers.insert("Referrer-Policy", "strict-origin-when-cross-origin".parse().unwrap());
-        
+        headers.insert(
+            "Referrer-Policy",
+            "strict-origin-when-cross-origin".parse().unwrap(),
+        );
+
         // Content Security Policy (restrictive by default)
         headers.insert(
             "Content-Security-Policy",
@@ -647,21 +662,28 @@ impl RestApiServer {
                     match height_str.parse::<u64>() {
                         Ok(height) => {
                             // Validate block height
-                            let validated_height = match rest_validation::validate_block_height(height) {
-                                Ok(h) => h,
-                                Err(e) => {
-                                    return Self::error_response_with_headers(
-                                        server.security_headers_enabled,
-                                        StatusCode::BAD_REQUEST,
-                                        "BAD_REQUEST",
-                                        &format!("Invalid block height: {}", e),
-                                        None,
-                                        request_id,
-                                    );
-                                }
-                            };
-                            match blocks::get_block_by_height(&server.blockchain, validated_height).await {
-                                Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                            let validated_height =
+                                match rest_validation::validate_block_height(height) {
+                                    Ok(h) => h,
+                                    Err(e) => {
+                                        return Self::error_response_with_headers(
+                                            server.security_headers_enabled,
+                                            StatusCode::BAD_REQUEST,
+                                            "BAD_REQUEST",
+                                            &format!("Invalid block height: {}", e),
+                                            None,
+                                            request_id,
+                                        );
+                                    }
+                                };
+                            match blocks::get_block_by_height(&server.blockchain, validated_height)
+                                .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    server.security_headers_enabled,
+                                ),
                                 Err(e) => Self::error_response_with_headers(
                                     server.security_headers_enabled,
                                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -707,11 +729,16 @@ impl RestApiServer {
                         );
                     }
                 };
-                
+
                 // Check if this is /api/v1/blocks/{hash}/transactions
                 if path_parts.get(4) == Some(&"transactions") {
-                    match blocks::get_block_transactions(&server.blockchain, &validated_hash).await {
-                        Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                    match blocks::get_block_transactions(&server.blockchain, &validated_hash).await
+                    {
+                        Ok(data) => Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            server.security_headers_enabled,
+                        ),
                         Err(e) => Self::error_response_with_headers(
                             server.security_headers_enabled,
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -724,7 +751,11 @@ impl RestApiServer {
                 } else {
                     // /api/v1/blocks/{hash}
                     match blocks::get_block_by_hash(&server.blockchain, &validated_hash).await {
-                        Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                        Ok(data) => Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            server.security_headers_enabled,
+                        ),
                         Err(e) => Self::error_response_with_headers(
                             server.security_headers_enabled,
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -792,12 +823,20 @@ impl RestApiServer {
                             );
                         }
                     };
-                    
+
                     // Check if this is /api/v1/transactions/{txid}/confirmations
                     if path_parts.get(4) == Some(&"confirmations") {
-                        match transactions::get_transaction_confirmations(&server.rawtx, &validated_txid).await
+                        match transactions::get_transaction_confirmations(
+                            &server.rawtx,
+                            &validated_txid,
+                        )
+                        .await
                         {
-                            Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                            Ok(data) => Self::success_response_with_headers(
+                                data,
+                                request_id,
+                                server.security_headers_enabled,
+                            ),
                             Err(e) => Self::error_response_with_headers(
                                 server.security_headers_enabled,
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -810,7 +849,11 @@ impl RestApiServer {
                     } else {
                         // /api/v1/transactions/{txid}
                         match transactions::get_transaction(&server.rawtx, &validated_txid).await {
-                            Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                            Ok(data) => Self::success_response_with_headers(
+                                data,
+                                request_id,
+                                server.security_headers_enabled,
+                            ),
                             Err(e) => Self::error_response_with_headers(
                                 server.security_headers_enabled,
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -874,7 +917,11 @@ impl RestApiServer {
                     };
 
                     match transactions::submit_transaction(&server.rawtx, &validated_hex).await {
-                        Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                        Ok(data) => Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            server.security_headers_enabled,
+                        ),
                         Err(e) => Self::error_response_with_headers(
                             server.security_headers_enabled,
                             StatusCode::BAD_REQUEST,
@@ -944,7 +991,7 @@ impl RestApiServer {
         }
 
         let address = path_parts[3];
-        
+
         // Validate address format
         let validated_address = match rest_validation::validate_address_string(address) {
             Ok(a) => a,
@@ -959,24 +1006,36 @@ impl RestApiServer {
                 );
             }
         };
-        
+
         let action = path_parts.get(4).copied().unwrap_or("");
 
         match action {
-            "balance" => match addresses::get_address_balance(&server.blockchain, &validated_address).await {
-                Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
-                Err(e) => Self::error_response_with_headers(
-                    server.security_headers_enabled,
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "INTERNAL_ERROR",
-                    &format!("Failed to get address balance: {}", e),
-                    None,
-                    request_id,
-                ),
-            },
+            "balance" => {
+                match addresses::get_address_balance(&server.blockchain, &validated_address).await {
+                    Ok(data) => Self::success_response_with_headers(
+                        data,
+                        request_id,
+                        server.security_headers_enabled,
+                    ),
+                    Err(e) => Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &format!("Failed to get address balance: {}", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
             "transactions" => {
-                match addresses::get_address_transactions(&server.blockchain, &validated_address).await {
-                    Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
+                match addresses::get_address_transactions(&server.blockchain, &validated_address)
+                    .await
+                {
+                    Ok(data) => Self::success_response_with_headers(
+                        data,
+                        request_id,
+                        server.security_headers_enabled,
+                    ),
                     Err(e) => Self::error_response_with_headers(
                         server.security_headers_enabled,
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -987,17 +1046,23 @@ impl RestApiServer {
                     ),
                 }
             }
-            "utxos" => match addresses::get_address_utxos(&server.blockchain, &validated_address).await {
-                Ok(data) => Self::success_response_with_headers(data, request_id, server.security_headers_enabled),
-                Err(e) => Self::error_response_with_headers(
-                    server.security_headers_enabled,
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "INTERNAL_ERROR",
-                    &format!("Failed to get address UTXOs: {}", e),
-                    None,
-                    request_id,
-                ),
-            },
+            "utxos" => {
+                match addresses::get_address_utxos(&server.blockchain, &validated_address).await {
+                    Ok(data) => Self::success_response_with_headers(
+                        data,
+                        request_id,
+                        server.security_headers_enabled,
+                    ),
+                    Err(e) => Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &format!("Failed to get address UTXOs: {}", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
             _ => Self::error_response_with_headers(
                 security_headers,
                 StatusCode::NOT_FOUND,
@@ -1053,7 +1118,9 @@ impl RestApiServer {
             None => {
                 // /api/v1/mempool - list all transactions
                 match rest_mempool::get_mempool(&server.mempool).await {
-                    Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
                     Err(e) => Self::error_response_with_headers(
                         security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1081,8 +1148,12 @@ impl RestApiServer {
                             );
                         }
                     };
-                    match rest_mempool::get_mempool_transaction(&server.mempool, &validated_txid).await {
-                        Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                    match rest_mempool::get_mempool_transaction(&server.mempool, &validated_txid)
+                        .await
+                    {
+                        Ok(data) => {
+                            Self::success_response_with_headers(data, request_id, security_headers)
+                        }
                         Err(e) => Self::error_response_with_headers(
                             security_headers,
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1106,7 +1177,9 @@ impl RestApiServer {
             Some(&"stats") => {
                 // /api/v1/mempool/stats
                 match rest_mempool::get_mempool_stats(&server.mempool).await {
-                    Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
                     Err(e) => Self::error_response_with_headers(
                         security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1243,22 +1316,25 @@ impl RestApiServer {
             Some(&"estimate") => {
                 // Parse query parameters for target blocks
                 // Format: /api/v1/fees/estimate?blocks=6
-                let target_blocks = request.uri().query()
+                let target_blocks = request
+                    .uri()
+                    .query()
                     .and_then(|q| {
-                        q.split('&')
-                            .find_map(|param| {
-                                let mut parts = param.split('=');
-                                if parts.next() == Some("blocks") {
-                                    parts.next().and_then(|v| v.parse::<u64>().ok())
-                                } else {
-                                    None
-                                }
-                            })
+                        q.split('&').find_map(|param| {
+                            let mut parts = param.split('=');
+                            if parts.next() == Some("blocks") {
+                                parts.next().and_then(|v| v.parse::<u64>().ok())
+                            } else {
+                                None
+                            }
+                        })
                     })
                     .unwrap_or(6); // Default to 6 blocks if not specified
 
                 match fees::get_fee_estimate(&server.mining, Some(target_blocks)).await {
-                    Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
                     Err(e) => Self::error_response_with_headers(
                         security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,

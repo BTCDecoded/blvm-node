@@ -515,14 +515,15 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
     /// from an async context (which is the typical usage pattern).
     fn get_peer_ids(&self) -> Vec<String> {
         use tokio::runtime::Handle;
-        
+
         // Try to get current async runtime handle
         if let Ok(handle) = Handle::try_current() {
             // We're in an async context - block on the async operation
             handle.block_on(async {
                 let network = self.network_manager.read().await;
                 // Extract connected peer addresses from peer_states
-                network.peer_states
+                network
+                    .peer_states
                     .read()
                     .await
                     .keys()

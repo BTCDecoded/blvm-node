@@ -2,12 +2,12 @@
 
 #[cfg(test)]
 mod tests {
-    use bllvm_node::network::protocol::NetworkAddress;
-    use bllvm_node::network::protocol::VersionMessage;
+    use blvm_node::network::protocol::NetworkAddress;
+    use blvm_node::network::protocol::VersionMessage;
     #[cfg(feature = "utxo-commitments")]
-    use bllvm_node::network::protocol::NODE_UTXO_COMMITMENTS;
-    use bllvm_node::network::protocol::{NODE_BAN_LIST_SHARING, NODE_FIBRE, NODE_PACKAGE_RELAY};
-    use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
+    use blvm_node::network::protocol::NODE_UTXO_COMMITMENTS;
+    use blvm_node::network::protocol::{NODE_BAN_LIST_SHARING, NODE_FIBRE, NODE_PACKAGE_RELAY};
+    use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
 
     fn create_version_message(services: u64) -> VersionMessage {
         VersionMessage {

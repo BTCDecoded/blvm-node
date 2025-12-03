@@ -2,8 +2,8 @@
 
 #[cfg(feature = "quinn")]
 mod tests {
-    use bllvm_node::network::quinn_transport::QuinnTransport;
-    use bllvm_node::network::transport::{Transport, TransportAddr};
+    use blvm_node::network::quinn_transport::QuinnTransport;
+    use blvm_node::network::transport::{Transport, TransportAddr};
     use std::net::SocketAddr;
 
     #[tokio::test]
@@ -14,7 +14,7 @@ mod tests {
         let transport = transport.unwrap();
         assert_eq!(
             transport.transport_type(),
-            bllvm_node::network::transport::TransportType::Quinn
+            blvm_node::network::transport::TransportType::Quinn
         );
     }
 

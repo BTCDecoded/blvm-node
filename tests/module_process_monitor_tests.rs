@@ -1,8 +1,8 @@
 //! Tests for module process monitor
 
-use bllvm_node::module::process::monitor::{ModuleHealth, ModuleProcessMonitor};
-use bllvm_node::module::process::spawner::ModuleProcess;
-use bllvm_node::module::traits::ModuleError;
+use blvm_node::module::process::monitor::{ModuleHealth, ModuleProcessMonitor};
+use blvm_node::module::process::spawner::ModuleProcess;
+use blvm_node::module::traits::ModuleError;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 

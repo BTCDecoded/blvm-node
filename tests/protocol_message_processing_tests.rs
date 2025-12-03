@@ -1,9 +1,9 @@
 //! Tests for protocol message processing integration
 
-use bllvm_node::network;
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_node::storage::Storage;
-use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+use blvm_node::network;
+use blvm_node::node::mempool::MempoolManager;
+use blvm_node::storage::Storage;
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -34,11 +34,11 @@ async fn test_node_chain_access_creation() {
     let mempool = Arc::new(MempoolManager::new());
 
     // Verify we can create NodeChainAccess with Storage Arcs
-    use bllvm_node::network::chain_access::NodeChainAccess;
+    use blvm_node::network::chain_access::NodeChainAccess;
     let chain_access = NodeChainAccess::new(storage.blocks(), storage.transactions(), mempool);
 
     // Test that it works
     let hash = [0u8; 32];
-    use bllvm_protocol::network::ChainStateAccess;
+    use blvm_protocol::network::ChainStateAccess;
     assert!(!chain_access.has_object(&hash)); // Empty storage
 }

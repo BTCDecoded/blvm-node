@@ -66,14 +66,18 @@ async fn test_rest_api_rate_limiting_with_endpoint() {
     // Should allow 5 requests (burst)
     for i in 0..5 {
         assert!(
-            auth.check_rate_limit_with_endpoint(&user_id, Some(addr), Some("/api/v1/blocks/123")).await,
-            "Request {} should be allowed", i + 1
+            auth.check_rate_limit_with_endpoint(&user_id, Some(addr), Some("/api/v1/blocks/123"))
+                .await,
+            "Request {} should be allowed",
+            i + 1
         );
     }
 
     // 6th request should be rate limited
     assert!(
-        !auth.check_rate_limit_with_endpoint(&user_id, Some(addr), Some("/api/v1/blocks/123")).await,
+        !auth
+            .check_rate_limit_with_endpoint(&user_id, Some(addr), Some("/api/v1/blocks/123"))
+            .await,
         "6th request should be rate limited"
     );
 }
@@ -87,14 +91,18 @@ async fn test_rest_api_ip_rate_limiting() {
     // Should allow requests up to IP limit (half of authenticated: 5 burst)
     for i in 0..5 {
         assert!(
-            auth.check_ip_rate_limit_with_endpoint(addr, Some("/api/v1/chain/info")).await,
-            "Request {} should be allowed", i + 1
+            auth.check_ip_rate_limit_with_endpoint(addr, Some("/api/v1/chain/info"))
+                .await,
+            "Request {} should be allowed",
+            i + 1
         );
     }
 
     // Next request should be rate limited
     assert!(
-        !auth.check_ip_rate_limit_with_endpoint(addr, Some("/api/v1/chain/info")).await,
+        !auth
+            .check_ip_rate_limit_with_endpoint(addr, Some("/api/v1/chain/info"))
+            .await,
         "Request should be rate limited after IP limit"
     );
 }
@@ -107,7 +115,8 @@ async fn test_brute_force_detection() {
 
     // Make 5 failed authentication attempts
     for i in 0..5 {
-        auth.record_auth_failure(addr, format!("Invalid token attempt {}", i)).await;
+        auth.record_auth_failure(addr, format!("Invalid token attempt {}", i))
+            .await;
     }
 
     // The 5th failure should trigger brute force detection
@@ -157,7 +166,9 @@ async fn test_input_validation_address() {
     use crate::rpc::rest::validation;
 
     // Valid address
-    assert!(validation::validate_address_string("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh").is_ok());
+    assert!(
+        validation::validate_address_string("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh").is_ok()
+    );
 
     // Invalid: empty
     assert!(validation::validate_address_string("").is_err());
@@ -235,4 +246,3 @@ async fn test_rate_limiting_time_window() {
     assert!(auth.check_rate_limit(&user_id).await);
     assert!(!auth.check_rate_limit(&user_id).await);
 }
-

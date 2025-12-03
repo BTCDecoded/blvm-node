@@ -1,10 +1,10 @@
 //! Tests for Module API Hub
 
-use bllvm_node::module::api::hub::{AuditEntry, ModuleApiHub};
-use bllvm_node::module::ipc::protocol::{RequestMessage, RequestPayload, ResponsePayload};
-use bllvm_node::module::security::permissions::{Permission, PermissionSet};
-use bllvm_node::module::traits::{ModuleError, NodeAPI};
-use bllvm_protocol::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use blvm_node::module::api::hub::{AuditEntry, ModuleApiHub};
+use blvm_node::module::ipc::protocol::{RequestMessage, RequestPayload, ResponsePayload};
+use blvm_node::module::security::permissions::{Permission, PermissionSet};
+use blvm_node::module::traits::{ModuleError, NodeAPI};
+use blvm_protocol::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 use std::sync::Arc;
 
 // Mock NodeAPI for testing
@@ -31,11 +31,11 @@ impl NodeAPI for MockNodeAPI {
     }
 
     async fn get_transaction(&self, _hash: &Hash) -> Result<Option<Transaction>, ModuleError> {
-        use bllvm_protocol::{ByteString, Integer, Natural};
+        use blvm_protocol::{ByteString, Integer, Natural};
         Ok(Some(Transaction {
             version: Natural::from(1u64),
-            inputs: bllvm_protocol::tx_inputs![],
-            outputs: bllvm_protocol::tx_outputs![],
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![],
             lock_time: Natural::from(0u64),
         }))
     }
@@ -45,7 +45,7 @@ impl NodeAPI for MockNodeAPI {
     }
 
     async fn get_utxo(&self, _outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
-        use bllvm_protocol::{ByteString, Integer, Natural};
+        use blvm_protocol::{ByteString, Integer, Natural};
         Ok(Some(UTXO {
             value: Integer::from(1000i64),
             script_pubkey: vec![], // ByteString is a type alias for Vec<u8>
@@ -71,9 +71,9 @@ impl NodeAPI for MockNodeAPI {
 
     async fn subscribe_events(
         &self,
-        _event_types: Vec<bllvm_node::module::traits::EventType>,
+        _event_types: Vec<blvm_node::module::traits::EventType>,
     ) -> Result<
-        tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>,
+        tokio::sync::mpsc::Receiver<blvm_node::module::ipc::protocol::ModuleMessage>,
         ModuleError,
     > {
         let (_tx, rx) = tokio::sync::mpsc::channel(10);
@@ -107,7 +107,7 @@ async fn test_module_api_hub_handle_handshake() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::Handshake,
@@ -137,7 +137,7 @@ async fn test_module_api_hub_handle_handshake_id_mismatch() {
     let node_api = Arc::new(MockNodeAPI);
     let mut hub = ModuleApiHub::new(node_api);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::Handshake,
@@ -166,7 +166,7 @@ async fn test_module_api_hub_handle_get_chain_tip() {
     permissions.add(Permission::ReadChainState);
     hub.register_module_permissions("test-module".to_string(), permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetChainTip,
@@ -197,7 +197,7 @@ async fn test_module_api_hub_handle_get_block() {
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetBlock,
@@ -230,7 +230,7 @@ async fn test_module_api_hub_handle_get_block_header() {
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetBlockHeader,
@@ -263,7 +263,7 @@ async fn test_module_api_hub_handle_get_transaction() {
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetTransaction,
@@ -296,7 +296,7 @@ async fn test_module_api_hub_handle_has_transaction() {
     permissions.add(Permission::ReadBlockchain);
     hub.register_module_permissions("test-module".to_string(), permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::HasTransaction,
@@ -329,7 +329,7 @@ async fn test_module_api_hub_handle_get_block_height() {
     permissions.add(Permission::ReadChainState);
     hub.register_module_permissions("test-module".to_string(), permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetBlockHeight,
@@ -360,8 +360,8 @@ async fn test_module_api_hub_handle_get_utxo() {
     permissions.add(Permission::ReadUTXO);
     hub.register_module_permissions("test-module".to_string(), permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
-    use bllvm_protocol::types::Natural;
+    use blvm_node::module::ipc::protocol::MessageType;
+    use blvm_protocol::types::Natural;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetUtxo,
@@ -397,12 +397,12 @@ async fn test_module_api_hub_handle_subscribe_events() {
     permissions.add(Permission::SubscribeEvents);
     hub.register_module_permissions("test-module".to_string(), permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::SubscribeEvents,
         payload: RequestPayload::SubscribeEvents {
-            event_types: vec![bllvm_node::module::traits::EventType::NewBlock],
+            event_types: vec![blvm_node::module::traits::EventType::NewBlock],
         },
     };
 
@@ -429,7 +429,7 @@ async fn test_module_api_hub_permission_denied() {
     let empty_permissions = PermissionSet::new();
     hub.register_module_permissions("test-module".to_string(), empty_permissions);
 
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetChainTip,
@@ -459,7 +459,7 @@ async fn test_module_api_hub_audit_log() {
     hub.register_module_permissions("test-module".to_string(), permissions);
 
     // Make a request
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetChainTip,
@@ -487,7 +487,7 @@ async fn test_module_api_hub_audit_log_limit() {
     hub.register_module_permissions("test-module".to_string(), permissions);
 
     // Make many requests (more than max_audit_entries)
-    use bllvm_node::module::ipc::protocol::MessageType;
+    use blvm_node::module::ipc::protocol::MessageType;
     for i in 0..1500 {
         let request = RequestMessage {
             correlation_id: i,

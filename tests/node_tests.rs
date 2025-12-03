@@ -1,11 +1,11 @@
 //! Node orchestration tests
 
-use bllvm_node::node::*;
-use bllvm_node::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+use blvm_node::node::*;
+use blvm_node::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 use std::net::SocketAddr;
 use tempfile::TempDir;
 mod common;
-use bllvm_protocol::ProtocolVersion;
+use blvm_protocol::ProtocolVersion;
 use common::*;
 
 // Import serial_test for sequential execution of database-heavy tests
@@ -55,11 +55,11 @@ async fn test_mempool_manager() {
     assert!(mempool.transaction_hashes().is_empty());
 
     // Test adding transaction (simplified)
-    use bllvm_protocol::Transaction;
+    use blvm_protocol::Transaction;
     let tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![],
-        outputs: bllvm_protocol::tx_outputs![],
+        inputs: blvm_protocol::tx_inputs![],
+        outputs: blvm_protocol::tx_outputs![],
         lock_time: 0,
     };
 
@@ -70,7 +70,7 @@ async fn test_mempool_manager() {
 #[tokio::test]
 async fn test_mining_coordinator() {
     use std::sync::Arc;
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test initial state
@@ -116,7 +116,7 @@ async fn test_sync_state_transitions() {
 #[tokio::test]
 async fn test_mining_info() {
     use std::sync::Arc;
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let miner = miner::MiningCoordinator::new(mempool, None);
     let info = miner.get_mining_info();
 
@@ -139,13 +139,13 @@ async fn test_node_creation_with_different_protocols() {
         mainnet_temp_dir.path().to_str().unwrap(),
         network_addr,
         rpc_addr,
-        Some(bllvm_protocol::ProtocolVersion::BitcoinV1),
+        Some(blvm_protocol::ProtocolVersion::BitcoinV1),
     )
     .unwrap();
 
     assert_eq!(
         mainnet_node.protocol().get_protocol_version(),
-        bllvm_protocol::ProtocolVersion::BitcoinV1
+        blvm_protocol::ProtocolVersion::BitcoinV1
     );
 
     // Test testnet node
@@ -154,13 +154,13 @@ async fn test_node_creation_with_different_protocols() {
         testnet_temp_dir.path().to_str().unwrap(),
         network_addr,
         rpc_addr,
-        Some(bllvm_protocol::ProtocolVersion::Testnet3),
+        Some(blvm_protocol::ProtocolVersion::Testnet3),
     )
     .unwrap();
 
     assert_eq!(
         testnet_node.protocol().get_protocol_version(),
-        bllvm_protocol::ProtocolVersion::Testnet3
+        blvm_protocol::ProtocolVersion::Testnet3
     );
 
     // Test regtest node (default)
@@ -175,7 +175,7 @@ async fn test_node_creation_with_different_protocols() {
 
     assert_eq!(
         regtest_node.protocol().get_protocol_version(),
-        bllvm_protocol::ProtocolVersion::Regtest
+        blvm_protocol::ProtocolVersion::Regtest
     );
 }
 
@@ -321,7 +321,7 @@ async fn test_mempool_manager_operations() {
     // Create a completely different transaction
     let tx2 = Transaction {
         version: 2, // Different version
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: random_hash(),
                 index: 1,
@@ -329,7 +329,7 @@ async fn test_mempool_manager_operations() {
             script_sig: vec![0x42, 0x05], // Different signature
             sequence: 0xfffffffe,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 25_0000_0000, // Different value
             script_pubkey: p2pkh_script(random_hash20()),
         }],
@@ -433,7 +433,7 @@ async fn test_mempool_manager_conflict_detection() {
 #[tokio::test]
 async fn test_mining_coordinator_operations() {
     use std::sync::Arc;
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test initial state
@@ -456,7 +456,7 @@ async fn test_mining_coordinator_operations() {
 #[tokio::test]
 async fn test_mining_coordinator_block_template() {
     use std::sync::Arc;
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test block template creation
@@ -473,7 +473,7 @@ async fn test_mining_coordinator_block_template() {
 #[tokio::test]
 async fn test_mining_coordinator_transaction_selection() {
     use std::sync::Arc;
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test transaction selection for mining
@@ -494,7 +494,7 @@ async fn test_mining_coordinator_transaction_selection() {
 #[tokio::test]
 async fn test_mining_coordinator_fee_optimization() {
     use std::sync::Arc;
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test fee optimization
@@ -524,7 +524,7 @@ async fn test_mining_coordinator_fee_optimization() {
 #[tokio::test]
 async fn test_mining_coordinator_mining_state() {
     use std::sync::Arc;
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let mut miner = miner::MiningCoordinator::new(mempool, None);
 
     // Test mining state management
@@ -572,7 +572,7 @@ async fn test_sync_mempool_interaction() {
 #[tokio::test]
 async fn test_mining_mempool_interaction() {
     use std::sync::Arc;
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let mut miner = miner::MiningCoordinator::new(mempool, None);
     let mut mempool = mempool::MempoolManager::new();
 

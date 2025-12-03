@@ -4,9 +4,9 @@
 
 #![cfg(feature = "ctv")]
 
-use bllvm_node::payment::covenant::CovenantEngine;
-use bllvm_node::payment::pool::{PoolConfig, PoolEngine};
-use bllvm_node::payment::processor::PaymentError;
+use blvm_node::payment::covenant::CovenantEngine;
+use blvm_node::payment::pool::{PoolConfig, PoolEngine};
+use blvm_node::payment::processor::PaymentError;
 use std::sync::Arc;
 
 /// Helper to create a test pool engine
@@ -306,7 +306,7 @@ fn test_exit_pool_full_balance() {
 #[cfg(feature = "ctv")]
 #[test]
 fn test_pool_state_storage() {
-    use bllvm_node::storage::Storage;
+    use blvm_node::storage::Storage;
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();

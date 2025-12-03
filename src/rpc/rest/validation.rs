@@ -10,11 +10,11 @@ use crate::rpc::validation::{
 /// Validate a hex string (for transaction hex, etc.)
 pub fn validate_hex_string(hex: &str, max_length: Option<usize>) -> Result<String, String> {
     let max_len = max_length.unwrap_or(MAX_HEX_STRING_LENGTH);
-    
+
     if hex.is_empty() {
         return Err("Hex string cannot be empty".to_string());
     }
-    
+
     if hex.len() > max_len {
         return Err(format!(
             "Hex string too long: {} bytes (max: {})",
@@ -22,16 +22,16 @@ pub fn validate_hex_string(hex: &str, max_length: Option<usize>) -> Result<Strin
             max_len
         ));
     }
-    
+
     // Validate hex format (even length, valid hex chars)
     if hex.len() % 2 != 0 {
         return Err("Hex string must be even-length".to_string());
     }
-    
+
     if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("Hex string contains invalid hex characters".to_string());
     }
-    
+
     Ok(hex.to_string())
 }
 
@@ -44,7 +44,7 @@ pub fn validate_hash_string(hash: &str) -> Result<String, String> {
             hash.len()
         ));
     }
-    
+
     validate_hex_string(hash, Some(MAX_HASH_STRING_LENGTH))
 }
 
@@ -53,7 +53,7 @@ pub fn validate_address_string(address: &str) -> Result<String, String> {
     if address.is_empty() {
         return Err("Address cannot be empty".to_string());
     }
-    
+
     if address.len() > MAX_ADDRESS_STRING_LENGTH {
         return Err(format!(
             "Address too long: {} bytes (max: {})",
@@ -61,21 +61,21 @@ pub fn validate_address_string(address: &str) -> Result<String, String> {
             MAX_ADDRESS_STRING_LENGTH
         ));
     }
-    
+
     Ok(address.to_string())
 }
 
 /// Validate a block height
 pub fn validate_block_height(height: u64) -> Result<u64, String> {
     use crate::rpc::validation::MAX_BLOCK_HEIGHT;
-    
+
     if height > MAX_BLOCK_HEIGHT {
         return Err(format!(
             "Block height too large: {} (max: {})",
             height, MAX_BLOCK_HEIGHT
         ));
     }
-    
+
     Ok(height)
 }
 
@@ -117,4 +117,3 @@ mod tests {
         // But we can't easily test that without importing the constant
     }
 }
-

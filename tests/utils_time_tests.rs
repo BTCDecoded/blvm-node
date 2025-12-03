@@ -2,7 +2,7 @@
 //!
 //! Tests for time-related utilities.
 
-use bllvm_node::utils::time::{current_timestamp, current_timestamp_duration};
+use blvm_node::utils::time::{current_timestamp, current_timestamp_duration};
 
 #[test]
 fn test_current_timestamp() {

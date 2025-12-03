@@ -2,7 +2,7 @@
 //!
 //! Tests rate limiting functionality, edge cases, and per-user/per-method limits.
 
-use bllvm_node::rpc::auth::{RpcAuthManager, RpcRateLimiter, UserId, AuthToken};
+use blvm_node::rpc::auth::{RpcAuthManager, RpcRateLimiter, UserId, AuthToken};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;

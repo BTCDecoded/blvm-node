@@ -1,10 +1,10 @@
 //! Unit tests for pruning functionality
 
-use bllvm_node::config::{PruningConfig, PruningMode};
-use bllvm_node::storage::blockstore::BlockStore;
-use bllvm_node::storage::pruning::{PruningManager, PruningStats};
-use bllvm_node::storage::Storage;
-use bllvm_protocol::{Block, BlockHeader, Hash};
+use blvm_node::config::{PruningConfig, PruningMode};
+use blvm_node::storage::blockstore::BlockStore;
+use blvm_node::storage::pruning::{PruningManager, PruningStats};
+use blvm_node::storage::Storage;
+use blvm_protocol::{Block, BlockHeader, Hash};
 use std::sync::Arc;
 use tempfile::TempDir;
 

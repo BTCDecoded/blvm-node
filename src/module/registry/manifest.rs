@@ -109,70 +109,65 @@ pub struct ModuleManifest {
     // ============================================================================
     // Core Identity (Required)
     // ============================================================================
-    
     /// Module name (unique identifier, alphanumeric with dashes/underscores)
     pub name: String,
-    
+
     /// Module version (semantic versioning: major.minor.patch)
     pub version: String,
-    
+
     /// Module entry point (binary name or path relative to module directory)
     pub entry_point: String,
-    
+
     // ============================================================================
     // Metadata (Optional)
     // ============================================================================
-    
     /// Human-readable description of what this module does
     #[serde(default)]
     pub description: Option<String>,
-    
+
     /// Module author (name and/or email)
     #[serde(default)]
     pub author: Option<String>,
-    
+
     // ============================================================================
     // Capabilities & Dependencies
     // ============================================================================
-    
     /// Capabilities this module requires (permissions)
     /// These determine what APIs the module can access
     #[serde(default)]
     pub capabilities: Vec<String>,
-    
+
     /// Required dependencies (hard dependencies)
     /// Module will fail to load if these are missing or unavailable
     #[serde(default)]
     pub dependencies: HashMap<String, String>,
-    
+
     /// Optional dependencies (soft dependencies)
     /// Module can load and function without these
     #[serde(default)]
     pub optional_dependencies: HashMap<String, String>,
-    
+
     // ============================================================================
     // Configuration
     // ============================================================================
-    
     /// Configuration schema (descriptions of config keys)
     /// Maps config key names to their descriptions
     #[serde(default)]
     pub config_schema: HashMap<String, String>,
-    
+
     // ============================================================================
     // Advanced Features (Optional)
     // ============================================================================
-    
     /// Signature section (for signed/verified modules)
     /// Contains maintainer signatures and threshold
     #[serde(default)]
     pub signatures: Option<SignatureSection>,
-    
+
     /// Binary information (for integrity verification)
     /// Contains hash and size for binary verification
     #[serde(default)]
     pub binary: Option<BinarySection>,
-    
+
     /// Payment configuration (for paid modules)
     /// Contains cryptographically signed payment addresses
     #[serde(default)]

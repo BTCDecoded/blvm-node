@@ -2,12 +2,12 @@
 //!
 //! Tests the automatic encryption of modules when payments are processed.
 
-use bllvm_node::config::PaymentConfig;
-use bllvm_node::module::encryption::{load_encrypted_module, ModuleEncryption};
-use bllvm_node::module::registry::client::{ModuleEntry, ModuleRegistry};
-use bllvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
-use bllvm_node::payment::processor::{PaymentError, PaymentProcessor};
-use bllvm_protocol::payment::{Payment, PaymentRequest};
+use blvm_node::config::PaymentConfig;
+use blvm_node::module::encryption::{load_encrypted_module, ModuleEncryption};
+use blvm_node::module::registry::client::{ModuleEntry, ModuleRegistry};
+use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
+use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
+use blvm_protocol::payment::{Payment, PaymentRequest};
 use secp256k1::{Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 /// Helper to create a test manifest with payment
 fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
-    use bllvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
+    use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
 
     // Create payment signature
     let secp = Secp256k1::new();
@@ -74,8 +74,8 @@ async fn create_test_registry_with_module(
     module_name: &str,
     module_binary: &[u8],
 ) -> Arc<ModuleRegistry> {
-    use bllvm_node::module::registry::cache::LocalCache;
-    use bllvm_node::module::registry::cas::ContentAddressableStorage;
+    use blvm_node::module::registry::cache::LocalCache;
+    use blvm_node::module::registry::cas::ContentAddressableStorage;
 
     let cache_dir = temp_dir.path().join("cache");
     let cas_dir = temp_dir.path().join("cas");
@@ -101,7 +101,7 @@ async fn create_test_registry_with_module(
     hash.copy_from_slice(&module_hash);
 
     // Add to cache
-    use bllvm_node::module::registry::cache::CachedModule;
+    use blvm_node::module::registry::cache::CachedModule;
     let cached = CachedModule {
         name: module_name.to_string(),
         version: "1.0.0".to_string(),
@@ -189,7 +189,7 @@ async fn test_process_payment_non_module_payment() {
     let processor = PaymentProcessor::new(config).unwrap();
 
     // Create a regular payment request (not a module payment)
-    let outputs = vec![bllvm_protocol::payment::PaymentOutput {
+    let outputs = vec![blvm_protocol::payment::PaymentOutput {
         script: vec![0x51, 0x00],
         amount: Some(100000),
     }];

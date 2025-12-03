@@ -1,14 +1,14 @@
-use bllvm_node::storage::blockstore::BlockStore;
-use bllvm_node::storage::chainstate::ChainState;
-use bllvm_node::storage::txindex::TxIndex;
-use bllvm_node::storage::utxostore::UtxoStore;
-use bllvm_node::Block;
-use bllvm_node::BlockHeader;
-use bllvm_node::Hash;
-use bllvm_node::OutPoint;
-use bllvm_node::Transaction;
-use bllvm_node::{ByteString, TransactionInput, TransactionOutput};
-use bllvm_protocol::ProtocolVersion;
+use blvm_node::storage::blockstore::BlockStore;
+use blvm_node::storage::chainstate::ChainState;
+use blvm_node::storage::txindex::TxIndex;
+use blvm_node::storage::utxostore::UtxoStore;
+use blvm_node::Block;
+use blvm_node::BlockHeader;
+use blvm_node::Hash;
+use blvm_node::OutPoint;
+use blvm_node::Transaction;
+use blvm_node::{ByteString, TransactionInput, TransactionOutput};
+use blvm_protocol::ProtocolVersion;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -26,7 +26,7 @@ impl TempDb {
         // Use the directory path, not a file path - create_database handles the file creation
         let db_path = temp_dir.path();
 
-        use bllvm_node::storage::database::{create_database, default_backend, Database};
+        use blvm_node::storage::database::{create_database, default_backend, Database};
         let db_arc: std::sync::Arc<dyn Database> =
             std::sync::Arc::from(create_database(db_path, default_backend())?);
         let utxo_store = UtxoStore::new(db_arc.clone())?;
@@ -163,7 +163,7 @@ impl TestBlockBuilder {
     pub fn add_coinbase_transaction(mut self, script_pubkey: ByteString) -> Self {
         let coinbase_tx = Transaction {
             version: 1,
-            inputs: bllvm_protocol::tx_inputs![TransactionInput {
+            inputs: blvm_protocol::tx_inputs![TransactionInput {
                 prevout: OutPoint {
                     hash: [0u8; 32],
                     index: 0xffffffff,
@@ -171,7 +171,7 @@ impl TestBlockBuilder {
                 script_sig: vec![0x51], // OP_1
                 sequence: 0xffffffff,
             }],
-            outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
                 value: 5000000000, // 50 BTC in satoshis
                 script_pubkey,
             }],

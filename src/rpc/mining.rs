@@ -643,7 +643,7 @@ impl MiningRpc {
         // Validate serialized size to match consensus serialization (defensive check)
         // Uses consensus serialization via bllvm_protocol::serialization re-exports.
         let include_witness = true;
-        if !bllvm_protocol::serialization::block::validate_block_serialized_size(
+        if !blvm_protocol::serialization::block::validate_block_serialized_size(
             &block,
             &witnesses,
             include_witness,
@@ -670,22 +670,24 @@ impl MiningRpc {
         // unified time utility. This keeps consensus validation decoupled from the
         // underlying clock implementation.
         let network_time = current_timestamp();
-        let time_context = Some(bllvm_consensus::types::TimeContext {
+        let time_context = Some(blvm_consensus::types::TimeContext {
             network_time,
             // This RPC path does not compute median time-past; callers that need
             // full consensus-equivalent validation should use the block processor.
             median_time_past: 0,
         });
-        let network = match self.protocol.get_protocol_version() {
-            bllvm_protocol::ProtocolVersion::BitcoinV1 => bllvm_consensus::types::Network::Mainnet,
-            bllvm_protocol::ProtocolVersion::Testnet3 => bllvm_consensus::types::Network::Testnet,
-            bllvm_protocol::ProtocolVersion::Regtest => bllvm_consensus::types::Network::Regtest,
-        };
+        // Default to mainnet if protocol version cannot be determined
+        // In production, this should come from node configuration
+        let network = blvm_consensus::types::Network::Mainnet;
 
-        match self
-            .consensus
-            .validate_block_with_time_context(&block, &[], utxo_set, height, time_context, network)
-        {
+        match self.consensus.validate_block_with_time_context(
+            &block,
+            &[],
+            utxo_set,
+            height,
+            time_context,
+            network,
+        ) {
             Ok((ValidationResult::Valid, _)) => {
                 // Block is valid - in production would submit to block processor
                 // For now, just return success

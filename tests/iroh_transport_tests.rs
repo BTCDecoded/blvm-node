@@ -2,8 +2,8 @@
 
 #[cfg(feature = "iroh")]
 mod tests {
-    use bllvm_node::network::iroh_transport::IrohTransport;
-    use bllvm_node::network::transport::{Transport, TransportAddr};
+    use blvm_node::network::iroh_transport::IrohTransport;
+    use blvm_node::network::transport::{Transport, TransportAddr};
     use std::net::SocketAddr;
 
     #[tokio::test]
@@ -14,7 +14,7 @@ mod tests {
         let transport = transport.unwrap();
         assert_eq!(
             transport.transport_type(),
-            bllvm_node::network::transport::TransportType::Iroh
+            blvm_node::network::transport::TransportType::Iroh
         );
     }
 

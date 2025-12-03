@@ -149,7 +149,7 @@ impl ModuleManager {
         tokio::spawn(async move {
             while let Some((module_name, error)) = crash_rx.recv().await {
                 warn!("Module {} crashed: {}", module_name, error);
-                
+
                 // Get dependent modules before removing
                 let dependents: Vec<String> = {
                     let modules = modules.lock().await;
@@ -164,7 +164,7 @@ impl ModuleManager {
                         })
                         .collect()
                 };
-                
+
                 // Remove crashed module
                 {
                     let mut modules = modules.lock().await;
@@ -177,7 +177,7 @@ impl ModuleManager {
                         managed.state = ModuleState::Error(error.to_string());
                     }
                 }
-                
+
                 // Publish ModuleUnloaded event (crashed modules are effectively unloaded)
                 use crate::module::ipc::protocol::EventPayload;
                 use crate::module::traits::EventType;
@@ -185,16 +185,25 @@ impl ModuleManager {
                     module_name: module_name.clone(),
                     version: String::new(), // Version unknown for crashed modules
                 };
-                if let Err(e) = event_manager.publish_event(EventType::ModuleUnloaded, payload).await {
-                    warn!("Failed to publish ModuleUnloaded event for crashed module: {}", e);
+                if let Err(e) = event_manager
+                    .publish_event(EventType::ModuleUnloaded, payload)
+                    .await
+                {
+                    warn!(
+                        "Failed to publish ModuleUnloaded event for crashed module: {}",
+                        e
+                    );
                 }
-                
+
                 // Unload dependent modules with hard dependencies
                 // Note: We can't use self.unload_module() here since we're in a spawned task
                 // Instead, we'll just remove them and let the system handle it
                 if !dependents.is_empty() {
-                    warn!("Unloading {} dependent module(s) due to crashed dependency '{}'", 
-                          dependents.len(), module_name);
+                    warn!(
+                        "Unloading {} dependent module(s) due to crashed dependency '{}'",
+                        dependents.len(),
+                        module_name
+                    );
                     let mut modules = modules.lock().await;
                     for dependent in dependents {
                         if let Some(mut managed) = modules.remove(&dependent) {
@@ -203,10 +212,12 @@ impl ModuleManager {
                                 handle.abort();
                             }
                             // Update state
-                            managed.state = ModuleState::Error(format!(
-                                "Dependency '{}' crashed", module_name
-                            ));
-                            warn!("Dependent module '{}' unloaded due to crashed dependency", dependent);
+                            managed.state =
+                                ModuleState::Error(format!("Dependency '{}' crashed", module_name));
+                            warn!(
+                                "Dependent module '{}' unloaded due to crashed dependency",
+                                dependent
+                            );
                         }
                     }
                 }
@@ -239,12 +250,13 @@ impl ModuleManager {
         // Validate dependencies BEFORE spawning process (hard dependency enforcement)
         for (dep_name, dep_version_req) in &metadata.dependencies {
             // Check if dependency is loaded
-            let dep_module = modules.get(dep_name)
-                .ok_or_else(|| ModuleError::DependencyMissing(format!(
+            let dep_module = modules.get(dep_name).ok_or_else(|| {
+                ModuleError::DependencyMissing(format!(
                     "Required dependency '{}' not loaded (required by '{}')",
                     dep_name, module_name
-                )))?;
-            
+                ))
+            })?;
+
             // Validate version constraint (basic semver checking)
             if !Self::check_version_constraint(&dep_module.metadata.version, dep_version_req) {
                 return Err(ModuleError::DependencyMissing(format!(
@@ -252,9 +264,11 @@ impl ModuleManager {
                     dep_name, dep_module.metadata.version, dep_version_req, module_name
                 )));
             }
-            
+
             // Check if dependency is in a valid state (Running or Initialized)
-            if dep_module.state != ModuleState::Running && dep_module.state != ModuleState::Initializing {
+            if dep_module.state != ModuleState::Running
+                && dep_module.state != ModuleState::Initializing
+            {
                 return Err(ModuleError::OperationError(format!(
                     "Dependency '{}' is not in a valid state (state: {:?}, required by '{}')",
                     dep_name, dep_module.state, module_name
@@ -266,7 +280,7 @@ impl ModuleManager {
         let module_id = format!("{module_name}_{}", uuid::Uuid::new_v4());
         let socket_path = self.spawner.socket_dir.join(format!("{module_name}.sock"));
         let data_dir = self.spawner.data_dir.join(module_name);
-        
+
         // Ensure module data directory exists
         std::fs::create_dir_all(&data_dir).map_err(|e| {
             ModuleError::InitializationError(format!("Failed to create module data directory: {e}"))
@@ -325,7 +339,7 @@ impl ModuleManager {
         modules.insert(module_name.to_string(), managed);
 
         info!("Module {} loaded successfully", module_name);
-        
+
         // Record module as loaded (for sending to newly subscribing modules)
         // ModuleLoaded event will be published AFTER the module subscribes (in subscribe_module)
         // This ensures consistency: ModuleLoaded only happens after startup is complete
@@ -338,14 +352,14 @@ impl ModuleManager {
                 .as_secs();
             loaded.insert(module_name.to_string(), (module_version.clone(), timestamp));
         }
-        
+
         // Note: ModuleLoaded event is NOT published here
         // It will be published when the module subscribes to events (after startup is complete)
         // This ensures:
         // 1. ModuleLoaded only happens after module is fully ready (subscribed)
         // 2. Hotloaded modules receive ModuleLoaded for all already-loaded modules via subscribe_module()
         // 3. Consistent event ordering: subscription -> ModuleLoaded events
-        
+
         Ok(())
     }
 
@@ -357,7 +371,8 @@ impl ModuleManager {
         let dependents = self.get_dependent_modules(module_name).await;
 
         let mut modules = self.modules.lock().await;
-        let module_id = modules.get(module_name)
+        let module_id = modules
+            .get(module_name)
             .map(|m| format!("{}_{}", module_name, uuid::Uuid::new_v4())) // We don't store module_id, so generate one
             .unwrap_or_else(|| module_name.to_string());
 
@@ -385,7 +400,7 @@ impl ModuleManager {
             }
 
             info!("Module {} unloaded", module_name);
-            
+
             // Publish ModuleUnloaded event for dependent modules to react
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
@@ -393,10 +408,14 @@ impl ModuleManager {
                 module_name: module_name.to_string(),
                 version: String::new(), // Get version from metadata if available
             };
-            if let Err(e) = self.event_manager.publish_event(EventType::ModuleUnloaded, payload).await {
+            if let Err(e) = self
+                .event_manager
+                .publish_event(EventType::ModuleUnloaded, payload)
+                .await
+            {
                 warn!("Failed to publish ModuleUnloaded event: {}", e);
             }
-            
+
             // Automatically unload dependent modules (if they have hard dependencies)
             // Note: We need to drop the lock first, then get dependents
             drop(modules);
@@ -404,23 +423,28 @@ impl ModuleManager {
                 // Check if it's a hard dependency (required) or soft (optional)
                 let is_required = {
                     let modules = self.modules.lock().await;
-                    modules.get(&dependent)
+                    modules
+                        .get(&dependent)
                         .map(|m| m.metadata.dependencies.contains_key(module_name))
                         .unwrap_or(false)
                 };
-                
+
                 if is_required {
-                    warn!("Unloading dependent module '{}' due to required dependency '{}' unloading", 
-                          dependent, module_name);
+                    warn!(
+                        "Unloading dependent module '{}' due to required dependency '{}' unloading",
+                        dependent, module_name
+                    );
                     if let Err(e) = Box::pin(self.unload_module(&dependent)).await {
                         error!("Failed to unload dependent module '{}': {}", dependent, e);
                     }
                 } else {
-                    debug!("Dependent module '{}' has optional dependency on '{}', leaving it running", 
-                           dependent, module_name);
+                    debug!(
+                        "Dependent module '{}' has optional dependency on '{}', leaving it running",
+                        dependent, module_name
+                    );
                 }
             }
-            
+
             Ok(())
         } else {
             Err(ModuleError::ModuleNotFound(module_name.to_string()))
@@ -428,14 +452,14 @@ impl ModuleManager {
     }
 
     /// Reload a module (unload and load again)
-    /// 
+    ///
     /// This gracefully handles dependent modules:
     /// 1. Tracks which dependent modules were unloaded (due to hard dependencies)
     /// 2. Reloads the module
     /// 3. Automatically reloads dependent modules that were unloaded
     /// 4. Handles version changes and validates dependency constraints
     /// 5. Publishes ModuleReloaded event
-    /// 
+    ///
     /// # Errors
     /// - Returns error if the module cannot be reloaded
     /// - Dependent modules that fail to reload are logged but don't fail the operation
@@ -455,10 +479,11 @@ impl ModuleManager {
                 .get(module_name)
                 .map(|m| m.metadata.version.clone())
                 .unwrap_or_else(|| "unknown".to_string());
-            
+
             // Get list of dependent modules that have hard dependencies
             // Use discovery to get proper binary paths and metadata
-            let discovery = crate::module::registry::discovery::ModuleDiscovery::new(&self.modules_dir);
+            let discovery =
+                crate::module::registry::discovery::ModuleDiscovery::new(&self.modules_dir);
             let dependents: Vec<String> = modules
                 .iter()
                 .filter_map(|(name, m)| {
@@ -470,7 +495,7 @@ impl ModuleManager {
                     }
                 })
                 .collect();
-            
+
             (old_version, dependents)
         };
 
@@ -485,8 +510,10 @@ impl ModuleManager {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Reload the module
-        let reload_result = self.load_module(module_name, binary_path, metadata.clone(), config.clone()).await;
-        
+        let reload_result = self
+            .load_module(module_name, binary_path, metadata.clone(), config.clone())
+            .await;
+
         // Publish ModuleReloaded event
         use crate::module::ipc::protocol::EventPayload;
         use crate::module::traits::EventType;
@@ -495,26 +522,38 @@ impl ModuleManager {
             old_version: old_version.clone(),
             new_version: metadata.version.clone(),
         };
-        if let Err(e) = self.event_manager.publish_event(EventType::ModuleReloaded, payload).await {
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::ModuleReloaded, payload)
+            .await
+        {
             warn!("Failed to publish ModuleReloaded event: {}", e);
         }
 
         // If reload succeeded, reload dependent modules using discovery
         if reload_result.is_ok() && !dependents_to_reload.is_empty() {
-            info!("Reloading {} dependent module(s) after {} reload", dependents_to_reload.len(), module_name);
-            
-            let discovery = crate::module::registry::discovery::ModuleDiscovery::new(&self.modules_dir);
-            
+            info!(
+                "Reloading {} dependent module(s) after {} reload",
+                dependents_to_reload.len(),
+                module_name
+            );
+
+            let discovery =
+                crate::module::registry::discovery::ModuleDiscovery::new(&self.modules_dir);
+
             for dependent_name in dependents_to_reload {
                 // Discover the dependent module to get proper binary path and metadata
                 let discovered = match discovery.discover_module(&dependent_name) {
                     Ok(d) => d,
                     Err(e) => {
-                        error!("Cannot reload dependent module '{}': discovery failed: {}", dependent_name, e);
+                        error!(
+                            "Cannot reload dependent module '{}': discovery failed: {}",
+                            dependent_name, e
+                        );
                         continue; // Skip this dependent
                     }
                 };
-                
+
                 // Validate that the new version still satisfies the dependent's requirements
                 let version_req = discovered.manifest.dependencies.get(module_name);
                 if let Some(req) = version_req {
@@ -526,16 +565,17 @@ impl ModuleManager {
                         continue; // Skip this dependent
                     }
                 }
-                
+
                 // Check if binary path exists
                 if !discovered.binary_path.exists() {
                     warn!(
                         "Cannot reload dependent module '{}': binary not found at {}",
-                        dependent_name, discovered.binary_path.display()
+                        dependent_name,
+                        discovered.binary_path.display()
                     );
                     continue; // Skip this dependent
                 }
-                
+
                 // Load config if it exists
                 let config_path = discovered.directory.join("config.toml");
                 let dependent_config = if config_path.exists() {
@@ -626,40 +666,54 @@ impl ModuleManager {
                                     config_map
                                 }
                                 Err(e) => {
-                                    warn!("Failed to parse TOML config from {}: {}", config_path.display(), e);
+                                    warn!(
+                                        "Failed to parse TOML config from {}: {}",
+                                        config_path.display(),
+                                        e
+                                    );
                                     HashMap::new()
                                 }
                             }
                         }
                         Err(e) => {
-                            warn!("Failed to read TOML config from {}: {}", config_path.display(), e);
+                            warn!(
+                                "Failed to read TOML config from {}: {}",
+                                config_path.display(),
+                                e
+                            );
                             HashMap::new()
                         }
                     }
                 } else {
                     HashMap::new()
                 };
-                
+
                 // Reload the dependent module
                 info!("Reloading dependent module: {}", dependent_name);
                 let dependent_metadata = discovered.manifest.to_metadata();
-                match self.load_module(
-                    &dependent_name,
-                    &discovered.binary_path,
-                    dependent_metadata,
-                    dependent_config,
-                ).await {
+                match self
+                    .load_module(
+                        &dependent_name,
+                        &discovered.binary_path,
+                        dependent_metadata,
+                        dependent_config,
+                    )
+                    .await
+                {
                     Ok(()) => {
                         info!("Successfully reloaded dependent module: {}", dependent_name);
                     }
                     Err(e) => {
-                        error!("Failed to reload dependent module '{}': {}", dependent_name, e);
+                        error!(
+                            "Failed to reload dependent module '{}': {}",
+                            dependent_name, e
+                        );
                         // Continue with other dependents - don't fail the whole operation
                     }
                 }
             }
         }
-        
+
         reload_result
     }
 
@@ -674,13 +728,13 @@ impl ModuleManager {
         let modules = self.modules.lock().await;
         modules.get(module_name).map(|m| m.state.clone())
     }
-    
+
     /// Get module metadata
     pub async fn get_module_metadata(&self, module_name: &str) -> Option<ModuleMetadata> {
         let modules = self.modules.lock().await;
         modules.get(module_name).map(|m| m.metadata.clone())
     }
-    
+
     /// Get all module information for discovery
     pub async fn get_all_module_info(&self) -> Vec<(String, ModuleMetadata, ModuleState)> {
         let modules = self.modules.lock().await;
@@ -689,23 +743,25 @@ impl ModuleManager {
             .map(|(name, m)| (name.clone(), m.metadata.clone(), m.state.clone()))
             .collect()
     }
-    
+
     /// Validate that all required dependencies for a module are available and running
     /// Only validates required (hard) dependencies - optional dependencies are checked at runtime
     pub async fn validate_module_dependencies(&self, module_name: &str) -> Result<(), ModuleError> {
         let modules = self.modules.lock().await;
-        let module = modules.get(module_name)
-            .ok_or_else(|| ModuleError::OperationError(format!("Module {} not found", module_name)))?;
-        
+        let module = modules.get(module_name).ok_or_else(|| {
+            ModuleError::OperationError(format!("Module {} not found", module_name))
+        })?;
+
         // Check each required (hard) dependency
         for (dep_name, dep_version_req) in &module.metadata.dependencies {
             // Check if dependency is loaded
-            let dep_module = modules.get(dep_name)
-                .ok_or_else(|| ModuleError::OperationError(format!(
+            let dep_module = modules.get(dep_name).ok_or_else(|| {
+                ModuleError::OperationError(format!(
                     "Required dependency '{}' not loaded (required by '{}')",
                     dep_name, module_name
-                )))?;
-            
+                ))
+            })?;
+
             // Validate version constraint
             if !Self::check_version_constraint(&dep_module.metadata.version, dep_version_req) {
                 return Err(ModuleError::DependencyMissing(format!(
@@ -713,21 +769,23 @@ impl ModuleManager {
                     dep_name, dep_module.metadata.version, dep_version_req, module_name
                 )));
             }
-            
+
             // Check if dependency is in a valid state (Running or Initialized)
-            if dep_module.state != ModuleState::Running && dep_module.state != ModuleState::Initializing {
+            if dep_module.state != ModuleState::Running
+                && dep_module.state != ModuleState::Initializing
+            {
                 return Err(ModuleError::OperationError(format!(
                     "Required dependency '{}' is not in a valid state (state: {:?}, required by '{}')",
                     dep_name, dep_module.state, module_name
                 )));
             }
         }
-        
+
         // Optional dependencies are not validated here - they're checked at runtime when needed
-        
+
         Ok(())
     }
-    
+
     /// Validate optional dependencies (soft dependencies)
     /// Returns list of missing optional dependencies (non-fatal)
     pub async fn validate_optional_dependencies(&self, module_name: &str) -> Vec<String> {
@@ -736,33 +794,37 @@ impl ModuleManager {
             Some(m) => m,
             None => return Vec::new(),
         };
-        
+
         let mut missing = Vec::new();
         for (dep_name, _dep_version) in &module.metadata.optional_dependencies {
             if !modules.contains_key(dep_name) {
                 missing.push(dep_name.clone());
             }
         }
-        
+
         missing
     }
-    
+
     /// Get list of modules that depend on a given module (required or optional)
     pub async fn get_dependent_modules(&self, module_name: &str) -> Vec<String> {
         let modules = self.modules.lock().await;
         let mut dependents = Vec::new();
-        
+
         for (name, module) in modules.iter() {
             // Check both required and optional dependencies
-            if module.metadata.dependencies.contains_key(module_name) 
-                || module.metadata.optional_dependencies.contains_key(module_name) {
+            if module.metadata.dependencies.contains_key(module_name)
+                || module
+                    .metadata
+                    .optional_dependencies
+                    .contains_key(module_name)
+            {
                 dependents.push(name.clone());
             }
         }
-        
+
         dependents
     }
-    
+
     /// Check if a module can be safely unloaded (no dependents)
     pub async fn can_unload_module(&self, module_name: &str) -> Result<bool, ModuleError> {
         let dependents = self.get_dependent_modules(module_name).await;
@@ -985,7 +1047,7 @@ impl ModuleManager {
     }
 
     /// Check if a version satisfies a version requirement
-    /// 
+    ///
     /// Supports basic semver constraints:
     /// - Exact: "1.0.0"
     /// - Greater than or equal: ">=1.0.0"
@@ -995,51 +1057,53 @@ impl ModuleManager {
     fn check_version_constraint(version: &str, requirement: &str) -> bool {
         // Simple implementation - for production, consider using semver crate
         // For now, handle common cases
-        
+
         // Exact match
         if version == requirement {
             return true;
         }
-        
+
         // Remove whitespace
         let req = requirement.trim();
-        
+
         // Handle >= constraint
         if let Some(required_version) = req.strip_prefix(">=") {
             return Self::compare_versions(version, required_version.trim()) >= 0;
         }
-        
+
         // Handle <= constraint
         if let Some(required_version) = req.strip_prefix("<=") {
             return Self::compare_versions(version, required_version.trim()) <= 0;
         }
-        
+
         // Handle > constraint
         if let Some(required_version) = req.strip_prefix(">") {
             return Self::compare_versions(version, required_version.trim()) > 0;
         }
-        
+
         // Handle < constraint
         if let Some(required_version) = req.strip_prefix("<") {
             return Self::compare_versions(version, required_version.trim()) < 0;
         }
-        
+
         // Handle range (comma-separated)
         if req.contains(',') {
             let parts: Vec<&str> = req.split(',').collect();
-            return parts.iter().all(|part| Self::check_version_constraint(version, part.trim()));
+            return parts
+                .iter()
+                .all(|part| Self::check_version_constraint(version, part.trim()));
         }
-        
+
         // Handle wildcard (x or *)
         if req.contains('x') || req.contains('*') {
             // Simple prefix match for now
             let version_parts: Vec<&str> = version.split('.').collect();
             let req_parts: Vec<&str> = req.split('.').collect();
-            
+
             if version_parts.len() != req_parts.len() {
                 return false;
             }
-            
+
             for (v_part, r_part) in version_parts.iter().zip(req_parts.iter()) {
                 if *r_part != "x" && *r_part != "*" && v_part != r_part {
                     return false;
@@ -1047,34 +1111,30 @@ impl ModuleManager {
             }
             return true;
         }
-        
+
         // Default: exact match (already checked above, so false)
         false
     }
-    
+
     /// Compare two version strings
     /// Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
     fn compare_versions(v1: &str, v2: &str) -> i32 {
-        let parts1: Vec<u32> = v1.split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        let parts2: Vec<u32> = v2.split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        
+        let parts1: Vec<u32> = v1.split('.').filter_map(|s| s.parse().ok()).collect();
+        let parts2: Vec<u32> = v2.split('.').filter_map(|s| s.parse().ok()).collect();
+
         let max_len = parts1.len().max(parts2.len());
-        
+
         for i in 0..max_len {
             let p1 = parts1.get(i).copied().unwrap_or(0);
             let p2 = parts2.get(i).copied().unwrap_or(0);
-            
+
             if p1 < p2 {
                 return -1;
             } else if p1 > p2 {
                 return 1;
             }
         }
-        
+
         0
     }
 }

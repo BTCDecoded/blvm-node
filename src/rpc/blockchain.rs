@@ -37,7 +37,7 @@ fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
 pub struct BlockchainRpc {
     storage: Option<Arc<Storage>>,
     /// Protocol engine for network/chain information
-    protocol: Option<Arc<bllvm_protocol::BitcoinProtocolEngine>>,
+    protocol: Option<Arc<blvm_protocol::BitcoinProtocolEngine>>,
 }
 
 impl Default for BlockchainRpc {
@@ -66,7 +66,7 @@ impl BlockchainRpc {
     /// Create with dependencies including protocol engine
     pub fn with_dependencies_and_protocol(
         storage: Arc<Storage>,
-        protocol: Arc<bllvm_protocol::BitcoinProtocolEngine>,
+        protocol: Arc<blvm_protocol::BitcoinProtocolEngine>,
     ) -> Self {
         Self {
             storage: Some(storage),
@@ -79,9 +79,9 @@ impl BlockchainRpc {
         self.protocol
             .as_ref()
             .map(|p| match p.get_protocol_version() {
-                bllvm_protocol::ProtocolVersion::BitcoinV1 => "mainnet",
-                bllvm_protocol::ProtocolVersion::Testnet3 => "testnet",
-                bllvm_protocol::ProtocolVersion::Regtest => "regtest",
+                blvm_protocol::ProtocolVersion::BitcoinV1 => "mainnet",
+                blvm_protocol::ProtocolVersion::Testnet3 => "testnet",
+                blvm_protocol::ProtocolVersion::Regtest => "regtest",
             })
             .unwrap_or("regtest") // Default fallback
     }
@@ -404,22 +404,31 @@ impl BlockchainRpc {
                     // strippedsize = block size without witness data (TX_NO_WITNESS)
                     // size = block size with witness data (TX_WITH_WITNESS)
                     use blvm_protocol::serialization::transaction::serialize_transaction;
-                    
+
                     // Calculate stripped size: serialize block without witness data
                     // This is the sum of all transaction sizes without witness
-                    let stripped_size: usize = block.transactions.iter()
+                    let stripped_size: usize = block
+                        .transactions
+                        .iter()
                         .map(|tx| serialize_transaction(tx).len())
-                        .sum::<usize>() + 80; // +80 for block header
-                    
+                        .sum::<usize>()
+                        + 80; // +80 for block header
+
                     // Calculate total size: serialize block with witness data
                     // For now, we'll use bincode serialization as approximation
                     // In full implementation, we'd serialize with witness marker and data
-                    let total_size = bincode::serialize(&block).map(|b| b.len()).unwrap_or(stripped_size);
-                    
+                    let total_size = bincode::serialize(&block)
+                        .map(|b| b.len())
+                        .unwrap_or(stripped_size);
+
                     // Use stripped_size as size if we can't determine total_size
                     // (For non-SegWit blocks, stripped_size == total_size)
-                    let block_size = if total_size > stripped_size { total_size } else { stripped_size };
-                    
+                    let block_size = if total_size > stripped_size {
+                        total_size
+                    } else {
+                        stripped_size
+                    };
+
                     // Calculate block weight: 4 * base_size + total_size (BIP141)
                     // base_size = stripped_size (without witness)
                     // total_size = block_size (with witness)

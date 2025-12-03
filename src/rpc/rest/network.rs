@@ -45,7 +45,11 @@ pub async fn get_net_totals(network: &NetworkRpc) -> Result<Value> {
 }
 
 /// Get added node info
-pub async fn get_added_node_info(network: &NetworkRpc, node: Option<&str>, dns: bool) -> Result<Value> {
+pub async fn get_added_node_info(
+    network: &NetworkRpc,
+    node: Option<&str>,
+    dns: bool,
+) -> Result<Value> {
     let params = if let Some(n) = node {
         json!([n, dns])
     } else {
@@ -102,7 +106,13 @@ pub async fn set_network_active(network: &NetworkRpc, state: bool) -> Result<Val
 }
 
 /// Set ban
-pub async fn set_ban(network: &NetworkRpc, subnet: &str, command: &str, bantime: Option<u64>, absolute: Option<bool>) -> Result<Value> {
+pub async fn set_ban(
+    network: &NetworkRpc,
+    subnet: &str,
+    command: &str,
+    bantime: Option<u64>,
+    absolute: Option<bool>,
+) -> Result<Value> {
     let mut params = json!([subnet, command]);
     if let Some(bt) = bantime {
         params.as_array_mut().unwrap().push(json!(bt));

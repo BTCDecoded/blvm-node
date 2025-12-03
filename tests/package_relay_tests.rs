@@ -1,16 +1,16 @@
 //! Tests for package relay (BIP331)
 
-use bllvm_node::network::package_relay::{
+use blvm_node::network::package_relay::{
     PackageError, PackageId, PackageRejectReason, PackageRelay, PackageStatus, PackageValidator,
     TransactionPackage,
 };
-use bllvm_protocol::{Transaction, TransactionInput, TransactionOutput};
+use blvm_protocol::{Transaction, TransactionInput, TransactionOutput};
 
 fn create_minimal_tx() -> Transaction {
     Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        inputs: blvm_protocol::tx_inputs![],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51], // OP_1
         }],
@@ -21,15 +21,15 @@ fn create_minimal_tx() -> Transaction {
 fn create_tx_with_input(prevout_hash: [u8; 32], prevout_index: u64) -> Transaction {
     Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
-            prevout: bllvm_protocol::OutPoint {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout: blvm_protocol::OutPoint {
                 hash: prevout_hash,
                 index: prevout_index,
             },
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 500,
             script_pubkey: vec![0x51],
         }],
@@ -111,7 +111,7 @@ fn test_transaction_package_multiple_txs() {
 fn test_transaction_package_ordering_valid() {
     // Create parent and child transactions
     let parent_tx = create_minimal_tx();
-    let parent_txid = bllvm_node::network::txhash::calculate_txid(&parent_tx);
+    let parent_txid = blvm_node::network::txhash::calculate_txid(&parent_tx);
 
     let child_tx = create_tx_with_input(parent_txid, 0);
 
@@ -124,7 +124,7 @@ fn test_transaction_package_ordering_valid() {
 fn test_transaction_package_ordering_invalid() {
     // Create parent and child transactions
     let parent_tx = create_minimal_tx();
-    let parent_txid = bllvm_node::network::txhash::calculate_txid(&parent_tx);
+    let parent_txid = blvm_node::network::txhash::calculate_txid(&parent_tx);
 
     let child_tx = create_tx_with_input(parent_txid, 0);
 

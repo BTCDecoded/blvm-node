@@ -1,4 +1,4 @@
-use bllvm_node::rpc::server::RpcServer;
+use blvm_node::rpc::server::RpcServer;
 use serde_json::Value;
 
 #[tokio::test]

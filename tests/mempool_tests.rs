@@ -1,7 +1,7 @@
 //! Tests for MempoolManager refactoring
 
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
+use blvm_node::node::mempool::MempoolManager;
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -11,7 +11,7 @@ async fn test_mempool_stores_full_transactions() {
     // Create a test transaction
     let tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -19,7 +19,7 @@ async fn test_mempool_stores_full_transactions() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51], // OP_1
         }],
@@ -31,7 +31,7 @@ async fn test_mempool_stores_full_transactions() {
     assert!(added);
 
     // Verify we can retrieve it
-    use bllvm_protocol::mempool::calculate_tx_id;
+    use blvm_protocol::mempool::calculate_tx_id;
     let tx_hash = calculate_tx_id(&tx);
     let retrieved = mempool.get_transaction(&tx_hash);
     assert!(retrieved.is_some());
@@ -62,12 +62,12 @@ async fn test_mempool_get_prioritized_transactions() {
     // High fee transaction
     let high_fee_tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: outpoint.clone(),
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 5000, // 5000 sat fee
             script_pubkey: vec![0x51],
         }],
@@ -77,7 +77,7 @@ async fn test_mempool_get_prioritized_transactions() {
     // Low fee transaction
     let low_fee_tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [1u8; 32],
                 index: 0,
@@ -85,7 +85,7 @@ async fn test_mempool_get_prioritized_transactions() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 9000, // 1000 sat fee
             script_pubkey: vec![0x51],
         }],
@@ -107,7 +107,7 @@ async fn test_mempool_get_prioritized_transactions() {
     assert_eq!(prioritized[0].version, high_fee_tx.version);
 
     // Verify the high fee transaction is in the results
-    use bllvm_protocol::block::calculate_tx_id;
+    use blvm_protocol::block::calculate_tx_id;
     let high_fee_hash = calculate_tx_id(&high_fee_tx);
     let prioritized_hashes: Vec<_> = prioritized.iter().map(calculate_tx_id).collect();
     assert!(
@@ -122,7 +122,7 @@ async fn test_mempool_remove_transaction() {
 
     let tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [0u8; 32],
                 index: 0,
@@ -130,7 +130,7 @@ async fn test_mempool_remove_transaction() {
             script_sig: vec![],
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51],
         }],
@@ -140,7 +140,7 @@ async fn test_mempool_remove_transaction() {
     mempool.add_transaction(tx.clone()).await.unwrap();
     assert_eq!(mempool.size(), 1);
 
-    use bllvm_protocol::mempool::calculate_tx_id;
+    use blvm_protocol::mempool::calculate_tx_id;
     let tx_hash = calculate_tx_id(&tx);
     let removed = mempool.remove_transaction(&tx_hash);
     assert!(removed);

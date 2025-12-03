@@ -1,6 +1,6 @@
 //! Tests for DoS protection system
 
-use bllvm_node::network::dos_protection::{
+use blvm_node::network::dos_protection::{
     ConnectionRateLimiter, DosProtectionManager, ResourceMetrics,
 };
 use std::net::{IpAddr, Ipv4Addr};

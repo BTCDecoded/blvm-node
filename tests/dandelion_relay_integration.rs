@@ -1,6 +1,6 @@
 #![cfg(feature = "dandelion")]
-use bllvm_node::network::relay::RelayManager;
-use bllvm_protocol::Hash;
+use blvm_node::network::relay::RelayManager;
+use blvm_protocol::Hash;
 
 fn hash_from_u8(v: u8) -> Hash {
     [v; 32]
@@ -9,9 +9,9 @@ fn hash_from_u8(v: u8) -> Hash {
 #[test]
 fn stem_then_fluff_via_hop_limit() {
     // Create relay manager with dandelion enabled
-    let mut policies = bllvm_node::network::relay::RelayPolicies::default();
+    let mut policies = blvm_node::network::relay::RelayPolicies::default();
     policies.enable_dandelion = true;
-    let mut relay = bllvm_node::network::relay::RelayManager::with_policies(policies);
+    let mut relay = blvm_node::network::relay::RelayManager::with_policies(policies);
     let peers = vec!["p1".into(), "p2".into(), "p3".into()];
 
     // Configure Dandelion for deterministic behavior

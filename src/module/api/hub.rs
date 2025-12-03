@@ -127,11 +127,11 @@ impl ModuleApiHub {
     /// Returns true if allowed, false if rate limited
     async fn check_module_rate_limit(&self, module_id: &str) -> bool {
         let mut limiters = self.rate_limiters.lock().await;
-        
+
         // Get or create rate limiter for this module
-        let limiter = limiters.entry(module_id.to_string()).or_insert_with(|| {
-            self.create_rate_limiter()
-        });
+        let limiter = limiters
+            .entry(module_id.to_string())
+            .or_insert_with(|| self.create_rate_limiter());
 
         limiter.check_and_consume()
     }
@@ -233,9 +233,12 @@ impl ModuleApiHub {
                 let tip = self.node_api.get_chain_tip().await?;
                 ResponsePayload::Hash(tip)
             }
-            _ => return Err(crate::module::traits::ModuleError::OperationError(
-                format!("Unimplemented request payload: {:?}", request.payload)
-            )),
+            _ => {
+                return Err(crate::module::traits::ModuleError::OperationError(format!(
+                    "Unimplemented request payload: {:?}",
+                    request.payload
+                )))
+            }
             RequestPayload::GetBlockHeight => {
                 let height = self.node_api.get_block_height().await?;
                 ResponsePayload::U64(height)
@@ -306,42 +309,54 @@ impl ModuleApiHub {
             // Filesystem API
             RequestPayload::ReadFile { path } => {
                 // Set module_id in thread-local for this call
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
                 let result = self.node_api.read_file(path.clone()).await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 let data = result?;
                 ResponsePayload::FileData(data)
             }
             RequestPayload::WriteFile { path, data } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
                 let result = self.node_api.write_file(path.clone(), data.clone()).await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 result?;
                 ResponsePayload::Bool(true)
             }
             RequestPayload::DeleteFile { path } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
                 let result = self.node_api.delete_file(path.clone()).await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 result?;
                 ResponsePayload::Bool(true)
             }
             RequestPayload::ListDirectory { path } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
                 let result = self.node_api.list_directory(path.clone()).await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 let entries = result?;
                 ResponsePayload::DirectoryListing(entries)
             }
             RequestPayload::CreateDirectory { path } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
                 let result = self.node_api.create_directory(path.clone()).await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 result?;
                 ResponsePayload::Bool(true)
             }
             RequestPayload::GetFileMetadata { path } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
                 let result = self.node_api.get_file_metadata(path.clone()).await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 let metadata = result?;
@@ -349,50 +364,86 @@ impl ModuleApiHub {
             }
             // Storage API
             RequestPayload::StorageOpenTree { name } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
                 let result = self.node_api.storage_open_tree(name.clone()).await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 let tree_id = result?;
                 ResponsePayload::StorageTreeId(tree_id)
             }
-            RequestPayload::StorageInsert { tree_id, key, value } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
-                let result = self.node_api.storage_insert(tree_id.clone(), key.clone(), value.clone()).await;
+            RequestPayload::StorageInsert {
+                tree_id,
+                key,
+                value,
+            } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self
+                    .node_api
+                    .storage_insert(tree_id.clone(), key.clone(), value.clone())
+                    .await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 result?;
                 ResponsePayload::Bool(true)
             }
             RequestPayload::StorageGet { tree_id, key } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
-                let result = self.node_api.storage_get(tree_id.clone(), key.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self
+                    .node_api
+                    .storage_get(tree_id.clone(), key.clone())
+                    .await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 let value = result?;
                 ResponsePayload::StorageValue(value)
             }
             RequestPayload::StorageRemove { tree_id, key } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
-                let result = self.node_api.storage_remove(tree_id.clone(), key.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self
+                    .node_api
+                    .storage_remove(tree_id.clone(), key.clone())
+                    .await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 result?;
                 ResponsePayload::Bool(true)
             }
             RequestPayload::StorageContainsKey { tree_id, key } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
-                let result = self.node_api.storage_contains_key(tree_id.clone(), key.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self
+                    .node_api
+                    .storage_contains_key(tree_id.clone(), key.clone())
+                    .await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 let exists = result?;
                 ResponsePayload::Bool(exists)
             }
             RequestPayload::StorageIter { tree_id } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
                 let result = self.node_api.storage_iter(tree_id.clone()).await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 let pairs = result?;
                 ResponsePayload::StorageKeyValuePairs(pairs)
             }
-            RequestPayload::StorageTransaction { tree_id, operations } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
-                let result = self.node_api.storage_transaction(tree_id.clone(), operations.clone()).await;
+            RequestPayload::StorageTransaction {
+                tree_id,
+                operations,
+            } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self
+                    .node_api
+                    .storage_transaction(tree_id.clone(), operations.clone())
+                    .await;
                 crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
                 result?;
                 ResponsePayload::Bool(true)
@@ -402,26 +453,38 @@ impl ModuleApiHub {
                 let modules = self.node_api.discover_modules().await?;
                 ResponsePayload::ModuleList(modules)
             }
-            RequestPayload::GetModuleInfo { module_id: target_module_id } => {
+            RequestPayload::GetModuleInfo {
+                module_id: target_module_id,
+            } => {
                 let info = self.node_api.get_module_info(target_module_id).await?;
                 ResponsePayload::ModuleInfo(info)
             }
-            RequestPayload::IsModuleAvailable { module_id: target_module_id } => {
+            RequestPayload::IsModuleAvailable {
+                module_id: target_module_id,
+            } => {
                 let available = self.node_api.is_module_available(target_module_id).await?;
                 ResponsePayload::ModuleAvailable(available)
             }
             // Module Event Publishing
-            RequestPayload::PublishEvent { event_type, payload } => {
-                self.node_api.publish_event(*event_type, payload.clone()).await?;
+            RequestPayload::PublishEvent {
+                event_type,
+                payload,
+            } => {
+                self.node_api
+                    .publish_event(*event_type, payload.clone())
+                    .await?;
                 ResponsePayload::EventPublished
             }
             // Module-to-Module Communication
-            RequestPayload::CallModule { target_module_id, method, params } => {
-                let response = self.node_api.call_module(
-                    target_module_id.as_deref(),
-                    &method,
-                    params.clone(),
-                ).await?;
+            RequestPayload::CallModule {
+                target_module_id,
+                method,
+                params,
+            } => {
+                let response = self
+                    .node_api
+                    .call_module(target_module_id.as_deref(), &method, params.clone())
+                    .await?;
                 ResponsePayload::ModuleApiResponse(response)
             }
             RequestPayload::RegisterModuleApi { .. } => {
@@ -451,12 +514,22 @@ impl ModuleApiHub {
                 ResponsePayload::HealthReported
             }
             // Network Integration
-            RequestPayload::SendMeshPacketToPeer { peer_addr, packet_data } => {
-                self.node_api.send_mesh_packet_to_peer(peer_addr.clone(), packet_data.clone()).await?;
+            RequestPayload::SendMeshPacketToPeer {
+                peer_addr,
+                packet_data,
+            } => {
+                self.node_api
+                    .send_mesh_packet_to_peer(peer_addr.clone(), packet_data.clone())
+                    .await?;
                 ResponsePayload::Bool(true)
             }
-            RequestPayload::SendStratumV2MessageToPeer { peer_addr, message_data } => {
-                self.node_api.send_stratum_v2_message_to_peer(peer_addr.clone(), message_data.clone()).await?;
+            RequestPayload::SendStratumV2MessageToPeer {
+                peer_addr,
+                message_data,
+            } => {
+                self.node_api
+                    .send_stratum_v2_message_to_peer(peer_addr.clone(), message_data.clone())
+                    .await?;
                 ResponsePayload::Bool(true)
             }
         };

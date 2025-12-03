@@ -7,13 +7,13 @@
 //! - Settlement monitoring
 //! - Instant proof (not instant settlement) functionality
 
-use bllvm_node::config::PaymentConfig;
+use blvm_node::config::PaymentConfig;
 #[cfg(feature = "ctv")]
-use bllvm_node::payment::covenant::{CovenantEngine, CovenantProof};
-use bllvm_node::payment::processor::PaymentProcessor;
-use bllvm_node::payment::settlement::SettlementMonitor;
-use bllvm_node::payment::state_machine::{PaymentState, PaymentStateMachine};
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_node::payment::covenant::{CovenantEngine, CovenantProof};
+use blvm_node::payment::processor::PaymentProcessor;
+use blvm_node::payment::settlement::SettlementMonitor;
+use blvm_node::payment::state_machine::{PaymentState, PaymentStateMachine};
+use blvm_protocol::payment::PaymentOutput;
 use std::sync::Arc;
 use tempfile::TempDir;
 

@@ -1,10 +1,10 @@
 //! Tests for event publisher
 
-use bllvm_node::module::api::events::EventManager;
-use bllvm_node::node::event_publisher::EventPublisher;
-use bllvm_node::{Block, BlockHeader, Hash, Transaction};
-use bllvm_protocol::tx_inputs;
-use bllvm_protocol::tx_outputs;
+use blvm_node::module::api::events::EventManager;
+use blvm_node::node::event_publisher::EventPublisher;
+use blvm_node::{Block, BlockHeader, Hash, Transaction};
+use blvm_protocol::tx_inputs;
+use blvm_protocol::tx_outputs;
 use std::sync::Arc;
 
 fn create_test_block() -> Block {
@@ -25,7 +25,7 @@ fn create_test_transaction() -> Transaction {
     Transaction {
         version: 1,
         inputs: tx_inputs![],
-        outputs: tx_outputs![bllvm_protocol::TransactionOutput {
+        outputs: tx_outputs![blvm_protocol::TransactionOutput {
             value: 1000,
             script_pubkey: vec![0x51], // OP_1
         }],

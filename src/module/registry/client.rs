@@ -288,12 +288,16 @@ impl ModuleRegistry {
         let manifest_hash_str = data
             .get("manifest_hash")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ModuleError::OperationError("Missing 'manifest_hash' field".to_string()))?;
+            .ok_or_else(|| {
+                ModuleError::OperationError("Missing 'manifest_hash' field".to_string())
+            })?;
 
         let binary_hash_str = data
             .get("binary_hash")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ModuleError::OperationError("Missing 'binary_hash' field".to_string()))?;
+            .ok_or_else(|| {
+                ModuleError::OperationError("Missing 'binary_hash' field".to_string())
+            })?;
 
         // Decode hashes from hex
         let hash = hex::decode(hash_str)
@@ -304,7 +308,9 @@ impl ModuleRegistry {
         let manifest_hash = hex::decode(manifest_hash_str)
             .map_err(|e| ModuleError::OperationError(format!("Invalid manifest_hash hex: {}", e)))?
             .try_into()
-            .map_err(|_| ModuleError::OperationError("Manifest hash must be 32 bytes".to_string()))?;
+            .map_err(|_| {
+                ModuleError::OperationError("Manifest hash must be 32 bytes".to_string())
+            })?;
 
         let binary_hash = hex::decode(binary_hash_str)
             .map_err(|e| ModuleError::OperationError(format!("Invalid binary_hash hex: {}", e)))?
@@ -320,13 +326,17 @@ impl ModuleRegistry {
             serde_json::from_value::<ModuleManifest>(manifest_obj.clone())
                 .map_err(|e| ModuleError::OperationError(format!("Invalid manifest JSON: {}", e)))?
         } else {
-            return Err(ModuleError::OperationError("Missing 'manifest' field".to_string()));
+            return Err(ModuleError::OperationError(
+                "Missing 'manifest' field".to_string(),
+            ));
         };
 
         // Verify manifest hash matches
         let cas = self.cas.read().await;
         let manifest_bytes = toml::to_string(&manifest)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to serialize manifest: {}", e)))?
+            .map_err(|e| {
+                ModuleError::OperationError(format!("Failed to serialize manifest: {}", e))
+            })?
             .into_bytes();
         if !cas.verify(&manifest_bytes, &manifest_hash) {
             return Err(ModuleError::CryptoError(
@@ -338,13 +348,13 @@ impl ModuleRegistry {
         let binary = data
             .get("binary")
             .and_then(|v| {
-                v.as_str()
-                    .and_then(|s| hex::decode(s).ok())
-                    .or_else(|| v.as_array().map(|arr| {
+                v.as_str().and_then(|s| hex::decode(s).ok()).or_else(|| {
+                    v.as_array().map(|arr| {
                         arr.iter()
                             .filter_map(|item| item.as_u64().map(|n| n as u8))
                             .collect()
-                    }))
+                    })
+                })
             })
             .and_then(|bin_data| {
                 // Verify binary hash if binary is provided

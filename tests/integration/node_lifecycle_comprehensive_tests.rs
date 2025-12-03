@@ -3,8 +3,8 @@
 //! Tests complete node lifecycle including startup, component initialization,
 //! module lifecycle, and graceful shutdown scenarios.
 
-use bllvm_node::node::Node;
-use bllvm_node::ProtocolVersion;
+use blvm_node::node::Node;
+use blvm_node::ProtocolVersion;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -43,7 +43,7 @@ async fn test_node_startup_with_pruning_config() {
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let rpc_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     
-    use bllvm_node::config::{PruningConfig, PruningMode};
+    use blvm_node::config::{PruningConfig, PruningMode};
     
     // Create pruning config
     let pruning_config = PruningConfig {
@@ -80,7 +80,7 @@ async fn test_node_startup_with_indexing_config() {
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let rpc_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     
-    use bllvm_node::config::{IndexingConfig, IndexingStrategy};
+    use blvm_node::config::{IndexingConfig, IndexingStrategy};
     
     // Create indexing config
     let indexing_config = IndexingConfig {

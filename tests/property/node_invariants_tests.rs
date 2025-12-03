@@ -3,8 +3,8 @@
 //! Tests critical invariants that must always hold true in the node implementation.
 
 use proptest::prelude::*;
-use bllvm_node::storage::Storage;
-use bllvm_node::network::NetworkManager;
+use blvm_node::storage::Storage;
+use blvm_node::network::NetworkManager;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
@@ -30,9 +30,9 @@ proptest! {
         uptime_seconds in 0u64..86400,
     ) {
         // Invariant: Quality score should always be between 0.0 and 1.0
-        use bllvm_node::network::peer::Peer;
-        use bllvm_node::network::transport::TransportAddr;
-        use bllvm_node::network::NetworkMessage;
+        use blvm_node::network::peer::Peer;
+        use blvm_node::network::transport::TransportAddr;
+        use blvm_node::network::NetworkMessage;
         
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -56,9 +56,9 @@ proptest! {
         failed in 0u64..100,
     ) {
         // Invariant: Quality score calculation should be consistent
-        use bllvm_node::network::peer::Peer;
-        use bllvm_node::network::transport::TransportAddr;
-        use bllvm_node::network::NetworkMessage;
+        use blvm_node::network::peer::Peer;
+        use blvm_node::network::transport::TransportAddr;
+        use blvm_node::network::NetworkMessage;
         
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();

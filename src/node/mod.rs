@@ -15,14 +15,14 @@ pub mod performance;
 pub mod sync;
 
 use anyhow::Result;
-use std::net::SocketAddr;
-use tracing::{debug, info, warn};
 use hex;
 use secp256k1;
+use std::net::SocketAddr;
+use tracing::{debug, info, warn};
 
 use crate::config::NodeConfig;
-use crate::module::ModuleManager;
 use crate::module::api::events::EventManager;
+use crate::module::ModuleManager;
 use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::node::metrics::MetricsCollector;
@@ -184,7 +184,7 @@ impl Node {
                                 let client = reqwest::Client::builder()
                                     .timeout(std::time::Duration::from_secs(5))
                                     .build();
-                                
+
                                 if let Ok(client) = client {
                                     let health_url = format!("{}/internal/health", url);
                                     if let Ok(response) = client.get(&health_url).send().await {
@@ -317,7 +317,7 @@ impl Node {
             let rest_api_addr: Option<SocketAddr> = self.rpc.rest_api_addr();
             #[cfg(not(feature = "rest-api"))]
             let rest_api_addr: Option<SocketAddr> = None;
-            
+
             let warnings: Vec<String> = config.validate_security(rpc_addr, rest_api_addr);
             for warning in warnings {
                 warn!("{}", warning);
@@ -426,10 +426,10 @@ impl Node {
                 Storage::new(&data_dir)
                     .map_err(|e| anyhow::anyhow!("Failed to create storage for modules: {}", e))?,
             );
-            
+
             // Get event manager from module manager
             let event_manager = module_manager.event_manager();
-            
+
             // Create NodeApiImpl with all dependencies
             let mut node_api_impl = crate::module::api::node_api::NodeApiImpl::with_dependencies(
                 Arc::clone(&storage_arc),
@@ -438,30 +438,34 @@ impl Node {
                 Some(Arc::clone(&self.mempool_manager)),
                 None, // network_manager will be set after registry setup
             );
-            
+
             // Set node storage for module storage API (needed for opening storage trees)
             node_api_impl.set_node_storage(Arc::clone(&storage_arc));
-            
+
             // Set sync coordinator for sync status checking
             let sync_coord_arc = Arc::new(tokio::sync::Mutex::new(self.sync_coordinator.clone()));
             node_api_impl.set_sync_coordinator(sync_coord_arc);
-            
+
             // Set module manager for module discovery
             // Note: We can't clone ModuleManager, so we'll set it later after it's been moved into an Arc
             // For now, we skip this - the module manager can be accessed via other means if needed
-            
+
             // Set up module API registry and router for module-to-module communication
-            let module_api_registry = Arc::new(crate::module::inter_module::registry::ModuleApiRegistry::new());
+            let module_api_registry =
+                Arc::new(crate::module::inter_module::registry::ModuleApiRegistry::new());
             // Note: ModuleManager doesn't implement Clone, so we can't pass it to the router here
             // The router can access the module manager through other means if needed
-            let module_router = Arc::new(
-                crate::module::inter_module::router::ModuleRouter::new(Arc::clone(&module_api_registry))
+            let module_router = Arc::new(crate::module::inter_module::router::ModuleRouter::new(
+                Arc::clone(&module_api_registry),
+            ));
+            node_api_impl.set_module_api_registry(
+                Arc::clone(&module_api_registry),
+                Arc::clone(&module_router),
             );
-            node_api_impl.set_module_api_registry(Arc::clone(&module_api_registry), Arc::clone(&module_router));
-            
+
             // Note: Payment state machine will be set after payment processor initialization
             // We'll update it via Arc::get_mut if possible, or store it separately
-            
+
             let mut node_api = Arc::new(node_api_impl);
             let socket_path = env_or_default("MODULE_SOCKET_DIR", "data/modules/socket");
 
@@ -559,9 +563,9 @@ impl Node {
                                 crate::payment::state_machine::PaymentStateMachine::new(
                                     Arc::clone(&processor_arc),
                                 );
-                            
+
                             let mut state_machine_arc = Arc::new(state_machine);
-                            
+
                             // Set network sender for payment proof broadcasting
                             // We need to get mutable access to set the sender
                             #[cfg(feature = "ctv")]
@@ -580,7 +584,7 @@ impl Node {
                                     // Let's use a different approach - set it in set_payment_state_machine
                                 }
                             }
-                            
+
                             self.payment_state_machine = Some(Arc::clone(&state_machine_arc));
 
                             // Connect to network manager (for P2P payments)
@@ -588,45 +592,45 @@ impl Node {
                                 .set_payment_processor(Arc::clone(&processor_arc));
                             self.network
                                 .set_payment_state_machine(Arc::clone(&state_machine_arc));
-                            
+
                             // Set merchant key from config if available
-                            let merchant_key = payment_config.merchant_key.as_ref()
-                                .and_then(|hex_key| {
-                                    hex::decode(hex_key).ok()
-                                        .and_then(|bytes| {
-                                            if bytes.len() == 32 {
-                                                secp256k1::SecretKey::from_slice(&bytes).ok()
-                                            } else {
-                                                None
-                                            }
-                                        })
+                            let merchant_key =
+                                payment_config.merchant_key.as_ref().and_then(|hex_key| {
+                                    hex::decode(hex_key).ok().and_then(|bytes| {
+                                        if bytes.len() == 32 {
+                                            secp256k1::SecretKey::from_slice(&bytes).ok()
+                                        } else {
+                                            None
+                                        }
+                                    })
                                 });
                             self.network.set_merchant_key(merchant_key);
-                            
+
                             // Set node payment address script from config if available
-                            let node_script = payment_config.node_payment_address.as_ref()
+                            let node_script = payment_config
+                                .node_payment_address
+                                .as_ref()
                                 .and_then(|addr_str| {
                                     // Decode Bitcoin address to script pubkey
                                     use blvm_protocol::address::BitcoinAddress;
-                                    BitcoinAddress::decode(addr_str).ok()
-                                        .and_then(|addr| {
-                                            // Convert address to script pubkey
-                                            match (addr.witness_version, addr.witness_program.len()) {
-                                                // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
-                                                (0, 20) | (0, 32) => {
-                                                    let mut script = vec![0x00]; // OP_0
-                                                    script.extend_from_slice(&addr.witness_program);
-                                                    Some(script)
-                                                }
-                                                // Taproot v1: P2TR (32 bytes)
-                                                (1, 32) => {
-                                                    let mut script = vec![0x51]; // OP_1
-                                                    script.extend_from_slice(&addr.witness_program);
-                                                    Some(script)
-                                                }
-                                                _ => None,
+                                    BitcoinAddress::decode(addr_str).ok().and_then(|addr| {
+                                        // Convert address to script pubkey
+                                        match (addr.witness_version, addr.witness_program.len()) {
+                                            // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
+                                            (0, 20) | (0, 32) => {
+                                                let mut script = vec![0x00]; // OP_0
+                                                script.extend_from_slice(&addr.witness_program);
+                                                Some(script)
                                             }
-                                        })
+                                            // Taproot v1: P2TR (32 bytes)
+                                            (1, 32) => {
+                                                let mut script = vec![0x51]; // OP_1
+                                                script.extend_from_slice(&addr.witness_program);
+                                                Some(script)
+                                            }
+                                            _ => None,
+                                        }
+                                    })
                                 });
                             self.network.set_node_payment_script(node_script);
 
@@ -662,7 +666,8 @@ impl Node {
                             // Update node API with payment state machine
                             // Try to get mutable access to update the Arc
                             if let Some(node_api_mut) = Arc::get_mut(&mut node_api) {
-                                node_api_mut.set_payment_state_machine(Arc::clone(&state_machine_arc));
+                                node_api_mut
+                                    .set_payment_state_machine(Arc::clone(&state_machine_arc));
                                 info!("Payment state machine set on NodeApiImpl");
                             } else {
                                 // If we can't get mutable access (multiple references exist),
@@ -747,13 +752,14 @@ impl Node {
                 self.mempool_manager
                     .set_event_publisher(Some(Arc::clone(event_publisher)));
                 info!("Event publisher set on mempool manager");
-                
+
                 // Set EventPublisher on NetworkManager for network event publishing
                 // Note: NetworkManager is stored as a value, not Arc, so we need to use a mutable reference
                 // Since we're in start_components which is &mut self, we can do this
-                self.network.set_event_publisher(Some(Arc::clone(event_publisher)));
+                self.network
+                    .set_event_publisher(Some(Arc::clone(event_publisher)));
                 info!("Event publisher set on network manager");
-                
+
                 // Publish ConfigLoaded event for modules to react to node configuration
                 // This allows modules like blvm-governance to configure themselves based on node config
                 if let Some(ref config) = self.config {
@@ -777,18 +783,23 @@ impl Node {
                     if config.payment.is_some() {
                         changed_sections.push("payment".to_string());
                     }
-                    
+
                     // Serialize config to JSON for modules that need full config
                     let config_json = serde_json::to_string(config)
                         .ok()
                         .map(|s| format!("{{\"config\":{}}}", s));
-                    
+
                     // Publish event (non-blocking, modules will receive it when they subscribe)
                     // Modules can also request config via NodeAPI if needed
                     let sections_count = changed_sections.len();
-                    event_publisher.publish_config_loaded(changed_sections, config_json).await;
-                    info!("ConfigLoaded event published for {} sections", sections_count);
-                    
+                    event_publisher
+                        .publish_config_loaded(changed_sections, config_json)
+                        .await;
+                    info!(
+                        "ConfigLoaded event published for {} sections",
+                        sections_count
+                    );
+
                     // Publish NodeStartupCompleted event
                     use crate::module::ipc::protocol::EventPayload;
                     use crate::module::traits::EventType;
@@ -802,7 +813,10 @@ impl Node {
                         duration_ms: 0, // Could track actual startup duration
                         components: startup_components,
                     };
-                    if let Err(e) = event_publisher.publish_event(EventType::NodeStartupCompleted, payload).await {
+                    if let Err(e) = event_publisher
+                        .publish_event(EventType::NodeStartupCompleted, payload)
+                        .await
+                    {
                         warn!("Failed to publish NodeStartupCompleted event: {}", e);
                     } else {
                         info!("NodeStartupCompleted event published");
@@ -894,23 +908,27 @@ impl Node {
             while let Some(block_data) = self.network.try_recv_block() {
                 info!("Processing block from network");
                 let blocks_arc = self.storage.blocks();
-                
+
                 // Parse block to get hash for event publishing
                 use crate::node::block_processor::parse_block_from_wire;
-                let block_hash_for_validation = if let Ok((block, _)) = parse_block_from_wire(&block_data) {
-                    use crate::storage::blockstore::BlockStore;
-                    blocks_arc.get_block_hash(&block)
-                } else {
-                    [0u8; 32]
-                };
-                
+                let block_hash_for_validation =
+                    if let Ok((block, _)) = parse_block_from_wire(&block_data) {
+                        use crate::storage::blockstore::BlockStore;
+                        blocks_arc.get_block_hash(&block)
+                    } else {
+                        [0u8; 32]
+                    };
+
                 // Publish block validation started event
                 if let Some(ref event_publisher) = self.event_publisher {
                     event_publisher
-                        .publish_block_validation_started(&block_hash_for_validation, current_height)
+                        .publish_block_validation_started(
+                            &block_hash_for_validation,
+                            current_height,
+                        )
                         .await;
                 }
-                
+
                 let validation_start_time = std::time::Instant::now();
                 match self.sync_coordinator.process_block(
                     &blocks_arc,
@@ -924,9 +942,9 @@ impl Node {
                 ) {
                     Ok(true) => {
                         info!("Block accepted at height {}", current_height);
-                        
+
                         let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
-                        
+
                         // Publish block validation completed event (success)
                         if let Some(ref event_publisher) = self.event_publisher {
                             event_publisher
@@ -1140,7 +1158,7 @@ impl Node {
                     Ok(false) => {
                         warn!("Block rejected at height {}", current_height);
                         let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
-                        
+
                         // Publish block validation completed event (failure)
                         if let Some(ref event_publisher) = self.event_publisher {
                             event_publisher
@@ -1157,7 +1175,7 @@ impl Node {
                     Err(e) => {
                         warn!("Error processing block: {}", e);
                         let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
-                        
+
                         // Publish block validation completed event (error)
                         if let Some(ref event_publisher) = self.event_publisher {
                             event_publisher
@@ -1269,13 +1287,10 @@ impl Node {
                 let available_bytes = total_bytes / 5; // 20% free (low threshold)
                 let percent_free = 20.0;
                 let disk_path = self.data_dir.to_string_lossy().to_string();
-                
-                event_publisher.publish_disk_space_low(
-                    available_bytes,
-                    total_bytes,
-                    percent_free,
-                    disk_path,
-                ).await;
+
+                event_publisher
+                    .publish_disk_space_low(available_bytes, total_bytes, percent_free, disk_path)
+                    .await;
             }
 
             // Check if pruning is enabled
@@ -1358,20 +1373,24 @@ impl Node {
 
         // Publish NodeShutdown event to modules (give them time to clean up)
         if let Some(ref event_publisher) = self.event_publisher {
-            event_publisher.publish_node_shutdown("graceful".to_string(), 30).await;
+            event_publisher
+                .publish_node_shutdown("graceful".to_string(), 30)
+                .await;
             // Give modules a moment to process shutdown event
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
 
         // Publish DataMaintenance event to modules (high urgency flush for shutdown)
         if let Some(ref event_publisher) = self.event_publisher {
-            event_publisher.publish_data_maintenance(
-                "flush".to_string(),      // Flush pending writes
-                "high".to_string(),       // High urgency (shutdown)
-                "shutdown".to_string(),   // Reason
-                None,                      // No cleanup needed
-                Some(5),                   // 5 second timeout
-            ).await;
+            event_publisher
+                .publish_data_maintenance(
+                    "flush".to_string(),    // Flush pending writes
+                    "high".to_string(),     // High urgency (shutdown)
+                    "shutdown".to_string(), // Reason
+                    None,                   // No cleanup needed
+                    Some(5),                // 5 second timeout
+                )
+                .await;
             // Give modules a moment to flush
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
@@ -1400,7 +1419,10 @@ impl Node {
             let payload = EventPayload::NodeShutdownCompleted {
                 duration_ms: 0, // Could track actual duration if needed
             };
-            if let Err(e) = event_publisher.publish_event(EventType::NodeShutdownCompleted, payload).await {
+            if let Err(e) = event_publisher
+                .publish_event(EventType::NodeShutdownCompleted, payload)
+                .await
+            {
                 warn!("Failed to publish NodeShutdownCompleted event: {}", e);
             }
         }

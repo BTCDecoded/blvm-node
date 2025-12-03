@@ -1,11 +1,11 @@
 //! Tests for BIP157 handler
 
-use bllvm_node::network::bip157_handler::{
+use blvm_node::network::bip157_handler::{
     generate_cfilter_response, handle_getcfcheckpt, handle_getcfheaders, handle_getcfilters,
 };
-use bllvm_node::network::filter_service::BlockFilterService;
-use bllvm_node::network::protocol::{GetCfcheckptMessage, GetCfheadersMessage, GetCfiltersMessage};
-use bllvm_node::storage::Storage;
+use blvm_node::network::filter_service::BlockFilterService;
+use blvm_node::network::protocol::{GetCfcheckptMessage, GetCfheadersMessage, GetCfiltersMessage};
+use blvm_node::storage::Storage;
 use std::sync::Arc;
 use tempfile::TempDir;
 

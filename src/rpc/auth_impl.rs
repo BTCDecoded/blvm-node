@@ -236,7 +236,7 @@ impl RpcAuthManager {
                 // Support "Bearer <token>" format
                 if let Some(token) = auth_str.strip_prefix("Bearer ") {
                     let tokens = self.valid_tokens.lock().await;
-                    
+
                     // Use constant-time comparison to prevent timing attacks
                     // Iterate through all tokens and compare using constant_time_eq
                     // This ensures timing is always O(n) regardless of which token matches
@@ -248,7 +248,7 @@ impl RpcAuthManager {
                             break;
                         }
                     }
-                    
+
                     if let Some(user_id) = matched_user_id {
                         debug!("Token authentication successful for {}", client_addr);
                         SecurityEvent::AuthSuccess {
@@ -265,13 +265,13 @@ impl RpcAuthManager {
                     } else {
                         // Record authentication failure for brute force detection
                         self.auth_failure_tracker.record_failure(client_addr).await;
-                        
+
                         SecurityEvent::AuthFailure {
                             client_addr,
                             reason: "Invalid authentication token".to_string(),
                         }
                         .log();
-                        
+
                         return AuthResult {
                             user_id: None,
                             requires_auth: self.auth_required,
@@ -288,7 +288,7 @@ impl RpcAuthManager {
         if let Some(cert_header) = headers.get("x-client-cert-fingerprint") {
             if let Ok(fingerprint) = cert_header.to_str() {
                 let certs = self.valid_certificates.lock().await;
-                
+
                 // Use constant-time comparison for certificate fingerprints
                 let mut matched_user_id = None;
                 for (stored_fingerprint, user_id) in certs.iter() {
@@ -297,7 +297,7 @@ impl RpcAuthManager {
                         break;
                     }
                 }
-                
+
                 if let Some(user_id) = matched_user_id {
                     debug!("Certificate authentication successful for {}", client_addr);
                     SecurityEvent::AuthSuccess {
@@ -319,13 +319,13 @@ impl RpcAuthManager {
         if self.auth_required {
             // Record authentication failure
             self.auth_failure_tracker.record_failure(client_addr).await;
-            
+
             SecurityEvent::AuthFailure {
                 client_addr,
                 reason: "Authentication required".to_string(),
             }
             .log();
-            
+
             return AuthResult {
                 user_id: None,
                 requires_auth: true,
@@ -372,7 +372,7 @@ impl RpcAuthManager {
         endpoint: Option<&str>,
     ) -> bool {
         let allowed = self.check_rate_limit(user_id).await;
-        
+
         if !allowed {
             // Log rate limit violation
             if let Some(addr) = client_addr {
@@ -384,7 +384,7 @@ impl RpcAuthManager {
                 .log();
             }
         }
-        
+
         allowed
     }
 
@@ -399,14 +399,14 @@ impl RpcAuthManager {
         let (burst, rate) = self.default_rate_limit;
         let ip_burst = burst / 2;
         let ip_rate = rate / 2;
-        
+
         let mut limiters = self.rate_limiters.lock().await;
-        let limiter = limiters.entry(user_id.clone()).or_insert_with(|| {
-            RpcRateLimiter::new(ip_burst, ip_rate)
-        });
-        
+        let limiter = limiters
+            .entry(user_id.clone())
+            .or_insert_with(|| RpcRateLimiter::new(ip_burst, ip_rate));
+
         let allowed = limiter.check_and_consume();
-        
+
         if !allowed {
             // Log rate limit violation
             SecurityEvent::RateLimitViolation {
@@ -416,7 +416,7 @@ impl RpcAuthManager {
             }
             .log();
         }
-        
+
         allowed
     }
 
@@ -460,9 +460,12 @@ impl SecurityEvent {
     /// Log the security event using structured logging
     pub fn log(&self) {
         use tracing::{debug, error, warn};
-        
+
         match self {
-            SecurityEvent::AuthFailure { client_addr, reason } => {
+            SecurityEvent::AuthFailure {
+                client_addr,
+                reason,
+            } => {
                 warn!(
                     target: "blvm_node::rpc::security",
                     client_addr = %client_addr,
@@ -534,19 +537,19 @@ impl AuthFailureTracker {
             .duration_since(UNIX_EPOCH)
             .expect("SystemTime should always be after UNIX_EPOCH")
             .as_secs();
-        
+
         let mut failures = self.failures.lock().await;
         let timestamps = failures.entry(addr).or_insert_with(Vec::new);
-        
+
         // Remove old failures outside the time window
         timestamps.retain(|&t| now.saturating_sub(t) < self.time_window_seconds);
-        
+
         // Add current failure
         timestamps.push(now);
-        
+
         // Check if threshold exceeded
         let exceeded = timestamps.len() >= self.failure_threshold as usize;
-        
+
         if exceeded {
             SecurityEvent::RepeatedAuthFailures {
                 client_addr: addr,
@@ -555,8 +558,7 @@ impl AuthFailureTracker {
             }
             .log();
         }
-        
+
         exceeded
     }
 }
-

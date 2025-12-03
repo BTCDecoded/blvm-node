@@ -1,13 +1,13 @@
 //! Storage layer tests
 
-use bllvm_node::storage::*;
-use bllvm_protocol::*;
+use blvm_node::storage::*;
+use blvm_protocol::*;
 use tempfile::TempDir;
 mod common;
-use bllvm_node::storage::blockstore::BlockStore;
-use bllvm_node::storage::chainstate::ChainState;
-use bllvm_node::storage::txindex::TxIndex;
-use bllvm_node::storage::utxostore::UtxoStore;
+use blvm_node::storage::blockstore::BlockStore;
+use blvm_node::storage::chainstate::ChainState;
+use blvm_node::storage::txindex::TxIndex;
+use blvm_node::storage::utxostore::UtxoStore;
 use common::*;
 
 #[test]
@@ -123,8 +123,8 @@ fn test_transaction_index() {
     // Create a test transaction
     let tx = Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        inputs: blvm_protocol::tx_inputs![],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 5000000000,
             script_pubkey: vec![0x76, 0xa9, 0x14],
         }],
@@ -602,7 +602,7 @@ fn test_transaction_index_metadata() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_chainstate_work_accumulation() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, default_backend, Database};
+    use blvm_node::storage::database::{create_database, default_backend, Database};
     let db_arc: std::sync::Arc<dyn Database> =
         std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
     let chainstate = ChainState::new(db_arc).unwrap();
@@ -644,7 +644,7 @@ async fn test_chainstate_persistence() {
 
     // Create first chainstate
     {
-        use bllvm_node::storage::database::{create_database, default_backend};
+        use blvm_node::storage::database::{create_database, default_backend};
         let db_arc = std::sync::Arc::from(create_database(db_path, default_backend()).unwrap());
         let chainstate = ChainState::new(db_arc).unwrap();
 
@@ -663,7 +663,7 @@ async fn test_chainstate_persistence() {
 
     // Reopen and verify persistence
     {
-        use bllvm_node::storage::database::{create_database, default_backend};
+        use blvm_node::storage::database::{create_database, default_backend};
         let db_arc = std::sync::Arc::from(create_database(db_path, default_backend()).unwrap());
         let chainstate = ChainState::new(db_arc).unwrap();
 
@@ -677,7 +677,7 @@ async fn test_chainstate_persistence() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_utxostore_concurrent_operations() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, default_backend, Database};
+    use blvm_node::storage::database::{create_database, default_backend, Database};
     let db_arc: std::sync::Arc<dyn Database> =
         std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
     let utxostore = UtxoStore::new(db_arc).unwrap();
@@ -732,7 +732,7 @@ async fn test_utxostore_concurrent_operations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_txindex_lookup_paths() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, default_backend, Database};
+    use blvm_node::storage::database::{create_database, default_backend, Database};
     let db_arc: std::sync::Arc<dyn Database> =
         std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
     let txindex = TxIndex::new(db_arc).unwrap();
@@ -748,7 +748,7 @@ async fn test_txindex_lookup_paths() {
         .with_lock_time(0)
         .build();
 
-    let tx_hash = bllvm_protocol::block::calculate_tx_id(&tx);
+    let tx_hash = blvm_protocol::block::calculate_tx_id(&tx);
     let block_hash = random_hash();
     let block_height = 100;
 
@@ -780,7 +780,7 @@ async fn test_txindex_lookup_paths() {
 #[test]
 fn test_redb_tree_clear() {
     // Test redb clear() implementation
-    use bllvm_node::storage::database::{create_database, default_backend, Database, Tree};
+    use blvm_node::storage::database::{create_database, default_backend, Database, Tree};
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
@@ -826,7 +826,7 @@ fn test_redb_tree_clear() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_storage_integration_workflow() {
     let temp_dir = TempDir::new().unwrap();
-    use bllvm_node::storage::database::{create_database, default_backend, Database};
+    use blvm_node::storage::database::{create_database, default_backend, Database};
     let db_arc: std::sync::Arc<dyn Database> =
         std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
 
@@ -870,7 +870,7 @@ async fn test_storage_integration_workflow() {
 
     // Index transaction
     let tx = valid_transaction();
-    let tx_hash = bllvm_protocol::block::calculate_tx_id(&tx);
+    let tx_hash = blvm_protocol::block::calculate_tx_id(&tx);
     txindex
         .index_transaction(&tx, &block_hash, block_height, 0)
         .unwrap();

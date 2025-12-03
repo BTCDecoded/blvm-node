@@ -1,8 +1,8 @@
 //! Tests for Module API Events
 
-use bllvm_node::module::api::events::EventManager;
-use bllvm_node::module::ipc::protocol::{EventMessage, EventPayload, ModuleMessage};
-use bllvm_node::module::traits::EventType;
+use blvm_node::module::api::events::EventManager;
+use blvm_node::module::ipc::protocol::{EventMessage, EventPayload, ModuleMessage};
+use blvm_node::module::traits::EventType;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
@@ -80,7 +80,7 @@ async fn test_event_manager_publish_event_no_subscribers() {
     let manager = EventManager::new();
 
     // Publish event with no subscribers
-    use bllvm_protocol::Hash;
+    use blvm_protocol::Hash;
     let result = manager
         .publish_event(
             EventType::NewBlock,
@@ -108,7 +108,7 @@ async fn test_event_manager_publish_event_with_subscribers() {
         .unwrap();
 
     // Publish event
-    use bllvm_protocol::Hash;
+    use blvm_protocol::Hash;
     let result = manager
         .publish_event(
             EventType::NewBlock,
@@ -168,7 +168,7 @@ async fn test_event_manager_publish_to_multiple_subscribers() {
         .unwrap();
 
     // Publish event
-    use bllvm_protocol::Hash;
+    use blvm_protocol::Hash;
     let result = manager
         .publish_event(
             EventType::NewBlock,
@@ -204,7 +204,7 @@ async fn test_event_manager_publish_different_event_types() {
         .unwrap();
 
     // Publish Transaction event (should not be received)
-    use bllvm_protocol::Hash;
+    use blvm_protocol::Hash;
     manager
         .publish_event(
             EventType::NewTransaction,
@@ -264,7 +264,7 @@ async fn test_event_manager_cleanup_failed_channels() {
     drop(rx);
 
     // Publish event (should handle failed channel gracefully)
-    use bllvm_protocol::Hash;
+    use blvm_protocol::Hash;
     let result = manager
         .publish_event(
             EventType::NewBlock,

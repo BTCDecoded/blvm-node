@@ -1,7 +1,7 @@
 //! Tests for network sandbox
 
-use bllvm_node::module::sandbox::NetworkSandbox;
-use bllvm_node::module::traits::ModuleError;
+use blvm_node::module::sandbox::NetworkSandbox;
+use blvm_node::module::traits::ModuleError;
 
 #[test]
 fn test_network_sandbox_creation() {

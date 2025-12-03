@@ -1,6 +1,6 @@
 //! Tests for async request-response routing enhancements
 
-use bllvm_node::network::{transport::TransportPreference, NetworkManager};
+use blvm_node::network::{transport::TransportPreference, NetworkManager};
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 

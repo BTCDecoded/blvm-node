@@ -330,22 +330,20 @@ async fn distribute_pool(
     // Parse distribution from body
     let distribution = body
         .and_then(|v| {
-            v.get("distribution")
-                .and_then(|d| d.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            if let (Some(id), Some(amount)) = (
-                                item.get("participant_id").and_then(|i| i.as_str()),
-                                item.get("amount").and_then(|a| a.as_u64()),
-                            ) {
-                                Some((id.to_string(), amount))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
+            v.get("distribution").and_then(|d| d.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        if let (Some(id), Some(amount)) = (
+                            item.get("participant_id").and_then(|i| i.as_str()),
+                            item.get("amount").and_then(|a| a.as_u64()),
+                        ) {
+                            Some((id.to_string(), amount))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
         })
         .unwrap_or_default();
 

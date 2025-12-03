@@ -1,7 +1,7 @@
 //! Edge case tests for transport layers (TCP, QUIC, Iroh)
 
-use bllvm_node::network::tcp_transport::TcpTransport;
-use bllvm_node::network::transport::{
+use blvm_node::network::tcp_transport::TcpTransport;
+use blvm_node::network::transport::{
     Transport, TransportAddr, TransportConnection, TransportListener,
 };
 use std::net::SocketAddr;
@@ -111,7 +111,7 @@ async fn test_tcp_transport_partial_read_write() {
 #[cfg(feature = "quinn")]
 #[tokio::test]
 async fn test_quinn_transport_error_recovery() {
-    use bllvm_node::network::quinn_transport::QuinnTransport;
+    use blvm_node::network::quinn_transport::QuinnTransport;
 
     let transport = QuinnTransport::new().unwrap();
 
@@ -131,7 +131,7 @@ async fn test_quinn_transport_error_recovery() {
 #[cfg(feature = "quinn")]
 #[tokio::test]
 async fn test_quinn_transport_concurrent_connections() {
-    use bllvm_node::network::quinn_transport::QuinnTransport;
+    use blvm_node::network::quinn_transport::QuinnTransport;
 
     let transport = QuinnTransport::new().unwrap();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -163,7 +163,7 @@ async fn test_quinn_transport_concurrent_connections() {
 #[cfg(feature = "iroh")]
 #[tokio::test]
 async fn test_iroh_transport_error_recovery() {
-    use bllvm_node::network::iroh_transport::IrohTransport;
+    use blvm_node::network::iroh_transport::IrohTransport;
 
     let transport = IrohTransport::new().await.unwrap();
 
@@ -180,7 +180,7 @@ async fn test_iroh_transport_error_recovery() {
 #[cfg(feature = "iroh")]
 #[tokio::test]
 async fn test_iroh_transport_concurrent_connections() {
-    use bllvm_node::network::iroh_transport::IrohTransport;
+    use blvm_node::network::iroh_transport::IrohTransport;
 
     let transport1 = IrohTransport::new().await.unwrap();
     let transport2 = IrohTransport::new().await.unwrap();

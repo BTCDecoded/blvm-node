@@ -1,9 +1,9 @@
 //! Tests for Ban List Signing
 
-use bllvm_node::network::ban_list_signing::{
+use blvm_node::network::ban_list_signing::{
     sign_ban_list, verify_ban_list_signature, SignedBanListMessage,
 };
-use bllvm_node::network::protocol::BanListMessage;
+use blvm_node::network::protocol::BanListMessage;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 fn create_test_ban_list() -> BanListMessage {

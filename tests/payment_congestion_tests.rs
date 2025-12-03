@@ -4,12 +4,12 @@
 
 #![cfg(feature = "ctv")]
 
-use bllvm_node::payment::congestion::{
+use blvm_node::payment::congestion::{
     BatchConfig, CongestionManager, PendingTransaction, TransactionPriority,
 };
-use bllvm_node::payment::covenant::CovenantEngine;
-use bllvm_node::payment::processor::PaymentError;
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_node::payment::covenant::CovenantEngine;
+use blvm_node::payment::processor::PaymentError;
+use blvm_protocol::payment::PaymentOutput;
 use std::sync::Arc;
 
 /// Helper to create a test congestion manager

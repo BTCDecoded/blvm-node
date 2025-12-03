@@ -149,7 +149,7 @@ impl Peer {
             last_block_received: None,
             last_tx_received: None,
             services: 0, // Service flags from version message (set when version received)
-            version: 0, // Protocol version from version message (set when version received)
+            version: 0,  // Protocol version from version message (set when version received)
         }
     }
 

@@ -27,14 +27,22 @@ pub async fn get_mempool_transaction(mempool: &MempoolRpc, txid: &str) -> Result
 }
 
 /// Get mempool transaction ancestors
-pub async fn get_mempool_ancestors(mempool: &MempoolRpc, txid: &str, verbose: bool) -> Result<Value> {
+pub async fn get_mempool_ancestors(
+    mempool: &MempoolRpc,
+    txid: &str,
+    verbose: bool,
+) -> Result<Value> {
     let params = json!([txid, verbose]);
     let ancestors = mempool.getmempoolancestors(&params).await?;
     Ok(ancestors)
 }
 
 /// Get mempool transaction descendants
-pub async fn get_mempool_descendants(mempool: &MempoolRpc, txid: &str, verbose: bool) -> Result<Value> {
+pub async fn get_mempool_descendants(
+    mempool: &MempoolRpc,
+    txid: &str,
+    verbose: bool,
+) -> Result<Value> {
     let params = json!([txid, verbose]);
     let descendants = mempool.getmempooldescendants(&params).await?;
     Ok(descendants)
@@ -55,8 +63,14 @@ pub async fn save_mempool(mempool: &MempoolRpc) -> Result<Value> {
 }
 
 /// Prioritize transaction in mempool
-pub async fn prioritize_transaction(mempool: &MempoolRpc, txid: &str, fee_delta: f64) -> Result<Value> {
+pub async fn prioritize_transaction(
+    mempool: &MempoolRpc,
+    txid: &str,
+    fee_delta: f64,
+) -> Result<Value> {
     // Note: prioritisetransaction is in mining.rs, but we'll call it through RPC server
     // For now, return error indicating it needs to be implemented
-    Err(anyhow::anyhow!("prioritisetransaction not yet exposed via REST API"))
+    Err(anyhow::anyhow!(
+        "prioritisetransaction not yet exposed via REST API"
+    ))
 }

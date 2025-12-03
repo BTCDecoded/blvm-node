@@ -1,7 +1,7 @@
 //! Tests for TCP transport
 
-use bllvm_node::network::tcp_transport::TcpTransport;
-use bllvm_node::network::transport::{Transport, TransportAddr, TransportListener};
+use blvm_node::network::tcp_transport::TcpTransport;
+use blvm_node::network::transport::{Transport, TransportAddr, TransportListener};
 use std::net::SocketAddr;
 
 #[tokio::test]
@@ -9,7 +9,7 @@ async fn test_tcp_transport_new() {
     let transport = TcpTransport::new();
     assert_eq!(
         transport.transport_type(),
-        bllvm_node::network::transport::TransportType::Tcp
+        blvm_node::network::transport::TransportType::Tcp
     );
 }
 
@@ -45,7 +45,7 @@ async fn test_tcp_transport_connect_invalid_addr() {
         // Just verify transport type
         assert_eq!(
             transport.transport_type(),
-            bllvm_node::network::transport::TransportType::Tcp
+            blvm_node::network::transport::TransportType::Tcp
         );
     }
 }

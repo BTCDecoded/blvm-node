@@ -1,7 +1,7 @@
 //! Advanced RPC scenario tests (rate limiting, large result sets)
 
-use bllvm_node::rpc::blockchain::BlockchainRpc;
-use bllvm_node::rpc::control::ControlRpc;
+use blvm_node::rpc::blockchain::BlockchainRpc;
+use blvm_node::rpc::control::ControlRpc;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

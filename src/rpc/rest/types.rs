@@ -125,15 +125,16 @@ pub async fn read_json_body(req: Request<Incoming>) -> Result<Option<Value>, Str
         Ok(collected) => collected.to_bytes(),
         Err(e) => return Err(format!("Failed to read request body: {}", e)),
     };
-    
+
     // Enforce maximum request size
     if body_bytes.len() > MAX_REQUEST_SIZE {
         return Err(format!(
             "Request body too large: {} bytes (max: {} bytes)",
-            body_bytes.len(), MAX_REQUEST_SIZE
+            body_bytes.len(),
+            MAX_REQUEST_SIZE
         ));
     }
-    
+
     if body_bytes.is_empty() {
         Ok(None)
     } else {

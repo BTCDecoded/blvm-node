@@ -2,9 +2,9 @@
 
 #![cfg(feature = "fibre")]
 
-use bllvm_node::network::fibre::{FibreError, FibreRelay};
-use bllvm_node::network::{NetworkManager, NetworkMessage};
-use bllvm_protocol::{Block, BlockHeader};
+use blvm_node::network::fibre::{FibreError, FibreRelay};
+use blvm_node::network::{NetworkManager, NetworkMessage};
+use blvm_protocol::{Block, BlockHeader};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -74,12 +74,12 @@ async fn test_fibre_network_manager_integration() {
     let mut network = NetworkManager::with_config(
         listen_addr,
         10,
-        bllvm_node::network::transport::TransportPreference::TCP_ONLY,
+        blvm_node::network::transport::TransportPreference::TCP_ONLY,
         None,
     );
 
     // Initialize FIBRE
-    let config = bllvm_protocol::fibre::FibreConfig {
+    let config = blvm_protocol::fibre::FibreConfig {
         enabled: true,
         fec_parity_ratio: 0.2,
         chunk_timeout_secs: 2,
@@ -88,7 +88,7 @@ async fn test_fibre_network_manager_integration() {
     };
 
     // Create a test config with FIBRE enabled
-    let mut node_config = bllvm_node::config::NodeConfig::default();
+    let mut node_config = blvm_node::config::NodeConfig::default();
     node_config.fibre = Some(config);
 
     // Initialize FIBRE
@@ -105,7 +105,7 @@ async fn test_fibre_network_manager_integration() {
 
 #[tokio::test]
 async fn test_fibre_chunk_serialization_roundtrip() {
-    use bllvm_protocol::fibre::{FecChunk, FIBRE_MAGIC};
+    use blvm_protocol::fibre::{FecChunk, FIBRE_MAGIC};
 
     // Create chunk manually (since new() is not public, we'll use deserialize after creating raw data)
     let block_hash = [0x42; 32];
@@ -114,8 +114,8 @@ async fn test_fibre_chunk_serialization_roundtrip() {
     // Create a valid serialized chunk manually for testing
     let mut packet = Vec::new();
     packet.extend_from_slice(&FIBRE_MAGIC);
-    packet.push(bllvm_protocol::fibre::FIBRE_VERSION);
-    packet.push(bllvm_protocol::fibre::PACKET_TYPE_CHUNK);
+    packet.push(blvm_protocol::fibre::FIBRE_VERSION);
+    packet.push(blvm_protocol::fibre::PACKET_TYPE_CHUNK);
     packet.extend_from_slice(&block_hash);
     packet.extend_from_slice(&12345u64.to_be_bytes());
     packet.extend_from_slice(&0u32.to_be_bytes()); // index

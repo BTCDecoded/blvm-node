@@ -3,9 +3,9 @@
 //! Tests for health checks, performance profiling, and metrics collection
 //! covering various scenarios and edge cases.
 
-use bllvm_node::node::health::{HealthChecker, HealthStatus};
-use bllvm_node::node::metrics::{MetricsCollector, NetworkMetrics, StorageMetrics};
-use bllvm_node::node::performance::PerformanceProfiler;
+use blvm_node::node::health::{HealthChecker, HealthStatus};
+use blvm_node::node::metrics::{MetricsCollector, NetworkMetrics, StorageMetrics};
+use blvm_node::node::performance::PerformanceProfiler;
 use std::time::Duration;
 
 #[test]

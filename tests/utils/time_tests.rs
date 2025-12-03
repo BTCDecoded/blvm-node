@@ -2,7 +2,7 @@
 //!
 //! Tests for time-related utilities.
 
-use bllvm_node::utils::{current_timestamp, current_timestamp_duration};
+use blvm_node::utils::{current_timestamp, current_timestamp_duration};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]

@@ -1,9 +1,9 @@
 //! Edge case tests for RPC methods (large results, concurrent calls, invalid params)
 
-use bllvm_node::rpc::blockchain::BlockchainRpc;
-use bllvm_node::rpc::control::ControlRpc;
-use bllvm_node::rpc::mining::MiningRpc;
-use bllvm_node::rpc::rawtx::RawTxRpc;
+use blvm_node::rpc::blockchain::BlockchainRpc;
+use blvm_node::rpc::control::ControlRpc;
+use blvm_node::rpc::mining::MiningRpc;
+use blvm_node::rpc::rawtx::RawTxRpc;
 use serde_json::json;
 use std::sync::Arc;
 

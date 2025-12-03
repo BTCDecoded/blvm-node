@@ -1,7 +1,7 @@
 //! Tests for Address Database
 
-use bllvm_node::network::address_db::{AddressDatabase, AddressEntry};
-use bllvm_node::network::protocol::NetworkAddress;
+use blvm_node::network::address_db::{AddressDatabase, AddressEntry};
+use blvm_node::network::protocol::NetworkAddress;
 use std::collections::HashMap;
 
 fn create_test_network_address(ip: [u8; 16], port: u16) -> NetworkAddress {

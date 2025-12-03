@@ -2,9 +2,9 @@
 //!
 //! Defines the interface that modules can implement to expose APIs to other modules.
 
+use crate::module::traits::ModuleError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::module::traits::ModuleError;
 
 /// Module API request payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,12 +45,10 @@ pub trait ModuleAPI: Send + Sync {
         params: &[u8],
         caller_module_id: &str,
     ) -> Result<Vec<u8>, ModuleError>;
-    
+
     /// Get list of available API methods
     fn list_methods(&self) -> Vec<String>;
-    
+
     /// Get API version
     fn api_version(&self) -> u32;
 }
-
-

@@ -12,9 +12,9 @@ use crate::storage::Storage;
 use crate::utils::option_to_result;
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
-use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
-#[cfg(feature = "utxo-commitments")]
 use blvm_protocol::spam_filter::SpamFilter;
+#[cfg(feature = "utxo-commitments")]
+use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 use hex;
 use std::sync::Arc;
 

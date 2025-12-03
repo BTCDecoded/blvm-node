@@ -6,7 +6,7 @@
 //! - Weighted vote calculation with verified signals
 //! - Tampering detection
 
-use bllvm_node::governance::user_signaling::{UserSignalingManager, UserSignal, SignalType};
+use blvm_node::governance::user_signaling::{UserSignalingManager, UserSignal, SignalType};
 use bllvm_sdk::governance::GovernanceKeypair;
 use std::collections::HashMap;
 

@@ -3,9 +3,9 @@
 //! Tests for UTXO commitments client when the "utxo-commitments" feature is enabled.
 
 #[cfg(feature = "utxo-commitments")]
-use bllvm_node::network::utxo_commitments_client::UtxoCommitmentsClient;
+use blvm_node::network::utxo_commitments_client::UtxoCommitmentsClient;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::types::Hash;
+use blvm_protocol::types::Hash;
 #[cfg(feature = "utxo-commitments")]
 use std::sync::Arc;
 #[cfg(feature = "utxo-commitments")]
@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 #[test]
 fn test_utxo_commitments_client_creation() {
     // Create a mock network manager
-    use bllvm_node::network::NetworkManager;
+    use blvm_node::network::NetworkManager;
     use std::net::SocketAddr;
 
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -57,7 +57,7 @@ fn test_utxo_commitments_client_peer_id_parsing() {
 #[test]
 fn test_utxo_commitments_client_get_peer_ids() {
     // Create client
-    use bllvm_node::network::NetworkManager;
+    use blvm_node::network::NetworkManager;
     use std::net::SocketAddr;
 
     let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

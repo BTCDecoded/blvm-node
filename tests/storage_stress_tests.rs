@@ -1,7 +1,7 @@
 //! Stress tests for storage operations (concurrent writes, high load)
 
-use bllvm_node::storage::Storage;
-use bllvm_node::{Block, BlockHeader, Hash};
+use blvm_node::storage::Storage;
+use blvm_node::{Block, BlockHeader, Hash};
 use std::sync::Arc;
 use tempfile::TempDir;
 

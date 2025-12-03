@@ -1,13 +1,13 @@
 //! Tests for BIP70 Payment Protocol Handler
 
-use bllvm_node::network::bip70_handler::{
+use blvm_node::network::bip70_handler::{
     handle_get_payment_request, handle_payment, validate_payment_ack_message,
     validate_payment_request_message,
 };
-use bllvm_node::network::protocol::{
+use blvm_node::network::protocol::{
     GetPaymentRequestMessage, PaymentACKMessage, PaymentMessage, PaymentRequestMessage,
 };
-use bllvm_protocol::payment::{Payment, PaymentOutput, PaymentRequest};
+use blvm_protocol::payment::{Payment, PaymentOutput, PaymentRequest};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -104,7 +104,7 @@ async fn test_validate_payment_request_message_no_signature() {
 
 #[test]
 fn test_validate_payment_ack_message() {
-    use bllvm_protocol::payment::PaymentACK;
+    use blvm_protocol::payment::PaymentACK;
 
     let payment = create_test_payment();
     let payment_ack = PaymentACK {
@@ -153,7 +153,7 @@ fn test_payment_message_structure() {
 
 #[test]
 fn test_payment_ack_message_structure() {
-    use bllvm_protocol::payment::PaymentACK;
+    use blvm_protocol::payment::PaymentACK;
 
     let payment = create_test_payment();
     let payment_ack = PaymentACK {

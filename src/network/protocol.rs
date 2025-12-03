@@ -894,16 +894,18 @@ impl ProtocolParser {
             "getbanlist" => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
             "banlist" => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
             // Governance messages
-            "econreg" => Ok(ProtocolMessage::EconomicNodeRegistration(bincode::deserialize(
+            "econreg" => Ok(ProtocolMessage::EconomicNodeRegistration(
+                bincode::deserialize(payload)?,
+            )),
+            "econveto" => Ok(ProtocolMessage::EconomicNodeVeto(bincode::deserialize(
                 payload,
             )?)),
-            "econveto" => Ok(ProtocolMessage::EconomicNodeVeto(bincode::deserialize(payload)?)),
             "econstatus" => Ok(ProtocolMessage::EconomicNodeStatus(bincode::deserialize(
                 payload,
             )?)),
-            "econfork" => Ok(ProtocolMessage::EconomicNodeForkDecision(bincode::deserialize(
-                payload,
-            )?)),
+            "econfork" => Ok(ProtocolMessage::EconomicNodeForkDecision(
+                bincode::deserialize(payload)?,
+            )),
             "getaddr" => Ok(ProtocolMessage::GetAddr),
             "addr" => Ok(ProtocolMessage::Addr(bincode::deserialize(payload)?)),
             // Module Registry
@@ -1011,12 +1013,12 @@ impl ProtocolParser {
             ProtocolMessage::GetBanList(msg) => ("getbanlist", bincode::serialize(msg)?),
             ProtocolMessage::BanList(msg) => ("banlist", bincode::serialize(msg)?),
             // Governance messages
-            ProtocolMessage::EconomicNodeRegistration(msg) => {
-                ("econreg", bincode::serialize(msg)?)
-            }
+            ProtocolMessage::EconomicNodeRegistration(msg) => ("econreg", bincode::serialize(msg)?),
             ProtocolMessage::EconomicNodeVeto(msg) => ("econveto", bincode::serialize(msg)?),
             ProtocolMessage::EconomicNodeStatus(msg) => ("econstatus", bincode::serialize(msg)?),
-            ProtocolMessage::EconomicNodeForkDecision(msg) => ("econfork", bincode::serialize(msg)?),
+            ProtocolMessage::EconomicNodeForkDecision(msg) => {
+                ("econfork", bincode::serialize(msg)?)
+            }
             // Address relay
             ProtocolMessage::GetAddr => ("getaddr", vec![]),
             ProtocolMessage::Addr(msg) => ("addr", bincode::serialize(msg)?),
@@ -1028,7 +1030,9 @@ impl ProtocolParser {
             ProtocolMessage::ModuleInv(msg) => ("moduleinv", bincode::serialize(msg)?),
             ProtocolMessage::GetModuleList(msg) => ("getmodulelist", bincode::serialize(msg)?),
             ProtocolMessage::ModuleList(msg) => ("modulelist", bincode::serialize(msg)?),
-            ProtocolMessage::MeshPacket(_) => return Err(anyhow::anyhow!("MeshPacket handled separately")),
+            ProtocolMessage::MeshPacket(_) => {
+                return Err(anyhow::anyhow!("MeshPacket handled separately"))
+            }
         };
 
         let mut message = Vec::new();

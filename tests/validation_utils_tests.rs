@@ -1,6 +1,6 @@
 //! Tests for validation utilities
 
-use bllvm_node::utils::validation::{
+use blvm_node::utils::validation::{
     ensure, ensure_fmt, ensure_not_empty, ensure_range, ensure_some,
 };
 

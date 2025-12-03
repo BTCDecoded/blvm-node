@@ -2,11 +2,11 @@
 //!
 //! Additional edge cases for module API hub: concurrent requests, timeouts, error recovery.
 
-use bllvm_node::module::api::hub::ModuleApiHub;
-use bllvm_node::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
-use bllvm_node::module::security::permissions::{Permission, PermissionSet};
-use bllvm_node::module::traits::{ModuleError, NodeAPI};
-use bllvm_protocol::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use blvm_node::module::api::hub::ModuleApiHub;
+use blvm_node::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
+use blvm_node::module::security::permissions::{Permission, PermissionSet};
+use blvm_node::module::traits::{ModuleError, NodeAPI};
+use blvm_protocol::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 use std::sync::Arc;
 
 // Mock NodeAPI for testing
@@ -44,9 +44,9 @@ impl NodeAPI for MockNodeAPI {
 
     async fn subscribe_events(
         &self,
-        _event_types: Vec<bllvm_node::module::traits::EventType>,
+        _event_types: Vec<blvm_node::module::traits::EventType>,
     ) -> Result<
-        tokio::sync::mpsc::Receiver<bllvm_node::module::ipc::protocol::ModuleMessage>,
+        tokio::sync::mpsc::Receiver<blvm_node::module::ipc::protocol::ModuleMessage>,
         ModuleError,
     > {
         let (_tx, rx) = tokio::sync::mpsc::channel(10);

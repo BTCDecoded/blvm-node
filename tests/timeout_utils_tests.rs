@@ -1,6 +1,6 @@
 //! Tests for timeout utilities
 
-use bllvm_node::utils::timeout::{
+use blvm_node::utils::timeout::{
     with_custom_timeout, with_network_timeout, with_rpc_timeout, with_storage_timeout,
     DEFAULT_NETWORK_TIMEOUT, DEFAULT_RPC_TIMEOUT, DEFAULT_STORAGE_TIMEOUT,
 };

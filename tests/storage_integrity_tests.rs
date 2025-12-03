@@ -2,8 +2,8 @@
 //!
 //! Tests data integrity, atomicity, and consistency of storage operations.
 
-use bllvm_node::storage::*;
-use bllvm_protocol::*;
+use blvm_node::storage::*;
+use blvm_protocol::*;
 use tempfile::TempDir;
 mod common;
 use common::*;

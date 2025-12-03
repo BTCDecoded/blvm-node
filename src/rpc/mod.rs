@@ -129,13 +129,17 @@ impl RpcManager {
         match auth_config.load_tokens() {
             Ok(tokens) => {
                 if !tokens.is_empty() {
-                    info!("Loaded {} RPC auth token(s) from secure source", tokens.len());
+                    info!(
+                        "Loaded {} RPC auth token(s) from secure source",
+                        tokens.len()
+                    );
                 }
                 // Add tokens to auth manager
                 for token in tokens {
                     if let Err(e) = auth_manager.add_token(token.clone()).await {
                         // Redact token from error message
-                        let redacted_error = auth::redact_tokens_from_log(&format!("{}", e), &[token]);
+                        let redacted_error =
+                            auth::redact_tokens_from_log(&format!("{}", e), &[token]);
                         error!("Failed to add RPC auth token: {}", redacted_error);
                     }
                 }
@@ -146,7 +150,8 @@ impl RpcManager {
                 for token in auth_config.tokens {
                     if let Err(e) = auth_manager.add_token(token.clone()).await {
                         // Redact token from error message
-                        let redacted_error = auth::redact_tokens_from_log(&format!("{}", e), &[token]);
+                        let redacted_error =
+                            auth::redact_tokens_from_log(&format!("{}", e), &[token]);
                         error!("Failed to add RPC auth token: {}", redacted_error);
                     }
                 }

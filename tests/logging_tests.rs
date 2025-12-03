@@ -2,10 +2,10 @@
 //!
 //! Tests for logging initialization functions.
 
-use bllvm_node::config::LoggingConfig;
+use blvm_node::config::LoggingConfig;
 #[cfg(feature = "json-logging")]
-use bllvm_node::utils::logging::init_json_logging;
-use bllvm_node::utils::logging::{init_logging, init_logging_from_config, init_module_logging};
+use blvm_node::utils::logging::init_json_logging;
+use blvm_node::utils::logging::{init_logging, init_logging_from_config, init_module_logging};
 
 #[test]
 fn test_init_logging_default() {

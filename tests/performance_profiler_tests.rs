@@ -1,6 +1,6 @@
 //! Tests for performance profiler
 
-use bllvm_node::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
+use blvm_node::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;

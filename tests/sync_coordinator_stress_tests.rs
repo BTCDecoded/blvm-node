@@ -1,8 +1,8 @@
 //! Stress tests for sync coordinator (state transitions, peer disconnection)
 
-use bllvm_node::node::sync::{SyncCoordinator, SyncState, SyncStateMachine};
-use bllvm_node::{BlockHeader, Hash};
-use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+use blvm_node::node::sync::{SyncCoordinator, SyncState, SyncStateMachine};
+use blvm_node::{BlockHeader, Hash};
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;

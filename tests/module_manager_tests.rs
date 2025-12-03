@@ -1,7 +1,7 @@
 //! Tests for module manager lifecycle
 
-use bllvm_node::module::manager::ModuleManager;
-use bllvm_node::module::traits::{ModuleError, ModuleMetadata};
+use blvm_node::module::manager::ModuleManager;
+use blvm_node::module::traits::{ModuleError, ModuleMetadata};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -37,7 +37,7 @@ async fn test_module_manager_with_config() {
     let data_dir = temp_dir.path().join("data");
     let socket_dir = temp_dir.path().join("sockets");
 
-    let config = bllvm_node::config::ModuleResourceLimitsConfig::default();
+    let config = blvm_node::config::ModuleResourceLimitsConfig::default();
     let manager = ModuleManager::with_config(&modules_dir, &data_dir, &socket_dir, Some(&config));
     // Manager should be created with config
     assert!(true);

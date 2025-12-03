@@ -2,7 +2,7 @@
 //!
 //! Tests for error handling helpers.
 
-use bllvm_node::utils::{
+use blvm_node::utils::{
     log_error, log_error_async, result_to_option, err_option_to_result,
     with_default, with_default_async, with_fallback, with_fallback_async,
 };

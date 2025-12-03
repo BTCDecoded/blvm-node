@@ -4,10 +4,10 @@
 
 #![cfg(feature = "ctv")]
 
-use bllvm_node::payment::covenant::CovenantEngine;
-use bllvm_node::payment::processor::PaymentError;
-use bllvm_node::payment::vault::{VaultConfig, VaultEngine, VaultLifecycle, VaultState};
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_node::payment::covenant::CovenantEngine;
+use blvm_node::payment::processor::PaymentError;
+use blvm_node::payment::vault::{VaultConfig, VaultEngine, VaultLifecycle, VaultState};
+use blvm_protocol::payment::PaymentOutput;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -338,7 +338,7 @@ fn test_mark_unvaulted() {
 #[cfg(feature = "ctv")]
 #[test]
 fn test_vault_state_storage() {
-    use bllvm_node::storage::Storage;
+    use blvm_node::storage::Storage;
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();

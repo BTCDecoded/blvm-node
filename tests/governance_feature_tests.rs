@@ -4,9 +4,9 @@
 //! These tests are conditionally compiled based on feature flags.
 
 #[cfg(feature = "governance")]
-use bllvm_node::governance::webhook::GovernanceWebhookClient;
+use blvm_node::governance::webhook::GovernanceWebhookClient;
 #[cfg(feature = "governance")]
-use bllvm_protocol::Block;
+use blvm_protocol::Block;
 
 #[cfg(feature = "governance")]
 #[test]
@@ -57,7 +57,7 @@ async fn test_governance_webhook_client_notify_block_disabled() {
 
     // Create a test block
     let block = Block {
-        header: bllvm_protocol::BlockHeader {
+        header: blvm_protocol::BlockHeader {
             version: 1,
             prev_block_hash: [0u8; 32],
             merkle_root: [0u8; 32],

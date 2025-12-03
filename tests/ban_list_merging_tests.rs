@@ -1,9 +1,9 @@
 //! Tests for ban list merging
 
-use bllvm_node::network::ban_list_merging::{
+use blvm_node::network::ban_list_merging::{
     calculate_ban_list_hash, merge_ban_lists, validate_ban_entry,
 };
-use bllvm_node::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
+use blvm_node::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
 
 fn create_ban_entry(ip: u32, port: u16, unban_timestamp: u64, reason: Option<String>) -> BanEntry {
     let mut ip_bytes = [0u8; 16];

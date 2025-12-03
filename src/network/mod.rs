@@ -66,9 +66,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::network::tcp_transport::TcpTransport;
 use crate::network::transport::{Transport, TransportAddr, TransportListener, TransportPreference};
-use std::collections::HashSet;
-use secp256k1;
 use hex;
+use secp256k1;
+use std::collections::HashSet;
 
 /// Network I/O operations for testing
 /// Note: This is deprecated - use TcpTransport instead
@@ -637,8 +637,12 @@ impl NetworkManager {
             peer_message_rates: Arc::new(Mutex::new(HashMap::new())),
             peer_tx_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             peer_tx_byte_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
-            mempool_policy_config: config.and_then(|c| c.mempool.as_ref()).map(|c| Arc::new(c.clone())),
-            spam_ban_config: config.and_then(|c| c.spam_ban.as_ref()).map(|c| Arc::new(c.clone())),
+            mempool_policy_config: config
+                .and_then(|c| c.mempool.as_ref())
+                .map(|c| Arc::new(c.clone())),
+            spam_ban_config: config
+                .and_then(|c| c.spam_ban.as_ref())
+                .map(|c| Arc::new(c.clone())),
             peer_spam_violations: Arc::new(Mutex::new(HashMap::new())),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
@@ -719,7 +723,9 @@ impl NetworkManager {
             // Try to get mutable access to set the sender
             // If we can't (multiple references exist), that's okay - broadcasting will be disabled
             if let Some(state_machine_mut) = StdArc::get_mut(&mut state_machine.clone()) {
-                *state_machine_mut = state_machine_mut.clone().with_network_sender(self.peer_tx.clone());
+                *state_machine_mut = state_machine_mut
+                    .clone()
+                    .with_network_sender(self.peer_tx.clone());
             } else {
                 // Multiple references exist - we can't update it now
                 // The state machine will work but won't broadcast (will just update state)
@@ -850,8 +856,8 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         msg: crate::network::protocol::EconomicNodeRegistrationMessage,
     ) -> Result<()> {
-        use tracing::{debug, info, warn, error};
         use reqwest::Client;
+        use tracing::{debug, error, info, warn};
 
         // Publish event for governance module (non-blocking)
         if let Some(event_publisher) = &self.event_publisher {
@@ -862,7 +868,10 @@ impl NetworkManager {
                 node_type: msg.node_type.clone(),
                 hashpower_percent: None,
             };
-            if let Err(e) = event_publisher.publish_event(EventType::EconomicNodeRegistered, payload).await {
+            if let Err(e) = event_publisher
+                .publish_event(EventType::EconomicNodeRegistered, payload)
+                .await
+            {
                 warn!("Failed to publish EconomicNodeRegistered event: {}", e);
             }
         }
@@ -873,17 +882,29 @@ impl NetworkManager {
         );
 
         // Replay protection: Check message ID and timestamp
-        if let Err(e) = self.replay_protection.check_message_id(&msg.message_id, msg.timestamp).await {
-            warn!("Replay protection: Rejected EconomicNodeRegistration from {}: {}", peer_addr, e);
+        if let Err(e) = self
+            .replay_protection
+            .check_message_id(&msg.message_id, msg.timestamp)
+            .await
+        {
+            warn!(
+                "Replay protection: Rejected EconomicNodeRegistration from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
-        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600) {
-            warn!("Replay protection: Invalid timestamp in EconomicNodeRegistration from {}: {}", peer_addr, e);
+        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600)
+        {
+            warn!(
+                "Replay protection: Invalid timestamp in EconomicNodeRegistration from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
 
         // Check if governance relay is enabled
-        let governance_enabled = self.governance_config
+        let governance_enabled = self
+            .governance_config
             .as_ref()
             .map(|c| c.enabled)
             .unwrap_or(false);
@@ -899,7 +920,9 @@ impl NetworkManager {
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
                 let env_api_key = std::env::var("COMMONS_API_KEY").ok();
-                let api_key = config.api_key.as_deref()
+                let api_key = config
+                    .api_key
+                    .as_deref()
                     .or_else(|| env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
@@ -909,7 +932,7 @@ impl NetworkManager {
                     .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
                 let url = format!("{}/internal/governance/registration", commons_url);
-                
+
                 let response = client
                     .post(&url)
                     .header("X-API-Key", api_key)
@@ -1017,8 +1040,8 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         msg: crate::network::protocol::EconomicNodeVetoMessage,
     ) -> Result<()> {
-        use tracing::{debug, info, warn, error};
         use reqwest::Client;
+        use tracing::{debug, error, info, warn};
 
         // Publish event for governance module (non-blocking)
         if let Some(event_publisher) = &self.event_publisher {
@@ -1026,10 +1049,16 @@ impl NetworkManager {
             use crate::module::traits::EventType;
             let payload = EventPayload::EconomicNodeVeto {
                 proposal_id: format!("{}", msg.pr_id),
-                node_id: msg.node_id.map(|id| id.to_string()).unwrap_or_else(|| String::new()),
+                node_id: msg
+                    .node_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| String::new()),
                 reason: msg.signal_type.clone(),
             };
-            if let Err(e) = event_publisher.publish_event(EventType::EconomicNodeVeto, payload).await {
+            if let Err(e) = event_publisher
+                .publish_event(EventType::EconomicNodeVeto, payload)
+                .await
+            {
                 warn!("Failed to publish EconomicNodeVeto event: {}", e);
             }
         }
@@ -1040,17 +1069,29 @@ impl NetworkManager {
         );
 
         // Replay protection: Check message ID and timestamp
-        if let Err(e) = self.replay_protection.check_message_id(&msg.message_id, msg.timestamp).await {
-            warn!("Replay protection: Rejected EconomicNodeVeto from {}: {}", peer_addr, e);
+        if let Err(e) = self
+            .replay_protection
+            .check_message_id(&msg.message_id, msg.timestamp)
+            .await
+        {
+            warn!(
+                "Replay protection: Rejected EconomicNodeVeto from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
-        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600) {
-            warn!("Replay protection: Invalid timestamp in EconomicNodeVeto from {}: {}", peer_addr, e);
+        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600)
+        {
+            warn!(
+                "Replay protection: Invalid timestamp in EconomicNodeVeto from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
 
         // Check if governance relay is enabled
-        let governance_enabled = self.governance_config
+        let governance_enabled = self
+            .governance_config
             .as_ref()
             .map(|c| c.enabled)
             .unwrap_or(false);
@@ -1066,7 +1107,9 @@ impl NetworkManager {
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
                 let env_api_key = std::env::var("COMMONS_API_KEY").ok();
-                let api_key = config.api_key.as_deref()
+                let api_key = config
+                    .api_key
+                    .as_deref()
                     .or_else(|| env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
@@ -1076,7 +1119,7 @@ impl NetworkManager {
                     .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
                 let url = format!("{}/internal/governance/veto", commons_url);
-                
+
                 let response = client
                     .post(&url)
                     .header("X-API-Key", api_key)
@@ -1116,8 +1159,8 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         msg: crate::network::protocol::EconomicNodeStatusMessage,
     ) -> Result<()> {
-        use tracing::{debug, info, warn, error};
         use reqwest::Client;
+        use tracing::{debug, error, info, warn};
 
         debug!(
             "EconomicNodeStatus received from {}: request_id={}, query_type={}, identifier={}",
@@ -1128,7 +1171,9 @@ impl NetworkManager {
         if let Some(event_publisher) = &self.event_publisher {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
-            let response_data = msg.status.as_ref()
+            let response_data = msg
+                .status
+                .as_ref()
                 .map(|s| serde_json::to_string(s).unwrap_or_default());
             let payload = EventPayload::EconomicNodeStatus {
                 request_id: msg.request_id.to_string(),
@@ -1136,7 +1181,10 @@ impl NetworkManager {
                 node_id: Some(msg.node_identifier.clone()),
                 response_data,
             };
-            if let Err(e) = event_publisher.publish_event(EventType::EconomicNodeStatus, payload).await {
+            if let Err(e) = event_publisher
+                .publish_event(EventType::EconomicNodeStatus, payload)
+                .await
+            {
                 warn!("Failed to publish EconomicNodeStatus event: {}", e);
             }
         }
@@ -1149,7 +1197,8 @@ impl NetworkManager {
         }
 
         // If this is a query, forward to bllvm-commons if we're a governance node
-        let governance_enabled = self.governance_config
+        let governance_enabled = self
+            .governance_config
             .as_ref()
             .map(|c| c.enabled)
             .unwrap_or(false);
@@ -1158,7 +1207,9 @@ impl NetworkManager {
             if let Some(config) = &self.governance_config {
                 if let Some(ref commons_url) = config.commons_url {
                     let env_api_key = std::env::var("COMMONS_API_KEY").ok();
-                    let api_key = config.api_key.as_deref()
+                    let api_key = config
+                        .api_key
+                        .as_deref()
                         .or_else(|| env_api_key.as_deref())
                         .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
@@ -1169,7 +1220,7 @@ impl NetworkManager {
 
                     // Forward query to bllvm-commons (it expects the same format)
                     let url = format!("{}/internal/governance/status", commons_url);
-                    
+
                     info!(
                         "Forwarding EconomicNodeStatus query to bllvm-commons: request_id={}, query_type={}",
                         msg.request_id, msg.query_type
@@ -1193,37 +1244,50 @@ impl NetworkManager {
 
                     if response.status().is_success() {
                         // Parse response
-                        let status_response: serde_json::Value = response
-                            .json()
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to parse status response: {}", e))?;
+                        let status_response: serde_json::Value =
+                            response.json().await.map_err(|e| {
+                                anyhow::anyhow!("Failed to parse status response: {}", e)
+                            })?;
 
                         // Convert response to P2P format
                         let status_data = status_response.get("status").and_then(|s| s.as_object());
                         let response_status = if let Some(data) = status_data {
                             Some(crate::network::protocol::NodeStatusResponse {
-                                node_id: data.get("node_id")
+                                node_id: data
+                                    .get("node_id")
                                     .and_then(|v| v.as_i64())
-                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid node_id"))? as i32,
-                                node_type: data.get("node_type")
+                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid node_id"))?
+                                    as i32,
+                                node_type: data
+                                    .get("node_type")
                                     .and_then(|v| v.as_str())
                                     .ok_or_else(|| anyhow::anyhow!("Missing or invalid node_type"))?
                                     .to_string(),
-                                entity_name: data.get("entity_name")
+                                entity_name: data
+                                    .get("entity_name")
                                     .and_then(|v| v.as_str())
-                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid entity_name"))?
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("Missing or invalid entity_name")
+                                    })?
                                     .to_string(),
-                                status: data.get("status")
+                                status: data
+                                    .get("status")
                                     .and_then(|v| v.as_str())
                                     .ok_or_else(|| anyhow::anyhow!("Missing or invalid status"))?
                                     .to_string(),
-                                weight: data.get("weight")
+                                weight: data
+                                    .get("weight")
                                     .and_then(|v| v.as_f64())
                                     .ok_or_else(|| anyhow::anyhow!("Missing or invalid weight"))?,
-                                registered_at: data.get("registered_at")
+                                registered_at: data
+                                    .get("registered_at")
                                     .and_then(|v| v.as_i64())
-                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid registered_at"))?,
-                                last_verified_at: data.get("last_verified_at").and_then(|v| v.as_i64()),
+                                    .ok_or_else(|| {
+                                    anyhow::anyhow!("Missing or invalid registered_at")
+                                })?,
+                                last_verified_at: data
+                                    .get("last_verified_at")
+                                    .and_then(|v| v.as_i64()),
                             })
                         } else {
                             None
@@ -1239,12 +1303,22 @@ impl NetworkManager {
                         // Send response back to original peer
                         let pm = self.peer_manager.lock().await;
                         if let Some(peer) = pm.get_peer(&transport::TransportAddr::Tcp(peer_addr)) {
-                            let msg_bytes = bincode::serialize(&crate::network::protocol::ProtocolMessage::EconomicNodeStatus(response_msg))
-                                .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+                            let msg_bytes = bincode::serialize(
+                                &crate::network::protocol::ProtocolMessage::EconomicNodeStatus(
+                                    response_msg,
+                                ),
+                            )
+                            .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
                             if let Err(e) = peer.send_message(msg_bytes).await {
-                                warn!("Failed to send status response to peer {}: {}", peer_addr, e);
+                                warn!(
+                                    "Failed to send status response to peer {}: {}",
+                                    peer_addr, e
+                                );
                             } else {
-                                info!("Sent status response to peer {} for request_id={}", peer_addr, msg.request_id);
+                                info!(
+                                    "Sent status response to peer {} for request_id={}",
+                                    peer_addr, msg.request_id
+                                );
                             }
                         }
                     } else {
@@ -1274,8 +1348,8 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         msg: crate::network::protocol::EconomicNodeForkDecisionMessage,
     ) -> Result<()> {
-        use tracing::{debug, info, warn, error};
         use reqwest::Client;
+        use tracing::{debug, error, info, warn};
 
         debug!(
             "EconomicNodeForkDecision received from {}: ruleset={}, message_id={}",
@@ -1286,7 +1360,9 @@ impl NetworkManager {
         if let Some(event_publisher) = &self.event_publisher {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
-            let node_id = msg.node_id.map(|id| id.to_string())
+            let node_id = msg
+                .node_id
+                .map(|id| id.to_string())
                 .unwrap_or_else(|| msg.public_key.clone());
             let decision = if msg.chosen_ruleset.is_empty() {
                 "abstain".to_string()
@@ -1300,23 +1376,38 @@ impl NetworkManager {
                 node_id,
                 timestamp: msg.timestamp as u64,
             };
-            if let Err(e) = event_publisher.publish_event(EventType::EconomicNodeForkDecision, payload).await {
+            if let Err(e) = event_publisher
+                .publish_event(EventType::EconomicNodeForkDecision, payload)
+                .await
+            {
                 warn!("Failed to publish EconomicNodeForkDecision event: {}", e);
             }
         }
 
         // Replay protection: Check message ID and timestamp
-        if let Err(e) = self.replay_protection.check_message_id(&msg.message_id, msg.timestamp).await {
-            warn!("Replay protection: Rejected EconomicNodeForkDecision from {}: {}", peer_addr, e);
+        if let Err(e) = self
+            .replay_protection
+            .check_message_id(&msg.message_id, msg.timestamp)
+            .await
+        {
+            warn!(
+                "Replay protection: Rejected EconomicNodeForkDecision from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
-        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600) {
-            warn!("Replay protection: Invalid timestamp in EconomicNodeForkDecision from {}: {}", peer_addr, e);
+        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600)
+        {
+            warn!(
+                "Replay protection: Invalid timestamp in EconomicNodeForkDecision from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
 
         // Check if governance relay is enabled
-        let governance_enabled = self.governance_config
+        let governance_enabled = self
+            .governance_config
             .as_ref()
             .map(|c| c.enabled)
             .unwrap_or(false);
@@ -1331,7 +1422,9 @@ impl NetworkManager {
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
                 let env_api_key = std::env::var("COMMONS_API_KEY").ok();
-                let api_key = config.api_key.as_deref()
+                let api_key = config
+                    .api_key
+                    .as_deref()
                     .or_else(|| env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
@@ -1341,7 +1434,7 @@ impl NetworkManager {
                     .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
                 let url = format!("{}/internal/governance/fork-decision", commons_url);
-                
+
                 let response = client
                     .post(&url)
                     .header("X-API-Key", api_key)
@@ -3085,7 +3178,7 @@ impl NetworkManager {
             match message {
                 NetworkMessage::PeerConnected(addr) => {
                     info!("Peer connected: {:?}", addr);
-                    
+
                     // Publish peer connected event
                     if let Some(ref event_publisher) = self.event_publisher {
                         let addr_str = format!("{:?}", addr);
@@ -3096,7 +3189,7 @@ impl NetworkManager {
                             #[cfg(feature = "iroh")]
                             TransportAddr::Iroh(_) => "iroh",
                         };
-                        
+
                         // Get peer info if available
                         let pm = self.peer_manager.lock().await;
                         let (services, version) = if let Some(peer) = pm.get_peer(&addr) {
@@ -3105,18 +3198,23 @@ impl NetworkManager {
                             (0, 0)
                         };
                         drop(pm);
-                        
+
                         let event_pub_clone = Arc::clone(event_publisher);
                         tokio::spawn(async move {
                             event_pub_clone
-                                .publish_peer_connected(&addr_str, transport_type, services, version)
+                                .publish_peer_connected(
+                                    &addr_str,
+                                    transport_type,
+                                    services,
+                                    version,
+                                )
                                 .await;
                         });
                     }
                 }
                 NetworkMessage::PeerDisconnected(addr) => {
                     info!("Peer disconnected: {:?}", addr);
-                    
+
                     // Publish peer disconnected event
                     if let Some(ref event_publisher) = self.event_publisher {
                         let addr_str = format!("{:?}", addr);
@@ -3275,7 +3373,10 @@ impl NetworkManager {
                             message_data: data,
                             peer_addr: peer_addr.to_string(),
                         };
-                        if let Err(e) = event_publisher.publish_event(EventType::StratumV2MessageReceived, payload).await {
+                        if let Err(e) = event_publisher
+                            .publish_event(EventType::StratumV2MessageReceived, payload)
+                            .await
+                        {
                             warn!("Failed to publish Stratum V2 message event: {}", e);
                         }
                     } else {
@@ -3415,25 +3516,30 @@ impl NetworkManager {
                             if let Some(ref state_machine) = self.payment_state_machine {
                                 if let Some(ref processor) = self.payment_processor {
                                     // Get payment request to verify proof against expected outputs
-                                    match processor.get_payment_request(&msg.payment_request_id).await {
+                                    match processor
+                                        .get_payment_request(&msg.payment_request_id)
+                                        .await
+                                    {
                                         Ok(payment_request) => {
                                             // Extract expected outputs from payment request
                                             let expected_outputs: Vec<_> = payment_request
                                                 .payment_details
                                                 .outputs
                                                 .iter()
-                                                .map(|output| blvm_protocol::payment::PaymentOutput {
-                                                    script: output.script.clone(),
-                                                    amount: output.amount,
+                                                .map(|output| {
+                                                    blvm_protocol::payment::PaymentOutput {
+                                                        script: output.script.clone(),
+                                                        amount: output.amount,
+                                                    }
                                                 })
                                                 .collect();
-                                            
+
                                             // Verify covenant proof
                                             #[cfg(feature = "ctv")]
                                             {
                                                 use crate::payment::covenant::CovenantEngine;
                                                 let covenant_engine = CovenantEngine::new();
-                                                
+
                                                 match covenant_engine.verify_covenant_proof(
                                                     &msg.covenant_proof,
                                                     &expected_outputs,
@@ -3443,13 +3549,15 @@ impl NetworkManager {
                                                             "Payment proof verified for payment: {}",
                                                             msg.payment_request_id
                                                         );
-                                                        
+
                                                         // Update state machine to ProofCreated
                                                         // Note: This is a proof received from peer, not created locally
                                                         // We mark it as ProofCreated so it can be tracked
                                                         // The state machine will handle the state transition
                                                         if let Err(e) = state_machine
-                                                            .create_covenant_proof(&msg.payment_request_id)
+                                                            .create_covenant_proof(
+                                                                &msg.payment_request_id,
+                                                            )
                                                             .await
                                                         {
                                                             // If creating proof fails (e.g., already exists), that's okay
@@ -3474,7 +3582,7 @@ impl NetworkManager {
                                                     }
                                                 }
                                             }
-                                            
+
                                             #[cfg(not(feature = "ctv"))]
                                             {
                                                 debug!(
@@ -3567,7 +3675,8 @@ impl NetworkManager {
                                         if let Err(e) = state_machine
                                             .mark_failed(
                                                 &msg.payment_request_id,
-                                                "Settlement failed (notification from peer)".to_string(),
+                                                "Settlement failed (notification from peer)"
+                                                    .to_string(),
                                             )
                                             .await
                                         {
@@ -3614,7 +3723,10 @@ impl NetworkManager {
                             packet_data: data.clone(),
                             peer_addr: peer_addr.to_string(),
                         };
-                        if let Err(e) = event_publisher.publish_event(EventType::MeshPacketReceived, payload).await {
+                        if let Err(e) = event_publisher
+                            .publish_event(EventType::MeshPacketReceived, payload)
+                            .await
+                        {
                             warn!("Failed to publish mesh packet event: {}", e);
                         }
                     } else {
@@ -3713,18 +3825,24 @@ impl NetworkManager {
             warn!("Rejecting message from banned peer: {}", peer_addr);
             return Ok(()); // Silently drop messages from banned peers
         }
-        
+
         // Check for mesh packet magic bytes (0x4D, 0x45, 0x53, 0x48 = "MESH")
         // Mesh packets are handled separately and routed to mesh module
         if data.len() >= 4 && data[0..4] == [0x4D, 0x45, 0x53, 0x48] {
-            debug!("Detected mesh packet from {}: {} bytes", peer_addr, data.len());
+            debug!(
+                "Detected mesh packet from {}: {} bytes",
+                peer_addr,
+                data.len()
+            );
             // Route mesh packet to mesh module via event system
             // The packet is sent to the message queue, which then publishes MeshPacketReceived events
             // that the mesh module can subscribe to (see handle_network_messages for event publishing)
-            let _ = self.peer_tx.send(NetworkMessage::MeshPacketReceived(data, peer_addr));
+            let _ = self
+                .peer_tx
+                .send(NetworkMessage::MeshPacketReceived(data, peer_addr));
             return Ok(());
         }
-        
+
         // Check for Stratum V2 TLV message format
         // Stratum V2 messages start with [4-byte length][2-byte tag][4-byte length][payload]
         // Valid Stratum V2 tags are in range 0x0001-0x0032 (see bllvm-stratum-v2/src/messages.rs)
@@ -3732,53 +3850,69 @@ impl NetworkManager {
         if data.len() >= 10 {
             // Try to parse as Stratum V2 TLV
             let length_prefix = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            if length_prefix >= 6 && length_prefix <= 1024 * 1024 { // Reasonable size limits
+            if length_prefix >= 6 && length_prefix <= 1024 * 1024 {
+                // Reasonable size limits
                 let tag = u16::from_le_bytes([data[4], data[5]]);
                 // Check if tag is a valid Stratum V2 message type
                 // Valid tags: 0x0001-0x0003 (setup), 0x0010-0x0012 (channel), 0x0020-0x0021 (job), 0x0030-0x0032 (shares)
-                if (tag >= 0x0001 && tag <= 0x0003) || 
-                   (tag >= 0x0010 && tag <= 0x0012) || 
-                   (tag >= 0x0020 && tag <= 0x0021) || 
-                   (tag >= 0x0030 && tag <= 0x0032) {
-                    debug!("Detected Stratum V2 message from {}: tag={:04x}, {} bytes", peer_addr, tag, data.len());
-                    let _ = self.peer_tx.send(NetworkMessage::StratumV2MessageReceived(data, peer_addr));
+                if (tag >= 0x0001 && tag <= 0x0003)
+                    || (tag >= 0x0010 && tag <= 0x0012)
+                    || (tag >= 0x0020 && tag <= 0x0021)
+                    || (tag >= 0x0030 && tag <= 0x0032)
+                {
+                    debug!(
+                        "Detected Stratum V2 message from {}: tag={:04x}, {} bytes",
+                        peer_addr,
+                        tag,
+                        data.len()
+                    );
+                    let _ = self
+                        .peer_tx
+                        .send(NetworkMessage::StratumV2MessageReceived(data, peer_addr));
                     return Ok(());
                 }
             }
         }
-        
+
         let parsed = ProtocolParser::parse_message(&data)?;
 
         // Check transaction rate limiting for Tx messages
         if let ProtocolMessage::Tx(_) = &parsed {
-            let (burst, rate) = self.mempool_policy_config.as_ref()
+            let (burst, rate) = self
+                .mempool_policy_config
+                .as_ref()
                 .map(|cfg| (cfg.tx_rate_limit_burst, cfg.tx_rate_limit_per_sec))
                 .unwrap_or((10, 1)); // Default: 10 burst, 1 tx/sec
 
             let should_process = {
                 let mut tx_rates = self.peer_tx_rate_limiters.lock().await;
-                let limiter = tx_rates.entry(peer_addr).or_insert_with(|| {
-                    PeerRateLimiter::new(burst, rate)
-                });
+                let limiter = tx_rates
+                    .entry(peer_addr)
+                    .or_insert_with(|| PeerRateLimiter::new(burst, rate));
                 limiter.check_and_consume()
             };
 
             if !should_process {
-                warn!("Transaction rate limit exceeded for peer {}, dropping transaction", peer_addr);
+                warn!(
+                    "Transaction rate limit exceeded for peer {}, dropping transaction",
+                    peer_addr
+                );
                 return Ok(()); // Drop transaction
             }
 
             // Check byte rate limiting
-            let (byte_burst, byte_rate) = self.mempool_policy_config.as_ref()
+            let (byte_burst, byte_rate) = self
+                .mempool_policy_config
+                .as_ref()
                 .map(|cfg| (cfg.tx_byte_rate_burst, cfg.tx_byte_rate_limit))
                 .unwrap_or((1_000_000, 100_000)); // Default: 1 MB burst, 100 KB/s
 
             let tx_bytes = data.len() as u64;
             let should_process_bytes = {
                 let mut byte_rates = self.peer_tx_byte_rate_limiters.lock().await;
-                let limiter = byte_rates.entry(peer_addr).or_insert_with(|| {
-                    PeerByteRateLimiter::new(byte_burst, byte_rate)
-                });
+                let limiter = byte_rates
+                    .entry(peer_addr)
+                    .or_insert_with(|| PeerByteRateLimiter::new(byte_burst, byte_rate));
                 limiter.check_and_consume(tx_bytes)
             };
 
@@ -3789,13 +3923,15 @@ impl NetworkManager {
 
             // Check if transaction is spam and track violations
             use blvm_consensus::spam_filter::SpamFilter;
-            
+
             // Parse transaction from data to check if it's spam
-            if let Ok(tx_msg) = bincode::deserialize::<crate::network::protocol::TxMessage>(&data[4..]) {
+            if let Ok(tx_msg) =
+                bincode::deserialize::<crate::network::protocol::TxMessage>(&data[4..])
+            {
                 let tx = &tx_msg.transaction;
                 let spam_filter = SpamFilter::new();
                 let result = spam_filter.is_spam(tx);
-                
+
                 if result.is_spam {
                     // Track spam violation
                     let mut violations = self.peer_spam_violations.lock().await;
@@ -3803,18 +3939,22 @@ impl NetworkManager {
                     *violation_count += 1;
                     let current_count = *violation_count;
                     drop(violations);
-                    
+
                     // Check if we should ban this peer
                     if let Some(ban_config) = self.spam_ban_config.as_ref() {
                         if current_count >= ban_config.spam_ban_threshold {
-                            let unban_timestamp = crate::utils::current_timestamp() + ban_config.spam_ban_duration_seconds;
+                            let unban_timestamp = crate::utils::current_timestamp()
+                                + ban_config.spam_ban_duration_seconds;
                             warn!("Auto-banning peer {} for spam violations ({} violations, unban at {})", peer_addr, current_count, unban_timestamp);
                             self.ban_peer(peer_addr, unban_timestamp);
                             return Ok(()); // Drop transaction and ban peer
                         }
                     }
-                    
-                    debug!("Spam transaction from peer {} (violation count: {})", peer_addr, current_count);
+
+                    debug!(
+                        "Spam transaction from peer {} (violation count: {})",
+                        peer_addr, current_count
+                    );
                 }
             }
         }
@@ -3952,7 +4092,9 @@ impl NetworkManager {
             }
             #[cfg(feature = "governance")]
             ProtocolMessage::EconomicNodeForkDecision(msg) => {
-                return self.handle_economic_node_fork_decision(peer_addr, msg).await;
+                return self
+                    .handle_economic_node_fork_decision(peer_addr, msg)
+                    .await;
             }
             // Address relay
             ProtocolMessage::GetAddr => {
@@ -4014,7 +4156,10 @@ impl NetworkManager {
                     if let Some(peer) = pm.get_peer_mut(&transport_addr) {
                         peer.set_services(version_msg.services);
                         peer.set_version(version_msg.version as u32);
-                        debug!("Stored service flags {} and version {} for peer {}", version_msg.services, version_msg.version, peer_addr);
+                        debug!(
+                            "Stored service flags {} and version {} for peer {}",
+                            version_msg.services, version_msg.version, peer_addr
+                        );
                     }
                 }
 
@@ -4130,8 +4275,15 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolParser;
 
         // Replay protection: Check request ID
-        if let Err(e) = self.replay_protection.check_request_id(message.request_id).await {
-            warn!("Replay protection: Rejected duplicate GetModule request from {}: {}", peer_addr, e);
+        if let Err(e) = self
+            .replay_protection
+            .check_request_id(message.request_id)
+            .await
+        {
+            warn!(
+                "Replay protection: Rejected duplicate GetModule request from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
 
@@ -4141,7 +4293,7 @@ impl NetworkManager {
         let payment_state_machine = self.payment_state_machine.as_ref().map(Arc::clone);
         let encryption = self.module_encryption.as_ref().map(Arc::clone);
         let modules_dir = self.modules_dir.clone();
-        
+
         // Get node's payment address script (set from config during initialization)
         let node_script = self.node_payment_script.clone();
 
@@ -4380,18 +4532,18 @@ impl NetworkManager {
                 // For now, we validate and accept using consensus layer
                 let utxo_lock = self.utxo_set.lock().await;
                 let mempool_lock = self.mempool.lock().await;
-                let _ = self
-                    .consensus
-                    .accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0);
+                let _ =
+                    self.consensus
+                        .accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0, None);
             }
         } else {
             // Fallback to legacy mempool
             let utxo_lock = self.utxo_set.lock().await;
             let mempool_lock = self.mempool.lock().await;
             for tx in txs {
-                let _ = self
-                    .consensus
-                    .accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0);
+                let _ =
+                    self.consensus
+                        .accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0, None);
             }
         }
         Ok(())
@@ -4416,8 +4568,15 @@ impl NetworkManager {
         };
 
         // Replay protection: Check request ID
-        if let Err(e) = self.replay_protection.check_request_id(get_filtered_block_msg.request_id).await {
-            warn!("Replay protection: Rejected duplicate GetFilteredBlock request from {}: {}", peer_addr, e);
+        if let Err(e) = self
+            .replay_protection
+            .check_request_id(get_filtered_block_msg.request_id)
+            .await
+        {
+            warn!(
+                "Replay protection: Rejected duplicate GetFilteredBlock request from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
 
@@ -4933,8 +5092,13 @@ impl NetworkManager {
         );
 
         // Replay protection: Validate timestamp (24 hour max age for ban lists)
-        if let Err(e) = replay_protection::ReplayProtection::validate_timestamp(msg.timestamp as i64, 86400) {
-            warn!("Replay protection: Invalid timestamp in BanList from {}: {}", peer_addr, e);
+        if let Err(e) =
+            replay_protection::ReplayProtection::validate_timestamp(msg.timestamp as i64, 86400)
+        {
+            warn!(
+                "Replay protection: Invalid timestamp in BanList from {}: {}",
+                peer_addr, e
+            );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
 

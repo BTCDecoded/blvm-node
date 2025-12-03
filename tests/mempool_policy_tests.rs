@@ -6,16 +6,16 @@
 //! - Fee thresholds
 //! - Size limits
 
-use bllvm_node::config::{EvictionStrategy, MempoolPolicyConfig};
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
+use blvm_node::config::{EvictionStrategy, MempoolPolicyConfig};
+use blvm_node::node::mempool::MempoolManager;
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
 use std::collections::HashMap;
 
 /// Create a test transaction
 fn create_test_tx(input_value: u64, output_value: u64, size: usize) -> Transaction {
     Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [1; 32],
                 index: 0,
@@ -23,7 +23,7 @@ fn create_test_tx(input_value: u64, output_value: u64, size: usize) -> Transacti
             script_sig: vec![0; size / 2], // Approximate size
             sequence: 0xffffffff,
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: output_value as i64,
             script_pubkey: vec![0x76, 0xa9, 0x14].repeat(size / 2), // Approximate size
         }],

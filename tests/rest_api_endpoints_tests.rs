@@ -2,17 +2,17 @@
 
 #[cfg(feature = "rest-api")]
 mod tests {
-    use bllvm_node::rpc::blockchain::BlockchainRpc;
-    use bllvm_node::rpc::mempool::MempoolRpc;
-    use bllvm_node::rpc::mining::MiningRpc;
-    use bllvm_node::rpc::network::NetworkRpc;
-    use bllvm_node::rpc::rawtx::RawTxRpc;
-    use bllvm_node::rpc::rest::types::ApiResponse;
-    use bllvm_node::rpc::rest::{
+    use blvm_node::rpc::blockchain::BlockchainRpc;
+    use blvm_node::rpc::mempool::MempoolRpc;
+    use blvm_node::rpc::mining::MiningRpc;
+    use blvm_node::rpc::network::NetworkRpc;
+    use blvm_node::rpc::rawtx::RawTxRpc;
+    use blvm_node::rpc::rest::types::ApiResponse;
+    use blvm_node::rpc::rest::{
         addresses, blocks, chain, fees, mempool as rest_mempool, mining, network as rest_network,
         node, transactions,
     };
-    use bllvm_node::storage::Storage;
+    use blvm_node::storage::Storage;
     use serde_json::Value;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -280,7 +280,7 @@ mod tests {
     async fn test_transactions_test_endpoint() {
         let rawtx = create_test_rawtx_rpc();
         let tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08044c86041b020602ffffffff0100f2052a010000004341041b0e8c2567c12536aa13357b79a073dc4443acf83e08e2c1252d0efcb9a4ba20b4e93f883d634390d26ed65f763194ea3273f11a6718b3615b4d94e82801b0eac00000000";
-        
+
         let result = transactions::test_transaction(&rawtx, tx_hex).await;
         // Should return result (may fail for other reasons)
         assert!(result.is_ok() || result.is_err());
@@ -290,11 +290,14 @@ mod tests {
     async fn test_transactions_decode_endpoint() {
         let rawtx = create_test_rawtx_rpc();
         let tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08044c86041b020602ffffffff0100f2052a010000004341041b0e8c2567c12536aa13357b79a073dc4443acf83e08e2c1252d0efcb9a4ba20b4e93f883d634390d26ed65f763194ea3273f11a6718b3615b4d94e82801b0eac00000000";
-        
+
         let result = transactions::decode_transaction(&rawtx, tx_hex).await;
         assert!(result.is_ok(), "Should decode transaction");
         let decoded = result.unwrap();
-        assert!(decoded.is_object(), "Decoded transaction should be an object");
+        assert!(
+            decoded.is_object(),
+            "Decoded transaction should be an object"
+        );
     }
 
     #[tokio::test]
@@ -309,8 +312,9 @@ mod tests {
         let outputs = serde_json::json!({
             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4": 0.001
         });
-        
-        let result = transactions::create_transaction(&rawtx, inputs, outputs, None, None, None).await;
+
+        let result =
+            transactions::create_transaction(&rawtx, inputs, outputs, None, None, None).await;
         assert!(result.is_ok(), "Should create transaction");
         let tx_hex = result.unwrap();
         assert!(tx_hex.is_string(), "Result should be hex string");
@@ -462,7 +466,7 @@ mod tests {
     // New node endpoints
     #[tokio::test]
     async fn test_node_uptime_endpoint() {
-        use bllvm_node::rpc::control::ControlRpc;
+        use blvm_node::rpc::control::ControlRpc;
         let control = ControlRpc::new();
         let result = node::get_uptime(&control).await;
         assert!(result.is_ok());
@@ -472,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_memory_endpoint() {
-        use bllvm_node::rpc::control::ControlRpc;
+        use blvm_node::rpc::control::ControlRpc;
         let control = ControlRpc::new();
         let result = node::get_memory_info(&control, Some("stats")).await;
         assert!(result.is_ok());
@@ -480,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_rpc_info_endpoint() {
-        use bllvm_node::rpc::control::ControlRpc;
+        use blvm_node::rpc::control::ControlRpc;
         let control = ControlRpc::new();
         let result = node::get_rpc_info(&control).await;
         assert!(result.is_ok());
@@ -488,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_help_endpoint() {
-        use bllvm_node::rpc::control::ControlRpc;
+        use blvm_node::rpc::control::ControlRpc;
         let control = ControlRpc::new();
         let result = node::get_help(&control, None).await;
         assert!(result.is_ok());
@@ -496,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_logging_endpoint() {
-        use bllvm_node::rpc::control::ControlRpc;
+        use blvm_node::rpc::control::ControlRpc;
         let control = ControlRpc::new();
         let result = node::get_logging(&control).await;
         assert!(result.is_ok());

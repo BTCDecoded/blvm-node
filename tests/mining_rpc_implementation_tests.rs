@@ -1,8 +1,8 @@
 //! Tests for mining RPC implementation
 
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_node::rpc::mining::MiningRpc;
-use bllvm_node::storage::Storage;
+use blvm_node::node::mempool::MempoolManager;
+use blvm_node::rpc::mining::MiningRpc;
+use blvm_node::storage::Storage;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;

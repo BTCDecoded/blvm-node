@@ -103,7 +103,7 @@ impl ModuleIpcClient {
     ) -> Result<(), ModuleError> {
         use crate::module::ipc::protocol::{LogMessage, ModuleMessage};
         use std::time::{SystemTime, UNIX_EPOCH};
-        
+
         let log_message = LogMessage {
             level,
             module_id: module_id.to_string(),
@@ -114,18 +114,18 @@ impl ModuleIpcClient {
                 .unwrap()
                 .as_secs(),
         };
-        
+
         let bytes = bincode::serialize(&ModuleMessage::Log(log_message))
             .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
-        
+
         self.writer
             .send(bytes::Bytes::from(bytes))
             .await
             .map_err(|e| ModuleError::IpcError(format!("Failed to send log: {e}")))?;
-        
+
         Ok(())
     }
-    
+
     /// Receive an event message (non-blocking)
     pub async fn receive_event(&mut self) -> Result<Option<ModuleMessage>, ModuleError> {
         // Use tokio::select with a timeout to make this non-blocking

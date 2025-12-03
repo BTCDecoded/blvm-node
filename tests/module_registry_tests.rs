@@ -1,9 +1,9 @@
 //! Tests for module registry (discovery, dependencies, manifest)
 
-use bllvm_node::module::registry::dependencies::{DependencyResolution, ModuleDependencies};
-use bllvm_node::module::registry::discovery::{DiscoveredModule, ModuleDiscovery};
-use bllvm_node::module::registry::manifest::ModuleManifest;
-use bllvm_node::module::traits::ModuleError;
+use blvm_node::module::registry::dependencies::{DependencyResolution, ModuleDependencies};
+use blvm_node::module::registry::discovery::{DiscoveredModule, ModuleDiscovery};
+use blvm_node::module::registry::manifest::ModuleManifest;
+use blvm_node::module::traits::ModuleError;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tempfile::TempDir;

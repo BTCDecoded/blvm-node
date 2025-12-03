@@ -1,12 +1,12 @@
 //! Stress tests for block processor (concurrent processing, reorganizations)
 
-use bllvm_node::node::block_processor::{
+use blvm_node::node::block_processor::{
     parse_block_from_wire, prepare_block_validation_context, store_block_with_context,
     validate_block_with_context,
 };
-use bllvm_node::storage::Storage;
-use bllvm_node::{Block, BlockHeader, Hash};
-use bllvm_protocol::{segwit::Witness, BitcoinProtocolEngine, ProtocolVersion, UtxoSet};
+use blvm_node::storage::Storage;
+use blvm_node::{Block, BlockHeader, Hash};
+use blvm_protocol::{segwit::Witness, BitcoinProtocolEngine, ProtocolVersion, UtxoSet};
 use std::sync::Arc;
 use tempfile::TempDir;
 

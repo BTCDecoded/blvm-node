@@ -6,16 +6,16 @@
 //! - Standard: BIP125-compliant (default)
 //! - Aggressive: Relaxed rules for miners
 
-use bllvm_node::config::{RbfConfig, RbfMode};
-use bllvm_node::node::mempool::MempoolManager;
-use bllvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
+use blvm_node::config::{RbfConfig, RbfMode};
+use blvm_node::node::mempool::MempoolManager;
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
 use std::collections::HashMap;
 
 /// Create a test transaction with RBF signaling
 fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
     Transaction {
         version: 1,
-        inputs: bllvm_protocol::tx_inputs![TransactionInput {
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout: OutPoint {
                 hash: [1; 32],
                 index: 0,
@@ -23,7 +23,7 @@ fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
             script_sig: vec![],
             sequence: 0xfffffffe, // RBF enabled
         }],
-        outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: output_value as i64,
             script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20), // P2PKH
         }],

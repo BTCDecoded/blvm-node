@@ -2,7 +2,7 @@
 //!
 //! Tests for Arc cloning helpers.
 
-use bllvm_node::utils::{arc_clone_many, arc_clone_pair};
+use blvm_node::utils::{arc_clone_many, arc_clone_pair};
 use std::sync::Arc;
 
 #[test]

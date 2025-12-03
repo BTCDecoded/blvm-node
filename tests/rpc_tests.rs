@@ -1,6 +1,6 @@
 //! RPC layer tests
 
-use bllvm_node::rpc::*;
+use blvm_node::rpc::*;
 use std::net::SocketAddr;
 use tokio::time::{timeout, Duration};
 mod common;
@@ -423,15 +423,15 @@ async fn test_mining_rpc_getmininginfo() {
 
 #[tokio::test]
 async fn test_mining_rpc_getblocktemplate() {
-    use bllvm_node::storage::Storage;
-    use bllvm_protocol::BlockHeader;
+    use blvm_node::storage::Storage;
+    use blvm_protocol::BlockHeader;
     use std::sync::Arc;
     use tempfile::TempDir;
 
     // Initialize chain state (required for getblocktemplate)
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
-    let mempool = Arc::new(bllvm_node::node::mempool::MempoolManager::new());
+    let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let mining = mining::MiningRpc::with_dependencies(storage.clone(), mempool);
 
     // Set up minimal chain (from mining_rpc_tests helper)

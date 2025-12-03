@@ -2,7 +2,7 @@
 //!
 //! Tests for environment variable reading helpers.
 
-use bllvm_node::utils::{env_or_default, env_or_else, env_opt, env_bool, env_int};
+use blvm_node::utils::{env_or_default, env_or_else, env_opt, env_bool, env_int};
 
 #[test]
 fn test_env_or_default_set() {

@@ -39,7 +39,12 @@ pub async fn get_transaction_confirmations(rawtx: &RawTxRpc, txid: &str) -> Resu
 }
 
 /// Get transaction output
-pub async fn get_transaction_output(rawtx: &RawTxRpc, txid: &str, n: u32, include_mempool: bool) -> Result<Value> {
+pub async fn get_transaction_output(
+    rawtx: &RawTxRpc,
+    txid: &str,
+    n: u32,
+    include_mempool: bool,
+) -> Result<Value> {
     let params = json!([txid, n, include_mempool]);
     let result = rawtx.gettxout(&params).await?;
     Ok(result)
@@ -67,7 +72,14 @@ pub async fn decode_transaction(rawtx: &RawTxRpc, hex: &str) -> Result<Value> {
 }
 
 /// Create a raw transaction
-pub async fn create_transaction(rawtx: &RawTxRpc, inputs: Value, outputs: Value, locktime: Option<u64>, replaceable: Option<bool>, version: Option<u32>) -> Result<Value> {
+pub async fn create_transaction(
+    rawtx: &RawTxRpc,
+    inputs: Value,
+    outputs: Value,
+    locktime: Option<u64>,
+    replaceable: Option<bool>,
+    version: Option<u32>,
+) -> Result<Value> {
     let mut params = json!([inputs, outputs]);
     if let Some(lt) = locktime {
         params.as_array_mut().unwrap().push(json!(lt));
