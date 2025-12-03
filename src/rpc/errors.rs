@@ -469,8 +469,8 @@ impl From<anyhow::Error> for RpcError {
 }
 
 /// Convert consensus error to RPC error
-impl From<bllvm_protocol::ConsensusError> for RpcError {
-    fn from(err: bllvm_protocol::ConsensusError) -> Self {
+impl From<blvm_protocol::ConsensusError> for RpcError {
+    fn from(err: blvm_protocol::ConsensusError) -> Self {
         RpcError::tx_rejected(format!("Consensus error: {err}"))
     }
 }

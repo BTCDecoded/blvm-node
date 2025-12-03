@@ -102,7 +102,7 @@ impl ModuleRouter {
             if let Some(state) = manager.get_module_state(target_module_name).await {
                 let health = match state {
                     crate::module::traits::ModuleState::Running => ModuleHealth::Healthy,
-                    crate::module::traits::ModuleState::Initialized => ModuleHealth::Healthy,
+                    crate::module::traits::ModuleState::Initializing => ModuleHealth::Healthy,
                     crate::module::traits::ModuleState::Stopped => ModuleHealth::Unresponsive,
                     crate::module::traits::ModuleState::Error(err) => ModuleHealth::Crashed(err),
                     crate::module::traits::ModuleState::Stopping => ModuleHealth::Unresponsive,

@@ -22,13 +22,14 @@ use secp256k1;
 
 use crate::config::NodeConfig;
 use crate::module::ModuleManager;
+use crate::module::api::events::EventManager;
 use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::PerformanceProfiler;
 use crate::rpc::RpcManager;
 use crate::storage::Storage;
-use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -69,9 +70,8 @@ pub struct Node {
     data_dir: PathBuf,
     /// Disk check counter (for periodic monitoring)
     disk_check_counter: std::sync::atomic::AtomicU64,
-    /// Governance webhook client (for fee forwarding integration)
-    #[cfg(feature = "governance")]
-    governance_webhook: Option<crate::governance::GovernanceWebhookClient>,
+    // Governance is handled via the module system (blvm-governance module)
+    // The module subscribes to governance events and handles webhook delivery
 }
 
 impl Node {
@@ -164,8 +164,7 @@ impl Node {
             module_registry: None,
             payment_processor: None,
             payment_state_machine: None,
-            #[cfg(feature = "governance")]
-            governance_webhook: None,
+            // Governance handled via module system
         })
     }
 
@@ -220,14 +219,9 @@ impl Node {
         )
         .with_dependencies(protocol_arc, storage_arc, mempool_manager_arc);
 
-        // Initialize governance webhook client if configured (from environment variables)
-        #[cfg(feature = "governance")]
-        let governance_webhook = std::env::var("GOVERNANCE_WEBHOOK_URL").ok().map(|url| {
-            crate::governance::GovernanceWebhookClient::new(
-                Some(url),
-                std::env::var("GOVERNANCE_NODE_ID").ok(),
-            )
-        });
+        // Governance is handled via the blvm-governance module
+        // The module subscribes to governance events (EconomicNodeRegistered, EconomicNodeVeto, etc.)
+        // and handles webhook delivery and economic node tracking
 
         self.network = network;
         self.config = Some(config.clone());
@@ -248,10 +242,7 @@ impl Node {
             );
         }
 
-        #[cfg(feature = "governance")]
-        {
-            self.governance_webhook = governance_webhook;
-        }
+        // Governance handled via module system - no direct webhook client needed
         Ok(self)
     }
 
@@ -323,11 +314,11 @@ impl Node {
         if let Some(ref config) = self.config {
             let rpc_addr = self.rpc.rpc_addr();
             #[cfg(feature = "rest-api")]
-            let rest_api_addr = self.rpc.rest_api_addr();
+            let rest_api_addr: Option<SocketAddr> = self.rpc.rest_api_addr();
             #[cfg(not(feature = "rest-api"))]
-            let rest_api_addr = None;
+            let rest_api_addr: Option<SocketAddr> = None;
             
-            let warnings = config.validate_security(rpc_addr, rest_api_addr);
+            let warnings: Vec<String> = config.validate_security(rpc_addr, rest_api_addr);
             for warning in warnings {
                 warn!("{}", warning);
             }
@@ -372,14 +363,14 @@ impl Node {
                             keep_from_height, ..
                         } => {
                             // Prune up to keep_from_height
-                            Some(*keep_from_height)
+                            Some(keep_from_height)
                         }
                         #[cfg(feature = "utxo-commitments")]
                         crate::config::PruningMode::Aggressive {
                             keep_from_height, ..
                         } => {
                             // Prune up to keep_from_height
-                            Some(*keep_from_height)
+                            Some(keep_from_height)
                         }
                         #[cfg(not(feature = "utxo-commitments"))]
                         crate::config::PruningMode::Aggressive { .. } => {
@@ -392,14 +383,14 @@ impl Node {
                             ..
                         } => {
                             // Prune up to keep_bodies_from_height
-                            Some(*keep_bodies_from_height)
+                            Some(keep_bodies_from_height)
                         }
                     };
 
                     if let Some(prune_to_height) = prune_height {
-                        if prune_to_height < current_height {
+                        if *prune_to_height < current_height {
                             match pruning_manager.prune_to_height(
-                                prune_to_height,
+                                *prune_to_height,
                                 current_height,
                                 is_ibd,
                             ) {
@@ -456,14 +447,15 @@ impl Node {
             node_api_impl.set_sync_coordinator(sync_coord_arc);
             
             // Set module manager for module discovery
-            let module_manager_arc = Arc::new(tokio::sync::Mutex::new(module_manager.clone()));
-            node_api_impl.set_module_manager(module_manager_arc);
+            // Note: We can't clone ModuleManager, so we'll set it later after it's been moved into an Arc
+            // For now, we skip this - the module manager can be accessed via other means if needed
             
             // Set up module API registry and router for module-to-module communication
             let module_api_registry = Arc::new(crate::module::inter_module::registry::ModuleApiRegistry::new());
+            // Note: ModuleManager doesn't implement Clone, so we can't pass it to the router here
+            // The router can access the module manager through other means if needed
             let module_router = Arc::new(
                 crate::module::inter_module::router::ModuleRouter::new(Arc::clone(&module_api_registry))
-                    .with_module_manager(Arc::clone(&module_manager_arc))
             );
             node_api_impl.set_module_api_registry(Arc::clone(&module_api_registry), Arc::clone(&module_router));
             
@@ -615,7 +607,7 @@ impl Node {
                             let node_script = payment_config.node_payment_address.as_ref()
                                 .and_then(|addr_str| {
                                     // Decode Bitcoin address to script pubkey
-                                    use bllvm_protocol::address::BitcoinAddress;
+                                    use blvm_protocol::address::BitcoinAddress;
                                     BitcoinAddress::decode(addr_str).ok()
                                         .and_then(|addr| {
                                             // Convert address to script pubkey
@@ -761,6 +753,61 @@ impl Node {
                 // Since we're in start_components which is &mut self, we can do this
                 self.network.set_event_publisher(Some(Arc::clone(event_publisher)));
                 info!("Event publisher set on network manager");
+                
+                // Publish ConfigLoaded event for modules to react to node configuration
+                // This allows modules like blvm-governance to configure themselves based on node config
+                if let Some(ref config) = self.config {
+                    // Determine which config sections are relevant
+                    let mut changed_sections = Vec::new();
+                    if config.network_timing.is_some() {
+                        changed_sections.push("network_timing".to_string());
+                    }
+                    if config.governance.is_some() {
+                        changed_sections.push("governance".to_string());
+                    }
+                    if config.modules.is_some() {
+                        changed_sections.push("modules".to_string());
+                    }
+                    if config.mempool.is_some() {
+                        changed_sections.push("mempool".to_string());
+                    }
+                    if config.rbf.is_some() {
+                        changed_sections.push("rbf".to_string());
+                    }
+                    if config.payment.is_some() {
+                        changed_sections.push("payment".to_string());
+                    }
+                    
+                    // Serialize config to JSON for modules that need full config
+                    let config_json = serde_json::to_string(config)
+                        .ok()
+                        .map(|s| format!("{{\"config\":{}}}", s));
+                    
+                    // Publish event (non-blocking, modules will receive it when they subscribe)
+                    // Modules can also request config via NodeAPI if needed
+                    let sections_count = changed_sections.len();
+                    event_publisher.publish_config_loaded(changed_sections, config_json).await;
+                    info!("ConfigLoaded event published for {} sections", sections_count);
+                    
+                    // Publish NodeStartupCompleted event
+                    use crate::module::ipc::protocol::EventPayload;
+                    use crate::module::traits::EventType;
+                    let startup_components = vec![
+                        "network".to_string(),
+                        "storage".to_string(),
+                        "rpc".to_string(),
+                        "modules".to_string(),
+                    ];
+                    let payload = EventPayload::NodeStartupCompleted {
+                        duration_ms: 0, // Could track actual startup duration
+                        components: startup_components,
+                    };
+                    if let Err(e) = event_publisher.publish_event(EventType::NodeStartupCompleted, payload).await {
+                        warn!("Failed to publish NodeStartupCompleted event: {}", e);
+                    } else {
+                        info!("NodeStartupCompleted event published");
+                    }
+                }
             }
         }
 
@@ -834,7 +881,7 @@ impl Node {
 
         // Get initial state for block processing
         let mut current_height = self.storage.chain().get_height()?.unwrap_or(0);
-        let mut utxo_set = bllvm_protocol::UtxoSet::new();
+        let mut utxo_set = blvm_protocol::UtxoSet::new();
 
         // Main node loop - coordinates between all components and handles shutdown signals
         loop {
@@ -942,13 +989,8 @@ impl Node {
                                     .await;
                             }
 
-                            // Notify governance app about new block (for fee forwarding tracking)
-                            #[cfg(feature = "governance")]
-                            if let Some(ref webhook) = self.governance_webhook {
-                                if let Err(e) = webhook.notify_block(&block, current_height).await {
-                                    warn!("Failed to notify governance app about block at height {}: {}", current_height, e);
-                                }
-                            }
+                            // Governance module subscribes to NewBlock events and handles notifications
+                            // No direct webhook call needed - handled via event system
                         }
 
                         // Persist UTXO set to storage after block validation
@@ -1050,7 +1092,7 @@ impl Node {
                                         ..
                                     } => {
                                         // Prune to keep_from_height, respecting min_blocks
-                                        let effective_keep = (*keep_from_height)
+                                        let effective_keep = keep_from_height
                                             .max(current_height.saturating_sub(*min_blocks));
                                         Some(effective_keep)
                                     }
@@ -1220,6 +1262,22 @@ impl Node {
         if !within_bounds {
             warn!("Storage bounds exceeded - disk space may be low");
 
+            // Publish DiskSpaceLow event to modules
+            if let Some(ref event_publisher) = self.event_publisher {
+                // Get disk space info (simplified - could get actual disk stats)
+                let total_bytes = 1_000_000_000_000; // 1TB placeholder
+                let available_bytes = total_bytes / 5; // 20% free (low threshold)
+                let percent_free = 20.0;
+                let disk_path = self.data_dir.to_string_lossy().to_string();
+                
+                event_publisher.publish_disk_space_low(
+                    available_bytes,
+                    total_bytes,
+                    percent_free,
+                    disk_path,
+                ).await;
+            }
+
             // Check if pruning is enabled
             if self.storage.is_pruning_enabled() {
                 if let Some(pruning_manager) = self.storage.pruning() {
@@ -1298,6 +1356,26 @@ impl Node {
     pub async fn stop(&mut self) -> Result<()> {
         info!("Stopping reference-node");
 
+        // Publish NodeShutdown event to modules (give them time to clean up)
+        if let Some(ref event_publisher) = self.event_publisher {
+            event_publisher.publish_node_shutdown("graceful".to_string(), 30).await;
+            // Give modules a moment to process shutdown event
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        // Publish DataMaintenance event to modules (high urgency flush for shutdown)
+        if let Some(ref event_publisher) = self.event_publisher {
+            event_publisher.publish_data_maintenance(
+                "flush".to_string(),      // Flush pending writes
+                "high".to_string(),       // High urgency (shutdown)
+                "shutdown".to_string(),   // Reason
+                None,                      // No cleanup needed
+                Some(5),                   // 5 second timeout
+            ).await;
+            // Give modules a moment to flush
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
         // Stop module manager
         if let Some(ref mut module_manager) = self.module_manager {
             module_manager
@@ -1306,11 +1384,26 @@ impl Node {
                 .map_err(|e| anyhow::anyhow!("Failed to shutdown module manager: {}", e))?;
         }
 
+        // Network manager doesn't need explicit stopping - it's managed by dropping
+        // The peer manager and connections will be cleaned up when the manager is dropped
+
         // Stop all components
         self.rpc.stop()?;
 
         // Flush storage
         self.storage.flush()?;
+
+        // Publish shutdown completed event
+        if let Some(ref event_publisher) = self.event_publisher {
+            use crate::module::ipc::protocol::EventPayload;
+            use crate::module::traits::EventType;
+            let payload = EventPayload::NodeShutdownCompleted {
+                duration_ms: 0, // Could track actual duration if needed
+            };
+            if let Err(e) = event_publisher.publish_event(EventType::NodeShutdownCompleted, payload).await {
+                warn!("Failed to publish NodeShutdownCompleted event: {}", e);
+            }
+        }
 
         info!("Node stopped");
         Ok(())

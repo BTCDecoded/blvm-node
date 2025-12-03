@@ -6,8 +6,8 @@
 use crate::payment::processor::PaymentError;
 use crate::{Hash, Transaction};
 #[cfg(feature = "ctv")]
-use bllvm_consensus::bip119::calculate_template_hash;
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_consensus::bip119::calculate_template_hash;
+use blvm_protocol::payment::PaymentOutput;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -276,10 +276,10 @@ impl CovenantEngine {
         let tx = self.template_to_transaction(template)?;
 
         // CTV (CheckTemplateVerify) hash calculation
-        // bllvm_protocol does not currently re-export CTV functions, so we use
-        // bllvm_consensus directly. This is the correct approach as CTV is a
+        // blvm_protocol does not currently re-export CTV functions, so we use
+        // blvm_consensus directly. This is the correct approach as CTV is a
         // consensus-level feature that belongs in the consensus crate.
-        use bllvm_consensus::bip119::calculate_template_hash;
+        use blvm_consensus::bip119::calculate_template_hash;
 
         calculate_template_hash(&tx, input_index).map_err(|e| {
             PaymentError::ProcessingError(format!("CTV hash calculation failed: {}", e))
@@ -291,9 +291,9 @@ impl CovenantEngine {
     fn template_to_transaction(
         &self,
         template: &TransactionTemplate,
-    ) -> Result<bllvm_consensus::types::Transaction, PaymentError> {
+    ) -> Result<blvm_consensus::types::Transaction, PaymentError> {
         // Convert template inputs to transaction inputs
-        use bllvm_consensus::types::{
+        use blvm_consensus::types::{
             ByteString, Integer, Natural, OutPoint, Transaction as ConsensusTransaction,
             TransactionInput as ConsensusInput, TransactionOutput as ConsensusOutput,
         };

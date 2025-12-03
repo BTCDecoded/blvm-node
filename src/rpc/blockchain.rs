@@ -5,7 +5,7 @@
 use crate::rpc::errors::RpcError;
 use crate::storage::Storage;
 use anyhow::Result;
-use bllvm_protocol::BlockHeader;
+use blvm_protocol::BlockHeader;
 use serde_json::{json, Number, Value};
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -142,7 +142,7 @@ impl BlockchainRpc {
     ///
     /// Serializes UTXO set deterministically and computes double SHA256 hash.
     /// Matches Bitcoin Core's gettxoutsetinfo hash_serialized_2 calculation.
-    fn calculate_utxo_set_hash(utxo_set: &bllvm_protocol::UtxoSet) -> [u8; 32] {
+    fn calculate_utxo_set_hash(utxo_set: &blvm_protocol::UtxoSet) -> [u8; 32] {
         use crate::storage::hashing::double_sha256;
 
         // Sort UTXOs for deterministic hashing (by outpoint: hash first, then index)
@@ -403,7 +403,7 @@ impl BlockchainRpc {
                     // Calculate block sizes
                     // strippedsize = block size without witness data (TX_NO_WITNESS)
                     // size = block size with witness data (TX_WITH_WITNESS)
-                    use bllvm_protocol::serialization::transaction::serialize_transaction;
+                    use blvm_protocol::serialization::transaction::serialize_transaction;
                     
                     // Calculate stripped size: serialize block without witness data
                     // This is the sum of all transaction sizes without witness
@@ -444,7 +444,7 @@ impl BlockchainRpc {
                         .transactions
                         .iter()
                         .map(|tx| {
-                            let tx_hash = bllvm_protocol::block::calculate_tx_id(tx);
+                            let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
                             hex::encode(tx_hash)
                         })
                         .collect();
@@ -650,7 +650,7 @@ impl BlockchainRpc {
                         "nextblockhash": next_blockhash
                     }))
                 } else {
-                    use bllvm_protocol::serialization::serialize_block_header;
+                    use blvm_protocol::serialization::serialize_block_header;
                     let header_bytes = serialize_block_header(&header);
                     Ok(Value::String(hex::encode(header_bytes)))
                 }
@@ -877,7 +877,7 @@ impl BlockchainRpc {
         );
 
         if let Some(ref storage) = self.storage {
-            use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+            use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
             // Use protocol engine which provides the correct validate_block signature
             let engine = BitcoinProtocolEngine::new(ProtocolVersion::Regtest)
                 .map_err(|e| anyhow::anyhow!("Failed to create protocol engine: {}", e))?;
@@ -905,12 +905,12 @@ impl BlockchainRpc {
                     if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
                         // Validate block using protocol engine (expects &HashMap, returns Result<ValidationResult>)
                         match engine.validate_block(&block, &utxo_set, height) {
-                            Ok(bllvm_protocol::ValidationResult::Valid) => {
+                            Ok(blvm_protocol::ValidationResult::Valid) => {
                                 // Block is valid, update UTXO set for next block
                                 // (Simplified - in full implementation would apply block to UTXO set)
                                 // For now, just continue
                             }
-                            Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => {
+                            Ok(blvm_protocol::ValidationResult::Invalid(reason)) => {
                                 errors.push(format!("Block at height {height} invalid: {reason}"));
                                 if check_level >= 4 {
                                     // Level 4: Stop on first error
@@ -948,7 +948,7 @@ impl BlockchainRpc {
 
                         // Check level 2: Verify merkle root
                         if check_level >= 2 {
-                            use bllvm_protocol::mining::calculate_merkle_root;
+                            use blvm_protocol::mining::calculate_merkle_root;
 
                             if let Ok(calculated_root) = calculate_merkle_root(&block.transactions)
                             {
@@ -1613,7 +1613,7 @@ impl BlockchainRpc {
             if let Ok(Some(block)) = storage.blocks().get_block(&hash) {
                 // Get filter service from network manager (if available)
                 // For now, generate filter directly
-                use bllvm_protocol::bip158::build_block_filter;
+                use blvm_protocol::bip158::build_block_filter;
 
                 // Get previous outpoint scripts from UTXO set
                 // For each input, find the UTXO and get its script_pubkey
@@ -1724,7 +1724,7 @@ impl BlockchainRpc {
         let txids: Vec<String> = transactions
             .iter()
             .map(|tx| {
-                let tx_hash = bllvm_protocol::block::calculate_tx_id(tx);
+                let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
                 hex::encode(tx_hash)
             })
             .collect();
@@ -1796,7 +1796,7 @@ impl BlockchainRpc {
             let tip_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
             let tip_header = storage.chain().get_tip_header()?.unwrap_or({
                 // Return genesis block header as fallback
-                bllvm_protocol::BlockHeader {
+                blvm_protocol::BlockHeader {
                     version: 1,
                     prev_block_hash: [0u8; 32],
                     merkle_root: [0u8; 32],
@@ -1938,14 +1938,14 @@ impl BlockchainRpc {
             let mut sent: i64 = 0;
 
             for tx in &transactions {
-                use bllvm_protocol::block::calculate_tx_id;
+                use blvm_protocol::block::calculate_tx_id;
                 let txid = calculate_tx_id(tx);
 
                 for (idx, output) in tx.outputs.iter().enumerate() {
                     if output.script_pubkey == script_pubkey {
                         received += output.value;
                         // Check if UTXO is spent
-                        let outpoint = bllvm_protocol::OutPoint {
+                        let outpoint = blvm_protocol::OutPoint {
                             hash: txid,
                             index: idx as u64,
                         };

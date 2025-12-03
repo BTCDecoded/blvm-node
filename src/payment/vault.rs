@@ -219,7 +219,7 @@ impl VaultEngine {
 
         #[cfg(feature = "ctv")]
         {
-            use bllvm_protocol::payment::PaymentOutput;
+            use blvm_protocol::payment::PaymentOutput;
 
             // Create deposit covenant that commits to unvaulting transaction
             let deposit_outputs = if config.require_unvault {
@@ -309,7 +309,7 @@ impl VaultEngine {
                 )));
             }
 
-            use bllvm_protocol::payment::PaymentOutput;
+            use blvm_protocol::payment::PaymentOutput;
 
             // Create unvault covenant that commits to withdrawal transaction
             let unvault_outputs = vec![PaymentOutput {
@@ -399,7 +399,7 @@ impl VaultEngine {
                 }
             }
 
-            use bllvm_protocol::payment::PaymentOutput;
+            use blvm_protocol::payment::PaymentOutput;
 
             // Create withdrawal covenant
             let withdrawal_outputs = vec![PaymentOutput {
@@ -469,7 +469,7 @@ impl VaultEngine {
                 _ => {}
             }
 
-            use bllvm_protocol::payment::PaymentOutput;
+            use blvm_protocol::payment::PaymentOutput;
 
             // Create recovery covenant
             let recovery_outputs = vec![PaymentOutput {

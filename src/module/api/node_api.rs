@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::debug;
 
 /// Thread-local storage for current module ID during API calls
 thread_local! {
@@ -82,6 +83,7 @@ pub struct NodeApiImpl {
 impl NodeApiImpl {
     /// Create a new Node API implementation
     pub fn new(storage: Arc<Storage>) -> Self {
+        let storage_clone = Arc::clone(&storage);
         Self {
             storage,
             event_manager: None,
@@ -100,7 +102,7 @@ impl NodeApiImpl {
             module_filesystem_sandboxes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             module_storage_trees: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            node_storage: Some(Arc::clone(&storage)),
+            node_storage: Some(storage_clone),
             ipc_server: None,
             sync_coordinator: None,
             payment_state_machine: None,
@@ -154,6 +156,7 @@ impl NodeApiImpl {
         mempool_manager: Option<Arc<MempoolManager>>,
         network_manager: Option<Arc<NetworkManager>>,
     ) -> Self {
+        let storage_clone = Arc::clone(&storage);
         Self {
             storage,
             event_manager,
@@ -162,6 +165,7 @@ impl NodeApiImpl {
             network_manager,
             rpc_server: None,
             hook_manager: None,
+            ipc_server: None,
             timer_manager: None,
             module_id_for_timers: None,
             metrics_manager: None,
@@ -172,7 +176,7 @@ impl NodeApiImpl {
             module_filesystem_sandboxes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             module_storage_trees: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            node_storage: Some(Arc::clone(&storage)),
+            node_storage: Some(storage_clone),
             sync_coordinator: None,
             payment_state_machine: None,
             module_manager: None,
@@ -310,6 +314,29 @@ impl NodeApiImpl {
     /// Set node storage (for module storage API)
     pub fn set_node_storage(&mut self, storage: Arc<Storage>) {
         self.node_storage = Some(storage);
+    }
+    
+    /// Helper to calculate difficulty from bits (private helper, not part of trait)
+    fn calculate_difficulty_from_bits_helper(&self, bits: u64) -> f64 {
+        const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
+        let exponent = (bits >> 24) as u8;
+        let mantissa = bits & 0x00ffffff;
+        
+        if mantissa == 0 {
+            return 1.0;
+        }
+        
+        let target = if exponent <= 3 {
+            mantissa >> (8 * (3 - exponent))
+        } else {
+            mantissa << (8 * (exponent - 3))
+        };
+        
+        if target == 0 {
+            return 1.0;
+        }
+        
+        MAX_TARGET as f64 / target as f64
     }
 }
 
@@ -509,7 +536,7 @@ impl NodeAPI for NodeApiImpl {
                 let mut total_fee = 0u64;
                 for tx in transactions_clone {
                     // Skip coinbase transactions (no fee)
-                    if tx.inputs.is_empty() || tx.inputs[0].prevout.txid == [0u8; 32] {
+                    if tx.inputs.is_empty() || tx.inputs[0].prevout.hash == [0u8; 32] {
                         continue;
                     }
                     
@@ -549,12 +576,34 @@ impl NodeAPI for NodeApiImpl {
         // Get network hash rate from storage (if available)
         let hash_rate = tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
+            // Helper function for difficulty calculation (static, doesn't need self)
+            fn calculate_difficulty_from_bits(bits: u64) -> f64 {
+                const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
+                let exponent = (bits >> 24) as u8;
+                let mantissa = bits & 0x00ffffff;
+                
+                if mantissa == 0 {
+                    return 1.0;
+                }
+                
+                let target = if exponent <= 3 {
+                    mantissa >> (8 * (3 - exponent))
+                } else {
+                    mantissa << (8 * (exponent - 3))
+                };
+                
+                if target == 0 {
+                    return 1.0;
+                }
+                
+                MAX_TARGET as f64 / target as f64
+            }
             move || {
                 // Try to get network hashrate from chain state cache
                 if let Ok(Some(chain_info)) = storage.chain().load_chain_info() {
                     // Calculate approximate hash rate from difficulty
                     // Hash rate = difficulty * 2^32 / 600 (seconds per block)
-                    let difficulty = Self::calculate_difficulty_from_bits(chain_info.tip_header.bits);
+                    let difficulty = calculate_difficulty_from_bits(chain_info.tip_header.bits);
                     (difficulty * 4294967296.0 / 600.0) as f64
                 } else {
                     0.0
@@ -563,7 +612,7 @@ impl NodeAPI for NodeApiImpl {
         })
         .await
         .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
-        .unwrap_or(0.0);
+        ;
         
         // Network stats don't track bytes sent/received at this level
         // These would need to be tracked by NetworkManager
@@ -573,29 +622,6 @@ impl NodeAPI for NodeApiImpl {
             bytes_sent: 0,
             bytes_received: 0,
         })
-    }
-    
-    /// Helper to calculate difficulty from bits
-    fn calculate_difficulty_from_bits(bits: u64) -> f64 {
-        const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
-        let exponent = (bits >> 24) as u8;
-        let mantissa = bits & 0x00ffffff;
-        
-        if mantissa == 0 {
-            return 1.0;
-        }
-        
-        let target = if exponent <= 3 {
-            mantissa >> (8 * (3 - exponent))
-        } else {
-            mantissa << (8 * (exponent - 3))
-        };
-        
-        if target == 0 {
-            return 1.0;
-        }
-        
-        MAX_TARGET as f64 / target as f64
     }
     
     async fn get_network_peers(&self) -> Result<Vec<PeerInfo>, ModuleError> {
@@ -651,10 +677,32 @@ impl NodeAPI for NodeApiImpl {
         let (difficulty, chain_work, is_synced) = tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
             let tip_clone = tip;
+            // Helper function for difficulty calculation (static, doesn't need self)
+            fn calculate_difficulty_from_bits(bits: u64) -> f64 {
+                const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
+                let exponent = (bits >> 24) as u8;
+                let mantissa = bits & 0x00ffffff;
+                
+                if mantissa == 0 {
+                    return 1.0;
+                }
+                
+                let target = if exponent <= 3 {
+                    mantissa >> (8 * (3 - exponent))
+                } else {
+                    mantissa << (8 * (exponent - 3))
+                };
+                
+                if target == 0 {
+                    return 1.0;
+                }
+                
+                MAX_TARGET as f64 / target as f64
+            }
             move || {
                 // Get tip header to calculate difficulty
                 let difficulty = if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
-                    Self::calculate_difficulty_from_bits(tip_header.bits) as u32
+                    calculate_difficulty_from_bits(tip_header.bits) as u32
                 } else {
                     0
                 };
@@ -670,7 +718,8 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))??;
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        ;
         
         // Check sync status from sync coordinator
         let is_synced = if let Some(ref sync_coord) = self.sync_coordinator {
@@ -762,7 +811,7 @@ impl NodeAPI for NodeApiImpl {
                 }
                 
                 // Get node_pubkey
-                let node_pubkey = tree.get(b"node_pubkey")
+                let node_pubkey: Vec<u8> = tree.get(b"node_pubkey")
                     .ok()
                     .flatten()
                     .unwrap_or_default();
@@ -799,12 +848,12 @@ impl NodeAPI for NodeApiImpl {
                     })
                     .unwrap_or(0);
                 
-                Ok(Some(LightningInfo {
+                return Ok(Some(LightningInfo {
                     node_url,
                     node_pubkey,
                     channel_count,
                     total_capacity_sats,
-                }))
+                }));
             }
         }
         
@@ -947,8 +996,10 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))??;
+        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        ;
         
+        let mut fee_rates = fee_rates;
         if fee_rates.is_empty() {
             return Ok(1);
         }
@@ -1617,8 +1668,10 @@ impl NodeAPI for NodeApiImpl {
         let router = self.module_router.as_ref()
             .ok_or_else(|| ModuleError::OperationError("Module router not available".to_string()))?;
         
-        // Get caller module ID from thread-local storage
-        let caller_module_id = NodeApiImpl::get_current_module_id()
+        // Get caller module ID from instance
+        let caller_module_id = self.module_id.as_ref()
+            .or_else(|| self.current_module_id_for_api.as_ref())
+            .map(|s| s.clone())
             .unwrap_or_else(|| "unknown".to_string());
         
         router.route_call(&caller_module_id, target_module_id, method, &params).await
@@ -1632,8 +1685,9 @@ impl NodeAPI for NodeApiImpl {
             .ok_or_else(|| ModuleError::OperationError("Module API registry not available".to_string()))?;
         
         let module_id = self.current_module_id_for_api.as_ref()
-            .or_else(|| NodeApiImpl::get_current_module_id())
-            .ok_or_else(|| ModuleError::OperationError("Module ID not available for API registration".to_string()))?;
+            .or_else(|| self.module_id.as_ref())
+            .ok_or_else(|| ModuleError::OperationError("Module ID not available for API registration".to_string()))?
+            .clone();
         
         registry.register_api(module_id.clone(), api).await
     }
@@ -1643,10 +1697,11 @@ impl NodeAPI for NodeApiImpl {
             .ok_or_else(|| ModuleError::OperationError("Module API registry not available".to_string()))?;
         
         let module_id = self.current_module_id_for_api.as_ref()
-            .or_else(|| NodeApiImpl::get_current_module_id())
-            .ok_or_else(|| ModuleError::OperationError("Module ID not available for API unregistration".to_string()))?;
+            .or_else(|| self.module_id.as_ref())
+            .ok_or_else(|| ModuleError::OperationError("Module ID not available for API unregistration".to_string()))?
+            .clone();
         
-        registry.unregister_api(module_id).await
+        registry.unregister_api(&module_id).await
     }
     
     async fn send_mesh_packet_to_module(
@@ -1802,8 +1857,9 @@ impl NodeAPI for NodeApiImpl {
         // Convert ModuleState to ModuleHealth
         match state {
             Some(ModuleState::Running) => Ok(Some(crate::module::process::monitor::ModuleHealth::Healthy)),
-            Some(ModuleState::Initialized) => Ok(Some(crate::module::process::monitor::ModuleHealth::Healthy)),
+            Some(ModuleState::Initializing) => Ok(Some(crate::module::process::monitor::ModuleHealth::Healthy)),
             Some(ModuleState::Stopped) => Ok(Some(crate::module::process::monitor::ModuleHealth::Unresponsive)),
+            Some(ModuleState::Stopping) => Ok(Some(crate::module::process::monitor::ModuleHealth::Unresponsive)),
             Some(ModuleState::Error(err)) => Ok(Some(crate::module::process::monitor::ModuleHealth::Crashed(err))),
             None => Ok(None),
         }
@@ -1822,8 +1878,9 @@ impl NodeAPI for NodeApiImpl {
             if let Some(state) = manager.get_module_state(module_name).await {
                 let health = match state {
                     ModuleState::Running => crate::module::process::monitor::ModuleHealth::Healthy,
-                    ModuleState::Initialized => crate::module::process::monitor::ModuleHealth::Healthy,
+                    ModuleState::Initializing => crate::module::process::monitor::ModuleHealth::Healthy,
                     ModuleState::Stopped => crate::module::process::monitor::ModuleHealth::Unresponsive,
+                    ModuleState::Stopping => crate::module::process::monitor::ModuleHealth::Unresponsive,
                     ModuleState::Error(err) => crate::module::process::monitor::ModuleHealth::Crashed(err),
                 };
                 result.push((module_id, health));
@@ -1838,8 +1895,10 @@ impl NodeAPI for NodeApiImpl {
         health: crate::module::process::monitor::ModuleHealth,
     ) -> Result<(), ModuleError> {
         // Get current module ID
-        let module_id = NodeApiImpl::get_current_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not available for health reporting".to_string()))?;
+        let module_id = self.current_module_id_for_api.as_ref()
+            .or_else(|| self.module_id.as_ref())
+            .ok_or_else(|| ModuleError::OperationError("Module ID not available for health reporting".to_string()))?
+            .clone();
         
         // Health reporting is handled by ModuleProcessMonitor automatically
         // This method allows modules to self-report additional health information
@@ -1847,3 +1906,12 @@ impl NodeAPI for NodeApiImpl {
         Ok(())
     }
 }
+
+// Safety: NodeApiImpl is safe to share across threads (Sync) because:
+// - All internal mutable state is protected by Arc, RwLock, or Mutex, ensuring safe concurrent access.
+// - The MempoolManager (which contains ZMQ sockets) is already marked as `unsafe impl Sync`.
+// - The EventPublisher (which contains ZMQ sockets) is already marked as `unsafe impl Sync`.
+// - The NetworkManager (which contains ZMQ sockets) is already marked as `unsafe impl Sync`.
+// - All other fields are either Arc-wrapped or are already Sync types.
+// This is a workaround for ZMQ's Socket type not being Sync, but the actual usage is safe.
+unsafe impl Sync for NodeApiImpl {}

@@ -56,14 +56,14 @@ pub use config::*;
 
 // Re-export commonly used types from protocol-engine
 // This allows depending only on protocol-engine (which transitively provides consensus-proof)
-pub use bllvm_protocol::mempool::Mempool;
-pub use bllvm_protocol::{
+pub use blvm_protocol::mempool::Mempool;
+pub use blvm_protocol::{
     Block, BlockHeader, ByteString, ConsensusError, Hash, Integer, Natural, OutPoint, Result,
     Transaction, TransactionInput, TransactionOutput, UtxoSet, ValidationResult, UTXO,
 };
 
 // Re-export protocol-engine types
-pub use bllvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+pub use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 
 /// Main reference node implementation
 pub struct ReferenceNode {
@@ -164,8 +164,8 @@ mod tests {
         // Create a simple transaction
         let tx = Transaction {
             version: 1,
-            inputs: bllvm_protocol::tx_inputs![],
-            outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
                 value: 1000,
                 script_pubkey: vec![0x51], // OP_1
             }],

@@ -9,8 +9,8 @@
 use super::dandelion::DandelionRelay;
 use crate::utils::current_timestamp;
 #[cfg(feature = "fibre")]
-use bllvm_protocol::Block;
-use bllvm_protocol::Hash;
+use blvm_protocol::Block;
+use blvm_protocol::Hash;
 use std::collections::HashMap;
 use tracing::debug;
 #[cfg(feature = "dandelion")]
@@ -373,7 +373,7 @@ mod tests {
         let mut relay = RelayManager::new();
         let mut fibre = FibreRelay::new();
         let block = Block {
-            header: bllvm_protocol::BlockHeader {
+            header: blvm_protocol::BlockHeader {
                 version: 1,
                 prev_block_hash: [0u8; 32],
                 merkle_root: [0u8; 32],

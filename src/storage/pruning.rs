@@ -16,7 +16,7 @@ use crate::storage::commitment_store::CommitmentStore;
 use crate::storage::utxostore::UtxoStore;
 use anyhow::{anyhow, Result};
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::Hash;
+use blvm_protocol::Hash;
 #[cfg(feature = "utxo-commitments")]
 use hex;
 use std::sync::Arc;
@@ -637,7 +637,7 @@ impl PruningManager {
         utxostore: &UtxoStore,
     ) -> Result<()> {
         #[cfg(feature = "utxo-commitments")]
-        use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
+        use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 
         // Reconstruct UTXO set at historical height by replaying blocks
         let utxo_set = self.reconstruct_utxo_set_at_height(height, utxostore)?;
@@ -685,10 +685,10 @@ impl PruningManager {
         &self,
         block_hash: &Hash,
         height: u64,
-        utxo_set: &bllvm_protocol::UtxoSet,
+        utxo_set: &blvm_protocol::UtxoSet,
         commitment_store: &CommitmentStore,
     ) -> Result<()> {
-        use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
+        use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 
         // Build Merkle tree from current UTXO set
         let mut utxo_tree = UtxoMerkleTree::new()
@@ -727,9 +727,9 @@ impl PruningManager {
         &self,
         target_height: u64,
         utxostore: &UtxoStore,
-    ) -> Result<bllvm_protocol::UtxoSet> {
-        use bllvm_protocol::block::connect_block;
-        use bllvm_protocol::UtxoSet;
+    ) -> Result<blvm_protocol::UtxoSet> {
+        use blvm_protocol::block::connect_block;
+        use blvm_protocol::UtxoSet;
 
         // Start with empty UTXO set (genesis)
         let mut utxo_set = UtxoSet::new();
@@ -763,11 +763,11 @@ impl PruningManager {
                         utxo_set,
                         height,
                         None, // No recent headers needed for historical replay
-                        bllvm_protocol::types::Network::Mainnet,
+                        blvm_protocol::types::Network::Mainnet,
                     )?;
 
                     // Check validation result
-                    if !matches!(validation_result, bllvm_protocol::ValidationResult::Valid) {
+                    if !matches!(validation_result, blvm_protocol::ValidationResult::Valid) {
                         warn!(
                             "Block at height {} failed validation during UTXO reconstruction",
                             height

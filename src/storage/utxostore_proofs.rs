@@ -14,7 +14,7 @@ mod kani_proofs {
     use crate::storage::kani_helpers::proof_limits;
     use crate::storage::kani_helpers::unwind_bounds;
     use crate::storage::utxostore::UtxoStore;
-    use bllvm_protocol::{OutPoint, UTXO};
+    use blvm_protocol::{OutPoint, UTXO};
     use kani::*;
     use std::sync::Arc;
 
@@ -187,7 +187,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::UTXO_SET)]
     fn verify_roundtrip_storage() {
-        use bllvm_protocol::UtxoSet;
+        use blvm_protocol::UtxoSet;
         use std::collections::HashMap;
 
         let mock_db = Arc::new(MockDatabase::new());

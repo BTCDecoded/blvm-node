@@ -53,8 +53,8 @@ use crate::node::mempool::MempoolManager;
 use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
-use bllvm_protocol::mempool::Mempool;
-use bllvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
+use blvm_protocol::mempool::Mempool;
+use blvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{
@@ -428,7 +428,7 @@ pub struct NetworkManager {
     fibre_relay: Option<Arc<Mutex<fibre::FibreRelay>>>,
     /// Peer state storage (per-connection state)
     /// Read-heavy: many reads to check peer state, fewer writes when updating state
-    peer_states: Arc<RwLock<HashMap<SocketAddr, bllvm_protocol::network::PeerState>>>,
+    peer_states: Arc<RwLock<HashMap<SocketAddr, blvm_protocol::network::PeerState>>>,
     /// Persistent peer list (peers to connect to on startup)
     persistent_peers: Arc<Mutex<HashSet<SocketAddr>>>,
     /// Eclipse attack prevention: track peer diversity
@@ -637,7 +637,7 @@ impl NetworkManager {
             peer_message_rates: Arc::new(Mutex::new(HashMap::new())),
             peer_tx_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             peer_tx_byte_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
-            mempool_policy_config: config.and_then(|c| c.mempool_policy.as_ref()).map(|c| Arc::new(c.clone())),
+            mempool_policy_config: config.and_then(|c| c.mempool.as_ref()).map(|c| Arc::new(c.clone())),
             spam_ban_config: config.and_then(|c| c.spam_ban.as_ref()).map(|c| Arc::new(c.clone())),
             peer_spam_violations: Arc::new(Mutex::new(HashMap::new())),
             bytes_sent: Arc::new(AtomicU64::new(0)),
@@ -756,7 +756,7 @@ impl NetworkManager {
         &mut self,
         config: Option<&crate::config::NodeConfig>,
     ) -> Result<()> {
-        let default_config = bllvm_protocol::fibre::FibreConfig::default();
+        let default_config = blvm_protocol::fibre::FibreConfig::default();
         let fibre_config = config
             .and_then(|c| c.fibre.as_ref())
             .unwrap_or(&default_config);
@@ -805,7 +805,7 @@ impl NetworkManager {
 
     /// Broadcast block via FIBRE to all FIBRE-capable peers
     #[cfg(feature = "fibre")]
-    pub async fn broadcast_block_via_fibre(&self, block: &bllvm_protocol::Block) -> Result<()> {
+    pub async fn broadcast_block_via_fibre(&self, block: &blvm_protocol::Block) -> Result<()> {
         if let Some(fibre_relay) = &self.fibre_relay {
             // Encode block (need to clone for encoding)
             let encoded = {
@@ -838,10 +838,12 @@ impl NetworkManager {
             Ok(())
         } else {
             // FIBRE not initialized, skip
-        Ok(())
+            Ok(())
+        }
     }
 
     /// Handle EconomicNodeRegistration message - Relay to governance node if enabled
+    /// Also publishes event for governance module to handle
     #[cfg(feature = "governance")]
     async fn handle_economic_node_registration(
         &self,
@@ -850,6 +852,20 @@ impl NetworkManager {
     ) -> Result<()> {
         use tracing::{debug, info, warn, error};
         use reqwest::Client;
+
+        // Publish event for governance module (non-blocking)
+        if let Some(event_publisher) = &self.event_publisher {
+            use crate::module::ipc::protocol::EventPayload;
+            use crate::module::traits::EventType;
+            let payload = EventPayload::EconomicNodeRegistered {
+                node_id: msg.entity_name.clone(),
+                node_type: msg.node_type.clone(),
+                hashpower_percent: None,
+            };
+            if let Err(e) = event_publisher.publish_event(EventType::EconomicNodeRegistered, payload).await {
+                warn!("Failed to publish EconomicNodeRegistered event: {}", e);
+            }
+        }
 
         debug!(
             "EconomicNodeRegistration received from {}: node_type={}, entity={}, message_id={}",
@@ -882,8 +898,9 @@ impl NetworkManager {
         // Forward to bllvm-commons via VPN
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
-                let api_key = config.api_key.as_ref()
-                    .or_else(|| std::env::var("COMMONS_API_KEY").ok().as_ref())
+                let env_api_key = std::env::var("COMMONS_API_KEY").ok();
+                let api_key = config.api_key.as_deref()
+                    .or_else(|| env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
                 let client = reqwest::Client::builder()
@@ -925,6 +942,28 @@ impl NetworkManager {
         Ok(())
     }
 
+    /// Helper: Publish governance event and call handler, preserving return value
+    #[cfg(feature = "governance")]
+    async fn handle_governance_with_event<F, Fut>(
+        &self,
+        event_type: crate::module::traits::EventType,
+        payload: crate::module::ipc::protocol::EventPayload,
+        handler: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        // Publish event for governance module (non-blocking, log errors but don't fail)
+        if let Some(event_publisher) = &self.event_publisher {
+            if let Err(e) = event_publisher.publish_event(event_type, payload).await {
+                warn!("Failed to publish governance event: {}", e);
+            }
+        }
+        // Call the original handler and return its result
+        handler().await
+    }
+
     /// Gossip a governance message to other governance-enabled peers
     #[cfg(feature = "governance")]
     async fn gossip_governance_message<T: serde::Serialize>(
@@ -958,7 +997,7 @@ impl NetworkManager {
         // Send to each governance peer
         let pm = self.peer_manager.lock().await;
         for (_transport_addr, peer_addr) in governance_peers {
-            if let Some(peer) = pm.get_peer(&super::transport::TransportAddr::Tcp(peer_addr)) {
+            if let Some(peer) = pm.get_peer(&transport::TransportAddr::Tcp(peer_addr)) {
                 if let Err(e) = peer.send_message(msg_json.clone()).await {
                     debug!("Failed to gossip to peer {}: {}", peer_addr, e);
                 } else {
@@ -971,6 +1010,7 @@ impl NetworkManager {
     }
 
     /// Handle EconomicNodeVeto message - Relay to governance node if enabled
+    /// Also publishes event for governance module to handle
     #[cfg(feature = "governance")]
     async fn handle_economic_node_veto(
         &self,
@@ -979,6 +1019,20 @@ impl NetworkManager {
     ) -> Result<()> {
         use tracing::{debug, info, warn, error};
         use reqwest::Client;
+
+        // Publish event for governance module (non-blocking)
+        if let Some(event_publisher) = &self.event_publisher {
+            use crate::module::ipc::protocol::EventPayload;
+            use crate::module::traits::EventType;
+            let payload = EventPayload::EconomicNodeVeto {
+                proposal_id: format!("{}", msg.pr_id),
+                node_id: msg.node_id.map(|id| id.to_string()).unwrap_or_else(|| String::new()),
+                reason: msg.signal_type.clone(),
+            };
+            if let Err(e) = event_publisher.publish_event(EventType::EconomicNodeVeto, payload).await {
+                warn!("Failed to publish EconomicNodeVeto event: {}", e);
+            }
+        }
 
         debug!(
             "EconomicNodeVeto received from {}: pr_id={}, signal={}, message_id={}",
@@ -1011,8 +1065,9 @@ impl NetworkManager {
         // Forward to bllvm-commons via VPN
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
-                let api_key = config.api_key.as_ref()
-                    .or_else(|| std::env::var("COMMONS_API_KEY").ok().as_ref())
+                let env_api_key = std::env::var("COMMONS_API_KEY").ok();
+                let api_key = config.api_key.as_deref()
+                    .or_else(|| env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
                 let client = reqwest::Client::builder()
@@ -1069,6 +1124,23 @@ impl NetworkManager {
             peer_addr, msg.request_id, msg.query_type, msg.node_identifier
         );
 
+        // Publish event for governance module (non-blocking)
+        if let Some(event_publisher) = &self.event_publisher {
+            use crate::module::ipc::protocol::EventPayload;
+            use crate::module::traits::EventType;
+            let response_data = msg.status.as_ref()
+                .map(|s| serde_json::to_string(s).unwrap_or_default());
+            let payload = EventPayload::EconomicNodeStatus {
+                request_id: msg.request_id.to_string(),
+                query_type: msg.query_type.clone(),
+                node_id: Some(msg.node_identifier.clone()),
+                response_data,
+            };
+            if let Err(e) = event_publisher.publish_event(EventType::EconomicNodeStatus, payload).await {
+                warn!("Failed to publish EconomicNodeStatus event: {}", e);
+            }
+        }
+
         // If this is a response, relay it to governance peers
         if msg.status.is_some() {
             debug!("EconomicNodeStatus response, relaying to governance peers");
@@ -1085,8 +1157,9 @@ impl NetworkManager {
         if governance_enabled {
             if let Some(config) = &self.governance_config {
                 if let Some(ref commons_url) = config.commons_url {
-                    let api_key = config.api_key.as_ref()
-                        .or_else(|| std::env::var("COMMONS_API_KEY").ok().as_ref())
+                    let env_api_key = std::env::var("COMMONS_API_KEY").ok();
+                    let api_key = config.api_key.as_deref()
+                        .or_else(|| env_api_key.as_deref())
                         .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
                     let client = reqwest::Client::builder()
@@ -1129,12 +1202,27 @@ impl NetworkManager {
                         let status_data = status_response.get("status").and_then(|s| s.as_object());
                         let response_status = if let Some(data) = status_data {
                             Some(crate::network::protocol::NodeStatusResponse {
-                                node_id: data.get("node_id")?.as_i64()? as i32,
-                                node_type: data.get("node_type")?.as_str()?.to_string(),
-                                entity_name: data.get("entity_name")?.as_str()?.to_string(),
-                                status: data.get("status")?.as_str()?.to_string(),
-                                weight: data.get("weight")?.as_f64()?,
-                                registered_at: data.get("registered_at")?.as_i64()?,
+                                node_id: data.get("node_id")
+                                    .and_then(|v| v.as_i64())
+                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid node_id"))? as i32,
+                                node_type: data.get("node_type")
+                                    .and_then(|v| v.as_str())
+                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid node_type"))?
+                                    .to_string(),
+                                entity_name: data.get("entity_name")
+                                    .and_then(|v| v.as_str())
+                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid entity_name"))?
+                                    .to_string(),
+                                status: data.get("status")
+                                    .and_then(|v| v.as_str())
+                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid status"))?
+                                    .to_string(),
+                                weight: data.get("weight")
+                                    .and_then(|v| v.as_f64())
+                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid weight"))?,
+                                registered_at: data.get("registered_at")
+                                    .and_then(|v| v.as_i64())
+                                    .ok_or_else(|| anyhow::anyhow!("Missing or invalid registered_at"))?,
                                 last_verified_at: data.get("last_verified_at").and_then(|v| v.as_i64()),
                             })
                         } else {
@@ -1150,7 +1238,7 @@ impl NetworkManager {
 
                         // Send response back to original peer
                         let pm = self.peer_manager.lock().await;
-                        if let Some(peer) = pm.get_peer(&super::transport::TransportAddr::Tcp(peer_addr)) {
+                        if let Some(peer) = pm.get_peer(&transport::TransportAddr::Tcp(peer_addr)) {
                             let msg_bytes = bincode::serialize(&crate::network::protocol::ProtocolMessage::EconomicNodeStatus(response_msg))
                                 .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
                             if let Err(e) = peer.send_message(msg_bytes).await {
@@ -1194,6 +1282,29 @@ impl NetworkManager {
             peer_addr, msg.chosen_ruleset, msg.message_id
         );
 
+        // Publish event for governance module (non-blocking)
+        if let Some(event_publisher) = &self.event_publisher {
+            use crate::module::ipc::protocol::EventPayload;
+            use crate::module::traits::EventType;
+            let node_id = msg.node_id.map(|id| id.to_string())
+                .unwrap_or_else(|| msg.public_key.clone());
+            let decision = if msg.chosen_ruleset.is_empty() {
+                "abstain".to_string()
+            } else {
+                "adopt".to_string()
+            };
+            let payload = EventPayload::EconomicNodeForkDecision {
+                message_id: msg.message_id.clone(),
+                ruleset_version: msg.chosen_ruleset.clone(),
+                decision,
+                node_id,
+                timestamp: msg.timestamp as u64,
+            };
+            if let Err(e) = event_publisher.publish_event(EventType::EconomicNodeForkDecision, payload).await {
+                warn!("Failed to publish EconomicNodeForkDecision event: {}", e);
+            }
+        }
+
         // Replay protection: Check message ID and timestamp
         if let Err(e) = self.replay_protection.check_message_id(&msg.message_id, msg.timestamp).await {
             warn!("Replay protection: Rejected EconomicNodeForkDecision from {}: {}", peer_addr, e);
@@ -1219,8 +1330,9 @@ impl NetworkManager {
         // Forward to bllvm-commons via VPN
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
-                let api_key = config.api_key.as_ref()
-                    .or_else(|| std::env::var("COMMONS_API_KEY").ok().as_ref())
+                let env_api_key = std::env::var("COMMONS_API_KEY").ok();
+                let api_key = config.api_key.as_deref()
+                    .or_else(|| env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
                 let client = reqwest::Client::builder()
@@ -1261,7 +1373,6 @@ impl NetworkManager {
 
         Ok(())
     }
-}
 
     /// Create a new network manager with transport preference
     pub fn with_transport_preference(
@@ -3311,7 +3422,7 @@ impl NetworkManager {
                                                 .payment_details
                                                 .outputs
                                                 .iter()
-                                                .map(|output| bllvm_protocol::payment::PaymentOutput {
+                                                .map(|output| blvm_protocol::payment::PaymentOutput {
                                                     script: output.script.clone(),
                                                     amount: output.amount,
                                                 })
@@ -3500,7 +3611,7 @@ impl NetworkManager {
                         use crate::module::ipc::protocol::EventPayload;
                         use crate::module::traits::EventType;
                         let payload = EventPayload::MeshPacketReceived {
-                            packet_data: data,
+                            packet_data: data.clone(),
                             peer_addr: peer_addr.to_string(),
                         };
                         if let Err(e) = event_publisher.publish_event(EventType::MeshPacketReceived, payload).await {
@@ -3584,10 +3695,10 @@ impl NetworkManager {
     /// Parse incoming TCP wire message and process with protocol layer
     ///
     /// This function:
-    /// 1. Converts ProtocolMessage to bllvm_protocol::network::NetworkMessage
+    /// 1. Converts ProtocolMessage to blvm_protocol::network::NetworkMessage
     /// 2. Gets or creates PeerState for this peer
     /// 3. Creates NodeChainAccess from storage modules
-    /// 4. Calls bllvm_protocol::network::process_network_message()
+    /// 4. Calls blvm_protocol::network::process_network_message()
     /// 5. Converts NetworkResponse back to wire format and enqueues for sending
     pub async fn handle_incoming_wire_tcp(
         &self,
@@ -3607,8 +3718,9 @@ impl NetworkManager {
         // Mesh packets are handled separately and routed to mesh module
         if data.len() >= 4 && data[0..4] == [0x4D, 0x45, 0x53, 0x48] {
             debug!("Detected mesh packet from {}: {} bytes", peer_addr, data.len());
-            // Route mesh packet to mesh module via message queue
-            // The mesh module will process these messages asynchronously
+            // Route mesh packet to mesh module via event system
+            // The packet is sent to the message queue, which then publishes MeshPacketReceived events
+            // that the mesh module can subscribe to (see handle_network_messages for event publishing)
             let _ = self.peer_tx.send(NetworkMessage::MeshPacketReceived(data, peer_addr));
             return Ok(());
         }
@@ -3676,7 +3788,7 @@ impl NetworkManager {
             }
 
             // Check if transaction is spam and track violations
-            use bllvm_consensus::spam_filter::SpamFilter;
+            use blvm_consensus::spam_filter::SpamFilter;
             
             // Parse transaction from data to check if it's spam
             if let Ok(tx_msg) = bincode::deserialize::<crate::network::protocol::TxMessage>(&data[4..]) {
@@ -3825,7 +3937,7 @@ impl NetworkManager {
             ProtocolMessage::BanList(msg) => {
                 return self.handle_ban_list(peer_addr, msg).await;
             }
-            // Governance messages
+            // Governance messages - handled via methods that publish events and handle network logic
             #[cfg(feature = "governance")]
             ProtocolMessage::EconomicNodeRegistration(msg) => {
                 return self.handle_economic_node_registration(peer_addr, msg).await;
@@ -3870,7 +3982,7 @@ impl NetworkManager {
             self.storage.as_ref(),
             self.mempool_manager.as_ref(),
         ) {
-            // Convert ProtocolMessage to bllvm_protocol::network::NetworkMessage
+            // Convert ProtocolMessage to blvm_protocol::network::NetworkMessage
             use crate::network::protocol_adapter::ProtocolAdapter;
             let protocol_msg = ProtocolAdapter::protocol_to_consensus_message(&parsed)?;
 
@@ -3901,7 +4013,7 @@ impl NetworkManager {
                     let transport_addr = TransportAddr::Tcp(peer_addr);
                     if let Some(peer) = pm.get_peer_mut(&transport_addr) {
                         peer.set_services(version_msg.services);
-                        peer.set_version(version_msg.version);
+                        peer.set_version(version_msg.version as u32);
                         debug!("Stored service flags {} and version {} for peer {}", version_msg.services, version_msg.version, peer_addr);
                     }
                 }
@@ -3934,10 +4046,10 @@ impl NetworkManager {
                 let mut peer_states = self.peer_states.write().await;
                 let peer_state = peer_states
                     .entry(peer_addr)
-                    .or_insert_with(bllvm_protocol::network::PeerState::new);
+                    .or_insert_with(blvm_protocol::network::PeerState::new);
 
                 // Process message (synchronous, no await points)
-                use bllvm_protocol::network::{process_network_message, ChainStateAccess};
+                use blvm_protocol::network::{process_network_message, ChainStateAccess};
                 process_network_message(
                     protocol_engine,
                     &protocol_msg,
@@ -4056,7 +4168,7 @@ impl NetworkManager {
                 let error_msg = e.to_string();
                 if error_msg.contains("requires payment") {
                     // Return error to client - they should request payment
-                    // The client can detect this error and initiate payment flow
+                    // The error message contains payment details that the client can use
                     warn!("Module requires payment: {}", error_msg);
                     Err(e)
                 } else {
@@ -4226,7 +4338,7 @@ impl NetworkManager {
         use crate::network::package_relay_handler::handle_pkgtxn;
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
-        use bllvm_protocol::Transaction;
+        use blvm_protocol::Transaction;
 
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
@@ -4256,7 +4368,7 @@ impl NetworkManager {
     /// Submit validated transactions to the mempool
     async fn submit_transactions_to_mempool(
         &self,
-        txs: &[bllvm_protocol::Transaction],
+        txs: &[blvm_protocol::Transaction],
     ) -> Result<()> {
         if let Some(ref _mempool_manager) = self.mempool_manager {
             // Use MempoolManager's add_transaction method
@@ -4902,7 +5014,7 @@ impl NetworkManager {
     }
 
     /// Get peer manager reference (for module API access)
-    pub fn peer_manager(&self) -> &Arc<Mutex<PeerManager>> {
+    pub fn peer_manager_ref(&self) -> &Arc<Mutex<PeerManager>> {
         &self.peer_manager
     }
 
@@ -4978,8 +5090,8 @@ impl NetworkManager {
         start_height: i32,
         relay: bool,
     ) -> crate::network::protocol::VersionMessage {
-        use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
-        use bllvm_protocol::service_flags::standard;
+        use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        use blvm_protocol::service_flags::standard;
 
         // Start with standard Bitcoin flags that should always be set
         // NODE_NETWORK (bit 0) - Always set for full nodes (even if pruned)

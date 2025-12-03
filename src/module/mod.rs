@@ -34,7 +34,10 @@ pub use security::{Permission, PermissionChecker, PermissionSet, RequestValidato
 pub use encryption::ModuleEncryption;
 pub use manager::ModuleManager;
 pub use process::{ModuleProcess, ModuleProcessMonitor, ModuleProcessSpawner};
-pub use traits::{Module, ModuleContext, ModuleError, ModuleMetadata, ModuleState, NodeAPI};
+pub use traits::{Module, ModuleContext, ModuleError, ModuleMetadata, ModuleState, NodeAPI, EventType};
+
+// Re-export IPC protocol types
+pub use ipc::protocol::{EventPayload, ModuleMessage, EventMessage};
 
 // Re-export IPC types conditionally
 #[cfg(unix)]

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::module::api::events::EventManager;
 use crate::module::api::hub::ModuleApiHub;
@@ -182,8 +182,8 @@ impl ModuleManager {
                 use crate::module::ipc::protocol::EventPayload;
                 use crate::module::traits::EventType;
                 let payload = EventPayload::ModuleUnloaded {
-                    module_id: format!("{}_{}", module_name, Uuid::new_v4()),
                     module_name: module_name.clone(),
+                    version: String::new(), // Version unknown for crashed modules
                 };
                 if let Err(e) = event_manager.publish_event(EventType::ModuleUnloaded, payload).await {
                     warn!("Failed to publish ModuleUnloaded event for crashed module: {}", e);
@@ -254,7 +254,7 @@ impl ModuleManager {
             }
             
             // Check if dependency is in a valid state (Running or Initialized)
-            if dep_module.state != ModuleState::Running && dep_module.state != ModuleState::Initialized {
+            if dep_module.state != ModuleState::Running && dep_module.state != ModuleState::Initializing {
                 return Err(ModuleError::OperationError(format!(
                     "Dependency '{}' is not in a valid state (state: {:?}, required by '{}')",
                     dep_name, dep_module.state, module_name
@@ -312,6 +312,8 @@ impl ModuleManager {
         }
 
         // Store module with shared process
+        // Clone version before moving metadata
+        let module_version = metadata.version.clone();
         let managed = ManagedModule {
             metadata,
             process: Some(shared_process),
@@ -324,17 +326,25 @@ impl ModuleManager {
 
         info!("Module {} loaded successfully", module_name);
         
-        // Publish ModuleLoaded event for dependent modules to react
-        use crate::module::ipc::protocol::EventPayload;
-        use crate::module::traits::EventType;
-        let payload = EventPayload::ModuleLoaded {
-            module_id: module_id.clone(),
-            module_name: module_name.to_string(),
-            version: metadata.version.clone(),
-        };
-        if let Err(e) = self.event_manager.publish_event(EventType::ModuleLoaded, payload).await {
-            warn!("Failed to publish ModuleLoaded event: {}", e);
+        // Record module as loaded (for sending to newly subscribing modules)
+        // ModuleLoaded event will be published AFTER the module subscribes (in subscribe_module)
+        // This ensures consistency: ModuleLoaded only happens after startup is complete
+        {
+            let loaded_modules = self.event_manager.loaded_modules();
+            let mut loaded = loaded_modules.lock().await;
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            loaded.insert(module_name.to_string(), (module_version.clone(), timestamp));
         }
+        
+        // Note: ModuleLoaded event is NOT published here
+        // It will be published when the module subscribes to events (after startup is complete)
+        // This ensures:
+        // 1. ModuleLoaded only happens after module is fully ready (subscribed)
+        // 2. Hotloaded modules receive ModuleLoaded for all already-loaded modules via subscribe_module()
+        // 3. Consistent event ordering: subscription -> ModuleLoaded events
         
         Ok(())
     }
@@ -380,8 +390,8 @@ impl ModuleManager {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
             let payload = EventPayload::ModuleUnloaded {
-                module_id: module_id.clone(),
                 module_name: module_name.to_string(),
+                version: String::new(), // Get version from metadata if available
             };
             if let Err(e) = self.event_manager.publish_event(EventType::ModuleUnloaded, payload).await {
                 warn!("Failed to publish ModuleUnloaded event: {}", e);
@@ -402,7 +412,7 @@ impl ModuleManager {
                 if is_required {
                     warn!("Unloading dependent module '{}' due to required dependency '{}' unloading", 
                           dependent, module_name);
-                    if let Err(e) = self.unload_module(&dependent).await {
+                    if let Err(e) = Box::pin(self.unload_module(&dependent)).await {
                         error!("Failed to unload dependent module '{}': {}", dependent, e);
                     }
                 } else {
@@ -705,7 +715,7 @@ impl ModuleManager {
             }
             
             // Check if dependency is in a valid state (Running or Initialized)
-            if dep_module.state != ModuleState::Running && dep_module.state != ModuleState::Initialized {
+            if dep_module.state != ModuleState::Running && dep_module.state != ModuleState::Initializing {
                 return Err(ModuleError::OperationError(format!(
                     "Required dependency '{}' is not in a valid state (state: {:?}, required by '{}')",
                     dep_name, dep_module.state, module_name
@@ -972,5 +982,99 @@ impl ModuleManager {
 
         info!("Module manager shut down");
         Ok(())
+    }
+
+    /// Check if a version satisfies a version requirement
+    /// 
+    /// Supports basic semver constraints:
+    /// - Exact: "1.0.0"
+    /// - Greater than or equal: ">=1.0.0"
+    /// - Less than or equal: "<=1.0.0"
+    /// - Range: ">=1.0.0,<2.0.0"
+    /// - Wildcard: "1.x" or "1.0.x"
+    fn check_version_constraint(version: &str, requirement: &str) -> bool {
+        // Simple implementation - for production, consider using semver crate
+        // For now, handle common cases
+        
+        // Exact match
+        if version == requirement {
+            return true;
+        }
+        
+        // Remove whitespace
+        let req = requirement.trim();
+        
+        // Handle >= constraint
+        if let Some(required_version) = req.strip_prefix(">=") {
+            return Self::compare_versions(version, required_version.trim()) >= 0;
+        }
+        
+        // Handle <= constraint
+        if let Some(required_version) = req.strip_prefix("<=") {
+            return Self::compare_versions(version, required_version.trim()) <= 0;
+        }
+        
+        // Handle > constraint
+        if let Some(required_version) = req.strip_prefix(">") {
+            return Self::compare_versions(version, required_version.trim()) > 0;
+        }
+        
+        // Handle < constraint
+        if let Some(required_version) = req.strip_prefix("<") {
+            return Self::compare_versions(version, required_version.trim()) < 0;
+        }
+        
+        // Handle range (comma-separated)
+        if req.contains(',') {
+            let parts: Vec<&str> = req.split(',').collect();
+            return parts.iter().all(|part| Self::check_version_constraint(version, part.trim()));
+        }
+        
+        // Handle wildcard (x or *)
+        if req.contains('x') || req.contains('*') {
+            // Simple prefix match for now
+            let version_parts: Vec<&str> = version.split('.').collect();
+            let req_parts: Vec<&str> = req.split('.').collect();
+            
+            if version_parts.len() != req_parts.len() {
+                return false;
+            }
+            
+            for (v_part, r_part) in version_parts.iter().zip(req_parts.iter()) {
+                if *r_part != "x" && *r_part != "*" && v_part != r_part {
+                    return false;
+                }
+            }
+            return true;
+        }
+        
+        // Default: exact match (already checked above, so false)
+        false
+    }
+    
+    /// Compare two version strings
+    /// Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
+    fn compare_versions(v1: &str, v2: &str) -> i32 {
+        let parts1: Vec<u32> = v1.split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let parts2: Vec<u32> = v2.split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        
+        let max_len = parts1.len().max(parts2.len());
+        
+        for i in 0..max_len {
+            let p1 = parts1.get(i).copied().unwrap_or(0);
+            let p2 = parts2.get(i).copied().unwrap_or(0);
+            
+            if p1 < p2 {
+                return -1;
+            } else if p1 > p2 {
+                return 1;
+            }
+        }
+        
+        0
     }
 }

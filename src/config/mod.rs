@@ -453,6 +453,7 @@ impl Default for NodeConfig {
             request_timeouts: None,
             module_resource_limits: None,
             fee_forwarding: None,
+            spam_ban: None,
             #[cfg(feature = "zmq")]
             zmq: None,
             logging: None,
@@ -2066,7 +2067,7 @@ pub struct RestApiConfig {
 /// Logging configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LoggingConfig {
-    /// Log level filter (e.g., "info", "debug", "bllvm_node=debug,network=trace")
+    /// Log level filter (e.g., "info", "debug", "blvm_node=debug,network=trace")
     /// If not set, uses RUST_LOG environment variable or defaults to "info"
     #[serde(default)]
     pub filter: Option<String>,

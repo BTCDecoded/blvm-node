@@ -8,7 +8,7 @@
 
 use crate::payment::processor::PaymentError;
 use crate::payment::state_machine::{PaymentState, PaymentStateMachine};
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_protocol::payment::PaymentOutput;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

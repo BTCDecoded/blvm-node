@@ -7,9 +7,9 @@ use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
-use bllvm_protocol::serialization::deserialize_block_with_witnesses;
-use bllvm_protocol::validation::ProtocolValidationContext;
-use bllvm_protocol::{
+use blvm_protocol::serialization::deserialize_block_with_witnesses;
+use blvm_protocol::validation::ProtocolValidationContext;
+use blvm_protocol::{
     segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult,
 };
 use std::sync::Arc;

@@ -15,13 +15,13 @@ use crate::network::{
     NetworkManager,
 };
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::types::{BlockHeader, Hash, Natural};
+use blvm_protocol::types::{BlockHeader, Hash, Natural};
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
+use blvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentResult;
+use blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentResult;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::utxo_commitments::network_integration::{
+use blvm_protocol::utxo_commitments::network_integration::{
     FilteredBlock, UtxoCommitmentsNetworkClient,
 };
 #[cfg(feature = "utxo-commitments")]
@@ -102,20 +102,20 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     use hex;
 
                     let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
-                        bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh peer_id format: {}", peer_id)
                         )
                     })?;
 
                     let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
-                        bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh node ID hex: {}", e)
                         )
                     })?;
 
                     // Validate node ID length (Iroh uses 32-byte public keys)
                     if node_id_bytes.len() != 32 {
-                        return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh node ID length: expected 32 bytes, got {}", node_id_bytes.len())
                         ));
                     }
@@ -136,7 +136,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 }
                 #[cfg(not(feature = "iroh"))]
                 {
-                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         "Iroh feature not enabled".to_string()
                     ));
                 }
@@ -147,7 +147,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             let (peer_addr, transport_addr_opt) = match peer_addr_opt {
                 Some((addr, transport)) => (addr, transport),
                 None => {
-                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Invalid peer_id format: {}", peer_id)
                     ));
                 }
@@ -195,7 +195,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
 
             // If we know the peer doesn't support UTXO commitments, return error early
             if !peer_supports_utxo_commitments {
-                return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::VerificationFailed(
+                return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::VerificationFailed(
                     format!("Peer {} does not support UTXO commitments (missing NODE_UTXO_COMMITMENTS service flag)", peer_id)
                 ));
             }
@@ -211,7 +211,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
 
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
             let wire_format = serialize_get_utxo_set(&get_utxo_set_msg)
-                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to serialize GetUTXOSet: {}", e)
                 ))?;
 
@@ -219,7 +219,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             {
                 let network = network_manager.read().await;
                 network.send_to_peer(peer_addr, wire_format).await
-                    .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
                     ))?;
             }
@@ -238,14 +238,14 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                             // Deserialize UTXOSet response
                             use crate::network::protocol::{ProtocolMessage, ProtocolParser};
                             let parsed = ProtocolParser::parse_message(&response_data)
-                                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                                .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                                     format!("Failed to parse UTXOSet response: {}", e)
                                 ))?;
 
                             match parsed {
                                 ProtocolMessage::UTXOSet(utxo_set_msg) => {
                                     // Convert to UtxoCommitment
-                                    let commitment = bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment {
+                                    let commitment = blvm_protocol::utxo_commitments::data_structures::UtxoCommitment {
                                         merkle_root: utxo_set_msg.commitment.merkle_root,
                                         total_supply: utxo_set_msg.commitment.total_supply,
                                         utxo_count: utxo_set_msg.commitment.utxo_count,
@@ -254,12 +254,12 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                     };
                                     Ok(commitment)
                                 }
-                                _ => Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                                _ => Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                                     format!("Unexpected response type: expected UTXOSet")
                                 ))
                             }
                         }
-                        Err(_) => Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        Err(_) => Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             "Response channel closed".to_string()
                         ))
                     }
@@ -274,7 +274,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         let mut pending = pending_requests_arc.lock().await;
                         pending.remove(&request_id);
                     }
-                    Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Request timeout: no response received within {} seconds", timeout_seconds)
                     ))
                 }
@@ -316,20 +316,20 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     use hex;
 
                     let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
-                        bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh peer_id format: {}", peer_id)
                         )
                     })?;
 
                     let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
-                        bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh node ID hex: {}", e)
                         )
                     })?;
 
                     // Validate node ID length (Iroh uses 32-byte public keys)
                     if node_id_bytes.len() != 32 {
-                        return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             format!("Invalid Iroh node ID length: expected 32 bytes, got {}", node_id_bytes.len())
                         ));
                     }
@@ -350,7 +350,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 }
                 #[cfg(not(feature = "iroh"))]
                 {
-                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         "Iroh feature not enabled".to_string()
                     ));
                 }
@@ -361,7 +361,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             let (peer_addr, transport_addr_opt) = match peer_addr_opt {
                 Some((addr, transport)) => (addr, transport),
                 None => {
-                    return Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Invalid peer_id format: {}", peer_id)
                     ));
                 }
@@ -400,7 +400,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
 
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
             let wire_format = serialize_get_filtered_block(&get_filtered_block_msg)
-                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                     format!("Failed to serialize GetFilteredBlock: {}", e)
                 ))?;
 
@@ -408,7 +408,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             {
                 let network = network_manager.read().await;
                 network.send_to_peer(peer_addr, wire_format).await
-                    .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
                     ))?;
             }
@@ -427,7 +427,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                             // Deserialize FilteredBlock response
                             use crate::network::protocol::{ProtocolMessage, ProtocolParser};
                             let parsed = ProtocolParser::parse_message(&response_data)
-                                .map_err(|e| bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                                .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                                     format!("Failed to parse FilteredBlock response: {}", e)
                                 ))?;
 
@@ -452,7 +452,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                     };
                                     let filtered_block = FilteredBlock {
                                         header,
-                                        commitment: bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment {
+                                        commitment: blvm_protocol::utxo_commitments::data_structures::UtxoCommitment {
                                             merkle_root: filtered_block_msg.commitment.merkle_root,
                                             total_supply: filtered_block_msg.commitment.total_supply,
                                             utxo_count: filtered_block_msg.commitment.utxo_count,
@@ -462,12 +462,12 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                         transactions: filtered_block_msg.transactions.clone(),
                                         transaction_indices: (0..filtered_block_msg.transactions.len() as u32).collect(),
                                         spam_summary: {
-                                            // Convert network::protocol::SpamSummary to bllvm_protocol::SpamSummary
+                                            // Convert network::protocol::SpamSummary to blvm_protocol::SpamSummary
                                             let network_summary = &filtered_block_msg.spam_summary;
-                                            bllvm_protocol::spam_filter::SpamSummary {
+                                            blvm_protocol::spam_filter::SpamSummary {
                                                 filtered_count: network_summary.filtered_count,
                                                 filtered_size: network_summary.filtered_size,
-                                                by_type: bllvm_protocol::spam_filter::SpamBreakdown {
+                                                by_type: blvm_protocol::spam_filter::SpamBreakdown {
                                                     ordinals: network_summary.by_type.ordinals,
                                                     inscriptions: network_summary.by_type.inscriptions,
                                                     dust: network_summary.by_type.dust,
@@ -478,12 +478,12 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                     };
                                     Ok(filtered_block)
                                 }
-                                _ => Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                                _ => Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                                     format!("Unexpected response type: expected FilteredBlock")
                                 ))
                             }
                         }
-                        Err(_) => Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        Err(_) => Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                             "Response channel closed".to_string()
                         ))
                     }
@@ -498,7 +498,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         let mut pending = pending_requests_arc.lock().await;
                         pending.remove(&request_id);
                     }
-                    Err(bllvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Request timeout: no response received within {} seconds", timeout_seconds)
                     ))
                 }

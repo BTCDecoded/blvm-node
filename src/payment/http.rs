@@ -21,7 +21,7 @@ pub async fn handle_create_payment_request(
     processor: Arc<PaymentProcessor>,
     req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, PaymentError> {
-    use bllvm_protocol::payment::{PaymentOutput, PaymentRequest};
+    use blvm_protocol::payment::{PaymentOutput, PaymentRequest};
 
     // Only accept POST
     if req.method() != Method::POST {
@@ -126,7 +126,7 @@ pub async fn handle_submit_payment(
     processor: Arc<PaymentProcessor>,
     req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, PaymentError> {
-    use bllvm_protocol::payment::Payment;
+    use blvm_protocol::payment::Payment;
 
     // Only accept POST
     if req.method() != Method::POST {

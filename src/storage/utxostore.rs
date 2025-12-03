@@ -4,7 +4,7 @@
 
 use crate::storage::database::{Database, Tree};
 use anyhow::Result;
-use bllvm_protocol::{OutPoint, UtxoSet, UTXO};
+use blvm_protocol::{OutPoint, UtxoSet, UTXO};
 use std::collections::HashMap;
 use std::sync::Arc;
 

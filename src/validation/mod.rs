@@ -11,10 +11,10 @@
 //! Reference: Bitcoin Core's parallel block validation for IBD
 
 use anyhow::Result;
-use bllvm_protocol::block::connect_block;
-use bllvm_protocol::segwit::Witness;
-use bllvm_protocol::types::Network;
-use bllvm_protocol::{Block, UtxoSet, ValidationResult};
+use blvm_protocol::block::connect_block;
+use blvm_protocol::segwit::Witness;
+use blvm_protocol::types::Network;
+use blvm_protocol::{Block, UtxoSet, ValidationResult};
 
 /// Block validation context
 #[derive(Debug, Clone)]

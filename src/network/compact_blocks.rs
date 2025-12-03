@@ -21,7 +21,7 @@
 
 use crate::network::transport::TransportType;
 use anyhow::Result;
-use bllvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
@@ -300,7 +300,7 @@ pub fn negotiate_optimizations(
     transport_type: TransportType,
     peer_services: u64,
 ) -> (u64, bool, bool) {
-    use bllvm_protocol::bip157::NODE_COMPACT_FILTERS;
+    use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
 
     let compact_version = recommended_compact_block_version(transport_type);
     let prefer_compact = should_prefer_compact_blocks(transport_type);

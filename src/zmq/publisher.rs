@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use bincode;
-use bllvm_protocol::{Block, Hash, Transaction};
+use blvm_protocol::{Block, Hash, Transaction};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};

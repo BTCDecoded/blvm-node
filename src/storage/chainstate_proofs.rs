@@ -12,7 +12,7 @@
 mod kani_proofs {
     use crate::storage::chainstate::{ChainInfo, ChainParams, ChainState};
     use crate::storage::kani_helpers::kani_mocks::MockDatabase;
-    use bllvm_protocol::{BlockHeader, Hash};
+    use blvm_protocol::{BlockHeader, Hash};
     use kani::*;
     use std::sync::Arc;
 

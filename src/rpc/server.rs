@@ -108,6 +108,7 @@ impl RpcServer {
             payment: None,
             auth_manager: None,
             metrics: None,
+            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -509,194 +510,194 @@ impl RpcServer {
         let mut output = String::new();
 
         // Network metrics
-        output.push_str("# HELP bllvm_network_peers_total Total number of connected peers\n");
-        output.push_str("# TYPE bllvm_network_peers_total gauge\n");
+        output.push_str("# HELP blvm_network_peers_total Total number of connected peers\n");
+        output.push_str("# TYPE blvm_network_peers_total gauge\n");
         output.push_str(&format!(
-            "bllvm_network_peers_total {}\n",
+            "blvm_network_peers_total {}\n",
             metrics.network.peer_count
         ));
 
-        output.push_str("# HELP bllvm_network_bytes_sent_total Total bytes sent\n");
-        output.push_str("# TYPE bllvm_network_bytes_sent_total counter\n");
+        output.push_str("# HELP blvm_network_bytes_sent_total Total bytes sent\n");
+        output.push_str("# TYPE blvm_network_bytes_sent_total counter\n");
         output.push_str(&format!(
-            "bllvm_network_bytes_sent_total {}\n",
+            "blvm_network_bytes_sent_total {}\n",
             metrics.network.bytes_sent
         ));
 
-        output.push_str("# HELP bllvm_network_bytes_received_total Total bytes received\n");
-        output.push_str("# TYPE bllvm_network_bytes_received_total counter\n");
+        output.push_str("# HELP blvm_network_bytes_received_total Total bytes received\n");
+        output.push_str("# TYPE blvm_network_bytes_received_total counter\n");
         output.push_str(&format!(
-            "bllvm_network_bytes_received_total {}\n",
+            "blvm_network_bytes_received_total {}\n",
             metrics.network.bytes_received
         ));
 
-        output.push_str("# HELP bllvm_network_messages_sent_total Total messages sent\n");
-        output.push_str("# TYPE bllvm_network_messages_sent_total counter\n");
+        output.push_str("# HELP blvm_network_messages_sent_total Total messages sent\n");
+        output.push_str("# TYPE blvm_network_messages_sent_total counter\n");
         output.push_str(&format!(
-            "bllvm_network_messages_sent_total {}\n",
+            "blvm_network_messages_sent_total {}\n",
             metrics.network.messages_sent
         ));
 
-        output.push_str("# HELP bllvm_network_messages_received_total Total messages received\n");
-        output.push_str("# TYPE bllvm_network_messages_received_total counter\n");
+        output.push_str("# HELP blvm_network_messages_received_total Total messages received\n");
+        output.push_str("# TYPE blvm_network_messages_received_total counter\n");
         output.push_str(&format!(
-            "bllvm_network_messages_received_total {}\n",
+            "blvm_network_messages_received_total {}\n",
             metrics.network.messages_received
         ));
 
-        output.push_str("# HELP bllvm_network_active_connections Active network connections\n");
-        output.push_str("# TYPE bllvm_network_active_connections gauge\n");
+        output.push_str("# HELP blvm_network_active_connections Active network connections\n");
+        output.push_str("# TYPE blvm_network_active_connections gauge\n");
         output.push_str(&format!(
-            "bllvm_network_active_connections {}\n",
+            "blvm_network_active_connections {}\n",
             metrics.network.active_connections
         ));
 
-        output.push_str("# HELP bllvm_network_banned_peers Banned peers count\n");
-        output.push_str("# TYPE bllvm_network_banned_peers gauge\n");
+        output.push_str("# HELP blvm_network_banned_peers Banned peers count\n");
+        output.push_str("# TYPE blvm_network_banned_peers gauge\n");
         output.push_str(&format!(
-            "bllvm_network_banned_peers {}\n",
+            "blvm_network_banned_peers {}\n",
             metrics.network.banned_peers
         ));
 
         // Storage metrics
-        output.push_str("# HELP bllvm_storage_blocks_total Total blocks stored\n");
-        output.push_str("# TYPE bllvm_storage_blocks_total gauge\n");
+        output.push_str("# HELP blvm_storage_blocks_total Total blocks stored\n");
+        output.push_str("# TYPE blvm_storage_blocks_total gauge\n");
         output.push_str(&format!(
-            "bllvm_storage_blocks_total {}\n",
+            "blvm_storage_blocks_total {}\n",
             metrics.storage.block_count
         ));
 
-        output.push_str("# HELP bllvm_storage_utxos_total Total UTXOs\n");
-        output.push_str("# TYPE bllvm_storage_utxos_total gauge\n");
+        output.push_str("# HELP blvm_storage_utxos_total Total UTXOs\n");
+        output.push_str("# TYPE blvm_storage_utxos_total gauge\n");
         output.push_str(&format!(
-            "bllvm_storage_utxos_total {}\n",
+            "blvm_storage_utxos_total {}\n",
             metrics.storage.utxo_count
         ));
 
-        output.push_str("# HELP bllvm_storage_transactions_total Total transactions indexed\n");
-        output.push_str("# TYPE bllvm_storage_transactions_total gauge\n");
+        output.push_str("# HELP blvm_storage_transactions_total Total transactions indexed\n");
+        output.push_str("# TYPE blvm_storage_transactions_total gauge\n");
         output.push_str(&format!(
-            "bllvm_storage_transactions_total {}\n",
+            "blvm_storage_transactions_total {}\n",
             metrics.storage.transaction_count
         ));
 
-        output.push_str("# HELP bllvm_storage_disk_size_bytes Estimated disk size in bytes\n");
-        output.push_str("# TYPE bllvm_storage_disk_size_bytes gauge\n");
+        output.push_str("# HELP blvm_storage_disk_size_bytes Estimated disk size in bytes\n");
+        output.push_str("# TYPE blvm_storage_disk_size_bytes gauge\n");
         output.push_str(&format!(
-            "bllvm_storage_disk_size_bytes {}\n",
+            "blvm_storage_disk_size_bytes {}\n",
             metrics.storage.disk_size
         ));
 
-        output.push_str("# HELP bllvm_storage_within_bounds Storage bounds status (1=within bounds, 0=exceeded)\n");
-        output.push_str("# TYPE bllvm_storage_within_bounds gauge\n");
+        output.push_str("# HELP blvm_storage_within_bounds Storage bounds status (1=within bounds, 0=exceeded)\n");
+        output.push_str("# TYPE blvm_storage_within_bounds gauge\n");
         output.push_str(&format!(
-            "bllvm_storage_within_bounds {}\n",
+            "blvm_storage_within_bounds {}\n",
             if metrics.storage.within_bounds { 1 } else { 0 }
         ));
 
         // RPC metrics
-        output.push_str("# HELP bllvm_rpc_requests_total Total RPC requests\n");
-        output.push_str("# TYPE bllvm_rpc_requests_total counter\n");
+        output.push_str("# HELP blvm_rpc_requests_total Total RPC requests\n");
+        output.push_str("# TYPE blvm_rpc_requests_total counter\n");
         output.push_str(&format!(
-            "bllvm_rpc_requests_total {}\n",
+            "blvm_rpc_requests_total {}\n",
             metrics.rpc.requests_total
         ));
 
-        output.push_str("# HELP bllvm_rpc_requests_success_total Successful RPC requests\n");
-        output.push_str("# TYPE bllvm_rpc_requests_success_total counter\n");
+        output.push_str("# HELP blvm_rpc_requests_success_total Successful RPC requests\n");
+        output.push_str("# TYPE blvm_rpc_requests_success_total counter\n");
         output.push_str(&format!(
-            "bllvm_rpc_requests_success_total {}\n",
+            "blvm_rpc_requests_success_total {}\n",
             metrics.rpc.requests_success
         ));
 
-        output.push_str("# HELP bllvm_rpc_requests_failed_total Failed RPC requests\n");
-        output.push_str("# TYPE bllvm_rpc_requests_failed_total counter\n");
+        output.push_str("# HELP blvm_rpc_requests_failed_total Failed RPC requests\n");
+        output.push_str("# TYPE blvm_rpc_requests_failed_total counter\n");
         output.push_str(&format!(
-            "bllvm_rpc_requests_failed_total {}\n",
+            "blvm_rpc_requests_failed_total {}\n",
             metrics.rpc.requests_failed
         ));
 
-        output.push_str("# HELP bllvm_rpc_requests_per_second Current RPC requests per second\n");
-        output.push_str("# TYPE bllvm_rpc_requests_per_second gauge\n");
+        output.push_str("# HELP blvm_rpc_requests_per_second Current RPC requests per second\n");
+        output.push_str("# TYPE blvm_rpc_requests_per_second gauge\n");
         output.push_str(&format!(
-            "bllvm_rpc_requests_per_second {}\n",
+            "blvm_rpc_requests_per_second {}\n",
             metrics.rpc.requests_per_second
         ));
 
         output.push_str(
-            "# HELP bllvm_rpc_avg_response_time_ms Average RPC response time in milliseconds\n",
+            "# HELP blvm_rpc_avg_response_time_ms Average RPC response time in milliseconds\n",
         );
-        output.push_str("# TYPE bllvm_rpc_avg_response_time_ms gauge\n");
+        output.push_str("# TYPE blvm_rpc_avg_response_time_ms gauge\n");
         output.push_str(&format!(
-            "bllvm_rpc_avg_response_time_ms {}\n",
+            "blvm_rpc_avg_response_time_ms {}\n",
             metrics.rpc.avg_response_time_ms
         ));
 
         // Performance metrics
-        output.push_str("# HELP bllvm_performance_avg_block_processing_time_ms Average block processing time in milliseconds\n");
-        output.push_str("# TYPE bllvm_performance_avg_block_processing_time_ms gauge\n");
+        output.push_str("# HELP blvm_performance_avg_block_processing_time_ms Average block processing time in milliseconds\n");
+        output.push_str("# TYPE blvm_performance_avg_block_processing_time_ms gauge\n");
         output.push_str(&format!(
-            "bllvm_performance_avg_block_processing_time_ms {}\n",
+            "blvm_performance_avg_block_processing_time_ms {}\n",
             metrics.performance.avg_block_processing_time_ms
         ));
 
-        output.push_str("# HELP bllvm_performance_avg_tx_validation_time_ms Average transaction validation time in milliseconds\n");
-        output.push_str("# TYPE bllvm_performance_avg_tx_validation_time_ms gauge\n");
+        output.push_str("# HELP blvm_performance_avg_tx_validation_time_ms Average transaction validation time in milliseconds\n");
+        output.push_str("# TYPE blvm_performance_avg_tx_validation_time_ms gauge\n");
         output.push_str(&format!(
-            "bllvm_performance_avg_tx_validation_time_ms {}\n",
+            "blvm_performance_avg_tx_validation_time_ms {}\n",
             metrics.performance.avg_tx_validation_time_ms
         ));
 
-        output.push_str("# HELP bllvm_performance_blocks_per_second Blocks processed per second\n");
-        output.push_str("# TYPE bllvm_performance_blocks_per_second gauge\n");
+        output.push_str("# HELP blvm_performance_blocks_per_second Blocks processed per second\n");
+        output.push_str("# TYPE blvm_performance_blocks_per_second gauge\n");
         output.push_str(&format!(
-            "bllvm_performance_blocks_per_second {}\n",
+            "blvm_performance_blocks_per_second {}\n",
             metrics.performance.blocks_per_second
         ));
 
         output.push_str(
-            "# HELP bllvm_performance_transactions_per_second Transactions processed per second\n",
+            "# HELP blvm_performance_transactions_per_second Transactions processed per second\n",
         );
-        output.push_str("# TYPE bllvm_performance_transactions_per_second gauge\n");
+        output.push_str("# TYPE blvm_performance_transactions_per_second gauge\n");
         output.push_str(&format!(
-            "bllvm_performance_transactions_per_second {}\n",
+            "blvm_performance_transactions_per_second {}\n",
             metrics.performance.transactions_per_second
         ));
 
         // System metrics
-        output.push_str("# HELP bllvm_system_uptime_seconds Node uptime in seconds\n");
-        output.push_str("# TYPE bllvm_system_uptime_seconds gauge\n");
+        output.push_str("# HELP blvm_system_uptime_seconds Node uptime in seconds\n");
+        output.push_str("# TYPE blvm_system_uptime_seconds gauge\n");
         output.push_str(&format!(
-            "bllvm_system_uptime_seconds {}\n",
+            "blvm_system_uptime_seconds {}\n",
             metrics.system.uptime_seconds
         ));
 
         if let Some(memory) = metrics.system.memory_usage_bytes {
-            output.push_str("# HELP bllvm_system_memory_usage_bytes Memory usage in bytes\n");
-            output.push_str("# TYPE bllvm_system_memory_usage_bytes gauge\n");
-            output.push_str(&format!("bllvm_system_memory_usage_bytes {memory}\n"));
+            output.push_str("# HELP blvm_system_memory_usage_bytes Memory usage in bytes\n");
+            output.push_str("# TYPE blvm_system_memory_usage_bytes gauge\n");
+            output.push_str(&format!("blvm_system_memory_usage_bytes {memory}\n"));
         }
 
         if let Some(cpu) = metrics.system.cpu_usage_percent {
-            output.push_str("# HELP bllvm_system_cpu_usage_percent CPU usage percentage\n");
-            output.push_str("# TYPE bllvm_system_cpu_usage_percent gauge\n");
-            output.push_str(&format!("bllvm_system_cpu_usage_percent {cpu}\n"));
+            output.push_str("# HELP blvm_system_cpu_usage_percent CPU usage percentage\n");
+            output.push_str("# TYPE blvm_system_cpu_usage_percent gauge\n");
+            output.push_str(&format!("blvm_system_cpu_usage_percent {cpu}\n"));
         }
 
         // DoS protection metrics
         output.push_str(
-            "# HELP bllvm_dos_connection_rate_violations_total Connection rate violations\n",
+            "# HELP blvm_dos_connection_rate_violations_total Connection rate violations\n",
         );
-        output.push_str("# TYPE bllvm_dos_connection_rate_violations_total counter\n");
+        output.push_str("# TYPE blvm_dos_connection_rate_violations_total counter\n");
         output.push_str(&format!(
-            "bllvm_dos_connection_rate_violations_total {}\n",
+            "blvm_dos_connection_rate_violations_total {}\n",
             metrics.network.dos_protection.connection_rate_violations
         ));
 
-        output.push_str("# HELP bllvm_dos_auto_bans_total Auto-bans triggered\n");
-        output.push_str("# TYPE bllvm_dos_auto_bans_total counter\n");
+        output.push_str("# HELP blvm_dos_auto_bans_total Auto-bans triggered\n");
+        output.push_str("# TYPE blvm_dos_auto_bans_total counter\n");
         output.push_str(&format!(
-            "bllvm_dos_auto_bans_total {}\n",
+            "blvm_dos_auto_bans_total {}\n",
             metrics.network.dos_protection.auto_bans
         ));
 

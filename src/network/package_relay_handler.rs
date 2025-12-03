@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 
 use crate::network::package_relay::{PackageRejectReason, PackageRelay, TransactionPackage};
 use crate::network::protocol::{PkgTxnMessage, PkgTxnRejectMessage, SendPkgTxnMessage};
-use bllvm_protocol::Transaction;
+use blvm_protocol::Transaction;
 
 /// Handle sendpkgtxn request (peer signals intent to send a package)
 pub fn handle_sendpkgtxn(_relay: &PackageRelay, msg: &SendPkgTxnMessage) -> Result<()> {
@@ -26,7 +26,7 @@ pub fn handle_pkgtxn(
     relay: &mut PackageRelay,
     msg: &PkgTxnMessage,
 ) -> Result<Option<PkgTxnRejectMessage>> {
-    // Deserialize transactions (they are bincode-serialized bllvm_protocol::Transaction)
+    // Deserialize transactions (they are bincode-serialized blvm_protocol::Transaction)
     let mut txs: Vec<Transaction> = Vec::with_capacity(msg.transactions.len());
     for raw in &msg.transactions {
         match bincode::deserialize::<Transaction>(raw) {
@@ -79,13 +79,13 @@ pub fn handle_pkgtxn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bllvm_protocol::TransactionOutput;
+    use blvm_protocol::TransactionOutput;
 
     fn minimal_tx() -> Transaction {
         Transaction {
             version: 1,
-            inputs: bllvm_protocol::tx_inputs![],
-            outputs: bllvm_protocol::tx_outputs![TransactionOutput {
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
                 value: 0,
                 script_pubkey: vec![],
             }],

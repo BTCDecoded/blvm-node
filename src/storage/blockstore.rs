@@ -4,8 +4,8 @@
 
 use crate::storage::database::{Database, Tree};
 use anyhow::Result;
-use bllvm_protocol::segwit::Witness;
-use bllvm_protocol::{Block, BlockHeader, Hash};
+use blvm_protocol::segwit::Witness;
+use blvm_protocol::{Block, BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

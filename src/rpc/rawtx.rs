@@ -101,7 +101,7 @@ impl RawTxRpc {
         })?;
 
         if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
-            use bllvm_protocol::serialization::transaction::deserialize_transaction;
+            use blvm_protocol::serialization::transaction::deserialize_transaction;
             let tx = deserialize_transaction(&tx_bytes).map_err(|e| {
                 RpcError::invalid_params_with_fields(
                     format!("Failed to parse transaction: {e}"),
@@ -116,7 +116,7 @@ impl RawTxRpc {
                 )
             })?;
 
-            use bllvm_protocol::block::calculate_tx_id;
+            use blvm_protocol::block::calculate_tx_id;
             let txid = calculate_tx_id(&tx);
             let txid_hex = hex::encode(txid);
 
@@ -151,10 +151,10 @@ impl RawTxRpc {
                 .as_ref()
                 .map(|p| PerformanceTimer::start(Arc::clone(p), OperationType::TxValidation));
             let validation_start = Instant::now();
-            use bllvm_protocol::ConsensusProof;
+            use blvm_protocol::ConsensusProof;
             let consensus = ConsensusProof::new();
             match consensus.validate_transaction(&tx) {
-                Ok(bllvm_protocol::ValidationResult::Valid) => {
+                Ok(blvm_protocol::ValidationResult::Valid) => {
                     let validation_time = validation_start.elapsed();
                     // Timer will record duration when dropped
 
@@ -206,7 +206,7 @@ impl RawTxRpc {
                     let fee_satoshis = mempool.calculate_transaction_fee(&tx, &utxo_set);
                     
                     // Calculate transaction size and vsize
-                    use bllvm_protocol::serialization::transaction::serialize_transaction;
+                    use blvm_protocol::serialization::transaction::serialize_transaction;
                     let base_size = serialize_transaction(&tx).len() as u64;
                     // For non-SegWit transactions, weight = 4 * size, vsize = size
                     // For SegWit, we'd need witness data, but for fee rate check we can use base size
@@ -252,7 +252,7 @@ impl RawTxRpc {
                         "Transaction validated but not added to mempool (requires mutable access)"
                     );
                 }
-                Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => {
+                Ok(blvm_protocol::ValidationResult::Invalid(reason)) => {
                     return Err(RpcError::tx_rejected_with_context(
                         format!("Transaction validation failed: {reason}"),
                         Some(&txid_hex),
@@ -340,7 +340,7 @@ impl RawTxRpc {
             // If package validation failed, mark all transactions as failed
             if let Some(ref pkg_err) = package_error {
                 results.push(json!({
-                    "txid": hex::encode(bllvm_protocol::block::calculate_tx_id(tx)),
+                    "txid": hex::encode(blvm_protocol::block::calculate_tx_id(tx)),
                     "wtxid": Self::calculate_wtxid(tx, tx_witnesses),
                     "package-error": pkg_err,
                     "allowed": false
@@ -349,23 +349,23 @@ impl RawTxRpc {
             }
 
             // Calculate txid and wtxid
-            use bllvm_protocol::block::calculate_tx_id;
+            use blvm_protocol::block::calculate_tx_id;
             let txid = calculate_tx_id(tx);
             let txid_hex = hex::encode(txid);
             let wtxid_hex = Self::calculate_wtxid(tx, tx_witnesses);
 
             // Validate transaction using consensus layer
-            use bllvm_protocol::ConsensusProof;
+            use blvm_protocol::ConsensusProof;
             let consensus = ConsensusProof::new();
             let validation_result = consensus.validate_transaction(tx);
 
             let allowed = matches!(
                 validation_result,
-                Ok(bllvm_protocol::ValidationResult::Valid)
+                Ok(blvm_protocol::ValidationResult::Valid)
             );
             let reject_reason = if !allowed {
                 match validation_result {
-                    Ok(bllvm_protocol::ValidationResult::Invalid(reason)) => Some(reason),
+                    Ok(blvm_protocol::ValidationResult::Invalid(reason)) => Some(reason),
                     Err(e) => Some(format!("Validation error: {e}")),
                     _ => None,
                 }
@@ -374,7 +374,7 @@ impl RawTxRpc {
             };
 
             // Calculate transaction size and weight with witness
-            use bllvm_protocol::serialization::transaction::serialize_transaction;
+            use blvm_protocol::serialization::transaction::serialize_transaction;
             let base_size = serialize_transaction(tx).len() as u64;
             // Calculate total witness size (sum of all witness stacks for all inputs)
             let witness_size: u64 = tx_witnesses.iter()
@@ -386,7 +386,7 @@ impl RawTxRpc {
             let weight = 4 * base_size + total_size;
             
             // Calculate vsize using proper BIP141 formula: vsize = ceil(weight / 4)
-            use bllvm_consensus::witness::weight_to_vsize;
+            use blvm_consensus::witness::weight_to_vsize;
             let vsize = weight_to_vsize(weight) as usize;
 
             // Calculate fee using mempool manager if available
@@ -463,9 +463,9 @@ impl RawTxRpc {
 
     /// Deserialize transaction with witness data from Bitcoin wire format
     /// Returns (transaction, all_witnesses) tuple where all_witnesses is Vec<Witness> (one per input)
-    fn deserialize_transaction_with_witness(data: &[u8]) -> Result<(bllvm_protocol::Transaction, Vec<bllvm_consensus::Witness>), RpcError> {
-        use bllvm_protocol::serialization::transaction::deserialize_transaction;
-        use bllvm_consensus::serialization::varint::decode_varint;
+    fn deserialize_transaction_with_witness(data: &[u8]) -> Result<(blvm_protocol::Transaction, Vec<blvm_consensus::Witness>), RpcError> {
+        use blvm_protocol::serialization::transaction::deserialize_transaction;
+        use blvm_consensus::serialization::varint::decode_varint;
         
         // Deserialize transaction (non-witness serialization)
         let tx = deserialize_transaction(data).map_err(|e| {
@@ -480,7 +480,7 @@ impl RawTxRpc {
         })?;
 
         // Calculate base transaction size
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
         let base_size = serialize_transaction(&tx).len();
         
         // Check if there's witness data (SegWit marker 0x0001 after transaction)
@@ -493,7 +493,7 @@ impl RawTxRpc {
             for _ in 0..tx.inputs.len() {
                 if offset >= data.len() {
                     // No more witness data - create empty witness
-                    all_witnesses.push(bllvm_consensus::Witness::new());
+                    all_witnesses.push(blvm_consensus::Witness::new());
                     continue;
                 }
                 
@@ -504,7 +504,7 @@ impl RawTxRpc {
                 offset += varint_len;
                 
                 // Parse each witness element
-                let mut witness_stack = bllvm_consensus::Witness::new();
+                let mut witness_stack = blvm_consensus::Witness::new();
                 for _ in 0..stack_count {
                     if offset >= data.len() {
                         break;
@@ -531,13 +531,13 @@ impl RawTxRpc {
             
             // Ensure we have witnesses for all inputs
             while all_witnesses.len() < tx.inputs.len() {
-                all_witnesses.push(bllvm_consensus::Witness::new());
+                all_witnesses.push(blvm_consensus::Witness::new());
             }
             
             all_witnesses
         } else {
             // Non-SegWit transaction - empty witnesses for all inputs
-            vec![bllvm_consensus::Witness::new(); tx.inputs.len()]
+            vec![blvm_consensus::Witness::new(); tx.inputs.len()]
         };
 
         Ok((tx, witnesses))
@@ -547,8 +547,8 @@ impl RawTxRpc {
     /// For non-SegWit: wtxid == txid
     /// For SegWit: wtxid = SHA256(SHA256(tx_with_witness))
     /// witnesses: Vec<Witness> - one witness stack per input
-    fn calculate_wtxid(tx: &bllvm_protocol::Transaction, witnesses: &[bllvm_consensus::Witness]) -> String {
-        use bllvm_protocol::block::calculate_tx_id;
+    fn calculate_wtxid(tx: &blvm_protocol::Transaction, witnesses: &[blvm_consensus::Witness]) -> String {
+        use blvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(tx);
         
         // Check if any witness has data
@@ -561,7 +561,7 @@ impl RawTxRpc {
         
         // For SegWit transactions, wtxid is hash of transaction WITH witness
         // Serialize: version + marker(0x00) + flag(0x01) + inputs + outputs + locktime + witness_data
-        use bllvm_consensus::serialization::varint::encode_varint;
+        use blvm_consensus::serialization::varint::encode_varint;
         use sha2::{Digest, Sha256};
         
         let mut serialized = Vec::new();
@@ -617,9 +617,9 @@ impl RawTxRpc {
 
     /// Validate package (multiple transactions)
     /// Returns error string if package is invalid
-    fn validate_package(transactions: &[bllvm_protocol::Transaction]) -> Option<String> {
+    fn validate_package(transactions: &[blvm_protocol::Transaction]) -> Option<String> {
         // Check for duplicate transactions
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
         let mut txids = std::collections::HashSet::new();
         for tx in transactions {
             let txid = calculate_tx_id(tx);
@@ -643,15 +643,15 @@ impl RawTxRpc {
 
     /// Get effective-includes (ancestor wtxids from mempool)
     /// Returns wtxids (as hex strings) of ancestor transactions used in fee calculation
-    fn get_effective_includes(txid: &bllvm_protocol::Hash, mempool: Option<&Arc<MempoolManager>>) -> Vec<String> {
+    fn get_effective_includes(txid: &blvm_protocol::Hash, mempool: Option<&Arc<MempoolManager>>) -> Vec<String> {
         let mut includes = Vec::new();
         
         if let Some(mempool) = mempool {
             // Get ancestors from mempool
-            use bllvm_protocol::block::calculate_tx_id;
+            use blvm_protocol::block::calculate_tx_id;
             if let Some(tx) = mempool.get_transaction(txid) {
                 // Find ancestor transactions (transactions that this tx spends from)
-                let ancestor_txids: Vec<bllvm_protocol::Hash> = mempool.get_transactions()
+                let ancestor_txids: Vec<blvm_protocol::Hash> = mempool.get_transactions()
                     .iter()
                     .filter(|ancestor_tx| {
                         let ancestor_hash = calculate_tx_id(ancestor_tx);
@@ -694,11 +694,11 @@ impl RawTxRpc {
         let tx_bytes = hex::decode(&hex_string)
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
-        use bllvm_protocol::serialization::transaction::deserialize_transaction;
+        use blvm_protocol::serialization::transaction::deserialize_transaction;
         let tx = deserialize_transaction(&tx_bytes)
             .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {e}")))?;
 
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(&tx);
         let txid_hex = hex::encode(txid);
         let size = tx_bytes.len();
@@ -750,11 +750,11 @@ impl RawTxRpc {
     /// Serialize transaction with witness data (SegWit format)
     /// Returns hex string with witness data if witnesses provided, otherwise non-witness format
     fn serialize_transaction_with_witness(
-        tx: &bllvm_protocol::Transaction,
-        witnesses: Option<&[bllvm_consensus::Witness]>,
+        tx: &blvm_protocol::Transaction,
+        witnesses: Option<&[blvm_consensus::Witness]>,
     ) -> String {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
-        use bllvm_consensus::serialization::varint::encode_varint;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_consensus::serialization::varint::encode_varint;
         
         // Check if we have witness data
         let has_witness = witnesses
@@ -819,11 +819,11 @@ impl RawTxRpc {
     /// Calculate transaction size and weight for SegWit transactions
     /// Returns (base_size, total_size, weight, vsize)
     fn calculate_segwit_sizes(
-        tx: &bllvm_protocol::Transaction,
-        witnesses: Option<&[bllvm_consensus::Witness]>,
+        tx: &blvm_protocol::Transaction,
+        witnesses: Option<&[blvm_consensus::Witness]>,
     ) -> (usize, usize, u64, usize) {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
-        use bllvm_consensus::witness::{calculate_transaction_weight_segwit, weight_to_vsize};
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_consensus::witness::{calculate_transaction_weight_segwit, weight_to_vsize};
         
         // Base size (without witness)
         let base_size = serialize_transaction(tx).len();
@@ -878,14 +878,14 @@ impl RawTxRpc {
 
         if let Some(ref storage) = self.storage {
             if let Ok(Some(tx)) = storage.transactions().get_transaction(&txid_array) {
-                use bllvm_protocol::block::calculate_tx_id;
+                use blvm_protocol::block::calculate_tx_id;
                 let calculated_txid = calculate_tx_id(&tx);
                 let txid_hex = hex::encode(calculated_txid);
                 
                 // Try to get witness data if available (from raw block data or mempool)
                 // For now, we'll assume no witness data is available from storage
                 // In a full implementation, we'd retrieve witness data from block storage
-                let witnesses: Option<Vec<bllvm_consensus::Witness>> = None;
+                let witnesses: Option<Vec<blvm_consensus::Witness>> = None;
                 
                 // Calculate wtxid
                 let wtxid_hex = if let Some(ref witnesses_vec) = witnesses {
@@ -990,7 +990,7 @@ impl RawTxRpc {
         let mut txid_array = [0u8; 32];
         txid_array.copy_from_slice(&txid_bytes);
 
-        use bllvm_protocol::OutPoint;
+        use blvm_protocol::OutPoint;
         let outpoint = OutPoint {
             hash: txid_array,
             index: n,
@@ -1076,7 +1076,7 @@ impl RawTxRpc {
                                             storage.blocks().get_block(&block_hash)
                                         {
                                             for tx in &block.transactions {
-                                                use bllvm_protocol::block::calculate_tx_id;
+                                                use blvm_protocol::block::calculate_tx_id;
                                                 let txid = calculate_tx_id(tx);
                                                 if txid == outpoint_hash {
                                                     tx_height = Some(h);
@@ -1141,11 +1141,11 @@ impl RawTxRpc {
 
     /// Build merkle proof for transactions in a block
     fn build_merkle_proof(
-        transactions: &[bllvm_protocol::Transaction],
+        transactions: &[blvm_protocol::Transaction],
         tx_indices: &[usize],
     ) -> Result<Vec<[u8; 32]>, RpcError> {
         use crate::storage::hashing::double_sha256;
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
 
         if transactions.is_empty() {
             return Err(RpcError::internal_error(
@@ -1229,7 +1229,7 @@ impl RawTxRpc {
 
         if let Some(ref storage) = self.storage {
             // Find block containing the transactions
-            let mut block: Option<bllvm_protocol::Block> = None;
+            let mut block: Option<blvm_protocol::Block> = None;
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
 
             if let Some(blockhash_str) = blockhash_opt {
@@ -1250,7 +1250,7 @@ impl RawTxRpc {
                     if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(h) {
                         if let Ok(Some(b)) = storage.blocks().get_block(&block_hash) {
                             // Check if block contains any of the requested txids
-                            use bllvm_protocol::block::calculate_tx_id;
+                            use blvm_protocol::block::calculate_tx_id;
                             for tx in &b.transactions {
                                 let txid = calculate_tx_id(tx);
                                 let txid_hex = hex::encode(txid);
@@ -1272,7 +1272,7 @@ impl RawTxRpc {
 
             if let Some(block) = block {
                 // Find transaction indices
-                use bllvm_protocol::block::calculate_tx_id;
+                use blvm_protocol::block::calculate_tx_id;
                 let mut tx_indices = Vec::new();
                 for (idx, tx) in block.transactions.iter().enumerate() {
                     let txid = calculate_tx_id(tx);
@@ -1365,7 +1365,7 @@ impl RawTxRpc {
 
             if let Ok(Some(block)) = storage.blocks().get_block(&blockhash_array) {
                 // Calculate merkle root from block
-                use bllvm_protocol::mining::calculate_merkle_root;
+                use blvm_protocol::mining::calculate_merkle_root;
                 let calculated_root = calculate_merkle_root(&block.transactions).map_err(|e| {
                     RpcError::internal_error(format!("Failed to calculate merkle root: {e}"))
                 })?;
@@ -1375,7 +1375,7 @@ impl RawTxRpc {
                 let matches = calculated_root == block.header.merkle_root;
 
                 // Extract transaction IDs from proof (simplified - full implementation would decode txids)
-                use bllvm_protocol::block::calculate_tx_id;
+                use blvm_protocol::block::calculate_tx_id;
                 let txids: Vec<String> = block
                     .transactions
                     .iter()
@@ -1431,7 +1431,7 @@ impl RawTxRpc {
         // Check mempool first
         if let Some(ref mempool) = self.mempool {
             if let Some(tx) = mempool.get_transaction(&hash) {
-                use bllvm_protocol::serialization::transaction::serialize_transaction;
+                use blvm_protocol::serialization::transaction::serialize_transaction;
                 let size = serialize_transaction(&tx).len();
                 let fee = if let Some(ref storage) = self.storage {
                     let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
@@ -1477,7 +1477,7 @@ impl RawTxRpc {
         // Check blockchain
         if let Some(ref storage) = self.storage {
             if let Ok(Some(tx)) = storage.transactions().get_transaction(&hash) {
-                use bllvm_protocol::serialization::transaction::serialize_transaction;
+                use blvm_protocol::serialization::transaction::serialize_transaction;
                 let size = serialize_transaction(&tx).len();
 
                 // Get block info if available from transaction metadata
@@ -1577,12 +1577,12 @@ impl RawTxRpc {
         let version = params
             .get(4)
             .and_then(|p| p.as_u64())
-            .unwrap_or(2) as u32;
+            .unwrap_or(2);
 
         // Build transaction inputs
-        use bllvm_protocol::Transaction;
-        use bllvm_protocol::TransactionInput;
-        use bllvm_protocol::OutPoint;
+        use blvm_protocol::Transaction;
+        use blvm_protocol::TransactionInput;
+        use blvm_protocol::OutPoint;
 
         let mut tx_inputs = Vec::new();
         for (idx, input) in inputs.iter().enumerate() {
@@ -1634,7 +1634,7 @@ impl RawTxRpc {
         }
 
         // Build transaction outputs
-        use bllvm_protocol::TransactionOutput;
+        use blvm_protocol::TransactionOutput;
         let mut tx_outputs = Vec::new();
 
         // Handle outputs - can be object (address->amount) or array
@@ -1736,25 +1736,51 @@ impl RawTxRpc {
         }
 
         // Build transaction
-        let tx = Transaction {
-            version,
-            inputs: tx_inputs,
-            outputs: tx_outputs,
-            lock_time: locktime as u32,
-        };
-
-        // Serialize transaction
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
-        let tx_hex = hex::encode(serialize_transaction(&tx));
-
-        Ok(json!(tx_hex))
+        // Transaction uses SmallVec in production, Vec otherwise
+        // The type system handles this automatically via feature flags
+        // Build transaction - Transaction type varies by feature flags
+        // In production, Transaction uses SmallVec; otherwise Vec
+        #[cfg(feature = "production")]
+        {
+            // Use SmallVec from blvm-consensus re-export
+            use blvm_consensus::smallvec::SmallVec;
+            let tx = Transaction {
+                version,
+                inputs: SmallVec::from_vec(tx_inputs),
+                outputs: SmallVec::from_vec(tx_outputs),
+                lock_time: locktime,
+            };
+            // Serialize and return
+            use blvm_protocol::serialization::transaction::serialize_transaction;
+            let tx_bytes = serialize_transaction(&tx);
+            return Ok(json!({
+                "hex": hex::encode(&tx_bytes),
+                "complete": true,
+            }));
+        }
+        #[cfg(not(feature = "production"))]
+        {
+            let tx = Transaction {
+                version,
+                inputs: tx_inputs,
+                outputs: tx_outputs,
+                lock_time: locktime,
+            };
+            // Serialize and return
+            use blvm_protocol::serialization::transaction::serialize_transaction;
+            let tx_bytes = serialize_transaction(&tx);
+            return Ok(json!({
+                "hex": hex::encode(&tx_bytes),
+                "complete": true,
+            }));
+        }
     }
 
     /// Convert Bitcoin address to script_pubkey
     /// Supports Bech32/Bech32m (SegWit/Taproot) addresses
     /// Note: Legacy P2PKH/P2SH support requires Base58 decoding (not yet implemented)
     fn address_to_script_pubkey(address: &str) -> Result<Vec<u8>, RpcError> {
-        use bllvm_protocol::address::BitcoinAddress;
+        use blvm_protocol::address::BitcoinAddress;
 
         // Try Bech32/Bech32m first
         if let Ok(addr) = BitcoinAddress::decode(address) {

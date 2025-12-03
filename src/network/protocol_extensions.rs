@@ -12,9 +12,9 @@ use crate::storage::Storage;
 use crate::utils::option_to_result;
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
+use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::spam_filter::SpamFilter;
+use blvm_protocol::spam_filter::SpamFilter;
 use hex;
 use std::sync::Arc;
 
@@ -146,7 +146,7 @@ pub async fn handle_get_filtered_block(
 
     // Create spam filter from preferences
     #[cfg(feature = "utxo-commitments")]
-    let spam_filter_config = bllvm_protocol::spam_filter::SpamFilterConfig {
+    let spam_filter_config = blvm_protocol::spam_filter::SpamFilterConfig {
         filter_ordinals: message.filter_preferences.filter_ordinals,
         filter_dust: message.filter_preferences.filter_dust,
         filter_brc20: message.filter_preferences.filter_brc20,
@@ -159,7 +159,7 @@ pub async fn handle_get_filtered_block(
     let (filtered_txs, spam_summary_from_filter) = spam_filter.filter_block(&block.transactions);
     #[cfg(not(feature = "utxo-commitments"))]
     let (filtered_txs, spam_summary_from_filter): (
-        Vec<bllvm_protocol::Transaction>,
+        Vec<blvm_protocol::Transaction>,
         crate::network::protocol::SpamSummary,
     ) = (
         block.transactions.to_vec(),
@@ -208,12 +208,12 @@ pub async fn handle_get_filtered_block(
     for tx in &filtered_txs {
         let txid = calculate_txid(tx);
         for (output_idx, output) in tx.outputs.iter().enumerate() {
-            use bllvm_protocol::OutPoint;
+            use blvm_protocol::OutPoint;
             let outpoint = OutPoint {
                 hash: txid,
                 index: output_idx as u64,
             };
-            use bllvm_protocol::UTXO;
+            use blvm_protocol::UTXO;
             let utxo = UTXO {
                 value: output.value,
                 script_pubkey: output.script_pubkey.clone(),

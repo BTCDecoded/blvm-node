@@ -9,7 +9,7 @@ use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::RpcResult;
 use crate::storage::Storage;
 use crate::utils::current_timestamp;
-use bllvm_protocol::Hash;
+use blvm_protocol::Hash;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::debug;
@@ -95,8 +95,8 @@ impl MempoolRpc {
 
         if let Some(ref mempool) = self.mempool {
             let transactions = mempool.get_transactions();
-            use bllvm_protocol::block::calculate_tx_id;
-            use bllvm_protocol::serialization::transaction::serialize_transaction;
+            use blvm_protocol::block::calculate_tx_id;
+            use blvm_protocol::serialization::transaction::serialize_transaction;
 
             if verbose {
                 let mut result = serde_json::Map::new();
@@ -250,7 +250,7 @@ impl MempoolRpc {
                     if let Some(ancestor_tx) = mempool.get_transaction(&ancestor_hash) {
                         let ancestor_txid = hex::encode(ancestor_hash);
                         let ancestor_txid_clone = ancestor_txid.clone();
-                        use bllvm_protocol::serialization::transaction::serialize_transaction;
+                        use blvm_protocol::serialization::transaction::serialize_transaction;
                         let size = serialize_transaction(&ancestor_tx).len();
 
                         result.insert(ancestor_txid, json!({
@@ -332,14 +332,14 @@ impl MempoolRpc {
                 // Get all output outpoints from this transaction
                 let mut output_outpoints = Vec::new();
                 for (idx, _output) in tx.outputs.iter().enumerate() {
-                    output_outpoints.push(bllvm_protocol::OutPoint {
+                    output_outpoints.push(blvm_protocol::OutPoint {
                         hash,
                         index: idx as u64,
                     });
                 }
 
                 // Find transactions that spend these outputs
-                use bllvm_protocol::block::calculate_tx_id;
+                use blvm_protocol::block::calculate_tx_id;
                 let transactions = mempool.get_transactions();
                 for descendant_tx in transactions {
                     let descendant_hash = calculate_tx_id(&descendant_tx);
@@ -359,7 +359,7 @@ impl MempoolRpc {
                     if let Some(descendant_tx) = mempool.get_transaction(&descendant_hash) {
                         let descendant_txid = hex::encode(descendant_hash);
                         let descendant_txid_clone = descendant_txid.clone();
-                        use bllvm_protocol::serialization::transaction::serialize_transaction;
+                        use blvm_protocol::serialization::transaction::serialize_transaction;
                         let size = serialize_transaction(&descendant_tx).len();
 
                         result.insert(descendant_txid, json!({
@@ -433,7 +433,7 @@ impl MempoolRpc {
 
         if let Some(ref mempool) = self.mempool {
             if let Some(tx) = mempool.get_transaction(&hash) {
-                use bllvm_protocol::serialization::transaction::serialize_transaction;
+                use blvm_protocol::serialization::transaction::serialize_transaction;
                 let size = serialize_transaction(&tx).len();
 
                 // Get ancestors and descendants
@@ -502,7 +502,7 @@ impl MempoolRpc {
 
         if let Some(tx) = mempool.get_transaction(tx_hash) {
             // Find transactions that this transaction depends on (spends their outputs)
-            use bllvm_protocol::block::calculate_tx_id;
+            use blvm_protocol::block::calculate_tx_id;
             for input in &tx.inputs {
                 // Find transaction that created this output by checking all transactions
                 let transactions = mempool.get_transactions();
@@ -531,14 +531,14 @@ impl MempoolRpc {
             // Get all output outpoints from this transaction
             let mut output_outpoints = Vec::new();
             for (idx, _output) in tx.outputs.iter().enumerate() {
-                output_outpoints.push(bllvm_protocol::OutPoint {
+                output_outpoints.push(blvm_protocol::OutPoint {
                     hash: *tx_hash,
                     index: idx as u64,
                 });
             }
 
             // Find transactions that spend these outputs
-            use bllvm_protocol::block::calculate_tx_id;
+            use blvm_protocol::block::calculate_tx_id;
             let transactions = mempool.get_transactions();
             for descendant_tx in transactions {
                 let descendant_hash = calculate_tx_id(&descendant_tx);

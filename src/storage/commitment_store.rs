@@ -8,9 +8,9 @@ use crate::storage::database::{Database, Tree};
 #[cfg(feature = "utxo-commitments")]
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
+use blvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
 #[cfg(feature = "utxo-commitments")]
-use bllvm_protocol::Hash;
+use blvm_protocol::Hash;
 #[cfg(feature = "utxo-commitments")]
 use std::sync::Arc;
 

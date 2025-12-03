@@ -3,7 +3,7 @@
 //! Handles inventory tracking, peer inventory synchronization, and data requests.
 
 use anyhow::Result;
-use bllvm_protocol::Hash;
+use blvm_protocol::Hash;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 

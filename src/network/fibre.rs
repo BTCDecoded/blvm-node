@@ -8,11 +8,11 @@
 
 #![cfg(feature = "fibre")]
 
-use bllvm_protocol::fibre::{FecChunk, FibreCapabilities, FibreProtocolError, FIBRE_MAGIC};
-use bllvm_protocol::{Block, Hash};
+use blvm_protocol::fibre::{FecChunk, FibreCapabilities, FibreProtocolError, FIBRE_MAGIC};
+use blvm_protocol::{Block, Hash};
 
 // Re-export FibreConfig for use in config module
-pub use bllvm_protocol::fibre::FibreConfig;
+pub use blvm_protocol::fibre::FibreConfig;
 use reed_solomon_erasure::{galois_8::Field, ReedSolomon};
 use sha2::Digest;
 use std::collections::HashMap;
@@ -273,7 +273,7 @@ impl UdpTransport {
             .serialize()
             .map_err(|e| FibreError::UdpError(format!("Failed to serialize chunk: {e}")))?;
 
-        if packet.len() > bllvm_protocol::fibre::MAX_PACKET_SIZE {
+        if packet.len() > blvm_protocol::fibre::MAX_PACKET_SIZE {
             return Err(FibreError::UdpError(format!(
                 "Packet too large: {} bytes",
                 packet.len()
@@ -414,7 +414,7 @@ impl UdpTransport {
 
     /// Receive chunk from network
     async fn recv_chunk(&self) -> Result<(SocketAddr, FecChunk), FibreError> {
-        let mut buffer = vec![0u8; bllvm_protocol::fibre::MAX_PACKET_SIZE];
+        let mut buffer = vec![0u8; blvm_protocol::fibre::MAX_PACKET_SIZE];
 
         let (len, peer_addr) = self
             .socket
@@ -481,7 +481,7 @@ impl UdpTransport {
     async fn recv_chunk_internal(
         socket: &Arc<UdpSocket>,
     ) -> Result<(SocketAddr, FecChunk), FibreError> {
-        let mut buffer = vec![0u8; bllvm_protocol::fibre::MAX_PACKET_SIZE];
+        let mut buffer = vec![0u8; blvm_protocol::fibre::MAX_PACKET_SIZE];
 
         let (len, peer_addr) = socket
             .recv_from(&mut buffer)
@@ -644,7 +644,7 @@ impl FibreRelay {
             .map_err(|e| FibreError::SerializationError(e.to_string()))?;
 
         // Calculate FEC shard configuration
-        let shard_size = bllvm_protocol::fibre::DEFAULT_SHARD_SIZE;
+        let shard_size = blvm_protocol::fibre::DEFAULT_SHARD_SIZE;
         let data_shards = block_data.len().div_ceil(shard_size);
         let parity_shards = ((data_shards as f64) * self.config.fec_parity_ratio).ceil() as usize;
         let total_shards = data_shards + parity_shards;
@@ -753,7 +753,7 @@ impl FibreRelay {
 
             let mut send_errors = 0u64;
             for packet in &packets {
-                if packet.len() > bllvm_protocol::fibre::MAX_PACKET_SIZE {
+                if packet.len() > blvm_protocol::fibre::MAX_PACKET_SIZE {
                     send_errors += 1;
                     continue;
                 }
@@ -847,7 +847,7 @@ impl FibreRelay {
                 // Create FEC encoder for this block
                 let data_shards = chunk.data_chunks as usize;
                 let parity_shards = (chunk.total_chunks - chunk.data_chunks) as usize;
-                let shard_size = bllvm_protocol::fibre::DEFAULT_SHARD_SIZE;
+                let shard_size = blvm_protocol::fibre::DEFAULT_SHARD_SIZE;
 
                 let fec_encoder = FecEncoder::new(data_shards, parity_shards, shard_size)
                     .expect("Failed to create FEC encoder");
@@ -1151,7 +1151,7 @@ impl From<FibreProtocolError> for FibreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bllvm_protocol::BlockHeader;
+    use blvm_protocol::BlockHeader;
 
     fn create_test_block() -> Block {
         Block {

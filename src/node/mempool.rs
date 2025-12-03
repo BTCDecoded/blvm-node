@@ -5,8 +5,8 @@
 use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
-use bllvm_protocol::mempool::{has_conflict_with_tx, replacement_checks, signals_rbf, Mempool};
-use bllvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
+use blvm_protocol::mempool::{has_conflict_with_tx, replacement_checks, signals_rbf, Mempool};
+use blvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -299,7 +299,7 @@ impl MempoolManager {
 
     /// Calculate current mempool size in MB
     fn calculate_mempool_size_mb(&self) -> u64 {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
 
         let total_bytes: usize = self
             .transactions
@@ -317,7 +317,7 @@ impl MempoolManager {
         target_size_mb: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
 
         // Get all transactions sorted by fee rate (ascending - lowest first)
         let mut tx_fee_rates: Vec<(Hash, u64, usize)> = self
@@ -374,7 +374,7 @@ impl MempoolManager {
         target_size_mb: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
 
         // Get all transactions with timestamps, sorted by age (oldest first)
         let mut tx_ages: Vec<(Hash, u64, usize)> = {
@@ -428,7 +428,7 @@ impl MempoolManager {
         target_size_mb: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
 
         // Get all transactions sorted by size (descending - largest first)
         let mut tx_sizes: Vec<(Hash, usize)> = self
@@ -482,7 +482,7 @@ impl MempoolManager {
         target_size_mb: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
 
         // Get all transactions with no descendants, sorted by fee rate (lowest first)
         let mut tx_no_descendants: Vec<(Hash, u64, usize)> = {
@@ -534,7 +534,7 @@ impl MempoolManager {
 
     /// Hybrid eviction: combine fee rate and age
     async fn evict_hybrid(&mut self, target_size_mb: u64, target_tx_count: usize) -> Result<()> {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
 
         // Calculate score: lower fee rate + older age = higher eviction priority
         let current_time = Self::current_timestamp();
@@ -613,8 +613,8 @@ impl MempoolManager {
         target_size_mb: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
-        use bllvm_consensus::spam_filter::SpamFilter;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_consensus::spam_filter::SpamFilter;
 
         // Get all transactions, classify as spam or not
             let spam_filter = SpamFilter::new();
@@ -691,7 +691,6 @@ impl MempoolManager {
                     current_tx_count -= 1;
                 }
             }
-        }
 
         Ok(())
     }
@@ -708,7 +707,7 @@ impl MempoolManager {
         utxo_set: &UtxoSet,
         storage: Option<&crate::storage::Storage>,
     ) -> Result<bool> {
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
 
         let rbf_config = match self.rbf_config.read().unwrap().as_ref() {
             Some(config) => config.clone(),
@@ -764,7 +763,7 @@ impl MempoolManager {
         let existing_fee = self.calculate_transaction_fee(existing_tx, utxo_set) as i64;
 
         // Calculate transaction sizes (simplified - use serialization length)
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
         let new_tx_size = serialize_transaction(new_tx).len();
         let existing_tx_size = serialize_transaction(existing_tx).len();
 
@@ -884,7 +883,7 @@ impl MempoolManager {
         tx_hash: &Hash,
         policy: &MempoolPolicyConfig,
     ) -> Result<bool> {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
 
         // Calculate transaction size
         let tx_size = serialize_transaction(tx).len() as u64;
@@ -1052,7 +1051,7 @@ impl MempoolManager {
     pub async fn add_transaction(&mut self, tx: Transaction) -> Result<bool> {
         debug!("Adding transaction to mempool");
 
-        use bllvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
 
         // Check for conflicts with existing mempool transactions
@@ -1490,7 +1489,7 @@ impl MempoolManager {
 
     /// Save mempool to disk for persistence
     pub fn save_to_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
-        use bllvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
         use std::fs::File;
         use std::io::Write;
 
@@ -1519,13 +1518,17 @@ impl Default for MempoolManager {
 }
 
 // Implement MempoolProvider trait for integration with MiningCoordinator
+// Safety: MempoolManager is thread-safe (uses Arc internally)
+unsafe impl Sync for MempoolManager {}
+unsafe impl Send for MempoolManager {}
+
 impl crate::node::miner::MempoolProvider for MempoolManager {
-    fn get_transactions(&self) -> Vec<bllvm_protocol::Transaction> {
+    fn get_transactions(&self) -> Vec<blvm_protocol::Transaction> {
         self.get_transactions()
     }
 
-    fn get_transaction(&self, hash: &[u8; 32]) -> Option<bllvm_protocol::Transaction> {
-        use bllvm_protocol::Hash;
+    fn get_transaction(&self, hash: &[u8; 32]) -> Option<blvm_protocol::Transaction> {
+        use blvm_protocol::Hash;
         let hash_array: Hash = *hash;
         self.get_transaction(&hash_array)
     }
@@ -1537,13 +1540,13 @@ impl crate::node::miner::MempoolProvider for MempoolManager {
     fn get_prioritized_transactions(
         &self,
         limit: usize,
-        utxo_set: &bllvm_protocol::UtxoSet,
-    ) -> Vec<bllvm_protocol::Transaction> {
+        utxo_set: &blvm_protocol::UtxoSet,
+    ) -> Vec<blvm_protocol::Transaction> {
         self.get_prioritized_transactions(limit, utxo_set)
     }
 
     fn remove_transaction(&mut self, hash: &[u8; 32]) -> bool {
-        use bllvm_protocol::Hash;
+        use blvm_protocol::Hash;
         let hash_array: Hash = *hash;
         self.remove_transaction(&hash_array)
     }
@@ -1552,7 +1555,7 @@ impl crate::node::miner::MempoolProvider for MempoolManager {
 impl MempoolManager {
     /// Load mempool from disk
     pub fn load_from_disk<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
-        use bllvm_protocol::serialization::transaction::deserialize_transaction;
+        use blvm_protocol::serialization::transaction::deserialize_transaction;
         use std::fs::File;
         use std::io::Read;
 

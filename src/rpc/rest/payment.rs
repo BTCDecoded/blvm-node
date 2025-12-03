@@ -8,7 +8,7 @@
 
 use crate::payment::state_machine::{PaymentState, PaymentStateMachine};
 use crate::rpc::rest::types::{ApiError, ApiResponse, ErrorDetails, ResponseMeta};
-use bllvm_protocol::payment::PaymentOutput;
+use blvm_protocol::payment::PaymentOutput;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};

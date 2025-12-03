@@ -509,6 +509,10 @@ pub enum EventType {
     GovernanceProposalMerged,
     /// Economic node registered
     EconomicNodeRegistered,
+    /// Economic node status query/response
+    EconomicNodeStatus,
+    /// Economic node fork decision
+    EconomicNodeForkDecision,
     /// Economic node veto signal
     EconomicNodeVeto,
     /// Webhook sent
@@ -635,6 +639,37 @@ pub enum EventType {
     ModuleHealthChanged,
     /// Module state changed
     ModuleStateChanged,
+    
+    // === Configuration Events ===
+    /// Node configuration loaded/changed
+    /// Modules can subscribe to this to react to config changes
+    ConfigLoaded,
+    
+    // === Node Lifecycle Events ===
+    /// Node is shutting down (modules should clean up gracefully)
+    NodeShutdown,
+    /// Node shutdown completed
+    NodeShutdownCompleted,
+    /// Node startup completed (all components initialized)
+    NodeStartupCompleted,
+    
+    // === Maintenance Events ===
+    /// Maintenance operation started (modules can prepare)
+    MaintenanceStarted,
+    /// Maintenance operation completed
+    MaintenanceCompleted,
+    /// Data maintenance requested (unified cleanup/flush event)
+    /// Modules should clean up old data and/or flush pending writes
+    /// Urgency level indicates how urgent the operation is
+    DataMaintenance,
+    /// Health check performed (modules can report their health)
+    HealthCheck,
+    
+    // === Resource Management Events ===
+    /// Disk space is low (modules should clean up data)
+    DiskSpaceLow,
+    /// Resource limit warning (modules should reduce usage)
+    ResourceLimitWarning,
     
     // === Dandelion++ Events ===
     /// Transaction entered stem phase
