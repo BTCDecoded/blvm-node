@@ -10,6 +10,7 @@ use crate::config::{PruningConfig, PruningMode};
 #[cfg(feature = "bip158")]
 use crate::network::filter_service::BlockFilterService;
 use crate::storage::blockstore::BlockStore;
+use crate::utils::current_timestamp;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::commitment_store::CommitmentStore;
 #[cfg(feature = "utxo-commitments")]
@@ -757,12 +758,14 @@ impl PruningManager {
 
                     // Apply block to UTXO set using connect_block
                     // This properly handles coinbase transactions and input/output processing
+                    let network_time = current_timestamp();
                     let (validation_result, new_utxo_set) = connect_block(
                         &block,
                         &witnesses,
                         utxo_set,
                         height,
                         None, // No recent headers needed for historical replay
+                        network_time,
                         blvm_protocol::types::Network::Mainnet,
                     )?;
 

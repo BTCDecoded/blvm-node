@@ -15,6 +15,7 @@ use blvm_protocol::block::connect_block;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::types::Network;
 use blvm_protocol::{Block, UtxoSet, ValidationResult};
+use crate::utils::current_timestamp;
 
 /// Block validation context
 #[derive(Debug, Clone)]
@@ -58,12 +59,14 @@ impl ParallelBlockValidator {
             .iter()
             .map(|_| Vec::new())
             .collect();
+        let network_time = current_timestamp();
         let (result, new_utxo_set, _undo_log) = connect_block(
             &context.block,
             &witnesses,
             context.prev_utxo_set.clone(),
             context.height,
             None, // No recent headers for single block validation
+            network_time,
             network,
         )?;
         Ok((result, new_utxo_set))
@@ -104,12 +107,14 @@ impl ParallelBlockValidator {
                         .iter()
                         .map(|_| Vec::new())
                         .collect();
+                    let network_time = current_timestamp();
                     let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
                         &witnesses,
                         context.prev_utxo_set.clone(),
                         context.height,
                         None, // No recent headers for parallel validation
+                        network_time,
                         network,
                     )?;
                     Ok::<_, anyhow::Error>((result, new_utxo_set))
@@ -130,12 +135,14 @@ impl ParallelBlockValidator {
                         .iter()
                         .map(|_| Vec::new())
                         .collect();
+                    let network_time = current_timestamp();
                     let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
                         &witnesses,
                         context.prev_utxo_set.clone(),
                         context.height,
                         None, // No recent headers for parallel validation
+                        network_time,
                         network,
                     )?;
                     Ok::<_, anyhow::Error>((result, new_utxo_set))
@@ -167,12 +174,14 @@ impl ParallelBlockValidator {
                 .iter()
                 .map(|_| Vec::new())
                 .collect();
+            let network_time = current_timestamp();
             let (result, new_utxo_set, _undo_log) = connect_block(
                 &context.block,
                 &witnesses,
                 context.prev_utxo_set.clone(),
                 context.height,
                 None, // No recent headers for sequential validation
+                network_time,
                 network,
             )?;
             results.push((result, new_utxo_set));
