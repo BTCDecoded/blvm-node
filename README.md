@@ -1,41 +1,44 @@
 # Bitcoin Commons Node
 
-Minimal Bitcoin node implementation using bllvm-protocol for protocol abstraction and bllvm-consensus for consensus decisions.
+Minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for consensus decisions.
 
-> **📚 Comprehensive Documentation**: See [bllvm-docs](../bllvm-docs/) for complete system documentation.  
+> **📚 Comprehensive Documentation**: See [blvm-docs](../blvm-docs/) for complete system documentation.  
 > **For verified system status**: See [SYSTEM_STATUS.md](https://github.com/BTCDecoded/.github/blob/main/SYSTEM_STATUS.md) in the BTCDecoded organization repository.
 
-Provides a minimal Bitcoin node implementation using bllvm-protocol for protocol abstraction and bllvm-consensus for all consensus decisions. Adds only non-consensus infrastructure: storage, networking, RPC, and orchestration.
+Provides a minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for all consensus decisions. Adds only non-consensus infrastructure: storage, networking, RPC, and orchestration.
 
 ## Architecture Position
 
-Tier 4 of the 6-tier Bitcoin Commons architecture (BLLVM technology stack):
+Tier 4 of the 6-tier Bitcoin Commons architecture (BLVM technology stack):
 
 ```
-1. bllvm-spec (Orange Paper - mathematical foundation)
-2. bllvm-consensus (pure math implementation)
-3. bllvm-protocol (Bitcoin abstraction)
-4. bllvm-node (full node implementation)
-5. bllvm-sdk (developer toolkit)
-6. bllvm-commons (governance enforcement)
+1. blvm-spec (Orange Paper - mathematical foundation)
+2. blvm-consensus (pure math implementation)
+3. blvm-protocol (Bitcoin abstraction)
+4. blvm-node (full node implementation)
+5. blvm-sdk (developer toolkit)
+6. blvm-commons (governance enforcement)
 ```
 
 ## Design Principles
 
-1. **Zero Consensus Re-implementation**: All consensus logic from bllvm-consensus
-2. **Protocol Abstraction**: Uses bllvm-protocol for variant support
+1. **Zero Consensus Re-implementation**: All consensus logic from blvm-consensus
+2. **Protocol Abstraction**: Uses blvm-protocol for variant support
 3. **Pure Infrastructure**: Only adds storage, networking, RPC, orchestration
 4. **Production Ready**: Full Bitcoin node functionality
 
 ## Features
 
-- **Consensus Integration**: All consensus logic from bllvm-consensus
+- **Consensus Integration**: All consensus logic from blvm-consensus
 - **Protocol Support**: Multiple variants (mainnet, testnet, regtest)
 - **RBF Support**: Configurable RBF modes (Disabled, Conservative, Standard, Aggressive)
-- **Mempool Policies**: Comprehensive mempool configuration
-- **RPC Interface**: Full RPC server implementation
-- **Storage**: UTXO set management and chain state
+- **Mempool Policies**: Comprehensive mempool configuration with 5 eviction strategies
+- **Payment Processing**: CTV (CheckTemplateVerify) support for advanced payment flows
+- **Advanced Indexing**: Address and value range indexing for efficient queries
+- **RPC Interface**: Full RPC server implementation with Bitcoin Core compatibility
+- **Storage**: UTXO set management and chain state with multiple backends
 - **Module System**: Process-isolated modules for optional features
+- **P2P Governance**: Governance message relay via P2P protocol
 
 See [Security](#security) for production considerations.
 
@@ -61,7 +64,7 @@ Supports multiple Bitcoin protocol variants:
 - **BitcoinV1**: Production Bitcoin mainnet
 
 ```rust
-use bllvm_node::{Node, NodeConfig};
+use blvm_node::{Node, NodeConfig};
 
 // Default: Regtest for safe development
 let config = NodeConfig::default();
@@ -78,29 +81,29 @@ let testnet_node = Node::new(config)?;
 ### Quick Start
 
 ```bash
-git clone https://github.com/BTCDecoded/bllvm-node
-cd bllvm-node
+git clone https://github.com/BTCDecoded/blvm-node
+cd blvm-node
 cargo build --release
 ```
 
-The build automatically fetches bllvm-consensus from GitHub.
+The build automatically fetches blvm-consensus from GitHub.
 
 ### Local Development
 
-If you're developing both bllvm-node and bllvm-consensus:
+If you're developing both blvm-node and blvm-consensus:
 
 1. Clone both repos:
    ```bash
-   git clone https://github.com/BTCDecoded/bllvm-consensus
-   git clone https://github.com/BTCDecoded/bllvm-node
+   git clone https://github.com/BTCDecoded/blvm-consensus
+   git clone https://github.com/BTCDecoded/blvm-node
    ```
 
 2. Set up local override:
    ```bash
-   cd bllvm-node
+   cd blvm-node
    mkdir -p .cargo
-   echo '[patch."https://github.com/BTCDecoded/bllvm-consensus"]' > .cargo/config.toml
-   echo 'bllvm-consensus = { path = "../bllvm-consensus" }' >> .cargo/config.toml
+   echo '[patch."https://github.com/BTCDecoded/blvm-consensus"]' > .cargo/config.toml
+   echo 'blvm-consensus = { path = "../blvm-consensus" }' >> .cargo/config.toml
    ```
 
 3. Build:
@@ -108,7 +111,7 @@ If you're developing both bllvm-node and bllvm-consensus:
    cargo build
    ```
 
-Changes to bllvm-consensus are now immediately reflected without git push.
+Changes to blvm-consensus are now immediately reflected without git push.
 
 ## Testing
 
@@ -138,7 +141,7 @@ cargo run -- --network mainnet
 ### Programmatic Usage
 
 ```rust
-use bllvm_node::{Node, NodeConfig};
+use blvm_node::{Node, NodeConfig};
 
 // Default: Regtest for safe development
 let config = NodeConfig::default();
@@ -161,7 +164,7 @@ Additional hardening required for production mainnet use.
 
 ## Dependencies
 
-- **bllvm-consensus**: All consensus logic (git dependency)
+- **blvm-consensus**: All consensus logic (git dependency)
 - **tokio**: Async runtime for networking
 - **serde**: Serialization
 - **anyhow/thiserror**: Error handling
