@@ -59,14 +59,15 @@ pub struct PaymentSection {
     /// DEPRECATED: Use author_payment_code instead to avoid address reuse
     #[serde(default)]
     pub author_address: Option<String>,
-    /// Commons governance payment code (BIP47) or address
+    /// Marketplace module developer payment code (BIP47) or address
     /// If payment_code is provided, generates unique address per payment (privacy-preserving)
     /// If address is provided, uses fixed address (legacy, less private)
-    /// This receives 15% of payment
+    /// This receives 15% of payment (goes to marketplace module developer, not "Commons governance")
     #[serde(default)]
     pub commons_payment_code: Option<String>,
-    /// Commons governance payment address (legacy, for backward compatibility)
+    /// Marketplace module developer payment address (legacy, for backward compatibility)
     /// DEPRECATED: Use commons_payment_code instead to avoid address reuse
+    /// Note: Despite the name "commons", this goes to marketplace module developer
     #[serde(default)]
     pub commons_address: Option<String>,
     /// Signature over payment section (payment_codes/addresses + price_sats)

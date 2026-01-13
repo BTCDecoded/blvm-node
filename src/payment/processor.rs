@@ -370,11 +370,22 @@ impl PaymentProcessor {
 
     /// Create module payment request (75/15/10 split)
     ///
+    /// Payment split:
+    /// - 75% to module author
+    /// - 15% to marketplace module developer (Commons developers)
+    /// - 10% to node operator
+    ///
     /// # Security
     ///
-    /// This method verifies that the author and commons addresses are cryptographically
+    /// This method verifies that the author and marketplace addresses are cryptographically
     /// signed in the module manifest. The node operator's address (10%) is provided by
     /// the node and is not signed (node can choose their own address).
+    ///
+    /// # Note
+    ///
+    /// The 15% goes to the marketplace module developer (who developed the marketplace module),
+    /// not to "Commons governance" as a separate entity. The marketplace module handles
+    /// registry, discovery, and payment processing.
     ///
     /// # Arguments
     ///
@@ -531,21 +542,22 @@ impl PaymentProcessor {
             PaymentError::ProcessingError(format!("Invalid author address format: {:?}", e))
         })?;
 
-        let commons_address = BitcoinAddress::decode(&commons_address_str).map_err(|e| {
-            PaymentError::ProcessingError(format!("Invalid commons address format: {:?}", e))
+        let marketplace_address = BitcoinAddress::decode(&commons_address_str).map_err(|e| {
+            PaymentError::ProcessingError(format!("Invalid marketplace address format: {:?}", e))
         })?;
 
         // Convert addresses to script pubkeys
         // For SegWit (v0) and Taproot (v1), we need to create the appropriate script
         let author_script = address_to_script_pubkey(&author_address)?;
-        let commons_script = address_to_script_pubkey(&commons_address)?;
-        // Calculate split: 75% author, 15% commons, 10% node
+        let marketplace_script = address_to_script_pubkey(&marketplace_address)?;
+        // Calculate split: 75% author, 15% marketplace module developer, 10% node
+        // Note: The 15% goes to marketplace module developer (Commons developers), not "Commons governance"
         let author_amount = (price_sats * 75) / 100;
-        let commons_amount = (price_sats * 15) / 100;
+        let marketplace_amount = (price_sats * 15) / 100;
         let node_amount = (price_sats * 10) / 100;
 
         // Verify total (should equal price_sats, accounting for rounding)
-        let total = author_amount + commons_amount + node_amount;
+        let total = author_amount + marketplace_amount + node_amount;
         if total > price_sats {
             warn!(
                 "Payment split exceeds price: {} > {} (rounding error)",
@@ -560,8 +572,8 @@ impl PaymentProcessor {
                 amount: Some(author_amount),
             },
             PaymentOutput {
-                script: commons_script,
-                amount: Some(commons_amount),
+                script: marketplace_script,
+                amount: Some(marketplace_amount),
             },
             PaymentOutput {
                 script: node_script,
@@ -579,7 +591,7 @@ impl PaymentProcessor {
                 "price_sats": price_sats,
                 "split": {
                     "author": author_amount,
-                    "commons": commons_amount,
+                    "marketplace": marketplace_amount,
                     "node": node_amount,
                 },
                 "author_address": author_address_str,

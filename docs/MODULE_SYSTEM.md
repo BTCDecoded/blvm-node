@@ -59,8 +59,30 @@ The module system enables optional features (Lightning, merge mining, privacy en
 │  │   Module A     │  │   Module B    │  │    Module C        │  │
 │  │  (Lightning)   │  │ (Merge Mine)  │  │  (Privacy)         │  │
 │  └──────────────┘  └──────────────┘  └────────────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐                            │
+│  │   Module D     │  │   Module E    │                            │
+│  │ (Marketplace)   │  │ (Stratum V2)  │                            │
+│  └──────────────┘  └──────────────┘                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+## Available Modules
+
+### Core Modules
+
+- **blvm-stratum-v2**: Stratum V2 mining protocol support
+- **blvm-merge-mining**: Merge mining for secondary chains (requires blvm-stratum-v2)
+- **blvm-marketplace**: Module marketplace and registry (handles module payments)
+
+### Module Dependencies
+
+- **blvm-merge-mining** requires **blvm-stratum-v2** (for mining coordination)
+- **blvm-marketplace** is standalone (handles module registry and payments)
+
+### Payment Models
+
+- **blvm-merge-mining**: One-time activation fee + hardcoded revenue share
+- **blvm-marketplace**: Receives 15% of all module sales (75% author, 15% marketplace, 10% node)
 
 ## Module Lifecycle
 
