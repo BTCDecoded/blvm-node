@@ -356,9 +356,6 @@ pub struct NodeConfig {
     /// Module resource limits configuration
     pub module_resource_limits: Option<ModuleResourceLimitsConfig>,
 
-    /// Fee forwarding configuration (for governance contributions)
-    pub fee_forwarding: Option<FeeForwardingConfig>,
-
     /// ZMQ notification configuration
     #[cfg(feature = "zmq")]
     pub zmq: Option<ZmqConfig>,
@@ -452,7 +449,6 @@ impl Default for NodeConfig {
             network_timing: None,
             request_timeouts: None,
             module_resource_limits: None,
-            fee_forwarding: None,
             spam_ban: None,
             #[cfg(feature = "zmq")]
             zmq: None,
@@ -465,31 +461,6 @@ impl Default for NodeConfig {
     }
 }
 
-/// Fee forwarding configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FeeForwardingConfig {
-    /// Enable fee forwarding to Commons address
-    #[serde(default = "default_false")]
-    pub enabled: bool,
-
-    /// Commons address to forward fees to
-    pub commons_address: Option<String>,
-
-    /// Percentage of block reward to forward (0-100)
-    #[serde(default = "default_fee_forwarding_percentage")]
-    pub forwarding_percentage: u8,
-
-    /// Contributor identifier (for tracking)
-    pub contributor_id: Option<String>,
-}
-
-fn default_false() -> bool {
-    false
-}
-
-fn default_fee_forwarding_percentage() -> u8 {
-    0 // Default: no forwarding (opt-in)
-}
 
 /// Governance message relay configuration
 #[cfg(feature = "governance")]
