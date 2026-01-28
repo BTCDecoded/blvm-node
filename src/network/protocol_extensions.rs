@@ -3,6 +3,8 @@
 //! Extends Bitcoin P2P protocol with UTXO commitment messages:
 //! - GetUTXOSet: Request UTXO set at specific height
 //! - UTXOSet: Response with UTXO commitment
+//! - GetUTXOProof: Request Merkle proof for a specific UTXO
+//! - UTXOProof: Response with Merkle proof
 //! - GetFilteredBlock: Request filtered (spam-free) block
 //! - FilteredBlock: Response with filtered transactions
 
@@ -15,6 +17,8 @@ use anyhow::Result;
 use blvm_protocol::spam_filter::SpamFilter;
 #[cfg(feature = "utxo-commitments")]
 use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
+#[cfg(feature = "utxo-commitments")]
+use blvm_consensus::types::{OutPoint, UTXO};
 use hex;
 use std::sync::Arc;
 
@@ -280,6 +284,92 @@ pub fn deserialize_utxo_set(data: &[u8]) -> Result<UTXOSetMessage> {
     match ProtocolParser::parse_message(data)? {
         ProtocolMessage::UTXOSet(msg) => Ok(msg),
         _ => Err(anyhow::anyhow!("Expected UTXOSet message")),
+    }
+}
+
+/// Handle GetUTXOProof message
+///
+/// Responds with Merkle proof for the requested UTXO.
+/// 1. Load UTXO set from storage
+/// 2. Build Merkle tree from UTXO set
+/// 3. Generate proof for requested outpoint
+/// 4. Return UTXOProof response
+#[cfg(feature = "utxo-commitments")]
+pub async fn handle_get_utxo_proof(
+    message: crate::network::protocol::GetUTXOProofMessage,
+    storage: Option<Arc<Storage>>,
+) -> Result<crate::network::protocol::UTXOProofMessage> {
+    let storage = match storage {
+        Some(s) => s,
+        None => {
+            return Err(anyhow::anyhow!(
+                "Storage not available: UTXO proof generation requires storage"
+            ));
+        }
+    };
+
+    // Get UTXO set from storage
+    let utxo_set = storage.utxos().get_all_utxos()?;
+
+    // Build Merkle tree from UTXO set
+    let mut utxo_tree = UtxoMerkleTree::new()
+        .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
+
+    for (outpoint, utxo) in &utxo_set {
+        utxo_tree
+            .insert(outpoint.clone(), utxo.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
+    }
+
+    // Create OutPoint from message
+    use blvm_consensus::types::OutPoint;
+    let outpoint = OutPoint {
+        hash: message.tx_hash,
+        index: message.output_index,
+    };
+
+    // Find UTXO in set
+    let utxo = utxo_set
+        .get(&outpoint)
+        .ok_or_else(|| anyhow::anyhow!("UTXO not found for outpoint"))?;
+
+    // Generate proof
+    let proof = utxo_tree
+        .generate_proof(&outpoint)
+        .map_err(|e| anyhow::anyhow!("Failed to generate proof: {:?}", e))?;
+
+    // Serialize proof to bytes
+    let proof_bytes = bincode::serialize(&proof)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize proof: {:?}", e))?;
+
+    Ok(crate::network::protocol::UTXOProofMessage {
+        request_id: message.request_id,
+        tx_hash: message.tx_hash,
+        output_index: message.output_index,
+        value: utxo.value,
+        script_pubkey: utxo.script_pubkey.clone(),
+        height: utxo.height,
+        is_coinbase: utxo.is_coinbase,
+        proof: proof_bytes,
+    })
+}
+
+/// Serialize GetUTXOProof message to protocol format
+pub fn serialize_get_utxo_proof(
+    message: &crate::network::protocol::GetUTXOProofMessage,
+) -> Result<Vec<u8>> {
+    use crate::network::protocol::ProtocolParser;
+    ProtocolParser::serialize_message(&ProtocolMessage::GetUTXOProof(message.clone()))
+}
+
+/// Deserialize UTXOProof message from protocol format
+pub fn deserialize_utxo_proof(
+    data: &[u8],
+) -> Result<crate::network::protocol::UTXOProofMessage> {
+    use crate::network::protocol::ProtocolParser;
+    match ProtocolParser::parse_message(data)? {
+        ProtocolMessage::UTXOProof(msg) => Ok(msg),
+        _ => Err(anyhow::anyhow!("Expected UTXOProof message")),
     }
 }
 

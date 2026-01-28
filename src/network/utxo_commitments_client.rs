@@ -9,8 +9,8 @@
 
 #[cfg(feature = "utxo-commitments")]
 use crate::network::{
-    protocol::{GetFilteredBlockMessage, GetUTXOSetMessage},
-    protocol_extensions::{serialize_get_filtered_block, serialize_get_utxo_set},
+    protocol::{GetFilteredBlockMessage, GetUTXOSetMessage, GetUTXOProofMessage},
+    protocol_extensions::{serialize_get_filtered_block, serialize_get_utxo_set, serialize_get_utxo_proof, deserialize_utxo_proof},
     transport::TransportType,
     NetworkManager,
 };
@@ -534,5 +534,129 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // Not in async context - return empty (caller should use async version)
             vec![]
         }
+    }
+
+    /// Request UTXO proof from a peer
+    ///
+    /// Sends GetUTXOProof message and awaits UTXOProof response.
+    /// Works with both TCP and Iroh transports automatically.
+    pub fn request_utxo_proof(
+        &self,
+        peer_id: &str,
+        tx_hash: Hash,
+        output_index: u32,
+        block_height: Natural,
+        block_hash: Hash,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(blvm_consensus::types::UTXO, sparse_merkle_tree::MerkleProof), anyhow::Error>> + Send + '_>,
+    > {
+        let network_manager = self.network_manager.clone();
+        let peer_id = peer_id.to_string();
+
+        Box::pin(async move {
+            // Parse peer address (similar to request_utxo_set)
+            let peer_addr_opt: Option<(
+                std::net::SocketAddr,
+                Option<crate::network::transport::TransportAddr>,
+            )> = if peer_id.starts_with("tcp:") {
+                peer_id
+                    .strip_prefix("tcp:")
+                    .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+                    .map(|addr| (addr, None))
+            } else if peer_id.starts_with("iroh:") {
+                #[cfg(feature = "iroh")]
+                {
+                    peer_id
+                        .strip_prefix("iroh:")
+                        .and_then(|s| hex::decode(s).ok())
+                        .and_then(|bytes| {
+                            if bytes.len() == 32 {
+                                Some(crate::network::transport::TransportAddr::Iroh(bytes.try_into().unwrap()))
+                            } else {
+                                None
+                            }
+                        })
+                        .map(|addr| (std::net::SocketAddr::from(([0, 0, 0, 0], 0)), Some(addr)))
+                }
+                #[cfg(not(feature = "iroh"))]
+                {
+                    None
+                }
+            } else {
+                // Try parsing as direct SocketAddr
+                peer_id.parse::<std::net::SocketAddr>().ok().map(|addr| (addr, None))
+            };
+
+            let peer_addr = peer_addr_opt.ok_or_else(|| anyhow::anyhow!("Invalid peer ID: {}", peer_id))?.0;
+
+            // Register pending request
+            let (request_id, response_rx) = {
+                let network = network_manager.read().await;
+                network.register_request(peer_addr)
+            };
+
+            // Create GetUTXOProof message
+            let get_proof_msg = GetUTXOProofMessage {
+                request_id,
+                tx_hash,
+                output_index,
+                block_height,
+                block_hash,
+            };
+
+            // Serialize and send
+            let wire_format = serialize_get_utxo_proof(&get_proof_msg)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize GetUTXOProof: {}", e))?;
+
+            {
+                let network = network_manager.read().await;
+                network.send_to_peer(peer_addr, wire_format).await
+                    .map_err(|e| anyhow::anyhow!("Failed to send GetUTXOProof to peer {}: {}", peer_addr, e))?;
+            }
+
+            // Await response
+            let timeout_seconds = {
+                let network = network_manager.read().await;
+                network.request_timeout_config.utxo_commitment_request_timeout_seconds
+            };
+
+            tokio::select! {
+                result = response_rx => {
+                    match result {
+                        Ok(response_data) => {
+                            let proof_msg = deserialize_utxo_proof(&response_data)
+                                .map_err(|e| anyhow::anyhow!("Failed to parse UTXOProof response: {}", e))?;
+
+                            // Deserialize proof
+                            let proof: sparse_merkle_tree::MerkleProof = bincode::deserialize(&proof_msg.proof)
+                                .map_err(|e| anyhow::anyhow!("Failed to deserialize proof: {}", e))?;
+
+                            // Reconstruct UTXO
+                            let utxo = blvm_consensus::types::UTXO {
+                                value: proof_msg.value,
+                                script_pubkey: proof_msg.script_pubkey,
+                                height: proof_msg.height,
+                                is_coinbase: proof_msg.is_coinbase,
+                            };
+
+                            Ok((utxo, proof))
+                        }
+                        Err(_) => Err(anyhow::anyhow!("Response channel closed"))
+                    }
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_seconds)) => {
+                    // Cleanup on timeout
+                    {
+                        let pending_requests_arc = {
+                            let network = network_manager.read().await;
+                            Arc::clone(&network.pending_requests)
+                        };
+                        let mut pending = pending_requests_arc.lock().await;
+                        pending.remove(&request_id);
+                    }
+                    Err(anyhow::anyhow!("Request timeout: no response received within {} seconds", timeout_seconds))
+                }
+            }
+        })
     }
 }
