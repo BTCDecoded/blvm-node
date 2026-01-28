@@ -115,6 +115,8 @@ pub enum ProtocolMessage {
     // UTXO commitment protocol extensions
     GetUTXOSet(GetUTXOSetMessage),
     UTXOSet(UTXOSetMessage),
+    GetUTXOProof(GetUTXOProofMessage),
+    UTXOProof(UTXOProofMessage),
     GetFilteredBlock(GetFilteredBlockMessage),
     FilteredBlock(FilteredBlockMessage),
     // Block Filtering (BIP157)
@@ -372,6 +374,37 @@ pub struct UTXOCommitment {
     pub utxo_count: u64,
     pub block_height: u64,
     pub block_hash: Hash,
+}
+
+/// GetUTXOProof message - Request Merkle proof for a specific UTXO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetUTXOProofMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// OutPoint to request proof for (transaction hash + output index)
+    pub tx_hash: Hash,
+    pub output_index: u32,
+    /// Block height/hash for which to request proof (must match commitment)
+    pub block_height: u64,
+    pub block_hash: Hash,
+}
+
+/// UTXOProof message - Response with Merkle proof for a UTXO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UTXOProofMessage {
+    /// Request ID (echo from GetUTXOProof for matching)
+    pub request_id: u64,
+    /// The transaction hash this proof is for
+    pub tx_hash: Hash,
+    /// The output index this proof is for
+    pub output_index: u32,
+    /// The UTXO data (for verification)
+    pub value: i64,
+    pub script_pubkey: Vec<u8>,
+    pub height: u64,
+    pub is_coinbase: bool,
+    /// The Merkle proof (serialized as bytes)
+    pub proof: Vec<u8>,
 }
 
 /// GetFilteredBlock message - Request filtered block (spam-filtered)
@@ -858,6 +891,8 @@ impl ProtocolParser {
             // UTXO commitment protocol extensions
             "getutxoset" => Ok(ProtocolMessage::GetUTXOSet(bincode::deserialize(payload)?)),
             "utxoset" => Ok(ProtocolMessage::UTXOSet(bincode::deserialize(payload)?)),
+            "getutxoproof" => Ok(ProtocolMessage::GetUTXOProof(bincode::deserialize(payload)?)),
+            "utxoproof" => Ok(ProtocolMessage::UTXOProof(bincode::deserialize(payload)?)),
             "getfilteredblock" => Ok(ProtocolMessage::GetFilteredBlock(bincode::deserialize(
                 payload,
             )?)),
@@ -981,6 +1016,8 @@ impl ProtocolParser {
             // UTXO commitment protocol extensions
             ProtocolMessage::GetUTXOSet(msg) => ("getutxoset", bincode::serialize(msg)?),
             ProtocolMessage::UTXOSet(msg) => ("utxoset", bincode::serialize(msg)?),
+            ProtocolMessage::GetUTXOProof(msg) => ("getutxoproof", bincode::serialize(msg)?),
+            ProtocolMessage::UTXOProof(msg) => ("utxoproof", bincode::serialize(msg)?),
             ProtocolMessage::GetFilteredBlock(msg) => {
                 ("getfilteredblock", bincode::serialize(msg)?)
             }
