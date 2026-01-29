@@ -506,6 +506,115 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         })
     }
 
+    /// Request full block from a peer (with witnesses)
+    ///
+    /// Uses GetData protocol message to request full block.
+    /// Returns block with witnesses for complete validation.
+    fn request_full_block(
+        &self,
+        peer_id: &str,
+        block_hash: Hash,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = UtxoCommitmentResult<blvm_protocol::utxo_commitments::network_integration::FullBlock>> + Send + '_>,
+    > {
+        let network_manager = self.network_manager.clone();
+        let peer_id = peer_id.to_string();
+
+        Box::pin(async move {
+            use crate::network::protocol::{GetDataMessage, InventoryItem, ProtocolMessage, ProtocolParser};
+            use blvm_protocol::utxo_commitments::network_integration::FullBlock;
+            use blvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
+
+            // Parse peer address
+            let peer_addr = if peer_id.starts_with("tcp:") {
+                peer_id
+                    .strip_prefix("tcp:")
+                    .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+                    .ok_or_else(|| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        format!("Invalid TCP peer address: {}", peer_id)
+                    ))?
+            } else if peer_id.starts_with("iroh:") {
+                // For Iroh, we'd need to resolve the pubkey to an address
+                // For now, return error - Iroh support can be added later
+                return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    "Iroh peer addresses not yet supported for full block requests".to_string()
+                ));
+            } else {
+                // Try parsing as direct SocketAddr
+                peer_id
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|_| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        format!("Invalid peer address format: {}", peer_id)
+                    ))?
+            };
+
+            // Register block request before sending GetData
+            let block_rx = {
+                let network = network_manager.read().await;
+                network.register_block_request(peer_addr, block_hash)
+            };
+
+            // Create GetData message for block (MSG_BLOCK = 2)
+            let get_data_msg = GetDataMessage {
+                inventory: vec![InventoryItem {
+                    inv_type: 2, // MSG_BLOCK
+                    hash: block_hash,
+                }],
+            };
+
+            // Serialize and send GetData message
+            let wire_format = ProtocolParser::serialize_message(&ProtocolMessage::GetData(get_data_msg))
+                .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    format!("Failed to serialize GetData: {}", e)
+                ))?;
+
+            {
+                let network = network_manager.read().await;
+                network.send_to_peer(peer_addr, wire_format).await
+                    .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        format!("Failed to send GetData to peer {}: {}", peer_addr, e)
+                    ))?;
+            }
+
+            // Await block response with timeout
+            let timeout_seconds = {
+                let network = network_manager.read().await;
+                network
+                    .request_timeout_config
+                    .utxo_commitment_request_timeout_seconds
+            };
+
+            tokio::select! {
+                result = block_rx => {
+                    match result {
+                        Ok((block, witnesses)) => {
+                            // Return full block with witnesses
+                            // Commitment will be computed after validation
+                            Ok(FullBlock {
+                                block,
+                                witnesses,
+                            })
+                        }
+                        Err(_) => Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                            "Block response channel closed".to_string()
+                        ))
+                    }
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_seconds)) => {
+                    // Timeout - cleanup request
+                    {
+                        let network = network_manager.read().await;
+                        let mut pending = network.pending_block_requests.lock().await;
+                        pending.remove(&(peer_addr, block_hash));
+                    }
+                    Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                        format!("Block request timeout: no response received within {} seconds", timeout_seconds)
+                    ))
+                }
+            }
+        })
+    }
+
     /// Get list of connected peer IDs
     ///
     /// Returns peer IDs in format "tcp:addr" or "iroh:pubkey" depending on transport.
