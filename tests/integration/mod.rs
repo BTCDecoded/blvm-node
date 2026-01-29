@@ -21,4 +21,8 @@ pub mod rbf_mempool_integration_tests;
 pub mod node_lifecycle_comprehensive_tests;
 pub mod module_lifecycle_e2e_tests;
 pub mod network_sync_scenarios_tests;
+#[cfg(feature = "production")]
+pub mod parallel_ibd_tests;
+#[cfg(feature = "erlay")]
+pub mod erlay_tests;
 

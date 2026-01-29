@@ -8,6 +8,9 @@ use blvm_protocol::{OutPoint, UtxoSet, UTXO};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(feature = "utxo-compression")]
+use zstd;
+
 #[cfg(feature = "production")]
 use std::sync::{OnceLock, RwLock};
 
@@ -42,11 +45,32 @@ pub struct UtxoStore {
     db: Arc<dyn Database>,
     utxos: Arc<dyn Tree>,
     spent_outputs: Arc<dyn Tree>,
+    #[cfg(feature = "utxo-compression")]
+    compression_enabled: bool,
+    #[cfg(feature = "utxo-compression")]
+    compression_level: u32,
 }
 
 impl UtxoStore {
     /// Create a new UTXO store
     pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        Self::new_with_compression(
+            db,
+            #[cfg(feature = "utxo-compression")]
+            false, // Default: compression disabled unless explicitly enabled
+            #[cfg(feature = "utxo-compression")]
+            1, // Default compression level (fast)
+        )
+    }
+
+    /// Create a new UTXO store with compression settings
+    pub fn new_with_compression(
+        db: Arc<dyn Database>,
+        #[cfg(feature = "utxo-compression")]
+        compression_enabled: bool,
+        #[cfg(feature = "utxo-compression")]
+        compression_level: u32,
+    ) -> Result<Self> {
         let utxos = Arc::from(db.open_tree("utxos")?);
         let spent_outputs = Arc::from(db.open_tree("spent_outputs")?);
 
@@ -54,6 +78,10 @@ impl UtxoStore {
             db,
             utxos,
             spent_outputs,
+            #[cfg(feature = "utxo-compression")]
+            compression_enabled,
+            #[cfg(feature = "utxo-compression")]
+            compression_level,
         })
     }
 
@@ -111,7 +139,19 @@ impl UtxoStore {
 
             // Sequential database writes (database operations must be sequential)
             for (key, value) in serialized_utxos {
-                self.utxos.insert(&key, &value)?;
+                // Compress if enabled
+                #[cfg(feature = "utxo-compression")]
+                let data_to_store = if self.compression_enabled {
+                    zstd::encode_all(&value[..], self.compression_level as i32)
+                        .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e))?
+                } else {
+                    value
+                };
+
+                #[cfg(not(feature = "utxo-compression"))]
+                let data_to_store = value;
+
+                self.utxos.insert(&key, &data_to_store)?;
             }
         }
 
@@ -151,7 +191,19 @@ impl UtxoStore {
                 #[cfg(not(feature = "production"))]
                 let value = bincode::serialize(utxo)?;
 
-                self.utxos.insert(&key, &value)?;
+                // Compress if enabled
+                #[cfg(feature = "utxo-compression")]
+                let data_to_store = if self.compression_enabled {
+                    zstd::encode_all(&value[..], self.compression_level as i32)
+                        .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e))?
+                } else {
+                    value
+                };
+
+                #[cfg(not(feature = "utxo-compression"))]
+                let data_to_store = value;
+
+                self.utxos.insert(&key, &data_to_store)?;
             }
         }
 
@@ -165,7 +217,20 @@ impl UtxoStore {
         for result in self.utxos.iter() {
             let (key, value) = result?;
             let outpoint = self.outpoint_from_key(&key)?;
-            let utxo: UTXO = bincode::deserialize(&value)?;
+            
+            // Decompress if data is compressed
+            #[cfg(feature = "utxo-compression")]
+            let utxo_data = if Self::is_compressed(&value) {
+                zstd::decode_all(&value[..])
+                    .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
+            } else {
+                value
+            };
+
+            #[cfg(not(feature = "utxo-compression"))]
+            let utxo_data = value;
+
+            let utxo: UTXO = bincode::deserialize(&utxo_data)?;
             utxo_set.insert(outpoint, utxo);
         }
 
@@ -208,7 +273,19 @@ impl UtxoStore {
         #[cfg(not(feature = "production"))]
         let value = bincode::serialize(utxo)?;
 
-        self.utxos.insert(&key, &value)?;
+        // Compress UTXO data if compression is enabled
+        #[cfg(feature = "utxo-compression")]
+        let data_to_store = if self.compression_enabled {
+            zstd::encode_all(&value[..], self.compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e))?
+        } else {
+            value
+        };
+
+        #[cfg(not(feature = "utxo-compression"))]
+        let data_to_store = value;
+
+        self.utxos.insert(&key, &data_to_store)?;
         Ok(())
     }
 
@@ -223,11 +300,29 @@ impl UtxoStore {
     pub fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
         let key = self.outpoint_key(outpoint);
         if let Some(data) = self.utxos.get(&key)? {
-            let utxo: UTXO = bincode::deserialize(&data)?;
+            // Decompress if data is compressed (auto-detect via zstd magic bytes)
+            #[cfg(feature = "utxo-compression")]
+            let utxo_data = if Self::is_compressed(&data) {
+                zstd::decode_all(&data[..])
+                    .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
+            } else {
+                data
+            };
+
+            #[cfg(not(feature = "utxo-compression"))]
+            let utxo_data = data;
+
+            let utxo: UTXO = bincode::deserialize(&utxo_data)?;
             Ok(Some(utxo))
         } else {
             Ok(None)
         }
+    }
+
+    /// Check if data is compressed (zstd magic bytes: 0x28, 0xB5, 0x2F, 0xFD)
+    #[cfg(feature = "utxo-compression")]
+    fn is_compressed(data: &[u8]) -> bool {
+        data.len() >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD
     }
 
     /// Check if a UTXO exists
@@ -265,7 +360,20 @@ impl UtxoStore {
 
         for result in self.utxos.iter() {
             let (_, value) = result?;
-            let utxo: UTXO = bincode::deserialize(&value)?;
+            
+            // Decompress if data is compressed
+            #[cfg(feature = "utxo-compression")]
+            let utxo_data = if Self::is_compressed(&value) {
+                zstd::decode_all(&value[..])
+                    .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
+            } else {
+                value
+            };
+
+            #[cfg(not(feature = "utxo-compression"))]
+            let utxo_data = value;
+
+            let utxo: UTXO = bincode::deserialize(&utxo_data)?;
             total += utxo.value as u64;
         }
 

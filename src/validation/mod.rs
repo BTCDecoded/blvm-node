@@ -53,11 +53,12 @@ impl ParallelBlockValidator {
         network: Network,
     ) -> Result<(ValidationResult, UtxoSet)> {
         // Create empty witnesses for each transaction
-        let witnesses: Vec<Witness> = context
+        // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
+        let witnesses: Vec<Vec<Witness>> = context
             .block
             .transactions
             .iter()
-            .map(|_| Vec::new())
+            .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
             .collect();
         let network_time = current_timestamp();
         let (result, new_utxo_set, _undo_log) = connect_block(
@@ -101,16 +102,17 @@ impl ParallelBlockValidator {
                 .par_iter()
                 .map(|context| {
                     // Create empty witnesses for each transaction
-                    let witnesses: Vec<Witness> = context
+                    // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
+                    let witnesses: Vec<Vec<Witness>> = context
                         .block
                         .transactions
                         .iter()
-                        .map(|_| Vec::new())
+                        .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
                         .collect();
                     let network_time = current_timestamp();
                     let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
-                        &witnesses,
+                        witnesses.as_slice(),
                         context.prev_utxo_set.clone(),
                         context.height,
                         None, // No recent headers for parallel validation
@@ -129,16 +131,17 @@ impl ParallelBlockValidator {
                 .iter()
                 .map(|context| {
                     // Create empty witnesses for each transaction
-                    let witnesses: Vec<Witness> = context
+                    // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
+                    let witnesses: Vec<Vec<Witness>> = context
                         .block
                         .transactions
                         .iter()
-                        .map(|_| Vec::new())
+                        .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
                         .collect();
                     let network_time = current_timestamp();
                     let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
-                        &witnesses,
+                        witnesses.as_slice(),
                         context.prev_utxo_set.clone(),
                         context.height,
                         None, // No recent headers for parallel validation
@@ -168,11 +171,12 @@ impl ParallelBlockValidator {
 
         for context in contexts {
             // Create empty witnesses for each transaction
-            let witnesses: Vec<Witness> = context
+            // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
+            let witnesses: Vec<Vec<Witness>> = context
                 .block
                 .transactions
                 .iter()
-                .map(|_| Vec::new())
+                .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
                 .collect();
             let network_time = current_timestamp();
             let (result, new_utxo_set, _undo_log) = connect_block(
