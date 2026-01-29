@@ -354,6 +354,7 @@ impl ProtocolAdapter {
             ConsensusNetworkMessage::Version(_) => "version",
             ConsensusNetworkMessage::VerAck => "verack",
             ConsensusNetworkMessage::Addr(_) => "addr",
+            ConsensusNetworkMessage::AddrV2(_) => "addrv2",
             ConsensusNetworkMessage::Inv(_) => "inv",
             ConsensusNetworkMessage::GetData(_) => "getdata",
             ConsensusNetworkMessage::GetHeaders(_) => "getheaders",

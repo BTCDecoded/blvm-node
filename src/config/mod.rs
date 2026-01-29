@@ -43,6 +43,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_modules_dir() -> String {
     "modules".to_string()
 }
@@ -1100,6 +1104,10 @@ pub struct StorageConfig {
     /// Transaction indexing configuration
     #[serde(default)]
     pub indexing: Option<IndexingConfig>,
+
+    /// Compression configuration
+    #[cfg(feature = "compression")]
+    pub compression: Option<CompressionConfig>,
 }
 
 /// Database backend configuration
@@ -1168,6 +1176,66 @@ impl Default for StorageConfig {
             pruning: None,
             cache: None,
             indexing: None,
+            #[cfg(feature = "compression")]
+            compression: None,
+        }
+    }
+}
+
+/// Compression configuration for storage optimization
+#[cfg(feature = "compression")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompressionConfig {
+    /// Enable block compression (30-50% storage reduction)
+    #[serde(default = "default_true")]
+    pub block_compression_enabled: bool,
+
+    /// Block compression level (1-22, default: 3 = balanced)
+    #[serde(default = "default_block_compression_level")]
+    pub block_compression_level: u32,
+
+    /// Enable UTXO compression (20-40% storage reduction)
+    #[serde(default = "default_true")]
+    pub utxo_compression_enabled: bool,
+
+    /// UTXO compression level (1-22, default: 1 = fast, UTXO set is hot data)
+    #[serde(default = "default_utxo_compression_level")]
+    pub utxo_compression_level: u32,
+
+    /// Enable witness compression (20-30% storage reduction)
+    #[serde(default = "default_true")]
+    pub witness_compression_enabled: bool,
+
+    /// Witness compression level (1-22, default: 2 = balanced)
+    #[serde(default = "default_witness_compression_level")]
+    pub witness_compression_level: u32,
+}
+
+#[cfg(feature = "compression")]
+fn default_block_compression_level() -> u32 {
+    3 // Balanced: good compression with reasonable speed
+}
+
+#[cfg(feature = "compression")]
+fn default_utxo_compression_level() -> u32 {
+    1 // Fast: UTXO set is frequently accessed
+}
+
+#[cfg(feature = "compression")]
+fn default_witness_compression_level() -> u32 {
+    2 // Balanced: witness data is less frequently accessed
+}
+
+#[cfg(feature = "compression")]
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            block_compression_enabled: true,
+            block_compression_level: 3,
+            utxo_compression_enabled: true,
+            utxo_compression_level: 1,
+            witness_compression_enabled: true,
+            witness_compression_level: 2,
         }
     }
 }

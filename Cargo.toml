@@ -107,6 +107,15 @@ sysinfo = { version = "0.30", optional = true }
 # HTTP client for governance webhooks (optional feature)
 reqwest = { version = "0.12", features = ["json"], optional = true }
 
+# Compression for storage optimization (optional feature)
+zstd = { version = "0.13", optional = true }
+
+# Erlay (BIP330) transaction relay optimization
+# Note: minisketch-rs requires libclang/LLVM for bindgen compilation
+# The erlay feature can be enabled without minisketch-rs, but functionality will be disabled
+# To enable full Erlay functionality, also enable the minisketch-rs feature (requires libclang)
+minisketch-rs = { version = "0.1.9", optional = true }
+
 # FEC (Forward Error Correction) for FIBRE
 reed-solomon-erasure = "=6.0.0"
 # CRC32 for FIBRE packet checksums
@@ -175,6 +184,19 @@ json-logging = []
 rest-api = []
 # HTTP BIP70 payment protocol support (requires rest-api)
 bip70-http = ["rest-api"]
+
+# Storage compression optimizations
+block-compression = ["dep:zstd"]
+utxo-compression = ["dep:zstd"]
+witness-compression = ["dep:zstd"]
+# All compression features
+compression = ["block-compression", "utxo-compression", "witness-compression"]
+
+# Erlay (BIP330) transaction relay optimization
+# Note: Requires libclang/LLVM for minisketch-rs bindgen compilation
+# Erlay is entirely optional - if libclang is not available, simply don't enable this feature
+# For CI without libclang: omit the erlay feature entirely
+erlay = ["dep:minisketch-rs"]
 
 # Formal verification (Kani model checking) - verification only, not in release builds
 verify = ["kani-verifier"]

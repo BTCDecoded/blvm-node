@@ -13,6 +13,8 @@ pub mod metrics;
 pub mod miner;
 pub mod performance;
 pub mod sync;
+#[cfg(feature = "production")]
+pub mod parallel_ibd;
 
 use anyhow::Result;
 use hex;
@@ -37,7 +39,7 @@ use std::sync::Arc;
 pub struct Node {
     protocol: Arc<BitcoinProtocolEngine>,
     storage: Arc<Storage>,
-    network: NetworkManager,
+    network: Arc<NetworkManager>,
     /// Module registry (shared between network and module manager)
     module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
     /// Payment processor for BIP70 payments (HTTP and P2P)
@@ -146,8 +148,7 @@ impl Node {
         Ok(Self {
             protocol: protocol_arc,
             storage: storage_arc,
-            network: Arc::try_unwrap(network_arc)
-                .unwrap_or_else(|_| NetworkManager::new(network_addr)),
+            network: network_arc,
             rpc,
             data_dir: PathBuf::from(data_dir),
             sync_coordinator,
@@ -211,13 +212,15 @@ impl Node {
         let storage_arc = Arc::clone(&self.storage);
         let mempool_manager_arc = Arc::clone(&self.mempool_manager);
 
-        let network = NetworkManager::with_config(
-            network_addr,
-            max_peers,
-            transport_preference,
-            Some(&config),
-        )
-        .with_dependencies(protocol_arc, storage_arc, mempool_manager_arc);
+        let network = Arc::new(
+            NetworkManager::with_config(
+                network_addr,
+                max_peers,
+                transport_preference,
+                Some(&config),
+            )
+            .with_dependencies(protocol_arc, storage_arc, mempool_manager_arc)
+        );
 
         // Governance is handled via the blvm-governance module
         // The module subscribes to governance events (EconomicNodeRegistered, EconomicNodeVeto, etc.)
@@ -343,6 +346,62 @@ impl Node {
         // Initialize peer connections automatically
         self.initialize_peer_connections().await?;
 
+        // Check if we need to do IBD and attempt parallel IBD if available
+        let current_height = self.storage.chain().get_height()?.unwrap_or(0);
+        let is_ibd = current_height == 0;
+        
+        if is_ibd {
+            info!("Detected IBD (height: {}), checking for parallel IBD support...", current_height);
+            
+            // Get connected peers for parallel IBD
+            let peer_addresses: Vec<String> = self.network
+                .peer_addresses()
+                .iter()
+                .map(|addr| addr.to_string())
+                .collect();
+            
+            if peer_addresses.len() >= 2 {
+                info!("Attempting parallel IBD with {} peers", peer_addresses.len());
+                
+                // Estimate target height (use a reasonable default or get from peers)
+                // For now, we'll use a large number and let parallel IBD handle it
+                // In a real implementation, we'd query peers for their best header height
+                let target_height = current_height + 1_000_000; // Large number, will be limited by actual chain
+                
+                // Attempt parallel IBD
+                let blockstore = Arc::clone(&self.storage.blocks());
+                let storage_arc = Arc::clone(&self.storage);
+                let protocol_arc = Arc::clone(&self.protocol);
+                let mut utxo_set = blvm_protocol::UtxoSet::new();
+                
+                match self.sync_coordinator.start_parallel_ibd(
+                    current_height,
+                    target_height,
+                    blockstore,
+                    Some(storage_arc),
+                    protocol_arc,
+                    &mut utxo_set,
+                    Some(Arc::clone(&self.network)),
+                    peer_addresses,
+                ).await {
+                    Ok(true) => {
+                        info!("Parallel IBD completed successfully");
+                        // Update current height after parallel IBD
+                        let new_height = self.storage.chain().get_height()?.unwrap_or(0);
+                        info!("IBD completed, current height: {}", new_height);
+                    }
+                    Ok(false) => {
+                        info!("Parallel IBD not available or failed, will use sequential sync");
+                    }
+                    Err(e) => {
+                        warn!("Parallel IBD error: {}, will use sequential sync", e);
+                    }
+                }
+            } else {
+                info!("Not enough peers for parallel IBD (have {}, need 2), will use sequential sync", peer_addresses.len());
+            }
+        }
+
         // Prune on startup if configured
         if let Some(pruning_manager) = self.storage.pruning() {
             let config = &pruning_manager.config;
@@ -436,7 +495,7 @@ impl Node {
                 Some(Arc::clone(event_manager)),
                 None, // module_id will be set per-module
                 Some(Arc::clone(&self.mempool_manager)),
-                None, // network_manager will be set after registry setup
+                Some(Arc::clone(&self.network)),  // Now we can set it directly
             );
 
             // Set node storage for module storage API (needed for opening storage trees)
@@ -479,23 +538,8 @@ impl Node {
                 &registry_cas_dir,
                 registry_mirrors,
             ) {
-                // Create Arc wrapper for network manager to share with registry
-                // Since NetworkManager doesn't implement Clone, we temporarily move it to Arc
-                // then move it back. This allows the registry to send P2P messages.
-                let network_arc = {
-                    // Temporarily replace network with a new one
-                    let temp_network = NetworkManager::new(self.network_addr);
-                    let old_network = std::mem::replace(&mut self.network, temp_network);
-                    Arc::new(old_network)
-                };
-
-                // Set network manager on registry
-                module_registry.set_network_manager(Arc::clone(&network_arc));
-
-                // Put network manager back
-                self.network = Arc::try_unwrap(network_arc)
-                    .map_err(|_| anyhow::anyhow!("Failed to unwrap network Arc"))
-                    .unwrap_or_else(|_| NetworkManager::new(self.network_addr));
+                // Set network manager on registry (now simple since network is already Arc)
+                module_registry.set_network_manager(Arc::clone(&self.network));
 
                 let module_registry_arc = Arc::new(module_registry);
 
@@ -1465,7 +1509,7 @@ impl Node {
 
     /// Get network manager
     pub fn network(&self) -> &NetworkManager {
-        &self.network
+        &*self.network  // Deref Arc to maintain API compatibility
     }
 
     /// Get RPC manager

@@ -9,6 +9,9 @@ use blvm_protocol::{Block, BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[cfg(feature = "block-compression")]
+use zstd;
+
 /// Block metadata stored separately from block data for fast RPC lookups
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockMetadata {
@@ -27,11 +30,44 @@ pub struct BlockStore {
     witnesses: Arc<dyn Tree>,
     recent_headers: Arc<dyn Tree>, // For median time-past: stores last 11+ headers by height
     block_metadata: Arc<dyn Tree>, // hash → BlockMetadata (for fast TX count lookup)
+    #[cfg(feature = "block-compression")]
+    block_compression_enabled: bool,
+    #[cfg(feature = "block-compression")]
+    block_compression_level: u32,
+    #[cfg(feature = "witness-compression")]
+    witness_compression_enabled: bool,
+    #[cfg(feature = "witness-compression")]
+    witness_compression_level: u32,
 }
 
 impl BlockStore {
     /// Create a new block store
     pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        Self::new_with_compression(
+            db,
+            #[cfg(feature = "block-compression")]
+            false, // Default: compression disabled unless explicitly enabled
+            #[cfg(feature = "block-compression")]
+            3, // Default compression level
+            #[cfg(feature = "witness-compression")]
+            false,
+            #[cfg(feature = "witness-compression")]
+            2,
+        )
+    }
+
+    /// Create a new block store with compression settings
+    pub fn new_with_compression(
+        db: Arc<dyn Database>,
+        #[cfg(feature = "block-compression")]
+        block_compression_enabled: bool,
+        #[cfg(feature = "block-compression")]
+        block_compression_level: u32,
+        #[cfg(feature = "witness-compression")]
+        witness_compression_enabled: bool,
+        #[cfg(feature = "witness-compression")]
+        witness_compression_level: u32,
+    ) -> Result<Self> {
         let blocks = Arc::from(db.open_tree("blocks")?);
         let headers = Arc::from(db.open_tree("headers")?);
         let height_index = Arc::from(db.open_tree("height_index")?);
@@ -49,6 +85,14 @@ impl BlockStore {
             witnesses,
             recent_headers,
             block_metadata,
+            #[cfg(feature = "block-compression")]
+            block_compression_enabled,
+            #[cfg(feature = "block-compression")]
+            block_compression_level,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_enabled,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_level,
         })
     }
 
@@ -57,7 +101,21 @@ impl BlockStore {
         let block_hash = self.block_hash(block);
         let block_data = bincode::serialize(block)?;
 
-        self.blocks.insert(block_hash.as_slice(), &block_data)?;
+        // Compress block data if compression is enabled
+        #[cfg(feature = "block-compression")]
+        let data_to_store = if self.block_compression_enabled {
+            zstd::encode_all(&block_data[..], self.block_compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("Block compression failed: {}", e))?
+        } else {
+            block_data
+        };
+
+        #[cfg(not(feature = "block-compression"))]
+        let data_to_store = block_data;
+
+        self.blocks.insert(block_hash.as_slice(), &data_to_store)?;
+        
+        // Store header (never compressed - small and frequently accessed)
         let header_data = bincode::serialize(&block.header)?;
         self.headers.insert(block_hash.as_slice(), &header_data)?;
 
@@ -80,7 +138,7 @@ impl BlockStore {
     pub fn store_block_with_witness(
         &self,
         block: &Block,
-        witnesses: &[Witness],
+        witnesses: &[Vec<Witness>], // CRITICAL FIX: Changed from &[Witness] to &[Vec<Witness>]
         height: u64,
     ) -> Result<()> {
         let block_hash = self.block_hash(block);
@@ -100,17 +158,46 @@ impl BlockStore {
     }
 
     /// Store witness data for a block
-    pub fn store_witness(&self, block_hash: &Hash, witness: &[Witness]) -> Result<()> {
+    pub fn store_witness(&self, block_hash: &Hash, witness: &[Vec<Witness>]) -> Result<()> {
+        // CRITICAL FIX: Changed from &[Witness] to &[Vec<Witness>]
+        // witnesses is now Vec<Vec<Witness>> where each Vec<Witness> is for one transaction
+        // and each Witness is for one input
         let witness_data = bincode::serialize(witness)?;
+
+        // Compress witness data if compression is enabled
+        #[cfg(feature = "witness-compression")]
+        let data_to_store = if self.witness_compression_enabled {
+            zstd::encode_all(&witness_data[..], self.witness_compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("Witness compression failed: {}", e))?
+        } else {
+            witness_data
+        };
+
+        #[cfg(not(feature = "witness-compression"))]
+        let data_to_store = witness_data;
+
         self.witnesses
-            .insert(block_hash.as_slice(), &witness_data)?;
+            .insert(block_hash.as_slice(), &data_to_store)?;
         Ok(())
     }
 
     /// Get witness data for a block
-    pub fn get_witness(&self, block_hash: &Hash) -> Result<Option<Vec<Witness>>> {
+    // CRITICAL FIX: Changed return type from Option<Vec<Witness>> to Option<Vec<Vec<Witness>>>
+    pub fn get_witness(&self, block_hash: &Hash) -> Result<Option<Vec<Vec<Witness>>>> {
         if let Some(data) = self.witnesses.get(block_hash.as_slice())? {
-            let witnesses: Vec<Witness> = bincode::deserialize(&data)?;
+            // Decompress if data is compressed (auto-detect via zstd magic bytes)
+            #[cfg(feature = "witness-compression")]
+            let witness_data = if Self::is_compressed(&data) {
+                zstd::decode_all(&data[..])
+                    .map_err(|e| anyhow::anyhow!("Witness decompression failed: {}", e))?
+            } else {
+                data
+            };
+
+            #[cfg(not(feature = "witness-compression"))]
+            let witness_data = data;
+
+            let witnesses: Vec<Vec<Witness>> = bincode::deserialize(&witness_data)?;
             Ok(Some(witnesses))
         } else {
             Ok(None)
@@ -175,11 +262,36 @@ impl BlockStore {
     /// Get a block by hash
     pub fn get_block(&self, hash: &Hash) -> Result<Option<Block>> {
         if let Some(data) = self.blocks.get(hash.as_slice())? {
-            let block: Block = bincode::deserialize(&data)?;
+            // Decompress if data is compressed (auto-detect via zstd magic bytes)
+            #[cfg(feature = "block-compression")]
+            let block_data = if Self::is_compressed(&data) {
+                zstd::decode_all(&data[..])
+                    .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?
+            } else {
+                data
+            };
+
+            #[cfg(not(feature = "block-compression"))]
+            let block_data = data;
+
+            let block: Block = bincode::deserialize(&block_data)?;
             Ok(Some(block))
         } else {
             Ok(None)
         }
+    }
+
+    /// Check if data is compressed (zstd magic bytes: 0x28, 0xB5, 0x2F, 0xFD)
+    #[cfg(feature = "block-compression")]
+    fn is_compressed(data: &[u8]) -> bool {
+        data.len() >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD
+    }
+
+    /// Store a block header
+    pub fn store_header(&self, hash: &Hash, header: &BlockHeader) -> Result<()> {
+        let header_data = bincode::serialize(header)?;
+        self.headers.insert(hash.as_slice(), &header_data)?;
+        Ok(())
     }
 
     /// Get a block header by hash

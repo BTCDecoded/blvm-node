@@ -93,8 +93,109 @@ impl Storage {
         pruning_config: Option<PruningConfig>,
         indexing_config: Option<crate::config::IndexingConfig>,
     ) -> Result<Self> {
+        #[cfg(feature = "compression")]
+        {
+            Self::with_backend_pruning_indexing_and_compression(
+                data_dir,
+                backend,
+                pruning_config,
+                indexing_config,
+                None,
+            )
+        }
+        #[cfg(not(feature = "compression"))]
+        {
+            // When compression feature is disabled, use the internal implementation
+            let db = Arc::from(create_database(data_dir, backend)?);
+            let blockstore = Arc::new(blockstore::BlockStore::new(Arc::clone(&db))?);
+            let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
+            let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
+
+            let txindex = if let Some(indexing) = indexing_config {
+                Arc::new(txindex::TxIndex::with_indexing(
+                    Arc::clone(&db),
+                    indexing.enable_address_index,
+                    indexing.enable_value_index,
+                )?)
+            } else {
+                Arc::new(txindex::TxIndex::new(Arc::clone(&db))?)
+            };
+
+            let pruning_manager = pruning_config.map(|config| {
+                #[cfg(feature = "utxo-commitments")]
+                {
+                    let needs_commitments = matches!(config.mode, crate::config::PruningMode::Aggressive { keep_commitments: true, .. })
+                        || matches!(config.mode, crate::config::PruningMode::Custom { keep_commitments: true, .. });
+                    if needs_commitments {
+                        let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db)) {
+                            Ok(store) => Arc::new(store),
+                            Err(e) => {
+                                warn!("Failed to create commitment store: {}. Pruning will continue without commitments.", e);
+                                return Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)));
+                            }
+                        };
+                        Arc::new(pruning::PruningManager::with_utxo_commitments(
+                            config,
+                            Arc::clone(&blockstore),
+                            commitment_store,
+                            Arc::clone(&utxostore),
+                        ))
+                    } else {
+                        Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
+                    }
+                }
+                #[cfg(not(feature = "utxo-commitments"))]
+                {
+                    Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
+                }
+            });
+
+            Ok(Self {
+                db,
+                blockstore,
+                utxostore,
+                chainstate,
+                txindex,
+                pruning_manager,
+            })
+        }
+    }
+
+    /// Create a new storage instance with backend, pruning, indexing, and compression config
+    #[cfg(feature = "compression")]
+    pub fn with_backend_pruning_indexing_and_compression<P: AsRef<Path>>(
+        data_dir: P,
+        backend: DatabaseBackend,
+        pruning_config: Option<PruningConfig>,
+        indexing_config: Option<crate::config::IndexingConfig>,
+        compression_config: Option<crate::config::CompressionConfig>,
+    ) -> Result<Self> {
         let db = Arc::from(create_database(data_dir, backend)?);
 
+        // Configure block store with compression settings
+        #[cfg(feature = "compression")]
+        let blockstore = {
+            let (block_compression_enabled, block_compression_level, witness_compression_enabled, witness_compression_level) = 
+                if let Some(compression) = &compression_config {
+                    (
+                        compression.block_compression_enabled,
+                        compression.block_compression_level,
+                        compression.witness_compression_enabled,
+                        compression.witness_compression_level,
+                    )
+                } else {
+                    (false, 3, false, 2) // Defaults: disabled
+                };
+            Arc::new(blockstore::BlockStore::new_with_compression(
+                Arc::clone(&db),
+                block_compression_enabled,
+                block_compression_level,
+                witness_compression_enabled,
+                witness_compression_level,
+            )?)
+        };
+
+        #[cfg(not(feature = "compression"))]
         let blockstore = Arc::new(blockstore::BlockStore::new(Arc::clone(&db))?);
         let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
         let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;

@@ -9,6 +9,7 @@ use blvm_node::storage::chainstate::ChainState;
 use blvm_node::storage::txindex::TxIndex;
 use blvm_node::storage::utxostore::UtxoStore;
 use common::*;
+use std::sync::Arc;
 
 #[test]
 fn test_storage_creation() {
@@ -902,4 +903,226 @@ async fn test_storage_integration_workflow() {
     let retrieved_tx_block = retrieved_metadata.map(|m| m.block_hash);
     assert!(retrieved_tx_block.is_some());
     assert_eq!(retrieved_tx_block.unwrap(), block_hash);
+}
+
+// ===== COMPRESSION TESTS =====
+
+#[cfg(feature = "block-compression")]
+#[test]
+fn test_block_compression_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let db = Arc::from(blvm_node::storage::database::create_database(
+        temp_dir.path(),
+        blvm_node::storage::database::DatabaseBackend::Sled,
+    )
+    .unwrap());
+    
+    // Create blockstore with compression enabled
+    let blockstore = BlockStore::new_with_compression(
+        db,
+        true,  // block_compression_enabled
+        3,     // block_compression_level
+        false, // witness_compression_enabled
+        2,     // witness_compression_level
+    )
+    .unwrap();
+
+    // Create a test block
+    let block = TestBlockBuilder::new()
+        .add_coinbase_transaction(p2pkh_script(random_hash20()))
+        .add_transaction(
+            TestTransactionBuilder::new()
+                .add_input(OutPoint {
+                    hash: random_hash(),
+                    index: 0,
+                })
+                .add_output(1000, p2pkh_script(random_hash20()))
+                .with_lock_time(0)
+                .build(),
+        )
+        .build();
+
+    // Store block
+    blockstore.store_block(&block).unwrap();
+
+    // Retrieve block
+    let block_hash = blockstore.get_block_hash(&block);
+    let retrieved = blockstore.get_block(&block_hash).unwrap();
+
+    // Verify block was correctly stored and retrieved
+    assert!(retrieved.is_some());
+    let retrieved_block = retrieved.unwrap();
+    assert_eq!(retrieved_block.header.version, block.header.version);
+    assert_eq!(retrieved_block.transactions.len(), block.transactions.len());
+}
+
+#[cfg(feature = "block-compression")]
+#[test]
+fn test_block_compression_ratio() {
+    let temp_dir = TempDir::new().unwrap();
+    let db = Arc::from(blvm_node::storage::database::create_database(
+        temp_dir.path(),
+        blvm_node::storage::database::DatabaseBackend::Sled,
+    )
+    .unwrap());
+    
+    // Create blockstore with compression enabled
+    let blockstore = BlockStore::new_with_compression(
+        db.clone(),
+        true,  // block_compression_enabled
+        3,     // block_compression_level
+        false, // witness_compression_enabled
+        2,     // witness_compression_level
+    )
+    .unwrap();
+
+    // Create a large block with many transactions
+    let mut block_builder = TestBlockBuilder::new()
+        .add_coinbase_transaction(p2pkh_script(random_hash20()));
+    
+    for _ in 0..100 {
+        block_builder = block_builder.add_transaction(
+            TestTransactionBuilder::new()
+                .add_input(OutPoint {
+                    hash: random_hash(),
+                    index: 0,
+                })
+                .add_output(1000, p2pkh_script(random_hash20()))
+                .with_lock_time(0)
+                .build(),
+        );
+    }
+    
+    let block = block_builder.build();
+
+    // Store block
+    blockstore.store_block(&block).unwrap();
+
+    // Verify block can be retrieved
+    let block_hash = blockstore.get_block_hash(&block);
+    let retrieved = blockstore.get_block(&block_hash).unwrap();
+    assert!(retrieved.is_some());
+}
+
+#[cfg(feature = "witness-compression")]
+#[test]
+fn test_witness_compression_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let db = Arc::from(blvm_node::storage::database::create_database(
+        temp_dir.path(),
+        blvm_node::storage::database::DatabaseBackend::Sled,
+    )
+    .unwrap());
+    
+    // Create blockstore with witness compression enabled
+    let blockstore = BlockStore::new_with_compression(
+        db,
+        false, // block_compression_enabled
+        3,     // block_compression_level
+        true,  // witness_compression_enabled
+        2,     // witness_compression_level
+    )
+    .unwrap();
+
+    let block = TestBlockBuilder::new()
+        .add_coinbase_transaction(p2pkh_script(random_hash20()))
+        .build();
+
+    let block_hash = blockstore.get_block_hash(&block);
+    let witnesses = vec![vec![vec![0x01, 0x02, 0x03, 0x04, 0x05]]]; // Single witness stack
+
+    // Store witness
+    blockstore.store_witness(&block_hash, &witnesses).unwrap();
+
+    // Retrieve witness
+    let retrieved = blockstore.get_witness(&block_hash).unwrap();
+    assert!(retrieved.is_some());
+    let retrieved_witnesses = retrieved.unwrap();
+    assert_eq!(retrieved_witnesses.len(), witnesses.len());
+    assert_eq!(retrieved_witnesses[0].len(), witnesses[0].len());
+}
+
+#[cfg(feature = "utxo-compression")]
+#[test]
+fn test_utxo_compression_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let db = Arc::from(blvm_node::storage::database::create_database(
+        temp_dir.path(),
+        blvm_node::storage::database::DatabaseBackend::Sled,
+    )
+    .unwrap());
+    
+    // Create UTXO store with compression enabled
+    let utxostore = UtxoStore::new_with_compression(
+        db,
+        true, // compression_enabled
+        1,    // compression_level
+    )
+    .unwrap();
+
+    // Create test UTXO
+    let outpoint = OutPoint {
+        hash: random_hash(),
+        index: 0,
+    };
+
+    let utxo = UTXO {
+        value: 5000000000,
+        script_pubkey: p2pkh_script(random_hash20()),
+        height: 0,
+        is_coinbase: false,
+    };
+
+    // Add UTXO
+    utxostore.add_utxo(&outpoint, &utxo).unwrap();
+
+    // Verify UTXO exists
+    assert!(utxostore.has_utxo(&outpoint).unwrap());
+
+    // Get UTXO
+    let retrieved_utxo = utxostore.get_utxo(&outpoint).unwrap().unwrap();
+    assert_eq!(retrieved_utxo.value, utxo.value);
+    assert_eq!(retrieved_utxo.script_pubkey, utxo.script_pubkey);
+    assert_eq!(retrieved_utxo.height, utxo.height);
+}
+
+#[cfg(feature = "utxo-compression")]
+#[test]
+fn test_utxo_compression_auto_detection() {
+    let temp_dir = TempDir::new().unwrap();
+    let db = Arc::from(blvm_node::storage::database::create_database(
+        temp_dir.path(),
+        blvm_node::storage::database::DatabaseBackend::Sled,
+    )
+    .unwrap());
+    
+    // Create UTXO store with compression enabled
+    let utxostore = UtxoStore::new_with_compression(
+        db,
+        true, // compression_enabled
+        1,    // compression_level
+    )
+    .unwrap();
+
+    // Store UTXO set
+    let mut utxo_set = UtxoSet::new();
+    for i in 0..10 {
+        let outpoint = OutPoint {
+            hash: random_hash(),
+            index: i,
+        };
+        let utxo = UTXO {
+            value: 1000000 * (i + 1),
+            script_pubkey: p2pkh_script(random_hash20()),
+            height: 0,
+            is_coinbase: false,
+        };
+        utxo_set.insert(outpoint, utxo);
+    }
+
+    utxostore.store_utxo_set(&utxo_set).unwrap();
+
+    // Load UTXO set (should auto-detect compression)
+    let loaded_set = utxostore.load_utxo_set().unwrap();
+    assert_eq!(loaded_set.len(), 10);
 }

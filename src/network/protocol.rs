@@ -27,6 +27,9 @@ pub const NODE_UTXO_COMMITMENTS: u64 = 1 << 27;
 pub const NODE_BAN_LIST_SHARING: u64 = 1 << 28;
 /// Governance message relay support (EconomicNodeRegistration, EconomicNodeVeto, EconomicNodeStatus)
 pub const NODE_GOVERNANCE: u64 = 1 << 29;
+/// Erlay (BIP330) transaction relay support
+#[cfg(feature = "erlay")]
+pub const NODE_ERLAY: u64 = 1 << 30;
 
 /// Allowed Bitcoin protocol commands
 pub const ALLOWED_COMMANDS: &[&str] = &[
@@ -91,6 +94,15 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "modulelist",
     // Mesh networking
     "mesh",
+    // Erlay (BIP330) transaction relay
+    #[cfg(feature = "erlay")]
+    "sendtxrcncl",
+    #[cfg(feature = "erlay")]
+    "reqrecon",
+    #[cfg(feature = "erlay")]
+    "reqskt",
+    #[cfg(feature = "erlay")]
+    "sketch",
 ];
 
 /// Bitcoin protocol message types
@@ -774,6 +786,63 @@ pub struct ModuleListMessage {
     pub modules: Vec<ModuleInventoryItem>,
 }
 
+// Erlay (BIP330) transaction relay messages
+
+/// sendtxrcncl message - Announce Erlay support and negotiate parameters
+#[cfg(feature = "erlay")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendTxRcnclMessage {
+    /// Erlay version (currently 1)
+    pub version: u16,
+    /// Initial reconciliation salt (for privacy)
+    #[serde(with = "serde_bytes")]
+    pub salt: [u8; 16],
+    /// Minimum field size in bits (32 or 64)
+    pub min_field_size: u8,
+    /// Maximum field size in bits (32 or 64)
+    pub max_field_size: u8,
+}
+
+/// reqrecon message - Request reconciliation
+#[cfg(feature = "erlay")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReqReconMessage {
+    /// Reconciliation salt (for privacy)
+    #[serde(with = "serde_bytes")]
+    pub salt: [u8; 16],
+    /// Local transaction set size
+    pub local_set_size: u32,
+    /// Field size in bits (32 or 64)
+    pub field_size: u8,
+}
+
+/// reqskt message - Request sketch
+#[cfg(feature = "erlay")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReqSktMessage {
+    /// Reconciliation salt (echo from ReqRecon)
+    #[serde(with = "serde_bytes")]
+    pub salt: [u8; 16],
+    /// Remote transaction set size
+    pub remote_set_size: u32,
+    /// Field size in bits (32 or 64)
+    pub field_size: u8,
+}
+
+/// sketch message - Send reconciliation sketch
+#[cfg(feature = "erlay")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SketchMessage {
+    /// Reconciliation salt (echo from ReqRecon)
+    #[serde(with = "serde_bytes")]
+    pub salt: [u8; 16],
+    /// Reconciliation sketch (minisketch serialized data)
+    #[serde(with = "serde_bytes")]
+    pub sketch: Vec<u8>,
+    /// Field size in bits (32 or 64)
+    pub field_size: u8,
+}
+
 /// SpamSummary - Summary of filtered spam transactions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpamSummary {
@@ -959,6 +1028,14 @@ impl ProtocolParser {
             "modulelist" => Ok(ProtocolMessage::ModuleList(bincode::deserialize(payload)?)),
             // Mesh networking packets
             "mesh" => Ok(ProtocolMessage::MeshPacket(payload.to_vec())),
+            #[cfg(feature = "erlay")]
+            "sendtxrcncl" => Ok(ProtocolMessage::SendTxRcncl(bincode::deserialize(payload)?)),
+            #[cfg(feature = "erlay")]
+            "reqrecon" => Ok(ProtocolMessage::ReqRecon(bincode::deserialize(payload)?)),
+            #[cfg(feature = "erlay")]
+            "reqskt" => Ok(ProtocolMessage::ReqSkt(bincode::deserialize(payload)?)),
+            #[cfg(feature = "erlay")]
+            "sketch" => Ok(ProtocolMessage::Sketch(bincode::deserialize(payload)?)),
             _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
         }
     }
@@ -1070,6 +1147,14 @@ impl ProtocolParser {
             ProtocolMessage::MeshPacket(_) => {
                 return Err(anyhow::anyhow!("MeshPacket handled separately"))
             }
+            #[cfg(feature = "erlay")]
+            ProtocolMessage::SendTxRcncl(msg) => ("sendtxrcncl", bincode::serialize(msg)?),
+            #[cfg(feature = "erlay")]
+            ProtocolMessage::ReqRecon(msg) => ("reqrecon", bincode::serialize(msg)?),
+            #[cfg(feature = "erlay")]
+            ProtocolMessage::ReqSkt(msg) => ("reqskt", bincode::serialize(msg)?),
+            #[cfg(feature = "erlay")]
+            ProtocolMessage::Sketch(msg) => ("sketch", bincode::serialize(msg)?),
         };
 
         let mut message = Vec::new();

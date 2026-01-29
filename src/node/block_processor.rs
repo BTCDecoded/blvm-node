@@ -15,7 +15,8 @@ use blvm_protocol::{
 use std::sync::Arc;
 
 /// Parse a block from Bitcoin wire format and extract witness data
-pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Witness>)> {
+// CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
+pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Vec<Witness>>)> {
     let (block, witnesses) = deserialize_block_with_witnesses(data)
         .map_err(|e| anyhow::anyhow!("Failed to parse block from wire format: {}", e))?;
 
@@ -38,7 +39,7 @@ pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Witness>)> {
 pub fn store_block_with_context(
     blockstore: &BlockStore,
     block: &Block,
-    witnesses: &[Witness],
+    witnesses: &[Vec<Witness>], // CRITICAL FIX: Changed from &[Witness] to &[Vec<Witness>]
     height: u64,
 ) -> Result<()> {
     // Store block
@@ -66,7 +67,7 @@ pub fn store_block_with_context_and_index(
     blockstore: &BlockStore,
     storage: Option<&Arc<Storage>>,
     block: &Block,
-    witnesses: &[Witness],
+    witnesses: &[Vec<Witness>], // CRITICAL FIX: Changed from &[Witness] to &[Vec<Witness>]
     height: u64,
 ) -> Result<()> {
     // Store block
@@ -85,16 +86,19 @@ pub fn store_block_with_context_and_index(
 }
 
 /// Retrieve witnesses and headers for block validation
+// CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
 pub fn prepare_block_validation_context(
     blockstore: &BlockStore,
     block: &Block,
     _current_height: u64,
-) -> Result<(Vec<Witness>, Option<Vec<BlockHeader>>)> {
+) -> Result<(Vec<Vec<Witness>>, Option<Vec<BlockHeader>>)> {
     // Get witnesses for this block
     let block_hash = blockstore.get_block_hash(block);
     let witnesses = blockstore
         .get_witness(&block_hash)?
-        .unwrap_or_else(|| block.transactions.iter().map(|_| Vec::new()).collect());
+        .unwrap_or_else(|| block.transactions.iter()
+            .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
+            .collect());
 
     // Get recent headers for median time-past (BIP113)
     let recent_headers = blockstore
@@ -113,7 +117,7 @@ pub fn validate_block_with_context(
     blockstore: &BlockStore,
     protocol: &BitcoinProtocolEngine,
     block: &Block,
-    witnesses: &[Witness],
+    witnesses: &[Vec<Witness>], // CRITICAL FIX: Changed from &[Witness] to &[Vec<Witness>]
     utxo_set: &mut UtxoSet,
     height: u64,
 ) -> Result<ValidationResult> {

@@ -17,6 +17,8 @@ pub mod protocol;
 pub mod protocol_adapter;
 pub mod protocol_extensions;
 pub mod relay;
+#[cfg(feature = "erlay")]
+pub mod erlay;
 pub mod replay_protection;
 pub mod tcp_transport;
 pub mod transport;
@@ -392,7 +394,7 @@ pub struct NetworkManager {
     iroh_transport: Option<crate::network::iroh_transport::IrohTransport>,
     transport_preference: TransportPreference,
     peer_tx: mpsc::UnboundedSender<NetworkMessage>,
-    peer_rx: mpsc::UnboundedReceiver<NetworkMessage>,
+    peer_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<NetworkMessage>>>,
     /// Block filter service for BIP157/158
     filter_service: crate::network::filter_service::BlockFilterService,
     /// Consensus engine for mempool acceptance
@@ -408,21 +410,21 @@ pub struct NetworkManager {
     /// Mempool manager for transaction access
     mempool_manager: Option<Arc<MempoolManager>>,
     /// Module registry for serving modules via P2P
-    module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
+    module_registry: Arc<tokio::sync::Mutex<Option<Arc<crate::module::registry::client::ModuleRegistry>>>>,
     /// Payment processor for BIP70 payments (HTTP and P2P)
-    payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
+    payment_processor: Arc<tokio::sync::Mutex<Option<Arc<crate::payment::processor::PaymentProcessor>>>>,
     /// Payment state machine for unified payment coordination
-    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
+    payment_state_machine: Arc<tokio::sync::Mutex<Option<Arc<crate::payment::state_machine::PaymentStateMachine>>>>,
     /// Merchant private key for signing payment ACKs (optional)
-    merchant_key: Option<secp256k1::SecretKey>,
+    merchant_key: Arc<tokio::sync::Mutex<Option<secp256k1::SecretKey>>>,
     /// Node payment address script (for module downloads - 10% fee)
-    node_payment_script: Option<Vec<u8>>,
+    node_payment_script: Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
     /// Module encryption for encrypted module serving
-    module_encryption: Option<Arc<crate::module::encryption::ModuleEncryption>>,
+    module_encryption: Arc<tokio::sync::Mutex<Option<Arc<crate::module::encryption::ModuleEncryption>>>>,
     /// Modules directory for encrypted/decrypted module storage
-    modules_dir: Option<std::path::PathBuf>,
+    modules_dir: Arc<tokio::sync::Mutex<Option<std::path::PathBuf>>>,
     /// Event publisher for module event notifications (optional)
-    event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
+    event_publisher: Arc<tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>>,
     /// FIBRE relay manager (for fast block relay)
     #[cfg(feature = "fibre")]
     fibre_relay: Option<Arc<Mutex<fibre::FibreRelay>>>,
@@ -464,6 +466,12 @@ pub struct NetworkManager {
     /// Pending async requests with metadata
     /// Key: request_id, Value: (sender, peer_addr, timestamp)
     pending_requests: Arc<Mutex<HashMap<u64, PendingRequest>>>,
+    /// Pending Headers requests (for IBD)
+    /// Key: peer_addr, Value: sender channel
+    pending_headers_requests: Arc<Mutex<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<blvm_protocol::BlockHeader>>>>>,
+    /// Pending Block requests (for IBD)
+    /// Key: (peer_addr, block_hash), Value: sender channel
+    pending_block_requests: Arc<Mutex<HashMap<(SocketAddr, blvm_protocol::Hash), tokio::sync::oneshot::Sender<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>>>>,
     /// DoS protection manager
     dos_protection: Arc<dos_protection::DosProtectionManager>,
     /// Replay protection for custom protocol messages
@@ -526,6 +534,8 @@ pub enum NetworkMessage {
     StratumV2MessageReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     // Raw message received from peer (needs processing)
     RawMessageReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    // Headers response (for IBD)
+    HeadersReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     // BIP157 Block Filter messages
     GetCfiltersReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     GetCfheadersReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
@@ -567,6 +577,7 @@ impl NetworkManager {
         config: Option<&crate::config::NodeConfig>,
     ) -> Self {
         let (peer_tx, peer_rx) = mpsc::unbounded_channel();
+        let peer_rx = Arc::new(tokio::sync::Mutex::new(peer_rx));
 
         // Use config for DoS protection
         let dos_config_default = crate::config::DosProtectionConfig::default();
@@ -619,14 +630,14 @@ impl NetworkManager {
             protocol_engine: None,
             storage: None,
             mempool_manager: None,
-            module_registry: None,
-            payment_processor: None,
-            payment_state_machine: None,
-            merchant_key: None,
-            node_payment_script: None,
-            module_encryption: None,
-            modules_dir: None,
-            event_publisher: None,
+            module_registry: Arc::new(tokio::sync::Mutex::new(None)),
+            payment_processor: Arc::new(tokio::sync::Mutex::new(None)),
+            payment_state_machine: Arc::new(tokio::sync::Mutex::new(None)),
+            merchant_key: Arc::new(tokio::sync::Mutex::new(None)),
+            node_payment_script: Arc::new(tokio::sync::Mutex::new(None)),
+            module_encryption: Arc::new(tokio::sync::Mutex::new(None)),
+            modules_dir: Arc::new(tokio::sync::Mutex::new(None)),
+            event_publisher: Arc::new(tokio::sync::Mutex::new(None)),
             #[cfg(feature = "fibre")]
             fibre_relay: None,
             peer_states: Arc::new(RwLock::new(HashMap::new())),
@@ -649,6 +660,8 @@ impl NetworkManager {
             socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
             request_id_counter: Arc::new(AtomicU64::new(0)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            pending_headers_requests: Arc::new(Mutex::new(HashMap::new())),
+            pending_block_requests: Arc::new(Mutex::new(HashMap::new())),
             dos_protection,
             replay_protection: Arc::new(replay_protection::ReplayProtection::new()),
             pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
@@ -681,39 +694,39 @@ impl NetworkManager {
         mut self,
         module_registry: Arc<crate::module::registry::client::ModuleRegistry>,
     ) -> Self {
-        self.module_registry = Some(module_registry);
+        *self.module_registry.blocking_lock() = Some(module_registry);
         self
     }
 
-    /// Set module registry for serving modules via P2P (mutable reference version)
+    /// Set module registry for serving modules via P2P
     pub fn set_module_registry(
-        &mut self,
+        &self,
         module_registry: Arc<crate::module::registry::client::ModuleRegistry>,
     ) {
-        self.module_registry = Some(module_registry);
+        *self.module_registry.blocking_lock() = Some(module_registry);
     }
 
     /// Set payment processor for BIP70 payments (HTTP and P2P)
     pub fn set_payment_processor(
-        &mut self,
+        &self,
         processor: Arc<crate::payment::processor::PaymentProcessor>,
     ) {
-        self.payment_processor = Some(processor);
+        *self.payment_processor.blocking_lock() = Some(processor);
     }
 
     /// Set merchant private key for signing payment ACKs
-    pub fn set_merchant_key(&mut self, merchant_key: Option<secp256k1::SecretKey>) {
-        self.merchant_key = merchant_key;
+    pub fn set_merchant_key(&self, merchant_key: Option<secp256k1::SecretKey>) {
+        *self.merchant_key.blocking_lock() = merchant_key;
     }
 
     /// Set node payment address script (for module downloads)
-    pub fn set_node_payment_script(&mut self, script: Option<Vec<u8>>) {
-        self.node_payment_script = script;
+    pub fn set_node_payment_script(&self, script: Option<Vec<u8>>) {
+        *self.node_payment_script.blocking_lock() = script;
     }
 
     /// Set payment state machine for unified payment coordination
     pub fn set_payment_state_machine(
-        &mut self,
+        &self,
         state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
     ) {
         // Set network sender for payment proof broadcasting
@@ -732,28 +745,28 @@ impl NetworkManager {
                 debug!("Payment state machine has multiple references, network sender not set (broadcasting disabled)");
             }
         }
-        self.payment_state_machine = Some(state_machine);
+        *self.payment_state_machine.blocking_lock() = Some(state_machine);
     }
 
     /// Set module encryption for encrypted module serving
     pub fn set_module_encryption(
-        &mut self,
+        &self,
         encryption: Arc<crate::module::encryption::ModuleEncryption>,
     ) {
-        self.module_encryption = Some(encryption);
+        *self.module_encryption.blocking_lock() = Some(encryption);
     }
 
     /// Set modules directory for encrypted/decrypted module storage
-    pub fn set_modules_dir(&mut self, modules_dir: std::path::PathBuf) {
-        self.modules_dir = Some(modules_dir);
+    pub fn set_modules_dir(&self, modules_dir: std::path::PathBuf) {
+        *self.modules_dir.blocking_lock() = Some(modules_dir);
     }
 
     /// Set event publisher for network event notifications
     pub fn set_event_publisher(
-        &mut self,
+        &self,
         event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
     ) {
-        self.event_publisher = event_publisher;
+        *self.event_publisher.blocking_lock() = event_publisher;
     }
 
     /// Initialize FIBRE relay (if enabled in config)
@@ -860,7 +873,8 @@ impl NetworkManager {
         use tracing::{debug, error, info, warn};
 
         // Publish event for governance module (non-blocking)
-        if let Some(event_publisher) = &self.event_publisher {
+        let event_publisher_guard = self.event_publisher.lock().await;
+        if let Some(event_publisher) = event_publisher_guard.as_ref() {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
             let payload = EventPayload::EconomicNodeRegistered {
@@ -978,7 +992,8 @@ impl NetworkManager {
         Fut: std::future::Future<Output = Result<()>>,
     {
         // Publish event for governance module (non-blocking, log errors but don't fail)
-        if let Some(event_publisher) = &self.event_publisher {
+        let event_publisher_guard = self.event_publisher.lock().await;
+        if let Some(event_publisher) = event_publisher_guard.as_ref() {
             if let Err(e) = event_publisher.publish_event(event_type, payload).await {
                 warn!("Failed to publish governance event: {}", e);
             }
@@ -1044,7 +1059,8 @@ impl NetworkManager {
         use tracing::{debug, error, info, warn};
 
         // Publish event for governance module (non-blocking)
-        if let Some(event_publisher) = &self.event_publisher {
+        let event_publisher_guard = self.event_publisher.lock().await;
+        if let Some(event_publisher) = event_publisher_guard.as_ref() {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
             let payload = EventPayload::EconomicNodeVeto {
@@ -1168,7 +1184,8 @@ impl NetworkManager {
         );
 
         // Publish event for governance module (non-blocking)
-        if let Some(event_publisher) = &self.event_publisher {
+        let event_publisher_guard = self.event_publisher.lock().await;
+        if let Some(event_publisher) = event_publisher_guard.as_ref() {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
             let response_data = msg
@@ -1357,7 +1374,8 @@ impl NetworkManager {
         );
 
         // Publish event for governance module (non-blocking)
-        if let Some(event_publisher) = &self.event_publisher {
+        let event_publisher_guard = self.event_publisher.lock().await;
+        if let Some(event_publisher) = event_publisher_guard.as_ref() {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
             let node_id = msg
@@ -1808,7 +1826,7 @@ impl NetworkManager {
     }
 
     /// Start the network manager
-    pub async fn start(&mut self, listen_addr: SocketAddr) -> Result<()> {
+    pub async fn start(&self, listen_addr: SocketAddr) -> Result<()> {
         info!(
             "Starting network manager with transport preference: {:?}",
             self.transport_preference
@@ -2344,6 +2362,83 @@ impl NetworkManager {
                     .filter(|(_, req)| req.peer_addr == peer_addr)
                     .map(|(id, _)| *id)
                     .collect()
+            })
+        })
+    }
+
+    /// Register a pending Headers request
+    /// Returns a receiver that will receive the Headers response
+    pub fn register_headers_request(
+        &self,
+        peer_addr: SocketAddr,
+    ) -> tokio::sync::oneshot::Receiver<Vec<blvm_protocol::BlockHeader>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.pending_headers_requests
+                    .lock()
+                    .await
+                    .insert(peer_addr, tx);
+            })
+        });
+        rx
+    }
+
+    /// Complete a pending Headers request
+    pub fn complete_headers_request(
+        &self,
+        peer_addr: SocketAddr,
+        headers: Vec<blvm_protocol::BlockHeader>,
+    ) -> bool {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut pending = self.pending_headers_requests.lock().await;
+                if let Some(sender) = pending.remove(&peer_addr) {
+                    let _ = sender.send(headers);
+                    true
+                } else {
+                    false
+                }
+            })
+        })
+    }
+
+    /// Register a pending Block request
+    /// Returns a receiver that will receive the Block response
+    pub fn register_block_request(
+        &self,
+        peer_addr: SocketAddr,
+        block_hash: blvm_protocol::Hash,
+    ) -> tokio::sync::oneshot::Receiver<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.pending_block_requests
+                    .lock()
+                    .await
+                    .insert((peer_addr, block_hash), tx);
+            })
+        });
+        rx
+    }
+
+    /// Complete a pending Block request
+    pub fn complete_block_request(
+        &self,
+        peer_addr: SocketAddr,
+        block_hash: blvm_protocol::Hash,
+        block: blvm_protocol::Block,
+        witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
+    ) -> bool {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut pending = self.pending_block_requests.lock().await;
+                if let Some(sender) = pending.remove(&(peer_addr, block_hash)) {
+                    let _ = sender.send((block, witnesses));
+                    true
+                } else {
+                    false
+                }
             })
         })
     }
@@ -3085,12 +3180,18 @@ impl NetworkManager {
 
     /// Try to receive a block message (non-blocking)
     /// Returns Some(block_data) if a block was received, None otherwise
-    pub fn try_recv_block(&mut self) -> Option<Vec<u8>> {
+    pub fn try_recv_block(&self) -> Option<Vec<u8>> {
         use tokio::sync::mpsc::error::TryRecvError;
 
         // Check for BlockReceived messages without blocking
-        loop {
-            match self.peer_rx.try_recv() {
+        // Use block_in_place to avoid blocking async runtime
+        tokio::task::block_in_place(|| {
+            let mut rx = match self.peer_rx.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return None, // Lock is held, skip this call
+            };
+            loop {
+                match rx.try_recv() {
                 Ok(NetworkMessage::BlockReceived(data)) => {
                     return Some(data);
                 }
@@ -3111,17 +3212,35 @@ impl NetworkManager {
                     warn!("Network message channel disconnected");
                     return None;
                 }
+                }
             }
-        }
+        })
     }
 
     /// Process incoming network messages
-    pub async fn process_messages(&mut self) -> Result<()> {
+    pub async fn process_messages(&self) -> Result<()> {
         // Track message queue size manually (unbounded channel doesn't have len())
         let mut message_count = 0u64;
         let mut last_metrics_update = std::time::SystemTime::now();
 
-        while let Some(message) = self.peer_rx.recv().await {
+        // Restructured to work with Arc<Mutex>: lock, receive one message, unlock, process
+        loop {
+            // Lock, receive one message, unlock
+            let message = {
+                let mut rx = self.peer_rx.lock().await;
+                rx.recv().await
+            };
+            
+            let message = match message {
+                Some(msg) => msg,
+                None => {
+                    // Channel closed
+                    warn!("Network message channel closed");
+                    break;
+                }
+            };
+            
+            // Process message (no lock held)
             message_count += 1;
 
             // Update metrics periodically (every 100 messages or 10 seconds)
@@ -3180,7 +3299,8 @@ impl NetworkManager {
                     info!("Peer connected: {:?}", addr);
 
                     // Publish peer connected event
-                    if let Some(ref event_publisher) = self.event_publisher {
+                    let event_publisher_guard = self.event_publisher.lock().await;
+                    if let Some(ref event_publisher) = *event_publisher_guard {
                         let addr_str = format!("{:?}", addr);
                         let transport_type = match &addr {
                             TransportAddr::Tcp(_) => "tcp",
@@ -3216,7 +3336,8 @@ impl NetworkManager {
                     info!("Peer disconnected: {:?}", addr);
 
                     // Publish peer disconnected event
-                    if let Some(ref event_publisher) = self.event_publisher {
+                    let event_publisher_guard = self.event_publisher.lock().await;
+                    if let Some(ref event_publisher) = *event_publisher_guard {
                         let addr_str = format!("{:?}", addr);
                         let reason = "disconnected".to_string(); // Could be more specific
                         let event_pub_clone = Arc::clone(event_publisher);
@@ -3305,6 +3426,19 @@ impl NetworkManager {
                         self.remove_peer_diversity(ip);
                     }
                 }
+                NetworkMessage::HeadersReceived(data, peer_addr) => {
+                    info!("Headers received from {}: {} bytes", peer_addr, data.len());
+                    // Parse and route to pending request if any
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::Headers(headers_msg) = parsed {
+                            let headers = headers_msg.headers;
+                            if self.complete_headers_request(peer_addr, headers) {
+                                debug!("Routed Headers to pending request from {}", peer_addr);
+                            }
+                            // Headers will also be processed normally through protocol layer
+                        }
+                    }
+                }
                 NetworkMessage::BlockReceived(data) => {
                     info!("Block received: {} bytes", data.len());
                     // Note: BlockReceived doesn't include peer address, so we can't track peer quality here
@@ -3366,7 +3500,8 @@ impl NetworkManager {
                         data.len()
                     );
                     // Route Stratum V2 message to Stratum V2 module via event system
-                    if let Some(event_publisher) = &self.event_publisher {
+                    let event_publisher_guard = self.event_publisher.lock().await;
+                    if let Some(event_publisher) = event_publisher_guard.as_ref() {
                         use crate::module::ipc::protocol::EventPayload;
                         use crate::module::traits::EventType;
                         let payload = EventPayload::StratumV2MessageReceived {
@@ -3513,8 +3648,10 @@ impl NetworkManager {
                     if let Ok(parsed) = ProtocolParser::parse_message(&data) {
                         if let ProtocolMessage::PaymentProof(msg) = parsed {
                             // Handle payment proof: verify and update state machine
-                            if let Some(ref state_machine) = self.payment_state_machine {
-                                if let Some(ref processor) = self.payment_processor {
+                            let state_machine_guard = self.payment_state_machine.lock().await;
+                            if let Some(ref state_machine) = *state_machine_guard {
+                                let processor_guard = self.payment_processor.lock().await;
+                                if let Some(ref processor) = *processor_guard {
                                     // Get payment request to verify proof against expected outputs
                                     match processor
                                         .get_payment_request(&msg.payment_request_id)
@@ -3619,7 +3756,8 @@ impl NetworkManager {
                     if let Ok(parsed) = ProtocolParser::parse_message(&data) {
                         if let ProtocolMessage::SettlementNotification(msg) = parsed {
                             // Handle settlement notification: update state machine
-                            if let Some(ref state_machine) = self.payment_state_machine {
+                            let state_machine_guard = self.payment_state_machine.lock().await;
+                            if let Some(ref state_machine) = *state_machine_guard {
                                 match msg.status.as_str() {
                                     "mempool" => {
                                         // Transaction in mempool
@@ -3716,7 +3854,8 @@ impl NetworkManager {
                     );
                     // Route mesh packet to mesh module via event system
                     // The mesh module subscribes to MeshPacketReceived events
-                    if let Some(event_publisher) = &self.event_publisher {
+                    let event_publisher_guard = self.event_publisher.lock().await;
+                    if let Some(event_publisher) = event_publisher_guard.as_ref() {
                         use crate::module::ipc::protocol::EventPayload;
                         use crate::module::traits::EventType;
                         let payload = EventPayload::MeshPacketReceived {
@@ -3960,7 +4099,7 @@ impl NetworkManager {
         }
 
         // Handle special cases that don't go through protocol layer
-        match parsed {
+        match &parsed {
             // BIP331
             ProtocolMessage::SendPkgTxn(_) => {
                 let _ = self
@@ -4030,208 +4169,106 @@ impl NetworkManager {
                     .send(NetworkMessage::ModuleListReceived(data, peer_addr));
                 return Ok(());
             }
-            // BIP70 Payment Protocol
-            ProtocolMessage::GetPaymentRequest(_) => {
-                let _ = self
-                    .peer_tx
-                    .send(NetworkMessage::GetPaymentRequestReceived(data, peer_addr));
-                return Ok(());
+            // Headers and Block messages (for IBD)
+            ProtocolMessage::Headers(headers_msg) => {
+                // Check if there's a pending Headers request for this peer
+                let headers = headers_msg.headers.clone();
+                if self.complete_headers_request(peer_addr, headers) {
+                    debug!("Routed Headers response to pending request from {}", peer_addr);
+                    return Ok(());
+                }
+                // No pending request - process normally through protocol layer
             }
-            ProtocolMessage::PaymentRequest(_) => {
-                let _ = self
-                    .peer_tx
-                    .send(NetworkMessage::PaymentRequestReceived(data, peer_addr));
-                return Ok(());
-            }
-            ProtocolMessage::Payment(_) => {
-                let _ = self
-                    .peer_tx
-                    .send(NetworkMessage::PaymentReceived(data, peer_addr));
-                return Ok(());
-            }
-            ProtocolMessage::PaymentACK(_) => {
-                let _ = self
-                    .peer_tx
-                    .send(NetworkMessage::PaymentACKReceived(data, peer_addr));
-                return Ok(());
-            }
-            #[cfg(feature = "ctv")]
-            ProtocolMessage::PaymentProof(_) => {
-                let _ = self
-                    .peer_tx
-                    .send(NetworkMessage::PaymentProofReceived(data, peer_addr));
-                return Ok(());
-            }
-            ProtocolMessage::SettlementNotification(_) => {
-                let _ = self
-                    .peer_tx
-                    .send(NetworkMessage::SettlementNotificationReceived(
-                        data, peer_addr,
-                    ));
-                return Ok(());
-            }
-            // Ban List Sharing
-            ProtocolMessage::GetBanList(msg) => {
-                return self.handle_get_ban_list(peer_addr, msg).await;
-            }
-            ProtocolMessage::BanList(msg) => {
-                return self.handle_ban_list(peer_addr, msg).await;
-            }
-            // Governance messages - handled via methods that publish events and handle network logic
-            #[cfg(feature = "governance")]
-            ProtocolMessage::EconomicNodeRegistration(msg) => {
-                return self.handle_economic_node_registration(peer_addr, msg).await;
-            }
-            #[cfg(feature = "governance")]
-            ProtocolMessage::EconomicNodeVeto(msg) => {
-                return self.handle_economic_node_veto(peer_addr, msg).await;
-            }
-            #[cfg(feature = "governance")]
-            ProtocolMessage::EconomicNodeStatus(msg) => {
-                return self.handle_economic_node_status(peer_addr, msg).await;
-            }
-            #[cfg(feature = "governance")]
-            ProtocolMessage::EconomicNodeForkDecision(msg) => {
-                return self
-                    .handle_economic_node_fork_decision(peer_addr, msg)
-                    .await;
-            }
-            // Address relay
-            ProtocolMessage::GetAddr => {
-                return self.handle_get_addr(peer_addr).await;
-            }
-            ProtocolMessage::Addr(msg) => {
-                return self.handle_addr(peer_addr, msg).await;
-            }
-            // Module Registry
-            ProtocolMessage::GetModule(msg) => {
-                return self.handle_get_module(peer_addr, msg).await;
-            }
-            ProtocolMessage::GetModuleByHash(msg) => {
-                return self.handle_get_module_by_hash(peer_addr, msg).await;
-            }
-            ProtocolMessage::GetModuleList(msg) => {
-                return self.handle_get_module_list(peer_addr, msg).await;
+            ProtocolMessage::Block(block_msg) => {
+                // Check if there's a pending Block request for this peer
+                use blvm_protocol::segwit::Witness;
+                // Calculate block hash - use double SHA256 of serialized header
+                use sha2::{Digest, Sha256};
+                let header_bytes = bincode::serialize(&block_msg.block.header)
+                    .unwrap_or_default();
+                let hash1 = Sha256::digest(&header_bytes);
+                let hash2 = Sha256::digest(hash1);
+                let mut block_hash = [0u8; 32];
+                block_hash.copy_from_slice(&hash2);
+                // Convert Vec<Vec<Vec<u8>>> to Vec<Vec<Witness>>
+                // BlockMessage.witnesses is Vec<Vec<Vec<u8>>> where:
+                // - Outer Vec: one per transaction
+                // - Middle Vec: one per input in that transaction
+                // - Inner Vec<u8>: the serialized witness stack for that input (Bitcoin wire format)
+                // Witness = Vec<ByteString> = Vec<Vec<u8>> (stack of witness elements)
+                // We need to deserialize each Vec<u8> (wire format) into a Witness (stack)
+                // Wire format: VarInt(stack_count) + for each element: VarInt(len) + bytes
+                use blvm_consensus::serialization::varint::decode_varint;
+                
+                let witnesses: Vec<Vec<Witness>> = block_msg.witnesses.iter()
+                    .map(|tx_witnesses| {
+                        // tx_witnesses is Vec<Vec<u8>> (one Vec<u8> per input)
+                        // Each Vec<u8> is the serialized witness stack in Bitcoin wire format
+                        tx_witnesses.iter()
+                            .map(|w_bytes| {
+                                // Deserialize witness stack from wire format
+                                // Format: VarInt(stack_count) + for each: VarInt(len) + bytes
+                                let mut offset = 0;
+                                let mut witness_stack = Vec::new();
+                                
+                                if w_bytes.is_empty() {
+                                    return witness_stack; // Empty witness
+                                }
+                                
+                                // Decode stack count (VarInt)
+                                match decode_varint(&w_bytes[offset..]) {
+                                    Ok((stack_count, varint_len)) => {
+                                        offset += varint_len;
+                                        
+                                        // Decode each witness element
+                                        for _ in 0..stack_count {
+                                            if offset >= w_bytes.len() {
+                                                break; // Incomplete witness data
+                                            }
+                                            
+                                            // Decode element length (VarInt)
+                                            match decode_varint(&w_bytes[offset..]) {
+                                                Ok((element_len, varint_len)) => {
+                                                    offset += varint_len;
+                                                    
+                                                    if offset + element_len as usize > w_bytes.len() {
+                                                        break; // Incomplete element
+                                                    }
+                                                    
+                                                    // Extract element bytes
+                                                    let element = w_bytes[offset..offset + element_len as usize].to_vec();
+                                                    witness_stack.push(element);
+                                                    offset += element_len as usize;
+                                                }
+                                                Err(_) => {
+                                                    warn!("Failed to decode witness element length");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        warn!("Failed to decode witness stack count, treating as empty");
+                                    }
+                                }
+                                
+                                witness_stack // Return Witness (Vec<Vec<u8>>)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                if self.complete_block_request(peer_addr, block_hash, block_msg.block.clone(), witnesses) {
+                    debug!("Routed Block response to pending request from {}", peer_addr);
+                    return Ok(()); // Message handled, return early
+                }
+                // No pending request - process normally through protocol layer
             }
             _ => {
-                // Continue to protocol layer processing
+                // Other NetworkMessage variants are handled above
+                // ProtocolMessage variants are handled in handle_incoming_wire_tcp()
             }
         }
-
-        // Process with protocol layer if dependencies are available
-        if let (Some(protocol_engine), Some(storage), Some(mempool_manager)) = (
-            self.protocol_engine.as_ref(),
-            self.storage.as_ref(),
-            self.mempool_manager.as_ref(),
-        ) {
-            // Convert ProtocolMessage to blvm_protocol::network::NetworkMessage
-            use crate::network::protocol_adapter::ProtocolAdapter;
-            let protocol_msg = ProtocolAdapter::protocol_to_consensus_message(&parsed)?;
-
-            // Create NodeChainAccess
-            use crate::network::chain_access::NodeChainAccess;
-            let chain_access = NodeChainAccess::new(
-                storage.blocks(),
-                storage.transactions(),
-                Arc::clone(mempool_manager),
-            );
-
-            // Get UTXO set and height
-            let utxo_set = storage
-                .utxos()
-                .get_all_utxos()
-                .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
-            let height = storage
-                .chain()
-                .get_height()
-                .map_err(|e| anyhow::anyhow!("Failed to get height: {}", e))?
-                .unwrap_or(0);
-
-            // Handle version message to detect peer capabilities and store service flags
-            if let ProtocolMessage::Version(version_msg) = &parsed {
-                // Store service flags and version in peer
-                {
-                    let mut pm = self.peer_manager.lock().await;
-                    let transport_addr = TransportAddr::Tcp(peer_addr);
-                    if let Some(peer) = pm.get_peer_mut(&transport_addr) {
-                        peer.set_services(version_msg.services);
-                        peer.set_version(version_msg.version as u32);
-                        debug!(
-                            "Stored service flags {} and version {} for peer {}",
-                            version_msg.services, version_msg.version, peer_addr
-                        );
-                    }
-                }
-
-                if version_msg.supports_fibre() {
-                    // Register FIBRE-capable peer
-                    #[cfg(feature = "fibre")]
-                    if let Some(fibre_relay) = &self.fibre_relay {
-                        let mut relay = fibre_relay.lock().await;
-                        // Use peer_addr as peer_id (could be improved with proper peer IDs)
-                        let peer_id = format!("{peer_addr}");
-                        // UDP address is same IP, port + 1 (or use addr_from if available)
-                        let udp_addr =
-                            SocketAddr::new(peer_addr.ip(), peer_addr.port().saturating_add(1));
-                        relay.register_fibre_peer(peer_id, Some(udp_addr));
-                        debug!(
-                            "Registered FIBRE-capable peer: {} (UDP: {})",
-                            peer_addr, udp_addr
-                        );
-                    }
-                    #[cfg(not(feature = "fibre"))]
-                    {
-                        debug!("FIBRE feature not enabled, skipping peer registration");
-                    }
-                }
-            }
-
-            // Process message with protocol layer - lock peer_states only during synchronous processing
-            let response = {
-                let mut peer_states = self.peer_states.write().await;
-                let peer_state = peer_states
-                    .entry(peer_addr)
-                    .or_insert_with(blvm_protocol::network::PeerState::new);
-
-                // Process message (synchronous, no await points)
-                use blvm_protocol::network::{process_network_message, ChainStateAccess};
-                process_network_message(
-                    protocol_engine,
-                    &protocol_msg,
-                    peer_state, // &mut PeerState
-                    Some(&chain_access as &dyn ChainStateAccess),
-                    Some(&utxo_set),
-                    Some(height),
-                )
-            }; // Lock dropped here before async operations
-
-            // Now handle response without holding the lock
-            match response {
-                Ok(response) => {
-                    // Convert response to wire format and send via transport layer
-                    use crate::network::message_bridge::MessageBridge;
-                    use crate::network::transport::TransportType;
-                    if let Ok(wire_messages) =
-                        MessageBridge::extract_send_messages(&response, TransportType::Tcp)
-                    {
-                        for wire_msg in wire_messages {
-                            if let Err(e) = self.send_to_peer(peer_addr, wire_msg).await {
-                                warn!("Failed to send protocol response to {}: {}", peer_addr, e);
-                            } else {
-                                debug!("Sent protocol response message to {}", peer_addr);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Protocol message processing failed: {}", e);
-                }
-            }
-        } else {
-            // Dependencies not set - fall back to old behavior
-            debug!("Protocol layer dependencies not set, skipping protocol processing");
-        }
-
+        
         Ok(())
     }
 
@@ -4288,14 +4325,14 @@ impl NetworkManager {
         }
 
         // Handle the request with registry integration and payment checking
-        let registry = self.module_registry.as_ref().map(Arc::clone);
-        let payment_processor = self.payment_processor.as_ref().map(Arc::clone);
-        let payment_state_machine = self.payment_state_machine.as_ref().map(Arc::clone);
-        let encryption = self.module_encryption.as_ref().map(Arc::clone);
-        let modules_dir = self.modules_dir.clone();
+        let registry = self.module_registry.lock().await.as_ref().map(Arc::clone);
+        let payment_processor = self.payment_processor.lock().await.as_ref().map(Arc::clone);
+        let payment_state_machine = self.payment_state_machine.lock().await.as_ref().map(Arc::clone);
+        let encryption = self.module_encryption.lock().await.as_ref().map(Arc::clone);
+        let modules_dir = self.modules_dir.lock().await.clone();
 
         // Get node's payment address script (set from config during initialization)
-        let node_script = self.node_payment_script.clone();
+        let node_script = self.node_payment_script.lock().await.clone();
 
         match handle_get_module(
             message,
@@ -4342,7 +4379,7 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolParser;
 
         // Handle the request with registry integration
-        let registry = self.module_registry.as_ref().map(Arc::clone);
+        let registry = self.module_registry.lock().await.as_ref().map(Arc::clone);
         let response = handle_get_module_by_hash(message, registry).await?;
 
         // Serialize and send response
@@ -4364,7 +4401,7 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolParser;
 
         // Handle the request with registry integration
-        let registry = self.module_registry.as_ref().map(Arc::clone);
+        let registry = self.module_registry.lock().await.as_ref().map(Arc::clone);
         let response = handle_get_module_list(message, registry).await?;
 
         // Serialize and send response
@@ -4385,7 +4422,7 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
 
-        let processor = self.payment_processor.as_ref().map(Arc::clone);
+        let processor = self.payment_processor.lock().await.as_ref().map(Arc::clone);
         let response_msg = handle_get_payment_request(&message, processor).await?;
         let response = ProtocolMessage::PaymentRequest(response_msg);
         let wire_msg = ProtocolParser::serialize_message(&response)?;
@@ -4403,9 +4440,10 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
 
-        let processor = self.payment_processor.as_ref().map(Arc::clone);
+        let processor = self.payment_processor.lock().await.as_ref().map(Arc::clone);
         // Get merchant private key (set from config during initialization)
-        let merchant_key = self.merchant_key.as_ref();
+        let merchant_key_guard = self.merchant_key.lock().await;
+        let merchant_key = merchant_key_guard.as_ref();
         let response_msg = handle_payment(&message, processor, merchant_key).await?;
         let response = ProtocolMessage::PaymentACK(response_msg);
         let wire_msg = ProtocolParser::serialize_message(&response)?;

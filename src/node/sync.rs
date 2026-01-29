@@ -16,7 +16,7 @@ use blvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, Validati
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Block provider for dependency injection
 pub struct BlockProvider {
@@ -168,6 +168,91 @@ impl SyncCoordinator {
         self.state_machine.transition_to(SyncState::Synced);
 
         Ok(())
+    }
+
+    /// Start parallel IBD sync (if enabled and peers available)
+    ///
+    /// Attempts to use parallel IBD for faster initial block download.
+    /// Falls back to sequential sync if parallel IBD is not available or fails.
+    #[cfg(feature = "production")]
+    pub async fn start_parallel_ibd(
+        &mut self,
+        current_height: u64,
+        target_height: u64,
+        blockstore: Arc<BlockStore>,
+        storage: Option<Arc<Storage>>,
+        protocol: Arc<BitcoinProtocolEngine>,
+        utxo_set: &mut UtxoSet,
+        network: Option<Arc<crate::network::NetworkManager>>,
+        peer_addresses: Vec<String>,
+    ) -> Result<bool> {
+        use crate::node::parallel_ibd::{ParallelIBD, ParallelIBDConfig};
+
+        // Check if we have enough peers for parallel IBD (need at least 2)
+        if peer_addresses.len() < 2 {
+            debug!(
+                "Not enough peers for parallel IBD (have {}, need 2), falling back to sequential",
+                peer_addresses.len()
+            );
+            return Ok(false);
+        }
+
+        // Check if we're actually in IBD (significant height difference)
+        if target_height <= current_height {
+            debug!("Already synced (height {} >= target {}), skipping parallel IBD", current_height, target_height);
+            return Ok(false);
+        }
+
+        info!(
+            "Attempting parallel IBD from height {} to {} with {} peers",
+            current_height,
+            target_height,
+            peer_addresses.len()
+        );
+
+        // Create parallel IBD coordinator
+        let config = ParallelIBDConfig::default();
+        let mut parallel_ibd = ParallelIBD::new(config);
+        parallel_ibd.initialize_peers(&peer_addresses);
+
+        // Attempt parallel sync
+        match parallel_ibd.sync_parallel(
+            current_height,
+            target_height,
+            &peer_addresses,
+            blockstore,
+            storage.as_ref(),
+            &protocol,
+            utxo_set,
+            network,
+        ).await {
+            Ok(()) => {
+                info!("Parallel IBD completed successfully");
+                self.state_machine.transition_to(SyncState::Synced);
+                Ok(true)
+            }
+            Err(e) => {
+                warn!("Parallel IBD failed: {}, falling back to sequential sync", e);
+                // Fall back to sequential sync
+                Ok(false)
+            }
+        }
+    }
+
+    #[cfg(not(feature = "production"))]
+    pub async fn start_parallel_ibd(
+        &mut self,
+        _current_height: u64,
+        _target_height: u64,
+        _blockstore: Arc<BlockStore>,
+        _storage: Option<Arc<Storage>>,
+        _protocol: Arc<BitcoinProtocolEngine>,
+        _utxo_set: &mut UtxoSet,
+        _network: Option<Arc<crate::network::NetworkManager>>,
+        _peer_addresses: Vec<String>,
+    ) -> Result<bool> {
+        // Parallel IBD not available without production feature
+        Ok(false)
     }
 
     /// Get sync progress
