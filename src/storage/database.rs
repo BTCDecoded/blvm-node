@@ -1,6 +1,6 @@
 //! Database abstraction layer
 //!
-//! Provides a unified interface for different database backends (sled, redb).
+//! Provides a unified interface for different database backends (sled, redb, rocksdb).
 //! Allows switching between storage engines via feature flags.
 
 use anyhow::Result;
@@ -54,6 +54,7 @@ pub trait Tree: Send + Sync {
 pub enum DatabaseBackend {
     Sled,
     Redb,
+    RocksDB,
 }
 
 /// Create a database instance based on backend type
@@ -73,6 +74,12 @@ pub fn create_database<P: AsRef<Path>>(
         #[cfg(not(feature = "redb"))]
         DatabaseBackend::Redb => Err(anyhow::anyhow!(
             "Redb backend not available (feature not enabled)"
+        )),
+        #[cfg(feature = "rocksdb")]
+        DatabaseBackend::RocksDB => Ok(Box::new(rocksdb_impl::RocksDBDatabase::new(data_dir)?)),
+        #[cfg(not(feature = "rocksdb"))]
+        DatabaseBackend::RocksDB => Err(anyhow::anyhow!(
+            "RocksDB backend not available (feature not enabled)"
         )),
     }
 }
@@ -110,7 +117,11 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
             {
                 Some(DatabaseBackend::Sled)
             }
-            #[cfg(not(feature = "sled"))]
+            #[cfg(all(not(feature = "sled"), feature = "rocksdb"))]
+            {
+                Some(DatabaseBackend::RocksDB)
+            }
+            #[cfg(all(not(feature = "sled"), not(feature = "rocksdb")))]
             {
                 None
             }
@@ -120,7 +131,25 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
             {
                 Some(DatabaseBackend::Redb)
             }
-            #[cfg(not(feature = "redb"))]
+            #[cfg(all(not(feature = "redb"), feature = "rocksdb"))]
+            {
+                Some(DatabaseBackend::RocksDB)
+            }
+            #[cfg(all(not(feature = "redb"), not(feature = "rocksdb")))]
+            {
+                None
+            }
+        }
+        DatabaseBackend::RocksDB => {
+            #[cfg(feature = "redb")]
+            {
+                Some(DatabaseBackend::Redb)
+            }
+            #[cfg(all(not(feature = "redb"), feature = "sled"))]
+            {
+                Some(DatabaseBackend::Sled)
+            }
+            #[cfg(all(not(feature = "redb"), not(feature = "sled")))]
             {
                 None
             }
@@ -256,6 +285,8 @@ mod redb_impl {
     static VAULTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vaults");
     static POOLS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pools");
     static BATCHES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("batches");
+    // Module storage table (shared table for all modules with namespaced keys)
+    static MODULES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("modules");
 
     pub struct RedbDatabase {
         db: Arc<RedbDb>,
@@ -299,6 +330,8 @@ mod redb_impl {
                             let _ = write_txn.open_table(VAULTS_TABLE)?;
                             let _ = write_txn.open_table(POOLS_TABLE)?;
                             let _ = write_txn.open_table(BATCHES_TABLE)?;
+                            // Module storage table
+                            let _ = write_txn.open_table(MODULES_TABLE)?;
                             let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
                             let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
                             let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
@@ -311,6 +344,8 @@ mod redb_impl {
                             let _ = write_txn.open_table(VAULTS_TABLE)?;
                             let _ = write_txn.open_table(POOLS_TABLE)?;
                             let _ = write_txn.open_table(BATCHES_TABLE)?;
+                            // Module storage table
+                            let _ = write_txn.open_table(MODULES_TABLE)?;
                         }
                         write_txn.commit()?;
                         db
@@ -358,6 +393,8 @@ mod redb_impl {
                 let _ = write_txn.open_table(VAULTS_TABLE)?;
                 let _ = write_txn.open_table(POOLS_TABLE)?;
                 let _ = write_txn.open_table(BATCHES_TABLE)?;
+                // Module storage table
+                let _ = write_txn.open_table(MODULES_TABLE)?;
             }
             write_txn.commit()?;
 
@@ -398,6 +435,10 @@ mod redb_impl {
                 "vaults" => Some(&VAULTS_TABLE),
                 "pools" => Some(&POOLS_TABLE),
                 "batches" => Some(&BATCHES_TABLE),
+                // Module storage table
+                "modules" => Some(&MODULES_TABLE),
+                // Module trees (dynamic names) use MODULES_TABLE with namespaced keys
+                name if name.starts_with("module_") => Some(&MODULES_TABLE),
                 _ => None,
             }
         }
@@ -405,6 +446,36 @@ mod redb_impl {
 
     impl Database for RedbDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
+            // Handle module trees specially
+            if name.starts_with("module_") {
+                // Parse module_id and tree_name from format: module_{module_id}_{tree_name}
+                let parts: Vec<&str> = name.splitn(3, '_').collect();
+                if parts.len() == 3 && parts[0] == "module" {
+                    let module_id = parts[1].to_string();
+                    let tree_name = parts[2].to_string();
+
+                    // Get MODULES_TABLE directly (avoid recursion)
+                    let table_def = self
+                        .get_table_def("modules")
+                        .ok_or_else(|| anyhow::anyhow!("MODULES_TABLE not defined"))?;
+
+                    // Create a RedbTree for the MODULES_TABLE (bypass open_tree to avoid recursion)
+                    let inner_tree = RedbTree {
+                        db: Arc::clone(&self.db),
+                        table_def,
+                        name: "modules".to_string(),
+                    };
+
+                    // Return wrapped tree with namespacing
+                    return Ok(Box::new(ModuleTree {
+                        inner: Arc::new(inner_tree),
+                        module_id,
+                        tree_name,
+                    }));
+                }
+            }
+
+            // Existing static table logic
             let table_def = self.get_table_def(name).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Unknown table name: {}. Redb requires pre-defined tables.",
@@ -425,6 +496,107 @@ mod redb_impl {
             let write_txn = self.db.begin_write()?;
             write_txn.commit()?;
             Ok(())
+        }
+    }
+
+    /// ModuleTree wrapper that provides namespaced keys for module storage
+    /// All module trees share the MODULES_TABLE but use key prefixes for isolation
+    struct ModuleTree {
+        inner: Arc<dyn Tree>,
+        module_id: String,
+        tree_name: String,
+    }
+
+    impl ModuleTree {
+        fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
+            let mut namespaced = self.key_prefix();
+            namespaced.extend_from_slice(key);
+            namespaced
+        }
+
+        fn key_prefix(&self) -> Vec<u8> {
+            format!("module_{}_{}_", self.module_id, self.tree_name).into_bytes()
+        }
+    }
+
+    impl Tree for ModuleTree {
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            let namespaced_key = self.namespace_key(key);
+            self.inner.insert(&namespaced_key, value)
+        }
+
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            let namespaced_key = self.namespace_key(key);
+            self.inner.get(&namespaced_key)
+        }
+
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            let namespaced_key = self.namespace_key(key);
+            self.inner.remove(&namespaced_key)
+        }
+
+        fn contains_key(&self, key: &[u8]) -> Result<bool> {
+            // Direct lookup with namespaced key - efficient
+            let namespaced_key = self.namespace_key(key);
+            self.inner.contains_key(&namespaced_key)
+        }
+
+        fn clear(&self) -> Result<()> {
+            // Remove only keys with this module/tree prefix
+            let prefix = self.key_prefix();
+            let keys: Vec<Vec<u8>> = {
+                let mut collected = Vec::new();
+                for item in self.inner.iter() {
+                    match item {
+                        Ok((k, _)) => {
+                            if k.starts_with(&prefix) {
+                                collected.push(k);
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                collected
+            };
+
+            for key in keys {
+                self.inner.remove(&key)?;
+            }
+            Ok(())
+        }
+
+        fn len(&self) -> Result<usize> {
+            // Count only keys with this module/tree prefix
+            let prefix = self.key_prefix();
+            let mut count = 0;
+            for item in self.inner.iter() {
+                match item {
+                    Ok((k, _)) if k.starts_with(&prefix) => count += 1,
+                    Ok(_) => {} // Skip keys from other modules
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(count)
+        }
+
+        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
+            // Filter iterator to only return keys for this module/tree
+            let prefix = self.key_prefix();
+            Box::new(
+                self.inner
+                    .iter()
+                    .filter_map(move |item| {
+                        match item {
+                            Ok((k, v)) if k.starts_with(&prefix) => {
+                                // Remove prefix from key
+                                let unprefixed_key = k[prefix.len()..].to_vec();
+                                Some(Ok((unprefixed_key, v)))
+                            }
+                            Ok(_) => None, // Skip keys from other modules
+                            Err(e) => Some(Err(e)),
+                        }
+                    }),
+            )
         }
     }
 
@@ -565,6 +737,173 @@ mod redb_impl {
                     items.push(Err(anyhow::anyhow!("Failed to create range: {}", e)));
                 }
             }
+
+            Box::new(items.into_iter())
+        }
+    }
+}
+
+// RocksDB implementation
+#[cfg(feature = "rocksdb")]
+pub mod rocksdb_impl {
+    use super::{Database, Tree};
+    use anyhow::Result;
+    use rocksdb::{DB, Options, ColumnFamilyDescriptor, ColumnFamily};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    pub struct RocksDBDatabase {
+        db: Arc<DB>,
+    }
+
+    impl RocksDBDatabase {
+        /// Create a new RocksDB database
+        pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+            let db_path = data_dir.as_ref().join("rocksdb");
+
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
+
+            // Define column families for each tree type
+            let cfs = vec![
+                ColumnFamilyDescriptor::new("default", Options::default()),
+                ColumnFamilyDescriptor::new("blocks", Options::default()),
+                ColumnFamilyDescriptor::new("headers", Options::default()),
+                ColumnFamilyDescriptor::new("height_index", Options::default()),
+                ColumnFamilyDescriptor::new("hash_to_height", Options::default()),
+                ColumnFamilyDescriptor::new("witnesses", Options::default()),
+                ColumnFamilyDescriptor::new("recent_headers", Options::default()),
+                ColumnFamilyDescriptor::new("utxos", Options::default()),
+                ColumnFamilyDescriptor::new("spent_outputs", Options::default()),
+                ColumnFamilyDescriptor::new("chain_info", Options::default()),
+                ColumnFamilyDescriptor::new("work_cache", Options::default()),
+                ColumnFamilyDescriptor::new("chainwork_cache", Options::default()),
+                ColumnFamilyDescriptor::new("utxo_stats_cache", Options::default()),
+                ColumnFamilyDescriptor::new("network_hashrate_cache", Options::default()),
+                ColumnFamilyDescriptor::new("invalid_blocks", Options::default()),
+                ColumnFamilyDescriptor::new("chain_tips", Options::default()),
+                ColumnFamilyDescriptor::new("tx_by_hash", Options::default()),
+                ColumnFamilyDescriptor::new("tx_by_block", Options::default()),
+                ColumnFamilyDescriptor::new("tx_metadata", Options::default()),
+                ColumnFamilyDescriptor::new("modules", Options::default()),
+            ];
+
+            let db = DB::open_cf_descriptors(&opts, &db_path, cfs)?;
+
+            Ok(Self { db: Arc::new(db) })
+        }
+
+        /// Open RocksDB with Bitcoin Core LevelDB format
+        ///
+        /// Opens an existing Bitcoin Core chainstate database (LevelDB format).
+        /// RocksDB can read LevelDB databases directly (backward compatible).
+        pub fn open_bitcoin_core<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+            // Open existing Bitcoin Core chainstate database (LevelDB format)
+            // RocksDB can read LevelDB databases directly
+            let chainstate_path = data_dir.as_ref().join("chainstate");
+
+            let mut opts = Options::default();
+            opts.create_if_missing(false); // Don't create, must exist
+
+            // RocksDB will automatically detect LevelDB format
+            // Note: LevelDB uses a single "default" column family
+            let cfs = vec![
+                ColumnFamilyDescriptor::new("default", Options::default()),
+            ];
+
+            let db = DB::open_cf_descriptors(&opts, &chainstate_path, cfs)?;
+
+            Ok(Self { db: Arc::new(db) })
+        }
+    }
+
+    impl Database for RocksDBDatabase {
+        fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
+            // Get or create column family
+            let cf = if let Some(cf) = self.db.cf_handle(name) {
+                cf
+            } else {
+                // Create new column family if it doesn't exist
+                let opts = Options::default();
+                self.db.create_cf(name, &opts)?;
+                self.db.cf_handle(name)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to create column family: {}", name))?
+            };
+
+            Ok(Box::new(RocksDBTree {
+                db: Arc::clone(&self.db),
+                cf: Arc::new(cf),
+                name: name.to_string(),
+            }))
+        }
+
+        fn flush(&self) -> Result<()> {
+            self.db.flush()?;
+            Ok(())
+        }
+    }
+
+    struct RocksDBTree {
+        db: Arc<DB>,
+        cf: Arc<ColumnFamily>,
+        name: String,
+    }
+
+    impl Tree for RocksDBTree {
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            self.db.put_cf(&self.cf, key, value)?;
+            Ok(())
+        }
+
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            Ok(self.db.get_cf(&self.cf, key)?.map(|v| v.to_vec()))
+        }
+
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            self.db.delete_cf(&self.cf, key)?;
+            Ok(())
+        }
+
+        fn contains_key(&self, key: &[u8]) -> Result<bool> {
+            Ok(self.db.get_cf(&self.cf, key)?.is_some())
+        }
+
+        fn clear(&self) -> Result<()> {
+            // Delete all keys in this column family
+            let mut iter = self.db.iterator_cf(&self.cf, rocksdb::IteratorMode::Start);
+            let mut batch = rocksdb::WriteBatch::default();
+
+            while let Some(item) = iter.next() {
+                let (key, _) = item?;
+                batch.delete_cf(&self.cf, &key);
+            }
+
+            self.db.write(batch)?;
+            Ok(())
+        }
+
+        fn len(&self) -> Result<usize> {
+            // Count keys in column family
+            let mut count = 0;
+            let iter = self.db.iterator_cf(&self.cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let _ = item?;
+                count += 1;
+            }
+            Ok(count)
+        }
+
+        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
+            // Use RocksDB iterator for efficient iteration
+            // Note: We need to collect into Vec because the iterator borrows from self
+            let iter = self.db.iterator_cf(&self.cf, rocksdb::IteratorMode::Start);
+            let items: Vec<_> = iter
+                .map(|item| {
+                    item.map(|(k, v)| (k.to_vec(), v.to_vec()))
+                        .map_err(|e| anyhow::anyhow!("RocksDB iteration error: {}", e))
+                })
+                .collect();
 
             Box::new(items.into_iter())
         }

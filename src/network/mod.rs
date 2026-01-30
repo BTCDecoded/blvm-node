@@ -9,6 +9,8 @@ pub mod ban_list_signing;
 pub mod chain_access;
 pub mod dns_seeds;
 pub mod dos_protection;
+pub mod ibd_protection;
+pub mod bandwidth_protection;
 pub mod inventory;
 pub mod message_bridge;
 pub mod module_registry_extensions;
@@ -474,6 +476,10 @@ pub struct NetworkManager {
     pending_block_requests: Arc<Mutex<HashMap<(SocketAddr, blvm_protocol::Hash), tokio::sync::oneshot::Sender<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>>>>,
     /// DoS protection manager
     dos_protection: Arc<dos_protection::DosProtectionManager>,
+    /// IBD bandwidth protection manager
+    ibd_protection: Arc<ibd_protection::IbdProtectionManager>,
+    /// Unified bandwidth protection manager (extends IBD protection)
+    bandwidth_protection: Arc<bandwidth_protection::BandwidthProtectionManager>,
     /// Replay protection for custom protocol messages
     replay_protection: Arc<replay_protection::ReplayProtection>,
     /// Pending ban shares (for periodic sharing)
@@ -594,6 +600,32 @@ impl NetworkManager {
             dos_config.ban_duration_seconds,
         ));
 
+        // Initialize IBD protection (bandwidth exhaustion attack mitigation)
+        let ibd_protection = if let Some(ibd_config) = config.and_then(|c| c.ibd_protection.as_ref()) {
+            let mut ibd_protection_config = ibd_protection::IbdProtectionConfig::default();
+            // Convert GB to bytes
+            ibd_protection_config.max_bandwidth_per_peer_per_day = (ibd_config.max_bandwidth_per_peer_per_day_gb * 1024 * 1024 * 1024) as u64;
+            ibd_protection_config.max_bandwidth_per_peer_per_hour = (ibd_config.max_bandwidth_per_peer_per_hour_gb * 1024 * 1024 * 1024) as u64;
+            ibd_protection_config.max_bandwidth_per_ip_per_day = (ibd_config.max_bandwidth_per_ip_per_day_gb * 1024 * 1024 * 1024) as u64;
+            ibd_protection_config.max_bandwidth_per_ip_per_hour = (ibd_config.max_bandwidth_per_ip_per_hour_gb * 1024 * 1024 * 1024) as u64;
+            ibd_protection_config.max_bandwidth_per_subnet_per_day = (ibd_config.max_bandwidth_per_subnet_per_day_gb * 1024 * 1024 * 1024) as u64;
+            ibd_protection_config.max_bandwidth_per_subnet_per_hour = (ibd_config.max_bandwidth_per_subnet_per_hour_gb * 1024 * 1024 * 1024) as u64;
+            ibd_protection_config.max_concurrent_ibd_serving = ibd_config.max_concurrent_ibd_serving;
+            ibd_protection_config.ibd_request_cooldown_seconds = ibd_config.ibd_request_cooldown_seconds;
+            ibd_protection_config.suspicious_reconnection_threshold = ibd_config.suspicious_reconnection_threshold;
+            ibd_protection_config.reputation_ban_threshold = ibd_config.reputation_ban_threshold;
+            ibd_protection_config.enable_emergency_throttle = ibd_config.enable_emergency_throttle;
+            ibd_protection_config.emergency_throttle_percent = ibd_config.emergency_throttle_percent;
+            Arc::new(ibd_protection::IbdProtectionManager::with_config(ibd_protection_config))
+        } else {
+            Arc::new(ibd_protection::IbdProtectionManager::new())
+        };
+
+        // Initialize unified bandwidth protection (extends IBD protection)
+        let bandwidth_protection = Arc::new(bandwidth_protection::BandwidthProtectionManager::new(
+            Arc::clone(&ibd_protection)
+        ));
+
         // Use config for address database
         let addr_db_config_default = crate::config::AddressDatabaseConfig::default();
         let addr_db_config = config
@@ -663,6 +695,8 @@ impl NetworkManager {
             pending_headers_requests: Arc::new(Mutex::new(HashMap::new())),
             pending_block_requests: Arc::new(Mutex::new(HashMap::new())),
             dos_protection,
+            ibd_protection,
+            bandwidth_protection,
             replay_protection: Arc::new(replay_protection::ReplayProtection::new()),
             pending_ban_shares: Arc::new(Mutex::new(Vec::new())),
             ban_list_sharing_config: config.and_then(|c| c.ban_list_sharing.clone()),
@@ -2939,6 +2973,52 @@ impl NetworkManager {
         // Track bytes sent only if peer exists (async-safe)
         self.track_bytes_sent(message_len as u64).await;
 
+        // Bandwidth Protection: Record bandwidth for various message types
+        // Check message command (Bitcoin wire format: 4-byte magic + 12-byte command + 4-byte length + payload)
+        if message.len() >= 16 {
+            let command_bytes = &message[4..16];
+            let command = String::from_utf8_lossy(command_bytes).trim_end_matches('\0');
+            
+            // Get SocketAddr for bandwidth protection (needed for tracking)
+            let peer_socket_addr_opt: Option<SocketAddr> = match &addr {
+                TransportAddr::Tcp(sock) => Some(*sock),
+                #[cfg(feature = "quinn")]
+                TransportAddr::Quinn(sock) => Some(*sock),
+                #[cfg(feature = "iroh")]
+                TransportAddr::Iroh(_) => {
+                    // For Iroh, try to get from socket_to_transport mapping
+                    // If not found, skip bandwidth tracking (Iroh uses different addressing)
+                    self.socket_to_transport.lock().await
+                        .iter()
+                        .find_map(|(sock, &ref ta)| if ta == addr { Some(*sock) } else { None })
+                }
+            };
+
+            if let Some(peer_socket_addr) = peer_socket_addr_opt {
+                // Record bandwidth for IBD-serving messages
+                if command == "headers" || command == "block" {
+                    // Record bandwidth for IBD protection
+                    self.ibd_protection.record_bandwidth(peer_socket_addr, message_len as u64).await;
+                    debug!(
+                        "IBD protection: Recorded {} bytes for {} message to {}",
+                        message_len, command, peer_socket_addr
+                    );
+                }
+                // Record bandwidth for transaction relay
+                else if command == "tx" {
+                    use crate::network::bandwidth_protection::ServiceType;
+                    // Record transaction relay bandwidth (per-IP/subnet limits)
+                    self.bandwidth_protection
+                        .record_service_bandwidth(ServiceType::TransactionRelay, peer_socket_addr, message_len as u64)
+                        .await;
+                    debug!(
+                        "Transaction relay: Recorded {} bytes to {}",
+                        message_len, peer_socket_addr
+                    );
+                }
+            }
+        }
+
         // Send message without holding the lock (unbounded channel, so send won't block)
         sender
             .send(message)
@@ -3364,6 +3444,9 @@ impl NetworkManager {
                         #[cfg(feature = "iroh")]
                         TransportAddr::Iroh(_) => None, // Iroh peers use different reconnection mechanism
                     } {
+                        // IBD Protection: Stop IBD serving tracking when peer disconnects
+                        self.ibd_protection.stop_ibd_serving(socket_addr).await;
+                        debug!("IBD protection: Stopped IBD serving tracking for disconnected peer {}", socket_addr);
                         // Add to reconnection queue with exponential backoff
                         let now = current_timestamp();
                         // Add to reconnection queue with exponential backoff
@@ -4017,6 +4100,29 @@ impl NetworkManager {
 
         // Check transaction rate limiting for Tx messages
         if let ProtocolMessage::Tx(_) = &parsed {
+            // Enhanced: Check per-IP bandwidth limits (prevents bypass with multiple peers from same IP)
+            use crate::network::bandwidth_protection::ServiceType;
+            let tx_bytes = data.len() as u64;
+            
+            // Check if IP has exceeded transaction relay bandwidth limits
+            match self.bandwidth_protection
+                .check_service_request(ServiceType::TransactionRelay, peer_addr)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        "Transaction relay bandwidth limit exceeded for IP {} (peer {}), dropping transaction",
+                        peer_addr.ip(), peer_addr
+                    );
+                    return Ok(()); // Drop transaction
+                }
+                Err(e) => {
+                    warn!("Bandwidth check error for transaction relay: {}", e);
+                    // Continue processing (don't block on check error)
+                }
+            }
+
             let (burst, rate) = self
                 .mempool_policy_config
                 .as_ref()
@@ -4039,14 +4145,13 @@ impl NetworkManager {
                 return Ok(()); // Drop transaction
             }
 
-            // Check byte rate limiting
+            // Check byte rate limiting (per-peer)
             let (byte_burst, byte_rate) = self
                 .mempool_policy_config
                 .as_ref()
                 .map(|cfg| (cfg.tx_byte_rate_burst, cfg.tx_byte_rate_limit))
                 .unwrap_or((1_000_000, 100_000)); // Default: 1 MB burst, 100 KB/s
 
-            let tx_bytes = data.len() as u64;
             let should_process_bytes = {
                 let mut byte_rates = self.peer_tx_byte_rate_limiters.lock().await;
                 let limiter = byte_rates
@@ -4059,6 +4164,11 @@ impl NetworkManager {
                 warn!("Transaction byte rate limit exceeded for peer {} ({} bytes), dropping transaction", peer_addr, tx_bytes);
                 return Ok(()); // Drop transaction
             }
+
+            // Record transaction relay bandwidth (for per-IP/subnet tracking)
+            self.bandwidth_protection
+                .record_service_bandwidth(ServiceType::TransactionRelay, peer_addr, tx_bytes)
+                .await;
 
             // Check if transaction is spam and track violations
             use blvm_consensus::spam_filter::SpamFilter;
@@ -4100,6 +4210,78 @@ impl NetworkManager {
 
         // Handle special cases that don't go through protocol layer
         match &parsed {
+            // IBD Protection: Check GetHeaders requests (full chain sync)
+            ProtocolMessage::GetHeaders(getheaders) => {
+                // Detect if this is a full chain request (empty locator = IBD)
+                let is_full_chain_request = getheaders.block_locator_hashes.is_empty();
+                
+                if is_full_chain_request {
+                    // Check IBD protection before serving
+                    match self.ibd_protection.can_serve_ibd(peer_addr).await {
+                        Ok(true) => {
+                            // Start IBD serving tracking
+                            self.ibd_protection.start_ibd_serving(peer_addr).await;
+                            debug!("IBD protection: Allowing full chain sync request from {}", peer_addr);
+                            // Continue to process the request normally
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "IBD protection: Rejecting full chain sync request from {} (bandwidth limit exceeded or cooldown active)",
+                                peer_addr
+                            );
+                            // Send reject message or silently drop
+                            // For now, we'll silently drop to avoid revealing our protection
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!("IBD protection check failed for {}: {}", peer_addr, e);
+                            // On error, allow the request (fail open for safety)
+                        }
+                    }
+                }
+                // Continue to process GetHeaders normally (will go through protocol layer)
+            }
+            // IBD Protection: Check GetData requests for blocks (IBD serving)
+            ProtocolMessage::GetData(getdata) => {
+                // Check if this GetData contains block requests (MSG_BLOCK = 2)
+                use crate::network::inventory::MSG_BLOCK;
+                let has_block_requests = getdata.inventory.iter().any(|inv| inv.inv_type == MSG_BLOCK);
+                
+                if has_block_requests {
+                    // Check IBD protection before serving blocks
+                    match self.ibd_protection.can_serve_ibd(peer_addr).await {
+                        Ok(true) => {
+                            // Start IBD serving tracking (if not already started)
+                            self.ibd_protection.start_ibd_serving(peer_addr).await;
+                            debug!("IBD protection: Allowing block request from {}", peer_addr);
+                            // Continue to process the request normally
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "IBD protection: Rejecting block request from {} (bandwidth limit exceeded or cooldown active)",
+                                peer_addr
+                            );
+                            // Send NotFound message for requested blocks (standard Bitcoin protocol behavior)
+                            // This prevents the peer from retrying immediately
+                            use crate::network::protocol::{NotFoundMessage, ProtocolMessage, ProtocolParser};
+                            let notfound = NotFoundMessage {
+                                inventory: getdata.inventory.clone(),
+                            };
+                            if let Ok(wire_msg) = ProtocolParser::serialize_message(&ProtocolMessage::NotFound(notfound)) {
+                                if let Err(e) = self.send_to_peer(peer_addr, wire_msg).await {
+                                    warn!("Failed to send NotFound message to {}: {}", peer_addr, e);
+                                }
+                            }
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!("IBD protection check failed for {}: {}", peer_addr, e);
+                            // On error, allow the request (fail open for safety)
+                        }
+                    }
+                }
+                // Continue to process GetData normally (will go through protocol layer)
+            }
             // BIP331
             ProtocolMessage::SendPkgTxn(_) => {
                 let _ = self
@@ -4279,9 +4461,33 @@ impl NetworkManager {
         data: Vec<u8>,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        use crate::network::bandwidth_protection::ServiceType;
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
         use crate::network::protocol_extensions::handle_get_utxo_set;
+
+        // Check bandwidth limits before processing (UTXO set can be very large)
+        match self.bandwidth_protection
+            .check_service_request(ServiceType::UtxoSet, peer_addr)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(anyhow::anyhow!(
+                    "UTXO set bandwidth limit exceeded for peer {}",
+                    peer_addr
+                ));
+            }
+            Err(e) => {
+                warn!("Bandwidth check error for UTXO set: {}", e);
+                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+            }
+        }
+
+        // Record request (for rate limiting - very restrictive for UTXO set)
+        self.bandwidth_protection
+            .record_service_request(ServiceType::UtxoSet, peer_addr)
+            .await;
 
         // Parse the request
         let protocol_msg = ProtocolParser::parse_message(&data)?;
@@ -4296,7 +4502,13 @@ impl NetworkManager {
 
         // Serialize and send response
         let response_wire = ProtocolParser::serialize_message(&ProtocolMessage::UTXOSet(response))?;
+        let response_bytes = response_wire.len() as u64;
         self.send_to_peer(peer_addr, response_wire).await?;
+
+        // Record bandwidth usage (UTXO set can be several GB)
+        self.bandwidth_protection
+            .record_service_bandwidth(ServiceType::UtxoSet, peer_addr, response_bytes)
+            .await;
 
         Ok(())
     }
@@ -4307,9 +4519,33 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         message: crate::network::protocol::GetModuleMessage,
     ) -> Result<()> {
+        use crate::network::bandwidth_protection::ServiceType;
         use crate::network::module_registry_extensions::handle_get_module;
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
+
+        // Check bandwidth limits before processing
+        match self.bandwidth_protection
+            .check_service_request(ServiceType::ModuleServing, peer_addr)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(anyhow::anyhow!(
+                    "Module serving bandwidth limit exceeded for peer {}",
+                    peer_addr
+                ));
+            }
+            Err(e) => {
+                warn!("Bandwidth check error for module serving: {}", e);
+                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+            }
+        }
+
+        // Record request (for rate limiting)
+        self.bandwidth_protection
+            .record_service_request(ServiceType::ModuleServing, peer_addr)
+            .await;
 
         // Replay protection: Check request ID
         if let Err(e) = self
@@ -4349,7 +4585,14 @@ impl NetworkManager {
                 // Serialize and send module response
                 let response_wire =
                     ProtocolParser::serialize_message(&ProtocolMessage::Module(module_response))?;
+                let response_bytes = response_wire.len() as u64;
                 self.send_to_peer(peer_addr, response_wire).await?;
+
+                // Record bandwidth usage (modules can be large)
+                self.bandwidth_protection
+                    .record_service_bandwidth(ServiceType::ModuleServing, peer_addr, response_bytes)
+                    .await;
+
                 Ok(())
             }
             Err(e) => {
@@ -4453,9 +4696,34 @@ impl NetworkManager {
 
     /// Handle GetCfilters request from a peer
     async fn handle_getcfilters_request(&self, data: Vec<u8>, peer_addr: SocketAddr) -> Result<()> {
+        use crate::network::bandwidth_protection::ServiceType;
         use crate::network::bip157_handler::handle_getcfilters;
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
+        use std::time::Instant;
+
+        // Check bandwidth limits before processing
+        match self.bandwidth_protection
+            .check_service_request(ServiceType::Filters, peer_addr)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(anyhow::anyhow!(
+                    "Filter service bandwidth limit exceeded for peer {}",
+                    peer_addr
+                ));
+            }
+            Err(e) => {
+                warn!("Bandwidth check error for filter service: {}", e);
+                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+            }
+        }
+
+        // Record request (for rate limiting)
+        self.bandwidth_protection
+            .record_service_request(ServiceType::Filters, peer_addr)
+            .await;
 
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
@@ -4463,14 +4731,35 @@ impl NetworkManager {
             _ => return Err(anyhow::anyhow!("Expected GetCfilters message")),
         };
 
+        // Track CPU time for filter generation
+        let cpu_start = Instant::now();
+
         // Handle request and generate responses
         let storage_ref = self.storage.as_ref();
         let responses = handle_getcfilters(&request, &self.filter_service, storage_ref)?;
 
-        // Send responses to peer
+        // Check CPU time limit
+        let cpu_time_ms = cpu_start.elapsed().as_millis() as u64;
+        if !self.bandwidth_protection.check_cpu_time_limit(ServiceType::Filters, cpu_time_ms) {
+            return Err(anyhow::anyhow!(
+                "Filter generation CPU time limit exceeded: {}ms",
+                cpu_time_ms
+            ));
+        }
+
+        // Send responses to peer and track bandwidth
+        let mut total_bytes = 0u64;
         for response in responses {
             let response_wire = ProtocolParser::serialize_message(&response)?;
+            total_bytes += response_wire.len() as u64;
             self.send_to_peer(peer_addr, response_wire).await?;
+        }
+
+        // Record bandwidth usage
+        if total_bytes > 0 {
+            self.bandwidth_protection
+                .record_service_bandwidth(ServiceType::Filters, peer_addr, total_bytes)
+                .await;
         }
 
         Ok(())
@@ -4524,11 +4813,35 @@ impl NetworkManager {
 
     /// Handle PkgTxn message from a peer
     async fn handle_pkgtxn_request(&self, data: Vec<u8>, peer_addr: SocketAddr) -> Result<()> {
+        use crate::network::bandwidth_protection::ServiceType;
         use crate::network::package_relay::PackageRelay;
         use crate::network::package_relay_handler::handle_pkgtxn;
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
         use blvm_protocol::Transaction;
+
+        // Check bandwidth limits before processing
+        match self.bandwidth_protection
+            .check_service_request(ServiceType::PackageRelay, peer_addr)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(anyhow::anyhow!(
+                    "Package relay bandwidth limit exceeded for peer {}",
+                    peer_addr
+                ));
+            }
+            Err(e) => {
+                warn!("Bandwidth check error for package relay: {}", e);
+                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+            }
+        }
+
+        // Record request (for rate limiting)
+        self.bandwidth_protection
+            .record_service_request(ServiceType::PackageRelay, peer_addr)
+            .await;
 
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
@@ -4537,9 +4850,11 @@ impl NetworkManager {
         };
 
         let mut relay = PackageRelay::new();
+        let mut response_bytes = 0u64;
         if let Some(reject) = handle_pkgtxn(&mut relay, &request)? {
             let response_wire =
                 ProtocolParser::serialize_message(&ProtocolMessage::PkgTxnReject(reject))?;
+            response_bytes = response_wire.len() as u64;
             self.send_to_peer(peer_addr, response_wire).await?;
         }
 
@@ -4552,6 +4867,13 @@ impl NetworkManager {
             }
         }
         let _ = self.submit_transactions_to_mempool(&txs).await;
+
+        // Record bandwidth usage (response size)
+        if response_bytes > 0 {
+            self.bandwidth_protection
+                .record_service_bandwidth(ServiceType::PackageRelay, peer_addr, response_bytes)
+                .await;
+        }
         Ok(())
     }
 
@@ -4594,9 +4916,33 @@ impl NetworkManager {
         data: Vec<u8>,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        use crate::network::bandwidth_protection::ServiceType;
         use crate::network::protocol::ProtocolMessage;
         use crate::network::protocol::ProtocolParser;
         use crate::network::protocol_extensions::handle_get_filtered_block;
+
+        // Check bandwidth limits before processing
+        match self.bandwidth_protection
+            .check_service_request(ServiceType::FilteredBlocks, peer_addr)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(anyhow::anyhow!(
+                    "Filtered block bandwidth limit exceeded for peer {}",
+                    peer_addr
+                ));
+            }
+            Err(e) => {
+                warn!("Bandwidth check error for filtered blocks: {}", e);
+                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+            }
+        }
+
+        // Record request (for rate limiting)
+        self.bandwidth_protection
+            .record_service_request(ServiceType::FilteredBlocks, peer_addr)
+            .await;
 
         // Parse the request
         let protocol_msg = ProtocolParser::parse_message(&data)?;
@@ -4627,7 +4973,13 @@ impl NetworkManager {
         // Serialize and send response
         let response_wire =
             ProtocolParser::serialize_message(&ProtocolMessage::FilteredBlock(response))?;
+        let response_bytes = response_wire.len() as u64;
         self.send_to_peer(peer_addr, response_wire).await?;
+
+        // Record bandwidth usage
+        self.bandwidth_protection
+            .record_service_bandwidth(ServiceType::FilteredBlocks, peer_addr, response_bytes)
+            .await;
 
         Ok(())
     }
@@ -5362,6 +5714,7 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     mod concurrency_stress_tests;
+    mod bandwidth_protection_tests;
     use super::*;
 
     #[tokio::test]

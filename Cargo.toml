@@ -30,6 +30,7 @@ blvm-consensus = { path = "../blvm-consensus", optional = true }
 # Storage layer - EXACT VERSIONS for security
 sled = { version = "=0.34.7", optional = true }
 redb = { version = "=1.4", optional = true }
+rocksdb = { version = "0.21", optional = true }
 
 # Networking layer - EXACT VERSIONS for security
 tokio = { version = "=1.48.0", features = ["full", "rt-multi-thread"] }  # Updated for iroh 0.95 compatibility (requires ^1.44.1)
@@ -65,6 +66,8 @@ hkdf = "=0.12.4"  # Key derivation for module encryption
 rand = "=0.8.5"
 # For iroh SecretKey generation in tests (avoids RNG version conflicts)
 getrandom = "=0.2"
+# Directory utilities for Bitcoin Core detection
+dirs = "5.0"
 
 # Address encoding (BIP173/350/351)
 bech32 = "=0.9"
@@ -114,7 +117,10 @@ zstd = { version = "0.13", optional = true }
 # Note: minisketch-rs requires libclang/LLVM for bindgen compilation
 # The erlay feature can be enabled without minisketch-rs, but functionality will be disabled
 # To enable full Erlay functionality, also enable the minisketch-rs feature (requires libclang)
-minisketch-rs = { version = "0.1.9", optional = true }
+# DISABLED: minisketch-rs conflicts with rocksdb due to clang-sys version incompatibility
+# Erlay is disabled by default - enable explicitly if needed (but not with rocksdb)
+# To re-enable erlay: uncomment the line below and the erlay feature
+# minisketch-rs = { version = "0.1.9", optional = true }
 
 # FEC (Forward Error Correction) for FIBRE
 reed-solomon-erasure = "=6.0.0"
@@ -146,6 +152,7 @@ rustls = { version = "0.21", optional = true }
 
 [features]
 default = ["sysinfo", "redb", "nix", "libc", "production", "governance", "zmq"]
+# Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
 # Note: utxo-commitments removed from default - it's experimental only
 iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
@@ -162,6 +169,8 @@ sysinfo = ["dep:sysinfo"]
 # Storage backends
 sled = ["dep:sled"]
 redb = ["dep:redb"]
+# Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
+rocksdb = ["dep:rocksdb"]
 # Process sandboxing (Unix)
 nix = ["dep:nix", "dep:libc"]
 libc = ["dep:libc"]
@@ -196,7 +205,9 @@ compression = ["block-compression", "utxo-compression", "witness-compression"]
 # Note: Requires libclang/LLVM for minisketch-rs bindgen compilation
 # Erlay is entirely optional - if libclang is not available, simply don't enable this feature
 # For CI without libclang: omit the erlay feature entirely
-erlay = ["dep:minisketch-rs"]
+# DISABLED: erlay conflicts with rocksdb due to clang-sys version conflicts
+# To enable erlay, uncomment minisketch-rs dependency above and this feature
+# erlay = ["dep:minisketch-rs"]
 
 # Formal verification (Kani model checking) - verification only, not in release builds
 verify = ["kani-verifier"]
@@ -242,6 +253,13 @@ codegen-units = 16
 # This allows you to develop against local changes in blvm-protocol without publishing
 # For CI jobs that checkout dependencies, .cargo/config.toml is created automatically
 
+# IMPORTANT: rocksdb and erlay features are mutually exclusive
+# Due to clang-sys version conflicts, you cannot enable both features simultaneously.
+# To use rocksdb, you must exclude erlay from your build:
+#   cargo build --features rocksdb --no-default-features
+# Then manually add back other needed features (e.g., --features rocksdb,production)
+# The build script (build.rs) will catch this conflict at build time.
+
 
 # Examples
 [[example]]
@@ -256,3 +274,8 @@ path = "examples/wallet-integration.rs"
 [[bin]]
 name = "convert-bitcoin-core-config"
 path = "tools/convert-bitcoin-core-config.rs"
+
+[[bin]]
+name = "migrate-bitcoin-core"
+path = "tools/migrate-bitcoin-core.rs"
+required-features = ["rocksdb"]

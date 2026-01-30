@@ -3,6 +3,10 @@
 //! This module provides persistent storage for blocks, UTXO set, and chain state.
 //! Supports multiple database backends via feature flags (sled, redb).
 
+pub mod bitcoin_core_blocks;
+pub mod bitcoin_core_detection;
+pub mod bitcoin_core_format;
+pub mod bitcoin_core_storage;
 pub mod blockstore;
 pub mod chainstate;
 #[cfg(kani)]
@@ -28,6 +32,13 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+#[cfg(feature = "rocksdb")]
+use bitcoin_core_detection::BitcoinCoreDetection;
+#[cfg(feature = "rocksdb")]
+use bitcoin_core_detection::BitcoinCoreNetwork;
+#[cfg(feature = "rocksdb")]
+use bitcoin_core_storage::BitcoinCoreStorage;
+
 /// Storage manager that coordinates all storage operations
 pub struct Storage {
     db: Arc<dyn Database>,
@@ -43,7 +54,77 @@ impl Storage {
     ///
     /// Attempts to use the default backend (redb), and gracefully falls back
     /// to sled if redb fails and sled is available.
+    /// 
+    /// If Bitcoin Core data is detected, will use RocksDB to read it.
     pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+        // Check for Bitcoin Core data first (if RocksDB is available)
+        #[cfg(feature = "rocksdb")]
+        {
+            use bitcoin_core_detection::BitcoinCoreNetwork;
+            use bitcoin_core_storage::BitcoinCoreStorage;
+            
+            // Try to detect Bitcoin Core mainnet data
+            if let Ok(Some(backend)) = BitcoinCoreStorage::detect_and_open(
+                data_dir.as_ref(),
+                BitcoinCoreNetwork::Mainnet,
+            ) {
+                if backend == DatabaseBackend::RocksDB {
+                    info!("Bitcoin Core data detected, opening with RocksDB backend");
+                    // Open Bitcoin Core database directly and initialize storage
+                    let db = Arc::from(BitcoinCoreStorage::open_bitcoin_core_database(
+                        data_dir.as_ref(),
+                        BitcoinCoreNetwork::Mainnet,
+                    )?);
+                    
+                    // Create Bitcoin Core block file reader if blocks directory exists
+                    // Use cache directory for index persistence
+                    let block_reader = if let Some(core_dir) = BitcoinCoreDetection::detect_data_dir(BitcoinCoreNetwork::Mainnet)? {
+                        let blocks_dir = core_dir.join("blocks");
+                        if blocks_dir.exists() {
+                            // Use data_dir for index cache
+                            match bitcoin_core_blocks::BitcoinCoreBlockReader::new_with_cache(
+                                &blocks_dir,
+                                BitcoinCoreNetwork::Mainnet,
+                                Some(data_dir.as_ref()),
+                            ) {
+                                Ok(reader) => {
+                                    info!("Bitcoin Core block files detected, enabling block file reader with index cache");
+                                    Some(Arc::new(reader))
+                                }
+                                Err(e) => {
+                                    warn!("Failed to initialize Bitcoin Core block file reader: {}", e);
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    // Initialize storage components with the opened database and block reader
+                    let blockstore = Arc::new(
+                        blockstore::BlockStore::new_with_bitcoin_core_reader(
+                            Arc::clone(&db),
+                            block_reader,
+                        )?
+                    );
+                    let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
+                    let chainstate = chainstate::ChainState::new(Arc::clone(&db))?);
+                    let txindex = Arc::new(txindex::TxIndex::new(Arc::clone(&db))?);
+                    return Ok(Self {
+                        db,
+                        blockstore,
+                        utxostore,
+                        chainstate,
+                        txindex,
+                        pruning_manager: None,
+                    });
+                }
+            }
+        }
+
         let default = default_backend();
 
         // Try default backend first
