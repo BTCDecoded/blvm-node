@@ -956,6 +956,160 @@ fn test_block_compression_roundtrip() {
     assert_eq!(retrieved_block.transactions.len(), block.transactions.len());
 }
 
+#[cfg(feature = "redb")]
+#[test]
+fn test_module_tree_isolation_redb() {
+    let temp_dir = TempDir::new().unwrap();
+    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb).unwrap());
+
+    // Create two module trees with different module IDs
+    let tree1 = db.open_tree("module_abc123_state").unwrap();
+    let tree2 = db.open_tree("module_xyz789_state").unwrap();
+
+    // Insert different keys in each tree
+    tree1.insert(b"key1", b"value1").unwrap();
+    tree2.insert(b"key1", b"value2").unwrap();
+
+    // Verify isolation - each tree should only see its own keys
+    assert_eq!(tree1.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+    assert_eq!(tree2.get(b"key1").unwrap(), Some(b"value2".to_vec()));
+
+    // Verify tree1 doesn't see tree2's value
+    assert_eq!(tree1.len().unwrap(), 1);
+    assert_eq!(tree2.len().unwrap(), 1);
+}
+
+#[cfg(feature = "redb")]
+#[test]
+fn test_module_tree_operations_redb() {
+    let temp_dir = TempDir::new().unwrap();
+    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb).unwrap());
+
+    let tree = db.open_tree("module_test123_cache").unwrap();
+
+    // Test insert and get
+    tree.insert(b"key1", b"value1").unwrap();
+    assert_eq!(tree.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+
+    // Test contains_key
+    assert!(tree.contains_key(b"key1").unwrap());
+    assert!(!tree.contains_key(b"nonexistent").unwrap());
+
+    // Test len
+    assert_eq!(tree.len().unwrap(), 1);
+    tree.insert(b"key2", b"value2").unwrap();
+    assert_eq!(tree.len().unwrap(), 2);
+
+    // Test remove
+    tree.remove(b"key1").unwrap();
+    assert_eq!(tree.get(b"key1").unwrap(), None);
+    assert_eq!(tree.len().unwrap(), 1);
+
+    // Test clear
+    tree.clear().unwrap();
+    assert_eq!(tree.len().unwrap(), 0);
+    assert_eq!(tree.get(b"key2").unwrap(), None);
+}
+
+#[cfg(feature = "redb")]
+#[test]
+fn test_module_tree_iter_redb() {
+    let temp_dir = TempDir::new().unwrap();
+    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb).unwrap());
+
+    let tree = db.open_tree("module_test456_data").unwrap();
+
+    // Insert multiple keys
+    tree.insert(b"key1", b"value1").unwrap();
+    tree.insert(b"key2", b"value2").unwrap();
+    tree.insert(b"key3", b"value3").unwrap();
+
+    // Test iteration
+    let mut items: Vec<(Vec<u8>, Vec<u8>)> = tree
+        .iter()
+        .map(|r| r.unwrap())
+        .collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0], (b"key1".to_vec(), b"value1".to_vec()));
+    assert_eq!(items[1], (b"key2".to_vec(), b"value2".to_vec()));
+    assert_eq!(items[2], (b"key3".to_vec(), b"value3".to_vec()));
+}
+
+#[cfg(feature = "redb")]
+#[test]
+fn test_module_tree_multiple_trees_same_module_redb() {
+    let temp_dir = TempDir::new().unwrap();
+    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb).unwrap());
+
+    // Create multiple trees for the same module
+    let state_tree = db.open_tree("module_mod123_state").unwrap();
+    let cache_tree = db.open_tree("module_mod123_cache").unwrap();
+
+    // Insert same key in both trees
+    state_tree.insert(b"key", b"state_value").unwrap();
+    cache_tree.insert(b"key", b"cache_value").unwrap();
+
+    // Verify isolation between trees
+    assert_eq!(state_tree.get(b"key").unwrap(), Some(b"state_value".to_vec()));
+    assert_eq!(cache_tree.get(b"key").unwrap(), Some(b"cache_value".to_vec()));
+
+    // Each tree should have its own count
+    assert_eq!(state_tree.len().unwrap(), 1);
+    assert_eq!(cache_tree.len().unwrap(), 1);
+}
+
+#[cfg(feature = "sled")]
+#[test]
+fn test_module_tree_isolation_sled() {
+    let temp_dir = TempDir::new().unwrap();
+    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+
+    // Create two module trees with different module IDs
+    let tree1 = db.open_tree("module_abc123_state").unwrap();
+    let tree2 = db.open_tree("module_xyz789_state").unwrap();
+
+    // Insert different keys in each tree
+    tree1.insert(b"key1", b"value1").unwrap();
+    tree2.insert(b"key1", b"value2").unwrap();
+
+    // Verify isolation - each tree should only see its own keys
+    assert_eq!(tree1.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+    assert_eq!(tree2.get(b"key1").unwrap(), Some(b"value2".to_vec()));
+
+    // Verify tree1 doesn't see tree2's value
+    assert_eq!(tree1.len().unwrap(), 1);
+    assert_eq!(tree2.len().unwrap(), 1);
+}
+
+#[cfg(feature = "redb")]
+#[test]
+fn test_module_tree_backend_compatibility() {
+    // Test that module trees work with both backends
+    let temp_dir1 = TempDir::new().unwrap();
+    let temp_dir2 = TempDir::new().unwrap();
+    
+    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    
+    // Test with redb
+    let db_redb = Arc::from(create_database(temp_dir1.path(), DatabaseBackend::Redb).unwrap());
+    let tree_redb = db_redb.open_tree("module_test_state").unwrap();
+    tree_redb.insert(b"key", b"value").unwrap();
+    assert_eq!(tree_redb.get(b"key").unwrap(), Some(b"value".to_vec()));
+
+    // Test with sled
+    let db_sled = Arc::from(create_database(temp_dir2.path(), DatabaseBackend::Sled).unwrap());
+    let tree_sled = db_sled.open_tree("module_test_state").unwrap();
+    tree_sled.insert(b"key", b"value").unwrap();
+    assert_eq!(tree_sled.get(b"key").unwrap(), Some(b"value".to_vec()));
+}
+
 #[cfg(feature = "block-compression")]
 #[test]
 fn test_block_compression_ratio() {

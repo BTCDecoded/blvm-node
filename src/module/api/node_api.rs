@@ -1556,6 +1556,18 @@ impl NodeAPI for NodeApiImpl {
             .get_module_id()
             .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
 
+        // Validate tree name format - prevent conflicts with our naming scheme
+        if name.starts_with("module_") {
+            return Err(ModuleError::OperationError(
+                "Tree name cannot start with 'module_'".to_string(),
+            ));
+        }
+        if name.contains("__") {
+            return Err(ModuleError::OperationError(
+                "Tree name cannot contain consecutive underscores".to_string(),
+            ));
+        }
+
         // Use node's storage to create an isolated tree for this module
         // Tree name format: module_{module_id}_{name}
         let tree_name = format!("module_{}_{}", module_id, name);

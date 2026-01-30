@@ -331,6 +331,9 @@ pub struct NodeConfig {
     /// DoS protection configuration
     pub dos_protection: Option<DosProtectionConfig>,
 
+    /// IBD bandwidth protection configuration
+    pub ibd_protection: Option<IbdProtectionConfig>,
+
     /// Spam-specific peer banning configuration
     pub spam_ban: Option<SpamBanConfig>,
 
@@ -1513,6 +1516,123 @@ impl Default for SpamBanConfig {
         Self {
             spam_ban_threshold: 10,
             spam_ban_duration_seconds: 3600,
+        }
+    }
+}
+
+/// IBD (Initial Block Download) bandwidth protection configuration
+/// Protects against bandwidth exhaustion attacks where malicious peers repeatedly
+/// request full blockchain sync to exhaust node bandwidth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IbdProtectionConfig {
+    /// Max bandwidth per peer per day (GB)
+    #[serde(default = "default_ibd_max_bandwidth_per_peer_per_day")]
+    pub max_bandwidth_per_peer_per_day_gb: u64,
+
+    /// Max bandwidth per peer per hour (GB)
+    #[serde(default = "default_ibd_max_bandwidth_per_peer_per_hour")]
+    pub max_bandwidth_per_peer_per_hour_gb: u64,
+
+    /// Max bandwidth per IP per day (GB)
+    #[serde(default = "default_ibd_max_bandwidth_per_ip_per_day")]
+    pub max_bandwidth_per_ip_per_day_gb: u64,
+
+    /// Max bandwidth per IP per hour (GB)
+    #[serde(default = "default_ibd_max_bandwidth_per_ip_per_hour")]
+    pub max_bandwidth_per_ip_per_hour_gb: u64,
+
+    /// Max bandwidth per subnet per day (GB)
+    #[serde(default = "default_ibd_max_bandwidth_per_subnet_per_day")]
+    pub max_bandwidth_per_subnet_per_day_gb: u64,
+
+    /// Max bandwidth per subnet per hour (GB)
+    #[serde(default = "default_ibd_max_bandwidth_per_subnet_per_hour")]
+    pub max_bandwidth_per_subnet_per_hour_gb: u64,
+
+    /// Max concurrent IBD serving connections
+    #[serde(default = "default_ibd_max_concurrent_serving")]
+    pub max_concurrent_ibd_serving: usize,
+
+    /// IBD request cooldown period (seconds)
+    #[serde(default = "default_ibd_request_cooldown")]
+    pub ibd_request_cooldown_seconds: u64,
+
+    /// Suspicious reconnection threshold (reconnections per hour)
+    #[serde(default = "default_ibd_suspicious_reconnection_threshold")]
+    pub suspicious_reconnection_threshold: u32,
+
+    /// Peer reputation ban threshold (negative reputation to ban)
+    #[serde(default = "default_ibd_reputation_ban_threshold")]
+    pub reputation_ban_threshold: i32,
+
+    /// Enable emergency throttle mode
+    #[serde(default = "default_false")]
+    pub enable_emergency_throttle: bool,
+
+    /// Emergency throttle percentage (0-100)
+    #[serde(default = "default_ibd_emergency_throttle_percent")]
+    pub emergency_throttle_percent: u8,
+}
+
+fn default_ibd_max_bandwidth_per_peer_per_day() -> u64 {
+    50 // 50 GB/day per peer
+}
+
+fn default_ibd_max_bandwidth_per_peer_per_hour() -> u64 {
+    10 // 10 GB/hour per peer
+}
+
+fn default_ibd_max_bandwidth_per_ip_per_day() -> u64 {
+    100 // 100 GB/day per IP
+}
+
+fn default_ibd_max_bandwidth_per_ip_per_hour() -> u64 {
+    20 // 20 GB/hour per IP
+}
+
+fn default_ibd_max_bandwidth_per_subnet_per_day() -> u64 {
+    500 // 500 GB/day per subnet
+}
+
+fn default_ibd_max_bandwidth_per_subnet_per_hour() -> u64 {
+    100 // 100 GB/hour per subnet
+}
+
+fn default_ibd_max_concurrent_serving() -> usize {
+    3 // Max 3 concurrent IBD serving
+}
+
+fn default_ibd_request_cooldown() -> u64 {
+    3600 // 1 hour cooldown
+}
+
+fn default_ibd_suspicious_reconnection_threshold() -> u32 {
+    3 // 3 reconnections in 1 hour = suspicious
+}
+
+fn default_ibd_reputation_ban_threshold() -> i32 {
+    -100 // Ban peer if reputation < -100
+}
+
+fn default_ibd_emergency_throttle_percent() -> u8 {
+    50 // 50% throttle when enabled
+}
+
+impl Default for IbdProtectionConfig {
+    fn default() -> Self {
+        Self {
+            max_bandwidth_per_peer_per_day_gb: 50,
+            max_bandwidth_per_peer_per_hour_gb: 10,
+            max_bandwidth_per_ip_per_day_gb: 100,
+            max_bandwidth_per_ip_per_hour_gb: 20,
+            max_bandwidth_per_subnet_per_day_gb: 500,
+            max_bandwidth_per_subnet_per_hour_gb: 100,
+            max_concurrent_ibd_serving: 3,
+            ibd_request_cooldown_seconds: 3600,
+            suspicious_reconnection_threshold: 3,
+            reputation_ban_threshold: -100,
+            enable_emergency_throttle: false,
+            emergency_throttle_percent: 50,
         }
     }
 }
