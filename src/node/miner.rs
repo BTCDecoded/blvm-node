@@ -78,6 +78,8 @@ impl TransactionSelector {
         let mut current_weight = 0;
 
         // Get prioritized transactions (with UTXO set for fee calculation)
+        // MempoolManager.get_prioritized_transactions() already returns transactions
+        // sorted by fee rate (descending) calculated with real UTXO set
         let transactions = mempool.get_prioritized_transactions(1000, utxo_set);
 
         for tx in transactions {
@@ -91,8 +93,11 @@ impl TransactionSelector {
                 break;
             }
 
-            // Check minimum fee rate
-            if self.calculate_fee_rate(&tx) < self.min_fee_rate {
+            // Check minimum fee rate using real UTXO set
+            // Since transactions are already prioritized by fee rate from MempoolManager,
+            // we can calculate the actual fee rate here for the final check
+            let fee_rate = self.calculate_fee_rate_with_utxo(&tx, utxo_set);
+            if fee_rate < self.min_fee_rate {
                 continue;
             }
 
@@ -116,18 +121,23 @@ impl TransactionSelector {
         self.calculate_transaction_size(tx) as u64 * 4
     }
 
-    /// Calculate fee rate (satoshis per byte)
-    fn calculate_fee_rate(&self, tx: &Transaction) -> u64 {
-        // Simplified calculation - in real implementation would calculate actual fees
+    /// Calculate fee rate (satoshis per byte) using UTXO set
+    fn calculate_fee_rate_with_utxo(&self, tx: &Transaction, utxo_set: &blvm_protocol::UtxoSet) -> u64 {
         let size = self.calculate_transaction_size(tx);
         if size == 0 {
             return 0;
         }
 
-        // Mock fee calculation
-        let total_output_value: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-        let total_input_value = total_output_value + 1000; // Mock input value
-        let fee = total_input_value - total_output_value;
+        // Calculate actual fee using UTXO set
+        let mut input_total = 0u64;
+        for input in &tx.inputs {
+            if let Some(utxo) = utxo_set.get(&input.prevout) {
+                input_total += utxo.value as u64;
+            }
+        }
+
+        let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
+        let fee = input_total.saturating_sub(output_total);
 
         fee / size as u64
     }
@@ -876,7 +886,22 @@ mod tests {
         let weight = selector.calculate_transaction_weight(&tx);
         assert!(weight > 0);
 
-        let fee_rate = selector.calculate_fee_rate(&tx);
+        // Test fee rate calculation with UTXO set
+        let mut utxo_set = blvm_protocol::UtxoSet::new();
+        let outpoint = blvm_protocol::OutPoint {
+            hash: [0u8; 32],
+            index: 0,
+        };
+        utxo_set.insert(
+            outpoint,
+            blvm_protocol::UTXO {
+                value: 10000,
+                script_pubkey: vec![0x51],
+                height: 0,
+                is_coinbase: false,
+            },
+        );
+        let fee_rate = selector.calculate_fee_rate_with_utxo(&tx, &utxo_set);
         assert!(fee_rate > 0);
     }
 

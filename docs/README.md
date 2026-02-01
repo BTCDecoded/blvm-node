@@ -14,9 +14,6 @@ Documentation for the bllvm-node implementation.
 
 - **[transport/](transport/)** - Transport abstraction documentation and changelog
 
-## Status Documentation
-
-- **[status/](status/)** - Implementation status documents for various components
 
 ## Historical Documentation
 
