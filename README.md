@@ -36,11 +36,31 @@ Tier 4 of the 6-tier Bitcoin Commons architecture (BLVM technology stack):
 - **Payment Processing**: CTV (CheckTemplateVerify) support for advanced payment flows
 - **Advanced Indexing**: Address and value range indexing for efficient queries
 - **RPC Interface**: Full RPC server implementation with Bitcoin Core compatibility
-- **Storage**: UTXO set management and chain state with multiple backends
+- **Storage**: UTXO set management and chain state with multiple backends (sled, redb, rocksdb)
 - **Module System**: Process-isolated modules for optional features
 - **P2P Governance**: Governance message relay via P2P protocol
 
 See [Security](#security) for production considerations.
+
+### Storage Backends
+
+Supports multiple database backends via feature flags:
+
+- **sled** (default): Embedded key-value store
+- **redb**: Embedded database with ACID transactions
+- **rocksdb** (optional): High-performance database with Bitcoin Core compatibility
+
+**RocksDB Features:**
+- Automatic Bitcoin Core data directory detection
+- Direct access to Bitcoin Core block files (`blk*.dat`)
+- Bitcoin Core format parsing and storage integration
+
+Enable RocksDB with the `rocksdb` feature:
+```bash
+cargo build --features rocksdb
+```
+
+**Note**: RocksDB requires `libclang` system dependency. RocksDB and erlay features are mutually exclusive due to dependency conflicts.
 
 ## Configuration
 
