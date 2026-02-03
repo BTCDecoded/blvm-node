@@ -322,11 +322,11 @@ impl ParallelIBD {
         const MAX_PARALLEL_PEERS: usize = 8;
         const TIMEOUT_SECS: u64 = 30;
         
-        let num_peers = peer_addrs.len().min(MAX_PARALLEL_PEERS);
-        let total_pipeline = PIPELINE_DEPTH * num_peers;
+        // num_peers will be recalculated dynamically as peer_addrs changes
+        let mut num_peers = peer_addrs.len().min(MAX_PARALLEL_PEERS);
         
-        info!("Using {} peers with pipeline depth {} = {} parallel requests", 
-            num_peers, PIPELINE_DEPTH, total_pipeline);
+        info!("Using up to {} peers with pipeline depth {} for parallel requests", 
+            MAX_PARALLEL_PEERS, PIPELINE_DEPTH);
 
         // Genesis hash
         let genesis_hash: [u8; 32] = [
@@ -337,7 +337,10 @@ impl ParallelIBD {
         ];
 
         let mut next_request_height = start_height;
+        // highest_stored represents the last successfully stored height
+        // Initialize to one less than start_height (or MAX if start_height is 0, meaning nothing stored yet)
         let mut highest_stored = start_height.saturating_sub(1);
+        let mut nothing_stored_yet = (start_height == 0);
         let mut last_stored_hash = genesis_hash;
         let mut consecutive_failures = 0;
         let mut last_progress_log = start_height;
@@ -351,6 +354,22 @@ impl ParallelIBD {
         let mut header_buffer: HashMap<u64, ([u8; 32], blvm_protocol::BlockHeader)> = HashMap::new();
         
         loop {
+            // Recalculate num_peers dynamically (peers may disconnect)
+            num_peers = peer_addrs.len().min(MAX_PARALLEL_PEERS);
+            if num_peers == 0 {
+                warn!("No peers available, waiting...");
+                peer_addrs = network.get_connected_peer_addresses().await;
+                if peer_addrs.is_empty() {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    peer_addrs = network.get_connected_peer_addresses().await;
+                    if peer_addrs.is_empty() {
+                        return Err(anyhow::anyhow!("No peers available"));
+                    }
+                }
+                num_peers = peer_addrs.len().min(MAX_PARALLEL_PEERS);
+            }
+            let total_pipeline = PIPELINE_DEPTH * num_peers;
+            
             // Fill the pipeline - send requests until we have enough in flight
             while pending.len() < total_pipeline && next_request_height < end_height {
                 // Round-robin peer selection
@@ -444,13 +463,26 @@ impl ParallelIBD {
                     }
                     
                     // Flush sequential headers from buffer to storage
-                    while let Some((hash, header)) = header_buffer.remove(&(highest_stored + 1)) {
-                        blockstore.store_header(&hash, &header)
-                            .context("Failed to store header")?;
-                        blockstore.store_height(highest_stored + 1, &hash)
-                            .context("Failed to store height")?;
-                        highest_stored += 1;
-                        last_stored_hash = hash;
+                    // Handle initial case where we need to store start_height first
+                    loop {
+                        let next_height = if nothing_stored_yet {
+                            start_height
+                        } else {
+                            highest_stored + 1
+                        };
+                        
+                        if let Some((hash, header)) = header_buffer.remove(&next_height) {
+                            blockstore.store_header(&hash, &header)
+                                .context("Failed to store header")?;
+                            blockstore.store_height(next_height, &hash)
+                                .context("Failed to store height")?;
+                            highest_stored = next_height;
+                            last_stored_hash = hash;
+                            nothing_stored_yet = false;
+                            // Continue loop to check for next_height + 1
+                        } else {
+                            break;
+                        }
                     }
                     
                     // Progress logging every 20k headers
@@ -522,10 +554,21 @@ impl ParallelIBD {
         }
         
         // Flush any remaining buffered headers
-        while let Some((hash, header)) = header_buffer.remove(&(highest_stored + 1)) {
-            blockstore.store_header(&hash, &header)?;
-            blockstore.store_height(highest_stored + 1, &hash)?;
-            highest_stored += 1;
+        loop {
+            let next_height = if nothing_stored_yet {
+                start_height
+            } else {
+                highest_stored + 1
+            };
+            
+            if let Some((hash, header)) = header_buffer.remove(&next_height) {
+                blockstore.store_header(&hash, &header)?;
+                blockstore.store_height(next_height, &hash)?;
+                highest_stored = next_height;
+                nothing_stored_yet = false;
+            } else {
+                break;
+            }
         }
         
         let total = highest_stored.saturating_sub(start_height) + 1;
