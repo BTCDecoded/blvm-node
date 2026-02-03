@@ -54,6 +54,26 @@ pub struct Peer {
     /// Best block height from version message (peer's chain tip)
     /// This indicates how many blocks the peer has
     start_height: i32,
+    /// Whether this is an outbound connection (we initiated it)
+    is_outbound: bool,
+    /// Best block hash (from version message or headers)
+    best_block_hash: Option<blvm_protocol::Hash>,
+    /// Best block height (from version message) - duplicate of start_height but as u64
+    best_block_height: Option<u64>,
+    /// Chainwork (cumulative proof-of-work, from headers)
+    chainwork: Option<u128>, // Use u128 for large chainwork values
+    /// Peer permissions (e.g., NoBan flag for trusted peers)
+    permissions: u64, // Bit flags for permissions (0 = no special permissions)
+    /// Whether this is a manual connection (via RPC addnode)
+    is_manual: bool,
+    /// Timestamp of last block announcement (for outbound peer eviction)
+    last_block_announcement: Option<u64>,
+    /// Pending ping nonce (None if no ping pending)
+    pending_ping_nonce: Option<u64>,
+    /// Timestamp when ping was sent (for timeout detection)
+    ping_sent_time: Option<u64>,
+    /// Ping timeout in seconds (default: 20 minutes, Bitcoin Core uses longer)
+    ping_timeout_seconds: u64,
 }
 
 impl Peer {
@@ -97,6 +117,8 @@ impl Peer {
                 match result {
                     Ok(data) if data.is_empty() => {
                         info!("Peer {:?} connection closed (empty read)", transport_addr_clone);
+                        // CRITICAL: Send PeerDisconnected to remove peer from PeerManager
+                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
                         break;
                     }
                     Ok(data) => {
@@ -114,6 +136,8 @@ impl Peer {
                     }
                     Err(e) => {
                         warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
+                        // CRITICAL: Send PeerDisconnected on read error
+                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
                         break;
                     }
                 }
@@ -168,6 +192,16 @@ impl Peer {
             version: 0,  // Protocol version from version message (set when version received)
             user_agent: None, // User agent from version message (set when version received)
             start_height: 0, // Best block height from version message (set when version received)
+            is_outbound: false, // Default to false, should be set by caller
+            pending_ping_nonce: None,
+            ping_sent_time: None,
+            ping_timeout_seconds: 1200, // 20 minutes default
+            best_block_hash: None,
+            best_block_height: None,
+            chainwork: None,
+            permissions: 0, // No special permissions by default
+            is_manual: false, // Default to false, set to true for manual connections
+            last_block_announcement: None, // No block announcements yet
         }
     }
 
@@ -221,6 +255,8 @@ impl Peer {
                         } else {
                             warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
                         }
+                        // CRITICAL: Send PeerDisconnected to remove peer from PeerManager
+                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
                         break;
                     }
                 }
@@ -232,6 +268,8 @@ impl Peer {
                 let data = if payload_len > 0 {
                     if payload_len > 32 * 1024 * 1024 - 24 {
                         warn!("Peer {:?} sent oversized message: {} bytes", transport_addr_clone, payload_len);
+                        // CRITICAL: Send PeerDisconnected on oversized message
+                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
                         break;
                     }
                     let mut payload = vec![0u8; payload_len];
@@ -243,6 +281,8 @@ impl Peer {
                         }
                         Err(e) => {
                             warn!("Peer read payload error for {:?}: {}", transport_addr_clone, e);
+                            // CRITICAL: Send PeerDisconnected on payload read error
+                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
                             break;
                         }
                     }
@@ -308,6 +348,16 @@ impl Peer {
             version: 0,
             user_agent: None,
             start_height: 0,
+            is_outbound: false, // Default to false, should be set by caller
+            best_block_hash: None,
+            best_block_height: None,
+            chainwork: None,
+            permissions: 0, // No special permissions by default
+            is_manual: false, // Default to false, set to true for manual connections
+            last_block_announcement: None, // No block announcements yet
+            pending_ping_nonce: None,
+            ping_sent_time: None,
+            ping_timeout_seconds: 1200, // 20 minutes default
         }
     }
 
@@ -495,5 +545,123 @@ impl Peer {
     /// Check if peer has a specific service flag
     pub fn has_service(&self, flag: u64) -> bool {
         (self.services & flag) != 0
+    }
+
+    /// Get whether this is an outbound connection
+    pub fn is_outbound(&self) -> bool {
+        self.is_outbound
+    }
+
+    /// Set whether this is an outbound connection
+    pub fn set_is_outbound(&mut self, is_outbound: bool) {
+        self.is_outbound = is_outbound;
+    }
+
+    /// Record that a ping was sent
+    pub fn record_ping_sent(&mut self, nonce: u64) {
+        self.pending_ping_nonce = Some(nonce);
+        self.ping_sent_time = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
+    }
+
+    /// Record that a pong was received (clears pending ping)
+    pub fn record_pong_received(&mut self, nonce: u64) -> bool {
+        match self.pending_ping_nonce {
+            Some(pending_nonce) if pending_nonce == nonce => {
+                self.pending_ping_nonce = None;
+                self.ping_sent_time = None;
+                true
+            }
+            _ => false // Nonce mismatch or no pending ping
+        }
+    }
+
+    /// Check if ping has timed out
+    pub fn is_ping_timed_out(&self) -> bool {
+        match (self.pending_ping_nonce, self.ping_sent_time) {
+            (Some(_), Some(sent_time)) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                now.saturating_sub(sent_time) > self.ping_timeout_seconds
+            }
+            _ => false
+        }
+    }
+
+    /// Set chainwork (cumulative proof-of-work)
+    pub fn set_chainwork(&mut self, chainwork: u128) {
+        self.chainwork = Some(chainwork);
+    }
+
+    /// Get chainwork (cumulative proof-of-work)
+    pub fn chainwork(&self) -> Option<u128> {
+        self.chainwork
+    }
+
+    /// Set best block height
+    pub fn set_best_block_height(&mut self, height: u64) {
+        self.best_block_height = Some(height);
+    }
+
+    /// Get best block height
+    pub fn best_block_height(&self) -> Option<u64> {
+        self.best_block_height
+    }
+
+    /// Set best block hash
+    pub fn set_best_block_hash(&mut self, hash: blvm_protocol::Hash) {
+        self.best_block_hash = Some(hash);
+    }
+
+    /// Get best block hash
+    pub fn best_block_hash(&self) -> Option<blvm_protocol::Hash> {
+        self.best_block_hash
+    }
+
+    /// Set peer permissions (bit flags)
+    pub fn set_permissions(&mut self, permissions: u64) {
+        self.permissions = permissions;
+    }
+
+    /// Get peer permissions (bit flags)
+    pub fn permissions(&self) -> u64 {
+        self.permissions
+    }
+
+    /// Check if peer has NoBan permission (won't be disconnected for misbehavior)
+    pub fn has_noban_permission(&self) -> bool {
+        // NoBan flag = 1 (Bitcoin Core: NetPermissionFlags::NoBan)
+        (self.permissions & 1) != 0
+    }
+
+    /// Check if this is a manual connection (via RPC addnode)
+    pub fn is_manual(&self) -> bool {
+        self.is_manual
+    }
+
+    /// Set whether this is a manual connection
+    pub fn set_is_manual(&mut self, is_manual: bool) {
+        self.is_manual = is_manual;
+    }
+
+    /// Record a block announcement (for outbound peer eviction)
+    pub fn record_block_announcement(&mut self) {
+        self.last_block_announcement = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
+    }
+
+    /// Get timestamp of last block announcement
+    pub fn last_block_announcement(&self) -> Option<u64> {
+        self.last_block_announcement
     }
 }
