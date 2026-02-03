@@ -16,6 +16,15 @@ pub const BITCOIN_MAGIC_REGTEST: [u8; 4] = [0xfa, 0xbf, 0xb5, 0xda];
 /// Maximum protocol message size (32MB)
 pub const MAX_PROTOCOL_MESSAGE_LENGTH: usize = 32 * 1024 * 1024;
 
+/// Maximum addresses in an addr message (Bitcoin Core: MAX_ADDR_TO_SEND)
+pub const MAX_ADDR_TO_SEND: usize = 1000;
+
+/// Maximum inventory items in inv/getdata messages (Bitcoin Core: MAX_INV_SZ)
+pub const MAX_INV_SZ: usize = 50000;
+
+/// Maximum headers in a headers message (Bitcoin Core: MAX_HEADERS_RESULTS)
+pub const MAX_HEADERS_RESULTS: usize = 2000;
+
 /// Service flags (bitfield in Version.services)
 #[cfg(feature = "dandelion")]
 pub const NODE_DANDELION: u64 = 1 << 24;

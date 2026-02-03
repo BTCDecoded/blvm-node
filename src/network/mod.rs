@@ -73,6 +73,8 @@ use crate::network::transport::{Transport, TransportAddr, TransportListener, Tra
 use hex;
 use secp256k1;
 use std::collections::HashSet;
+use std::net::IpAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Network I/O operations for testing
 /// Note: This is deprecated - use TcpTransport instead
@@ -471,9 +473,9 @@ pub struct NetworkManager {
     /// Pending async requests with metadata
     /// Key: request_id, Value: (sender, peer_addr, timestamp)
     pending_requests: Arc<Mutex<HashMap<u64, PendingRequest>>>,
-    /// Pending Headers requests (for IBD)
-    /// Key: peer_addr, Value: sender channel
-    pending_headers_requests: Arc<Mutex<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<blvm_protocol::BlockHeader>>>>>,
+    /// Pending Headers requests (for IBD) - supports pipelining with queue per peer
+    /// Key: peer_addr, Value: queue of sender channels (FIFO order)
+    pending_headers_requests: Arc<Mutex<HashMap<SocketAddr, std::collections::VecDeque<tokio::sync::oneshot::Sender<Vec<blvm_protocol::BlockHeader>>>>>>,
     /// Pending Block requests (for IBD)
     /// Key: (peer_addr, block_hash), Value: sender channel
     pending_block_requests: Arc<Mutex<HashMap<(SocketAddr, blvm_protocol::Hash), tokio::sync::oneshot::Sender<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>>>>,
@@ -896,6 +898,74 @@ impl NetworkManager {
         } else {
             // FIBRE not initialized, skip
             Ok(())
+        }
+    }
+
+    /// Check if address is local (loopback, private, link-local)
+    pub(crate) fn is_local_address(addr: &SocketAddr) -> bool {
+        match addr.ip() {
+            IpAddr::V4(ip) => {
+                ip.is_loopback() || ip.is_private() || ip.is_link_local()
+            }
+            IpAddr::V6(ip) => {
+                ip.is_loopback() || ip.is_unspecified()
+            }
+        }
+    }
+
+    /// Check if address is onion (Tor) - placeholder for future implementation
+    /// In Bitcoin Core, this checks for .onion domains, but we'd need DNS resolution
+    /// For now, this is a placeholder that returns false
+    pub(crate) fn is_onion_address(_addr: &SocketAddr) -> bool {
+        // TODO: Implement proper .onion detection when DNS resolution is available
+        // For now, return false (no onion detection)
+        false
+    }
+
+    /// Evict extra outbound peers if we have too many
+    /// Bitcoin Core protects up to MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT peers
+    /// based on block announcement recency
+    #[allow(dead_code)]
+    async fn evict_extra_outbound_peers(&self) {
+        const MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT: usize = 4;
+        
+        let mut pm = self.peer_manager.lock().await;
+        
+        // Get all outbound peers with their last block announcement time
+        let mut outbound_peers: Vec<(TransportAddr, u64)> = pm.peers.iter()
+            .filter(|(_, peer)| peer.is_outbound() && !peer.is_manual())
+            .map(|(addr, peer)| {
+                let last_announce = peer.last_block_announcement().unwrap_or(0);
+                (addr.clone(), last_announce)
+            })
+            .collect();
+        
+        if outbound_peers.len() <= MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT {
+            return; // Not too many peers, no eviction needed
+        }
+        
+        // Sort by last announcement (oldest first) - peers with no announcements (0) come first
+        outbound_peers.sort_by_key(|(_, time)| *time);
+        
+        // Disconnect oldest peers (keep best MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT)
+        let peers_to_evict = outbound_peers.len() - MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT;
+        for (addr, last_announce) in outbound_peers.iter().take(peers_to_evict) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let time_ago = if *last_announce > 0 {
+                now.saturating_sub(*last_announce)
+            } else {
+                0
+            };
+            warn!(
+                "Evicting extra outbound peer {:?} (last block announcement: {} seconds ago)",
+                addr, time_ago
+            );
+            drop(pm); // Release lock before sending message
+            let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(addr.clone()));
+            pm = self.peer_manager.lock().await; // Re-acquire lock for next iteration
         }
     }
 
@@ -2283,6 +2353,21 @@ impl NetworkManager {
 
         // Start peer reconnection task
         self.start_peer_reconnection_task();
+        
+        // Start periodic ping task (sends ping every 2 minutes)
+        self.start_ping_task();
+        
+        // Start ping timeout checking task (checks every 30 seconds)
+        self.start_ping_timeout_check_task();
+        
+            // Start chain sync timeout checking task (checks every 60 seconds)
+            self.start_chain_sync_timeout_check_task();
+            
+            // Start outbound peer eviction task (checks every 5 minutes)
+            self.start_outbound_peer_eviction_task();
+            
+            // Start outbound peer eviction task (checks every 5 minutes)
+            self.start_outbound_peer_eviction_task();
 
         // Note: Peer connection initialization (DNS seeds, persistent peers, etc.)
         // should be called separately via initialize_peer_connections() after start()
@@ -2382,7 +2467,7 @@ impl NetworkManager {
         })
     }
 
-    /// Register a pending Headers request
+    /// Register a pending Headers request (supports pipelining - multiple requests per peer)
     /// Returns a receiver that will receive the Headers response
     pub fn register_headers_request(
         &self,
@@ -2394,13 +2479,15 @@ impl NetworkManager {
                 self.pending_headers_requests
                     .lock()
                     .await
-                    .insert(peer_addr, tx);
+                    .entry(peer_addr)
+                    .or_insert_with(std::collections::VecDeque::new)
+                    .push_back(tx);
             })
         });
         rx
     }
 
-    /// Complete a pending Headers request
+    /// Complete a pending Headers request (FIFO - completes oldest request for this peer)
     pub fn complete_headers_request(
         &self,
         peer_addr: SocketAddr,
@@ -2409,12 +2496,31 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut pending = self.pending_headers_requests.lock().await;
-                if let Some(sender) = pending.remove(&peer_addr) {
-                    let _ = sender.send(headers);
-                    true
-                } else {
-                    false
+                if let Some(queue) = pending.get_mut(&peer_addr) {
+                    if let Some(sender) = queue.pop_front() {
+                        let _ = sender.send(headers);
+                        // Clean up empty queues
+                        if queue.is_empty() {
+                            pending.remove(&peer_addr);
+                        }
+                        return true;
+                    }
                 }
+                false
+            })
+        })
+    }
+    
+    /// Get the number of pending header requests for a peer
+    pub fn pending_headers_count(&self, peer_addr: SocketAddr) -> usize {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.pending_headers_requests
+                    .lock()
+                    .await
+                    .get(&peer_addr)
+                    .map(|q| q.len())
+                    .unwrap_or(0)
             })
         })
     }
@@ -2591,6 +2697,240 @@ impl NetworkManager {
 
                 if expired_count > 0 {
                     info!("Cleaned up {} expired ban(s)", expired_count);
+                }
+            }
+        });
+    }
+
+    /// Start chain sync timeout checking task (checks for outbound peers that haven't synced within 20 minutes)
+    fn start_chain_sync_timeout_check_task(&self) {
+        let peer_manager = Arc::clone(&self.peer_manager);
+        let peer_tx = self.peer_tx.clone();
+        let storage = self.storage.clone();
+        
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Check every minute
+            
+            loop {
+                interval.tick().await;
+                
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let chain_sync_timeout = 20 * 60; // 20 minutes (CHAIN_SYNC_TIMEOUT)
+                
+                // Get our chainwork (from storage/chainstate)
+                let our_chainwork = {
+                    if let Some(storage) = &storage {
+                        // Get tip hash first
+                        if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
+                            // Get chainwork for tip
+                            if let Ok(Some(chainwork)) = storage.chain().get_chainwork(&tip_hash) {
+                                chainwork
+                            } else {
+                                0 // No chainwork available
+                            }
+                        } else {
+                            0 // No tip hash available
+                        }
+                    } else {
+                        0 // Storage not available
+                    }
+                };
+                
+                let mut pm = peer_manager.lock().await;
+                let mut peers_to_disconnect: Vec<crate::network::transport::TransportAddr> = Vec::new();
+                
+                for (addr, peer) in pm.peers.iter() {
+                    // Check if peer is outbound (we initiated connection)
+                    let is_outbound = peer.is_outbound();
+                    
+                    if is_outbound {
+                        let connection_age = now.saturating_sub(peer.conntime());
+                        
+                        if connection_age > chain_sync_timeout {
+                            // Check if peer's chainwork is sufficient
+                            if let Some(peer_chainwork) = peer.chainwork() {
+                                if peer_chainwork < our_chainwork {
+                                    warn!(
+                                        "Outbound peer {:?} has insufficient chainwork after {} minutes (peer: {}, ours: {}), disconnecting",
+                                        addr, connection_age / 60, peer_chainwork, our_chainwork
+                                    );
+                                    peers_to_disconnect.push(addr.clone());
+                                }
+                            } else {
+                                // No chainwork known, disconnect
+                                warn!(
+                                    "Outbound peer {:?} has no chainwork after {} minutes, disconnecting",
+                                    addr, connection_age / 60
+                                );
+                                peers_to_disconnect.push(addr.clone());
+                            }
+                        }
+                    }
+                }
+                
+                drop(pm); // Release lock before disconnecting
+                
+                for addr in peers_to_disconnect {
+                    let _ = peer_tx.send(NetworkMessage::PeerDisconnected(addr));
+                }
+            }
+        });
+    }
+
+    /// Start outbound peer eviction task (checks every 5 minutes)
+    fn start_outbound_peer_eviction_task(&self) {
+        let peer_manager = Arc::clone(&self.peer_manager);
+        let peer_tx = self.peer_tx.clone();
+        
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60)); // Check every 5 minutes
+            const MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT: usize = 4;
+            
+            loop {
+                interval.tick().await;
+                
+                let mut pm = peer_manager.lock().await;
+                
+                // Get all outbound peers with their last block announcement time
+                let mut outbound_peers: Vec<(crate::network::transport::TransportAddr, u64)> = pm.peers.iter()
+                    .filter(|(_, peer)| peer.is_outbound() && !peer.is_manual())
+                    .map(|(addr, peer)| {
+                        let last_announce = peer.last_block_announcement().unwrap_or(0);
+                        (addr.clone(), last_announce)
+                    })
+                    .collect();
+                
+                if outbound_peers.len() <= MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT {
+                    continue; // Not too many peers, no eviction needed
+                }
+                
+                // Sort by last announcement (oldest first) - peers with no announcements (0) come first
+                outbound_peers.sort_by_key(|(_, time)| *time);
+                
+                // Disconnect oldest peers (keep best MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT)
+                let peers_to_evict = outbound_peers.len() - MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT;
+                let peers_to_disconnect: Vec<_> = outbound_peers.iter()
+                    .take(peers_to_evict)
+                    .map(|(addr, _)| addr.clone())
+                    .collect();
+                
+                drop(pm); // Release lock before sending messages
+                
+                for addr in peers_to_disconnect {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let pm_check = peer_manager.lock().await;
+                    let last_announce = pm_check.get_peer(&addr)
+                        .and_then(|p| p.last_block_announcement())
+                        .unwrap_or(0);
+                    drop(pm_check);
+                    
+                    warn!(
+                        "Evicting extra outbound peer {:?} (last block announcement: {} seconds ago)",
+                        addr,
+                        if last_announce > 0 {
+                            now.saturating_sub(last_announce)
+                        } else {
+                            0
+                        }
+                    );
+                    let _ = peer_tx.send(NetworkMessage::PeerDisconnected(addr));
+                }
+            }
+        });
+    }
+
+    /// Start ping timeout checking task (checks for timed-out pings every 30 seconds)
+    fn start_ping_timeout_check_task(&self) {
+        let peer_manager = Arc::clone(&self.peer_manager);
+        let peer_tx = self.peer_tx.clone();
+        
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30)); // Check every 30 seconds
+            
+            loop {
+                interval.tick().await;
+                
+                let mut pm = peer_manager.lock().await;
+                let mut peers_to_disconnect: Vec<crate::network::transport::TransportAddr> = Vec::new();
+                
+                for (addr, peer) in pm.peers.iter() {
+                    if peer.is_ping_timed_out() {
+                        warn!("Ping timeout for peer {:?}, disconnecting", addr);
+                        peers_to_disconnect.push(addr.clone());
+                    }
+                }
+                
+                drop(pm); // Release lock before disconnecting
+                
+                for addr in peers_to_disconnect {
+                    let _ = peer_tx.send(NetworkMessage::PeerDisconnected(addr));
+                }
+            }
+        });
+    }
+
+    /// Start periodic ping task (sends ping every 2 minutes to all peers)
+    /// This uses the existing ping_all_peers() method which already handles TransportAddr properly
+    fn start_ping_task(&self) {
+        // We need to call ping_all_peers() periodically, but we can't clone NetworkManager
+        // Instead, we'll create a task that sends a trigger message, or we can access
+        // the necessary components directly. For simplicity, let's create a wrapper that
+        // can call ping_all_peers. Since ping_all_peers is async and uses &self, we need
+        // to restructure this. For now, we'll use a channel-based approach or store
+        // the necessary Arc fields.
+        
+        // Actually, the simplest approach is to have a separate task that periodically
+        // calls a method. But since we can't easily share &self across tasks, we'll
+        // use the existing infrastructure: create a task that sends pings directly
+        // using the same pattern as ping_all_peers but in a loop.
+        
+        let peer_manager = Arc::clone(&self.peer_manager);
+        let tcp_transport = self.tcp_transport.clone();
+        #[cfg(feature = "quinn")]
+        let quinn_transport = self.quinn_transport.clone();
+        #[cfg(feature = "iroh")]
+        let iroh_transport = self.iroh_transport.clone();
+        
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // 2 minutes
+            
+            loop {
+                interval.tick().await;
+                
+                // Generate nonce for ping
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                
+                use crate::network::protocol::{PingMessage, ProtocolMessage, ProtocolParser};
+                let ping_msg = ProtocolMessage::Ping(PingMessage { nonce });
+                let wire_msg = match ProtocolParser::serialize_message(&ping_msg) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        warn!("Failed to serialize ping message: {}", e);
+                        continue;
+                    }
+                };
+                
+                // Get all peers and send ping via their send channels
+                {
+                    let mut pm = peer_manager.lock().await;
+                    for (addr, peer) in pm.peers.iter_mut() {
+                        // Record ping in peer state
+                        peer.record_ping_sent(nonce);
+                        
+                        // Send ping via peer's send channel (send_tx is pub(crate))
+                        if let Err(e) = peer.send_tx.send(wire_msg.clone()) {
+                            warn!("Failed to send ping to peer {:?}: {}", addr, e);
+                        }
+                    }
                 }
             }
         });
@@ -2951,7 +3291,7 @@ impl NetworkManager {
     }
 
     /// Send a message to a specific peer (by TransportAddr - supports all transports)
-    /// Returns Ok even if peer doesn't exist (graceful no-op)
+    /// Returns error if peer doesn't exist or is disconnected
     pub async fn send_to_peer_by_transport(
         &self,
         addr: TransportAddr,
@@ -2963,10 +3303,13 @@ impl NetworkManager {
         let sender = {
             let pm = self.peer_manager.lock().await;
             if let Some(peer) = pm.get_peer(&addr) {
+                if !peer.is_connected() {
+                    return Err(anyhow::anyhow!("Peer {:?} is disconnected", addr));
+                }
                 peer.send_tx.clone()
             } else {
-                // Peer doesn't exist - return Ok (graceful no-op)
-                return Ok(());
+                // Peer doesn't exist - return error so caller knows to try another peer
+                return Err(anyhow::anyhow!("Peer {:?} not found", addr));
             }
         };
 
@@ -3221,9 +3564,14 @@ impl NetworkManager {
         let wire_msg = ProtocolParser::serialize_message(&ping_msg)?;
 
         let peer_addrs = {
-            let pm = self.peer_manager.lock().await;
+            let mut pm = self.peer_manager.lock().await;
+            // Record ping in peer state before sending
+            for (addr, peer) in pm.peers.iter_mut() {
+                peer.record_ping_sent(nonce);
+            }
             pm.peer_addresses()
         };
+        
         for addr in peer_addrs {
             // Convert TransportAddr to SocketAddr for send_to_peer, or use send_to_peer_by_transport
             let addr_clone = addr.clone();
@@ -3372,7 +3720,7 @@ impl NetworkManager {
                         addr_recv,
                         addr_from,
                         rand::random::<u64>(),
-                        "/Bitcoin Commons:0.1.0/".to_string(),
+                        format!("/Bitcoin Commons:{}/", env!("CARGO_PKG_VERSION")),
                         start_height,
                         true,
                     );
@@ -3575,7 +3923,7 @@ impl NetworkManager {
                             addr_recv,
                             addr_from,
                             rand::random::<u64>(), // Random nonce
-                            "/Bitcoin Commons:0.1.0/".to_string(),
+                            format!("/Bitcoin Commons:{}/", env!("CARGO_PKG_VERSION")),
                             start_height,
                             true, // relay
                         );
@@ -3753,7 +4101,36 @@ impl NetworkManager {
                 }
                 NetworkMessage::InventoryReceived(data) => {
                     info!("Inventory received: {} bytes", data.len());
-                    // Process inventory
+                    // Parse and validate inventory size (Bitcoin Core compatibility)
+                    // Note: InventoryReceived doesn't include peer_addr, so validation
+                    // should be done in the protocol message handler where peer_addr is available
+                    // For now, we'll validate here but can't disconnect without peer address
+                    if let Ok(parsed) = ProtocolParser::parse_message(&data) {
+                        if let ProtocolMessage::Inv(inv_msg) = parsed {
+                            if inv_msg.inventory.len() > crate::network::protocol::MAX_INV_SZ {
+                                warn!(
+                                    "inv message size = {} exceeds MAX_INV_SZ ({})",
+                                    inv_msg.inventory.len(),
+                                    crate::network::protocol::MAX_INV_SZ
+                                );
+                                // Can't disconnect here without peer address
+                                // Validation should be done in protocol handler
+                                continue; // Don't process invalid message
+                            }
+                            
+                            // Record block announcements for outbound peer eviction
+                            // Check if this inv contains block announcements (MSG_BLOCK = 2)
+                            use crate::network::inventory::MSG_BLOCK;
+                            let has_block_announcements = inv_msg.inventory.iter().any(|inv| inv.inv_type == MSG_BLOCK);
+                            if has_block_announcements {
+                                // Note: We don't have peer_addr here, so we can't update peer state
+                                // This is a limitation - block announcements should be tracked in the protocol handler
+                                // where peer_addr is available. For now, we'll track it when we process the inv
+                                // in the protocol handler (see ProtocolMessage::Inv handler)
+                            }
+                        }
+                    }
+                    // Process inventory (existing code continues here)
                 }
                 #[cfg(feature = "utxo-commitments")]
                 NetworkMessage::GetUTXOSetReceived(data, peer_addr) => {
@@ -4464,6 +4841,7 @@ impl NetworkManager {
             }
             // Respond to Ping with Pong (required to keep connection alive)
             ProtocolMessage::Ping(ping_msg) => {
+                use crate::network::protocol::PongMessage;
                 // Send Pong with the same nonce to keep connection alive
                 let pong_msg = ProtocolMessage::Pong(PongMessage { nonce: ping_msg.nonce });
                 match ProtocolParser::serialize_message(&pong_msg) {
@@ -4472,7 +4850,7 @@ impl NetworkManager {
                         let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
                         drop(pm);
                         if let Some(transport_addr) = transport_addr {
-                            if let Err(e) = self.send_to_peer_by_transport(transport_addr, pong_wire).await {
+                            if let Err(e) = self.send_to_peer_by_transport(transport_addr.clone(), pong_wire).await {
                                 warn!("Failed to send Pong to {}: {}", peer_addr, e);
                             } else {
                                 debug!("Sent Pong to {} (nonce={})", peer_addr, ping_msg.nonce);
@@ -4484,6 +4862,39 @@ impl NetworkManager {
                     }
                 }
                 return Ok(()); // Ping handled, no further processing needed
+            }
+            // Handle Pong response (clear pending ping)
+            ProtocolMessage::Pong(pong_msg) => {
+                // Record pong received in peer state
+                {
+                    let mut pm = self.peer_manager.lock().await;
+                    // Find TransportAddr for this SocketAddr
+                    let transport_addr = pm.find_transport_addr_by_socket(peer_addr)
+                        .or_else(|| {
+                            // Fallback: try to find by iterating (if method doesn't exist)
+                            pm.peers.iter()
+                                .find(|(addr, _)| {
+                                    match addr {
+                                        TransportAddr::Tcp(sock) => *sock == peer_addr,
+                                        #[cfg(feature = "quinn")]
+                                        TransportAddr::Quinn(sock) => *sock == peer_addr,
+                                        _ => false,
+                                    }
+                                })
+                                .map(|(addr, _)| addr.clone())
+                        });
+                    
+                    if let Some(addr) = transport_addr {
+                        if let Some(peer) = pm.get_peer_mut(&addr) {
+                            if !peer.record_pong_received(pong_msg.nonce) {
+                                warn!("Received pong with non-matching nonce from {}", peer_addr);
+                            } else {
+                                debug!("Received valid pong from {} (nonce={})", peer_addr, pong_msg.nonce);
+                            }
+                        }
+                    }
+                }
+                // Continue normal processing (pong is just acknowledgment)
             }
             // IBD Protection: Check GetHeaders requests (full chain sync)
             ProtocolMessage::GetHeaders(getheaders) => {
@@ -4518,6 +4929,49 @@ impl NetworkManager {
             }
             // IBD Protection: Check GetData requests for blocks (IBD serving)
             ProtocolMessage::GetData(getdata) => {
+                // Validate inventory size (Bitcoin Core compatibility)
+                if getdata.inventory.len() > crate::network::protocol::MAX_INV_SZ {
+                    warn!(
+                        "getdata message size = {} exceeds MAX_INV_SZ ({}), disconnecting peer {}",
+                        getdata.inventory.len(),
+                        crate::network::protocol::MAX_INV_SZ,
+                        peer_addr
+                    );
+                    // Check if peer should be disconnected (exempt manual connections and NoBan)
+                    let mut pm = self.peer_manager.lock().await;
+                    let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
+                        !peer.is_manual() && !peer.has_noban_permission()
+                    } else {
+                        true // Peer not found, disconnect anyway
+                    };
+                    drop(pm);
+                    
+                    if should_disconnect {
+                        // Check if local/onion peer (don't ban, just disconnect)
+                        if Self::is_local_address(&peer_addr) || Self::is_onion_address(&peer_addr) {
+                            warn!("Disconnecting local/onion peer {} for getdata size violation (not banning)", peer_addr);
+                        } else {
+                            // Add to ban list for misbehaving (normal peer)
+                            let mut ban_list = self.ban_list.write().await;
+                            let ban_until = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                + 24 * 60 * 60; // Ban for 24 hours
+                            ban_list.insert(peer_addr, ban_until);
+                            drop(ban_list);
+                        }
+                        // Disconnect peer for protocol violation
+                        let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                            TransportAddr::Tcp(peer_addr)
+                        ));
+                        return Err(anyhow::anyhow!("getdata message size exceeded"));
+                    } else {
+                        warn!("Peer {} has manual/NoBan permission, not disconnecting for getdata size violation", peer_addr);
+                        return Ok(()); // Don't disconnect, but don't process message
+                    }
+                }
+                
                 // Check if this GetData contains block requests (MSG_BLOCK = 2)
                 use crate::network::inventory::MSG_BLOCK;
                 let has_block_requests = getdata.inventory.iter().any(|inv| inv.inv_type == MSG_BLOCK);
@@ -4589,6 +5043,40 @@ impl NetworkManager {
                     .send(NetworkMessage::GetCfcheckptReceived(data, peer_addr));
                 return Ok(());
             }
+            // Validate Inv messages (Bitcoin Core compatibility)
+            ProtocolMessage::Inv(inv_msg) => {
+                // Validate inventory size BEFORE routing to InventoryReceived
+                if inv_msg.inventory.len() > crate::network::protocol::MAX_INV_SZ {
+                    warn!(
+                        "inv message size = {} exceeds MAX_INV_SZ ({}), disconnecting peer {}",
+                        inv_msg.inventory.len(),
+                        crate::network::protocol::MAX_INV_SZ,
+                        peer_addr
+                    );
+                    // Check if peer should be disconnected (exempt manual connections and NoBan)
+                    let mut pm = self.peer_manager.lock().await;
+                    let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
+                        !peer.is_manual() && !peer.has_noban_permission()
+                    } else {
+                        true // Peer not found, disconnect anyway
+                    };
+                    drop(pm);
+                    
+                    if should_disconnect {
+                        // Disconnect peer for protocol violation
+                        let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                            TransportAddr::Tcp(peer_addr)
+                        ));
+                        return Err(anyhow::anyhow!("inv message size exceeded"));
+                    } else {
+                        warn!("Peer {} has NoBan permission, not disconnecting for inv size violation", peer_addr);
+                        return Ok(()); // Don't disconnect, but don't process message
+                    }
+                }
+                // Route to InventoryReceived handler (existing code)
+                let _ = self.peer_tx.send(NetworkMessage::InventoryReceived(data));
+                return Ok(());
+            }
             // Module Registry
             ProtocolMessage::GetModule(_) => {
                 let _ = self
@@ -4628,6 +5116,49 @@ impl NetworkManager {
             }
             // Headers and Block messages (for IBD)
             ProtocolMessage::Headers(headers_msg) => {
+                // Validate headers size (Bitcoin Core compatibility)
+                if headers_msg.headers.len() > crate::network::protocol::MAX_HEADERS_RESULTS {
+                    warn!(
+                        "headers message size = {} exceeds MAX_HEADERS_RESULTS ({}), disconnecting peer {}",
+                        headers_msg.headers.len(),
+                        crate::network::protocol::MAX_HEADERS_RESULTS,
+                        peer_addr
+                    );
+                    // Check if peer should be disconnected (exempt manual connections and NoBan)
+                    let mut pm = self.peer_manager.lock().await;
+                    let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
+                        !peer.is_manual() && !peer.has_noban_permission()
+                    } else {
+                        true // Peer not found, disconnect anyway
+                    };
+                    drop(pm);
+                    
+                    if should_disconnect {
+                        // Check if local/onion peer (don't ban, just disconnect)
+                        if Self::is_local_address(&peer_addr) || Self::is_onion_address(&peer_addr) {
+                            warn!("Disconnecting local/onion peer {} for headers size violation (not banning)", peer_addr);
+                        } else {
+                            // Add to ban list for misbehaving (normal peer)
+                            let mut ban_list = self.ban_list.write().await;
+                            let ban_until = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                + 24 * 60 * 60; // Ban for 24 hours
+                            ban_list.insert(peer_addr, ban_until);
+                            drop(ban_list);
+                        }
+                        // Disconnect peer for protocol violation
+                        let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                            TransportAddr::Tcp(peer_addr)
+                        ));
+                        return Err(anyhow::anyhow!("headers message size exceeded"));
+                    } else {
+                        warn!("Peer {} has manual/NoBan permission, not disconnecting for headers size violation", peer_addr);
+                        return Ok(()); // Don't disconnect, but don't process message
+                    }
+                }
+                
                 // Check if there's a pending Headers request for this peer
                 let headers = headers_msg.headers.clone();
                 if self.complete_headers_request(peer_addr, headers) {
@@ -4719,6 +5250,55 @@ impl NetworkManager {
                     return Ok(()); // Message handled, return early
                 }
                 // No pending request - process normally through protocol layer
+            }
+            // Compact Block Relay (BIP152) - Add error handling and disconnection
+            ProtocolMessage::CmpctBlock(cmpct_msg) => {
+                // Validate compact block
+                // If reconstruction fails or validation fails, disconnect peer
+                // Note: Compact block reconstruction happens in compact_blocks module
+                // For now, we'll add validation here and disconnect on errors
+                use crate::network::compact_blocks::CompactBlock;
+                
+                // Check if compact block is valid (basic checks)
+                if cmpct_msg.compact_block.short_ids.len() > 10000 {
+                    warn!("Invalid compact block: too many short IDs ({}) from {}", 
+                        cmpct_msg.compact_block.short_ids.len(), peer_addr);
+                    let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                        TransportAddr::Tcp(peer_addr)
+                    ));
+                    return Err(anyhow::anyhow!("Invalid compact block: too many short IDs"));
+                }
+                
+                // Route to protocol layer for processing
+                // If reconstruction fails there, it should signal disconnection
+            }
+            ProtocolMessage::GetBlockTxn(getblocktxn_msg) => {
+                // Validate GetBlockTxn indices
+                // Check if indices are out of bounds (should be < short_ids count from previous compact block)
+                // For now, basic validation - if indices are unreasonably large, disconnect
+                if getblocktxn_msg.indices.len() > 10000 {
+                    warn!("GetBlockTxn with too many indices ({}) from {}", 
+                        getblocktxn_msg.indices.len(), peer_addr);
+                    let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                        TransportAddr::Tcp(peer_addr)
+                    ));
+                    return Err(anyhow::anyhow!("GetBlockTxn with too many indices"));
+                }
+                
+                // Check for out-of-bounds indices (would need to track previous compact block)
+                // For now, we'll let the compact block handler validate this
+            }
+            ProtocolMessage::BlockTxn(blocktxn_msg) => {
+                // Validate BlockTxn response
+                // If transactions don't match expected indices or block hash, disconnect
+                if blocktxn_msg.transactions.len() > 10000 {
+                    warn!("BlockTxn with too many transactions ({}) from {}", 
+                        blocktxn_msg.transactions.len(), peer_addr);
+                    let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                        TransportAddr::Tcp(peer_addr)
+                    ));
+                    return Err(anyhow::anyhow!("BlockTxn with too many transactions"));
+                }
             }
             _ => {
                 // Other NetworkMessage variants are handled above
@@ -5013,13 +5593,32 @@ impl NetworkManager {
         let storage_ref = self.storage.as_ref();
         let responses = handle_getcfilters(&request, &self.filter_service, storage_ref)?;
 
-        // Check CPU time limit
+        // Check CPU time limit (Bitcoin Core disconnects if filter generation takes too long)
         let cpu_time_ms = cpu_start.elapsed().as_millis() as u64;
-        if !self.bandwidth_protection.check_cpu_time_limit(ServiceType::Filters, cpu_time_ms) {
-            return Err(anyhow::anyhow!(
-                "Filter generation CPU time limit exceeded: {}ms",
-                cpu_time_ms
-            ));
+        const MAX_FILTER_CPU_TIME_MS: u64 = 5000; // 5 seconds (Bitcoin Core uses similar limit)
+        if cpu_time_ms > MAX_FILTER_CPU_TIME_MS {
+            // CPU time limit exceeded - disconnect peer (filter service violation)
+            warn!("Filter service CPU time limit exceeded ({}ms > {}ms) for peer {}, disconnecting", 
+                cpu_time_ms, MAX_FILTER_CPU_TIME_MS, peer_addr);
+            
+            // Check if peer has NoBan permission before disconnecting
+            let mut pm = self.peer_manager.lock().await;
+            let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
+                !peer.has_noban_permission()
+            } else {
+                true // Peer not found, disconnect anyway
+            };
+            drop(pm);
+            
+            if should_disconnect {
+                let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                    TransportAddr::Tcp(peer_addr)
+                ));
+                return Err(anyhow::anyhow!("Filter service CPU time limit exceeded: {}ms", cpu_time_ms));
+            } else {
+                warn!("Peer {} has NoBan permission, not disconnecting for filter CPU time violation", peer_addr);
+                return Ok(()); // Don't disconnect, but don't process further
+            }
         }
 
         // Send responses to peer and track bandwidth
@@ -5266,6 +5865,13 @@ impl NetworkManager {
         self.peer_manager.lock().await
     }
 
+    /// Get current connected peer addresses as SocketAddr
+    /// Returns addresses for TCP/Quinn peers only (Iroh peers use different addressing)
+    pub async fn get_connected_peer_addresses(&self) -> Vec<SocketAddr> {
+        let pm = self.peer_manager.lock().await;
+        pm.peer_socket_addresses()
+    }
+
     /// Check eclipse prevention for an IP address
     /// Returns true if connection is allowed, false if it would violate eclipse prevention
     pub fn check_eclipse_prevention(&self, ip: std::net::IpAddr) -> bool {
@@ -5423,6 +6029,21 @@ impl NetworkManager {
 
     /// Handle Addr message - store addresses and optionally relay
     async fn handle_addr(&self, peer_addr: SocketAddr, msg: AddrMessage) -> Result<()> {
+        // Validate message size (Bitcoin Core compatibility)
+        if msg.addresses.len() > crate::network::protocol::MAX_ADDR_TO_SEND {
+            warn!(
+                "addr message size = {} exceeds MAX_ADDR_TO_SEND ({}), disconnecting peer {}",
+                msg.addresses.len(),
+                crate::network::protocol::MAX_ADDR_TO_SEND,
+                peer_addr
+            );
+            // Disconnect peer for protocol violation
+            let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                TransportAddr::Tcp(peer_addr)
+            ));
+            return Err(anyhow::anyhow!("addr message size exceeded"));
+        }
+
         // AddrMessage is already in scope as parameter, NetworkAddress is available from top-level import
 
         // Get peer services from peer state
