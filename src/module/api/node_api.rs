@@ -19,7 +19,7 @@ use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::metrics::manager::{Metric, MetricsManager};
 use crate::module::traits::{
     ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError, ModuleInfo, ModuleState,
-    NetworkStats, NodeAPI, PaymentState, PeerInfo,
+    NetworkStats, NodeAPI, PaymentState, PeerInfo, SubmitBlockResult,
 };
 use crate::network::{transport::TransportAddr, NetworkManager};
 use crate::node::mempool::MempoolManager;
@@ -2268,6 +2268,120 @@ impl NodeAPI for NodeApiImpl {
         }
 
         Ok(result)
+    }
+
+    async fn get_block_template(
+        &self,
+        rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_address: Option<String>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        // Get current height
+        let height = self
+            .storage
+            .chain()
+            .get_height()
+            .map_err(|e| ModuleError::OperationError(format!("Failed to get height: {}", e)))?
+            .ok_or_else(|| ModuleError::OperationError("Chain not initialized".to_string()))?;
+
+        // Get tip header
+        let prev_header = self
+            .storage
+            .chain()
+            .get_tip_header()
+            .map_err(|e| ModuleError::OperationError(format!("Failed to get tip header: {}", e)))?
+            .ok_or_else(|| ModuleError::OperationError("No chain tip".to_string()))?;
+
+        // Get headers for difficulty adjustment
+        let prev_headers = if let Ok(recent) = self.storage.blocks().get_recent_headers(2016) {
+            if recent.len() >= 2 {
+                recent
+            } else {
+                // Fallback: get headers by height
+                let mut headers = Vec::new();
+                if let Ok(Some(current_height)) = self.storage.chain().get_height() {
+                    for h in 0..=current_height.min(2015) {
+                        if let Ok(Some(hash)) = self.storage.blocks().get_hash_by_height(h) {
+                            if let Ok(Some(header)) = self.storage.blocks().get_header(&hash) {
+                                headers.push(header);
+                            }
+                        }
+                    }
+                }
+                headers
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Get mempool transactions
+        let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError("Mempool manager not available".to_string())
+        })?;
+        let mempool_txs = mempool_manager.get_transactions();
+
+        // Get UTXO set
+        let utxo_set = self
+            .storage
+            .utxos()
+            .get_all_utxos()
+            .map_err(|e| ModuleError::OperationError(format!("Failed to get UTXO set: {}", e)))?;
+
+        // Convert coinbase script/address to ByteString
+        let coinbase_script_bytes = coinbase_script.unwrap_or_default();
+        let coinbase_address_bytes = coinbase_address
+            .map(|a| a.into_bytes())
+            .unwrap_or_default();
+
+        // Use formally verified consensus function (same as RPC getblocktemplate)
+        let template = blvm_consensus::mining::create_block_template(
+            &utxo_set,
+            &mempool_txs,
+            height,
+            &prev_header,
+            &prev_headers,
+            &coinbase_script_bytes,
+            &coinbase_address_bytes,
+        )
+        .map_err(|e| ModuleError::OperationError(format!("Template creation failed: {}", e)))?;
+
+        Ok(template)
+    }
+
+    async fn submit_block(&self, block: Block) -> Result<SubmitBlockResult, ModuleError> {
+        use crate::rpc::mining::MiningRpc;
+        use serde_json::json;
+
+        // Create MiningRpc instance
+        let storage = self.storage.clone();
+        let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError("Mempool manager not available".to_string())
+        })?;
+
+        let mining_rpc = MiningRpc::with_dependencies(storage, mempool_manager.clone());
+
+        // Serialize block to hex using bincode (same as RPC submitblock)
+        let block_bytes = bincode::serialize(&block)
+            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+        let block_hex = hex::encode(block_bytes);
+
+        // Build params
+        let params = json!([block_hex]);
+
+        // Call submit_block via RPC method
+        let result = mining_rpc.submit_block(&params).await.map_err(|e| {
+            ModuleError::OperationError(format!("Failed to submit block: {}", e))
+        })?;
+
+        // Parse result
+        let result_str = result.as_str().unwrap_or("");
+        match result_str {
+            "" | "null" => Ok(SubmitBlockResult::Accepted),
+            s if s.contains("duplicate") || s.contains("already") => {
+                Ok(SubmitBlockResult::Duplicate)
+            }
+            s => Ok(SubmitBlockResult::Rejected(s.to_string())),
+        }
     }
 
     async fn report_module_health(
