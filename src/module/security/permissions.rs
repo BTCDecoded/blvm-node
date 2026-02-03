@@ -35,6 +35,7 @@ pub fn parse_permission_string(perm_str: &str) -> Option<Permission> {
         "publish_events" | "PublishEvents" => Some(Permission::PublishEvents),
         "call_module" | "CallModule" => Some(Permission::CallModule),
         "register_module_api" | "RegisterModuleApi" => Some(Permission::RegisterModuleApi),
+        "submit_block" | "SubmitBlock" => Some(Permission::SubmitBlock),
         _ => None,
     }
 }
@@ -98,6 +99,8 @@ pub enum Permission {
     CallModule,
     /// Register module API for other modules to call
     RegisterModuleApi,
+    /// Submit blocks (mining)
+    SubmitBlock,
 }
 
 /// Set of permissions for a module
@@ -285,6 +288,8 @@ impl PermissionChecker {
             RequestPayload::CallModule { .. } => Permission::CallModule,
             RequestPayload::RegisterModuleApi { .. } => Permission::RegisterModuleApi,
             RequestPayload::UnregisterModuleApi => Permission::RegisterModuleApi,
+            RequestPayload::GetBlockTemplate { .. } => Permission::ReadBlockchain,
+            RequestPayload::SubmitBlock { .. } => Permission::SubmitBlock,
         };
 
         if !self.check_permission(module_id, &required_permission) {

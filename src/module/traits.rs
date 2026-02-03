@@ -480,6 +480,38 @@ pub trait NodeAPI: Send + Sync {
         &self,
         health: crate::module::process::monitor::ModuleHealth,
     ) -> Result<(), ModuleError>;
+
+    // === Mining API Methods ===
+    /// Get block template (GBT equivalent)
+    ///
+    /// Returns a block template suitable for mining.
+    /// Uses the same formally verified consensus function as RPC getblocktemplate.
+    ///
+    /// # Arguments
+    /// * `rules` - Consensus rules to apply (e.g., ["segwit"])
+    /// * `coinbase_script` - Optional coinbase script (for custom coinbase)
+    /// * `coinbase_address` - Optional coinbase address (for custom coinbase)
+    ///
+    /// # Returns
+    /// BlockTemplate with header, coinbase transaction, and selected transactions
+    async fn get_block_template(
+        &self,
+        rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_address: Option<String>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError>;
+
+    /// Submit a solved block
+    ///
+    /// Submits a fully solved block to the network.
+    /// The block must be valid and meet the difficulty target.
+    ///
+    /// # Arguments
+    /// * `block` - The solved block to submit
+    ///
+    /// # Returns
+    /// SubmitBlockResult indicating acceptance, rejection, or duplicate
+    async fn submit_block(&self, block: Block) -> Result<SubmitBlockResult, ModuleError>;
 }
 
 /// Event types that modules can subscribe to
@@ -910,4 +942,15 @@ pub struct PaymentState {
     pub tx_hash: Option<Hash>,
     /// Confirmations (if confirmed)
     pub confirmations: Option<u32>,
+}
+
+/// Result of block submission
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmitBlockResult {
+    /// Block was accepted
+    Accepted,
+    /// Block was rejected with reason
+    Rejected(String),
+    /// Block was already submitted (duplicate)
+    Duplicate,
 }

@@ -578,6 +578,8 @@ impl ModuleApiHub {
             RequestPayload::GetPaymentState { .. } => "get_payment_state",
             RequestPayload::CheckTransactionInMempool { .. } => "check_transaction_in_mempool",
             RequestPayload::GetFeeEstimate { .. } => "get_fee_estimate",
+            RequestPayload::GetBlockTemplate { .. } => "get_block_template",
+            RequestPayload::SubmitBlock { .. } => "submit_block",
             // Filesystem API
             RequestPayload::ReadFile { .. } => "read_file",
             RequestPayload::WriteFile { .. } => "write_file",

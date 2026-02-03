@@ -122,6 +122,9 @@ pub enum MessageType {
     // Network Integration
     SendMeshPacketToPeer,
     SendStratumV2MessageToPeer,
+    // Mining API
+    GetBlockTemplate,
+    SubmitBlock,
     /// Log message from module
     Log,
     /// Response messages
@@ -312,6 +315,15 @@ pub enum RequestPayload {
         peer_addr: String,
         message_data: Vec<u8>,
     },
+    // Mining API
+    GetBlockTemplate {
+        rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_address: Option<String>,
+    },
+    SubmitBlock {
+        block: Block,
+    },
 }
 
 /// Response message from node to module
@@ -390,6 +402,9 @@ pub enum ResponsePayload {
     ModuleHealth(Option<crate::module::process::monitor::ModuleHealth>),
     AllModuleHealth(Vec<(String, crate::module::process::monitor::ModuleHealth)>),
     HealthReported,
+    // Mining API responses
+    BlockTemplate(blvm_protocol::mining::BlockTemplate),
+    SubmitBlockResult(crate::module::traits::SubmitBlockResult),
 }
 
 /// Event message from node to subscribed modules

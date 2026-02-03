@@ -890,6 +890,31 @@ impl ModuleIpcServer {
                     ResponsePayload::Bool(true),
                 ))
             }
+            // Mining API
+            RequestPayload::GetBlockTemplate {
+                rules,
+                coinbase_script,
+                coinbase_address,
+            } => {
+                let template = node_api
+                    .get_block_template(
+                        rules.clone(),
+                        coinbase_script.clone(),
+                        coinbase_address.clone(),
+                    )
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::BlockTemplate(template),
+                ))
+            }
+            RequestPayload::SubmitBlock { block } => {
+                let result = node_api.submit_block(block.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::SubmitBlockResult(result),
+                ))
+            }
         }
     }
 }

@@ -180,6 +180,8 @@ impl RequestValidator {
             // Network Integration - requires validation (sending network packets)
             | RequestPayload::SendMeshPacketToPeer { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::SendStratumV2MessageToPeer { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::GetBlockTemplate { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::SubmitBlock { .. } => Ok(ValidationResult::Allowed),
         }
     }
 
