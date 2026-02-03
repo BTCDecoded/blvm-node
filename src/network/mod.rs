@@ -456,6 +456,9 @@ pub struct NetworkManager {
     mempool_policy_config: Option<Arc<crate::config::MempoolPolicyConfig>>,
     /// Spam ban configuration
     spam_ban_config: Option<Arc<crate::config::SpamBanConfig>>,
+    /// Pending blocks queue (blocks received via BlockReceived message)
+    /// Separate from main message channel to avoid draining other messages
+    pending_blocks: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
     /// Network statistics
     /// Optimization: Use AtomicU64 for lock-free updates
     bytes_sent: Arc<AtomicU64>,
@@ -687,6 +690,7 @@ impl NetworkManager {
                 .and_then(|c| c.spam_ban.as_ref())
                 .map(|c| Arc::new(c.clone())),
             peer_spam_violations: Arc::new(Mutex::new(HashMap::new())),
+            pending_blocks: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
@@ -733,33 +737,33 @@ impl NetworkManager {
     }
 
     /// Set module registry for serving modules via P2P
-    pub fn set_module_registry(
+    pub async fn set_module_registry(
         &self,
         module_registry: Arc<crate::module::registry::client::ModuleRegistry>,
     ) {
-        *self.module_registry.blocking_lock() = Some(module_registry);
+        *self.module_registry.lock().await = Some(module_registry);
     }
 
     /// Set payment processor for BIP70 payments (HTTP and P2P)
-    pub fn set_payment_processor(
+    pub async fn set_payment_processor(
         &self,
         processor: Arc<crate::payment::processor::PaymentProcessor>,
     ) {
-        *self.payment_processor.blocking_lock() = Some(processor);
+        *self.payment_processor.lock().await = Some(processor);
     }
 
     /// Set merchant private key for signing payment ACKs
-    pub fn set_merchant_key(&self, merchant_key: Option<secp256k1::SecretKey>) {
-        *self.merchant_key.blocking_lock() = merchant_key;
+    pub async fn set_merchant_key(&self, merchant_key: Option<secp256k1::SecretKey>) {
+        *self.merchant_key.lock().await = merchant_key;
     }
 
     /// Set node payment address script (for module downloads)
-    pub fn set_node_payment_script(&self, script: Option<Vec<u8>>) {
-        *self.node_payment_script.blocking_lock() = script;
+    pub async fn set_node_payment_script(&self, script: Option<Vec<u8>>) {
+        *self.node_payment_script.lock().await = script;
     }
 
     /// Set payment state machine for unified payment coordination
-    pub fn set_payment_state_machine(
+    pub async fn set_payment_state_machine(
         &self,
         state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
     ) {
@@ -779,28 +783,28 @@ impl NetworkManager {
                 debug!("Payment state machine has multiple references, network sender not set (broadcasting disabled)");
             }
         }
-        *self.payment_state_machine.blocking_lock() = Some(state_machine);
+        *self.payment_state_machine.lock().await = Some(state_machine);
     }
 
     /// Set module encryption for encrypted module serving
-    pub fn set_module_encryption(
+    pub async fn set_module_encryption(
         &self,
         encryption: Arc<crate::module::encryption::ModuleEncryption>,
     ) {
-        *self.module_encryption.blocking_lock() = Some(encryption);
+        *self.module_encryption.lock().await = Some(encryption);
     }
 
     /// Set modules directory for encrypted/decrypted module storage
-    pub fn set_modules_dir(&self, modules_dir: std::path::PathBuf) {
-        *self.modules_dir.blocking_lock() = Some(modules_dir);
+    pub async fn set_modules_dir(&self, modules_dir: std::path::PathBuf) {
+        *self.modules_dir.lock().await = Some(modules_dir);
     }
 
     /// Set event publisher for network event notifications
-    pub fn set_event_publisher(
+    pub async fn set_event_publisher(
         &self,
         event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
     ) {
-        *self.event_publisher.blocking_lock() = event_publisher;
+        *self.event_publisher.lock().await = event_publisher;
     }
 
     /// Initialize FIBRE relay (if enabled in config)
@@ -1914,30 +1918,9 @@ impl NetworkManager {
             let ban_list = Arc::clone(&self.ban_list);
             tokio::spawn(async move {
                 loop {
-                    match tcp_listener.accept().await {
-                        Ok((conn, transport_addr)) => {
-                            // Extract SocketAddr from TransportAddr::Tcp
-                            // In TCP listener context, we should only get TCP addresses
-                            // TcpListener::accept() always returns TransportAddr::Tcp
-                            let socket_addr = match transport_addr {
-                                TransportAddr::Tcp(addr) => addr,
-                                #[cfg(feature = "quinn")]
-                                TransportAddr::Quinn(_) => {
-                                    error!("Unexpected transport address type for TCP listener");
-                                    continue;
-                                }
-                                #[cfg(feature = "iroh")]
-                                TransportAddr::Iroh(_) => {
-                                    error!("Unexpected transport address type for TCP listener");
-                                    continue;
-                                }
-                                #[cfg(not(any(feature = "quinn", feature = "iroh")))]
-                                #[allow(unreachable_patterns)]
-                                _ => {
-                                    error!("Unexpected transport address type for TCP listener");
-                                    continue;
-                                }
-                            };
+                    // Use accept_stream() to get raw TcpStream for proper split handling
+                    match tcp_listener.accept_stream().await {
+                        Ok((stream, socket_addr)) => {
                             info!("New TCP connection from {:?}", socket_addr);
 
                             // Check DoS protection: connection rate limiting
@@ -1960,7 +1943,7 @@ impl NetworkManager {
                                 }
 
                                 // Close connection immediately
-                                drop(conn);
+                                drop(stream);
                                 continue;
                             }
 
@@ -1974,7 +1957,7 @@ impl NetworkManager {
                                 .await
                             {
                                 warn!("Active connection limit exceeded, rejecting connection from {}", socket_addr);
-                                drop(conn);
+                                drop(stream);
                                 continue;
                             }
 
@@ -1988,11 +1971,10 @@ impl NetworkManager {
                             let peer_manager_for_peer = Arc::clone(&peer_manager_clone);
                             let transport_addr_for_peer = transport_addr_tcp;
                             tokio::spawn(async move {
-                                // Create peer from transport connection
-                                let peer = peer::Peer::from_transport_connection(
-                                    conn,
+                                // Create peer using split stream for concurrent read/write
+                                let peer = peer::Peer::from_tcp_stream_split(
+                                    stream,
                                     socket_addr,
-                                    transport_addr_for_peer.clone(),
                                     peer_tx_clone.clone(),
                                 );
 
@@ -2815,6 +2797,24 @@ impl NetworkManager {
         })
     }
 
+    /// Get the highest start_height (best block height) from all connected peers
+    /// Returns None if no peers are connected or no peers have reported a start_height
+    pub fn get_highest_peer_start_height(&self) -> Option<u64> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let pm = self.peer_manager.lock().await;
+                let mut max_height: Option<i32> = None;
+                for (_addr, peer) in pm.peers.iter() {
+                    let peer_height = peer.start_height();
+                    if peer_height > 0 {
+                        max_height = Some(max_height.map_or(peer_height, |m| m.max(peer_height)));
+                    }
+                }
+                max_height.map(|h| h as u64)
+            })
+        })
+    }
+
     /// Broadcast a message to all peers
     pub async fn broadcast(&self, message: Vec<u8>) -> Result<()> {
         // Get peer addresses first, then drop lock before async operations
@@ -2977,7 +2977,8 @@ impl NetworkManager {
         // Check message command (Bitcoin wire format: 4-byte magic + 12-byte command + 4-byte length + payload)
         if message.len() >= 16 {
             let command_bytes = &message[4..16];
-            let command = String::from_utf8_lossy(command_bytes).trim_end_matches('\0');
+            let command_str = String::from_utf8_lossy(command_bytes);
+            let command = command_str.trim_end_matches('\0');
             
             // Get SocketAddr for bandwidth protection (needed for tracking)
             let peer_socket_addr_opt: Option<SocketAddr> = match &addr {
@@ -3094,8 +3095,8 @@ impl NetworkManager {
                         pm.add_peer(transport_addr.clone(), peer)?;
                     }
 
-                    // Note: Peer handler is managed by Peer::from_transport_connection
-                    // No need to spawn additional handler task
+                    // Send PeerConnected notification to trigger handshake (Version/VerAck)
+                    let _ = self.peer_tx.send(NetworkMessage::PeerConnected(transport_addr.clone()));
 
                     info!(
                         "Successfully connected to {} via {:?} (transport: {:?})",
@@ -3163,15 +3164,13 @@ impl NetworkManager {
 
         match transport_type {
             crate::network::transport::TransportType::Tcp => {
-                // Use TcpTransport to create connection properly
-                let tcp_addr = TransportAddr::Tcp(addr);
-                let tcp_conn = self.tcp_transport.connect(tcp_addr).await?;
+                // Use connect_stream for raw TcpStream, then create Peer with split
+                let stream = self.tcp_transport.connect_stream(addr).await?;
                 let transport_addr = TransportAddr::Tcp(addr);
                 Ok((
-                    peer::Peer::from_transport_connection(
-                        tcp_conn,
+                    peer::Peer::from_tcp_stream_split(
+                        stream,
                         addr,
-                        transport_addr.clone(),
                         self.peer_tx.clone(),
                     ),
                     transport_addr,
@@ -3260,41 +3259,188 @@ impl NetworkManager {
 
     /// Try to receive a block message (non-blocking)
     /// Returns Some(block_data) if a block was received, None otherwise
+    /// Try to receive a block from the pending blocks queue
+    /// This does NOT consume other message types from the main channel
     pub fn try_recv_block(&self) -> Option<Vec<u8>> {
-        use tokio::sync::mpsc::error::TryRecvError;
+        // Use the dedicated pending_blocks queue instead of draining the main channel
+        // This preserves PeerConnected, RawMessageReceived, etc. for proper processing
+        let mut blocks = match self.pending_blocks.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => return None,
+        };
+        blocks.pop_front()
+    }
+    
+    /// Queue a block for processing (called when BlockReceived is received in process_messages)
+    pub fn queue_block(&self, data: Vec<u8>) {
+        if let Ok(mut blocks) = self.pending_blocks.try_lock() {
+            blocks.push_back(data);
+        }
+    }
 
-        // Check for BlockReceived messages without blocking
-        // Use block_in_place to avoid blocking async runtime
-        tokio::task::block_in_place(|| {
-            let mut rx = match self.peer_rx.try_lock() {
-                Ok(guard) => guard,
-                Err(_) => return None, // Lock is held, skip this call
-            };
-            loop {
+    /// Process all pending network messages without blocking
+    /// Returns the number of messages processed
+    pub async fn process_pending_messages(&self) -> Result<usize> {
+        let mut processed = 0;
+        
+        loop {
+            // Try to receive a message without blocking
+            let message = {
+                let mut rx = self.peer_rx.lock().await;
                 match rx.try_recv() {
-                Ok(NetworkMessage::BlockReceived(data)) => {
-                    return Some(data);
+                    Ok(msg) => {
+                        debug!("process_pending_messages: received message {:?}", 
+                            match &msg {
+                                NetworkMessage::PeerConnected(addr) => format!("PeerConnected({:?})", addr),
+                                NetworkMessage::PeerDisconnected(addr) => format!("PeerDisconnected({:?})", addr),
+                                NetworkMessage::RawMessageReceived(data, addr) => format!("RawMessageReceived({} bytes from {})", data.len(), addr),
+                                _ => "other".to_string(),
+                            });
+                        Some(msg)
+                    },
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        warn!("process_pending_messages: channel disconnected");
+                        return Ok(processed);
+                    }
                 }
-                Ok(NetworkMessage::GetModuleReceived(_, _))
-                | Ok(NetworkMessage::ModuleReceived(_, _))
-                | Ok(NetworkMessage::GetModuleByHashReceived(_, _))
-                | Ok(NetworkMessage::ModuleByHashReceived(_, _))
-                | Ok(NetworkMessage::GetModuleListReceived(_, _))
-                | Ok(NetworkMessage::ModuleListReceived(_, _))
-                | Ok(_) => {
-                    // Other message types, continue checking
-                    continue;
+            };
+            
+            let message = match message {
+                Some(msg) => msg,
+                None => break, // No more pending messages
+            };
+            
+            // Process the message (reuse the same processing logic)
+            self.handle_network_message(message).await;
+            processed += 1;
+        }
+        
+        Ok(processed)
+    }
+
+    /// Handle a single network message (extracted for reuse)
+    async fn handle_network_message(&self, message: NetworkMessage) {
+        match message {
+            NetworkMessage::PeerConnected(addr) => {
+                info!("Peer connected: {:?}", addr);
+
+                // Send Version message to initiate handshake
+                let socket_addr = match &addr {
+                    TransportAddr::Tcp(sock) => Some(*sock),
+                    #[cfg(feature = "quinn")]
+                    TransportAddr::Quinn(sock) => Some(*sock),
+                    #[cfg(feature = "iroh")]
+                    TransportAddr::Iroh(_) => None,
+                };
+
+                if let Some(peer_socket) = socket_addr {
+                    let start_height = if let Some(ref storage) = self.storage {
+                        storage.chain().get_height().ok().flatten().unwrap_or(0) as i32
+                    } else {
+                        0
+                    };
+
+                    let peer_ip = match peer_socket.ip() {
+                        std::net::IpAddr::V4(ip) => {
+                            let mut addr = [0u8; 16];
+                            addr[10] = 0xff;
+                            addr[11] = 0xff;
+                            addr[12..16].copy_from_slice(&ip.octets());
+                            addr
+                        }
+                        std::net::IpAddr::V6(ip) => ip.octets(),
+                    };
+                    let addr_recv = crate::network::protocol::NetworkAddress {
+                        services: 0,
+                        ip: peer_ip,
+                        port: peer_socket.port(),
+                    };
+                    let addr_from = crate::network::protocol::NetworkAddress {
+                        services: 0,
+                        ip: [0u8; 16],
+                        port: 0,
+                    };
+
+                    let version_msg = self.create_version_message(
+                        70015,
+                        0,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64,
+                        addr_recv,
+                        addr_from,
+                        rand::random::<u64>(),
+                        "/Bitcoin Commons:0.1.0/".to_string(),
+                        start_height,
+                        true,
+                    );
+
+                    match ProtocolParser::serialize_message(&ProtocolMessage::Version(version_msg)) {
+                        Ok(wire_msg) => {
+                            if let Err(e) = self.send_to_peer_by_transport(addr.clone(), wire_msg).await {
+                                warn!("Failed to send Version message to {:?}: {}", addr, e);
+                            } else {
+                                info!("Sent Version message to {:?}", addr);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to serialize Version message for {:?}: {}", addr, e);
+                        }
+                    }
                 }
-                Err(TryRecvError::Empty) => {
-                    return None;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    warn!("Network message channel disconnected");
-                    return None;
-                }
+
+                // Publish peer connected event
+                let event_publisher_guard = self.event_publisher.lock().await;
+                if let Some(ref event_publisher) = *event_publisher_guard {
+                    let addr_str = format!("{:?}", addr);
+                    let transport_type = match &addr {
+                        TransportAddr::Tcp(_) => "tcp",
+                        #[cfg(feature = "quinn")]
+                        TransportAddr::Quinn(_) => "quinn",
+                        #[cfg(feature = "iroh")]
+                        TransportAddr::Iroh(_) => "iroh",
+                    };
+
+                    let pm = self.peer_manager.lock().await;
+                    let (services, version) = if let Some(peer) = pm.get_peer(&addr) {
+                        (peer.services(), peer.version())
+                    } else {
+                        (0, 0)
+                    };
+                    drop(pm);
+
+                    let event_pub_clone = Arc::clone(event_publisher);
+                    tokio::spawn(async move {
+                        event_pub_clone
+                            .publish_peer_connected(
+                                &addr_str,
+                                transport_type,
+                                services,
+                                version,
+                            )
+                            .await;
+                    });
                 }
             }
-        })
+            NetworkMessage::PeerDisconnected(addr) => {
+                info!("Peer disconnected (during pending processing): {:?}", addr);
+                // Simplified disconnection handling for pending messages
+                let mut pm = self.peer_manager.lock().await;
+                pm.remove_peer(&addr);
+            }
+            NetworkMessage::RawMessageReceived(data, peer_addr) => {
+                // Process raw message - this will handle Version messages and send VerAck
+                if let Err(e) = self.handle_incoming_wire_tcp(peer_addr, data).await {
+                    debug!("Error processing raw message from {}: {}", peer_addr, e);
+                }
+            }
+            _ => {
+                // Other message types - handle minimally during handshake
+                debug!("Received other message type during handshake phase");
+            }
+        }
     }
 
     /// Process incoming network messages
@@ -3377,6 +3523,77 @@ impl NetworkManager {
             match message {
                 NetworkMessage::PeerConnected(addr) => {
                     info!("Peer connected: {:?}", addr);
+
+                    // Send Version message to initiate handshake
+                    // This is required by Bitcoin protocol - both sides send Version after connection
+                    let socket_addr = match &addr {
+                        TransportAddr::Tcp(sock) => Some(*sock),
+                        #[cfg(feature = "quinn")]
+                        TransportAddr::Quinn(sock) => Some(*sock),
+                        #[cfg(feature = "iroh")]
+                        TransportAddr::Iroh(_) => None, // Iroh uses different handshake
+                    };
+
+                    if let Some(peer_socket) = socket_addr {
+                        // Get current block height from storage (or 0 if not available)
+                        let start_height = if let Some(ref storage) = self.storage {
+                            storage.chain().get_height().ok().flatten().unwrap_or(0) as i32
+                        } else {
+                            0
+                        };
+
+                        // Create network addresses for version message
+                        let peer_ip = match peer_socket.ip() {
+                            std::net::IpAddr::V4(ip) => {
+                                let mut addr = [0u8; 16];
+                                addr[10] = 0xff;
+                                addr[11] = 0xff;
+                                addr[12..16].copy_from_slice(&ip.octets());
+                                addr
+                            }
+                            std::net::IpAddr::V6(ip) => ip.octets(),
+                        };
+                        let addr_recv = crate::network::protocol::NetworkAddress {
+                            services: 0,
+                            ip: peer_ip,
+                            port: peer_socket.port(),
+                        };
+                        let addr_from = crate::network::protocol::NetworkAddress {
+                            services: 0,
+                            ip: [0u8; 16],
+                            port: 0,
+                        };
+
+                        // Create version message with our node's capabilities
+                        let version_msg = self.create_version_message(
+                            70015, // Protocol version
+                            0,     // Additional services (base services added by create_version_message)
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64,
+                            addr_recv,
+                            addr_from,
+                            rand::random::<u64>(), // Random nonce
+                            "/Bitcoin Commons:0.1.0/".to_string(),
+                            start_height,
+                            true, // relay
+                        );
+
+                        // Serialize and send Version message
+                        match ProtocolParser::serialize_message(&ProtocolMessage::Version(version_msg)) {
+                            Ok(wire_msg) => {
+                                if let Err(e) = self.send_to_peer_by_transport(addr.clone(), wire_msg).await {
+                                    warn!("Failed to send Version message to {:?}: {}", addr, e);
+                                } else {
+                                    debug!("Sent Version message to {:?}", addr);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to serialize Version message for {:?}: {}", addr, e);
+                            }
+                        }
+                    }
 
                     // Publish peer connected event
                     let event_publisher_guard = self.event_publisher.lock().await;
@@ -4210,6 +4427,64 @@ impl NetworkManager {
 
         // Handle special cases that don't go through protocol layer
         match &parsed {
+            // Store peer version information when Version message is received
+            ProtocolMessage::Version(version_msg) => {
+                // Update peer with version, services, user_agent, and start_height
+                let mut pm = self.peer_manager.lock().await;
+                let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
+                let transport_addr_for_verack = transport_addr.clone();
+                if let Some(transport_addr) = transport_addr {
+                    if let Some(peer) = pm.get_peer_mut(&transport_addr) {
+                        peer.set_version(version_msg.version as u32);
+                        peer.set_services(version_msg.services);
+                        peer.set_user_agent(version_msg.user_agent.clone());
+                        peer.set_start_height(version_msg.start_height);
+                        debug!("Updated peer {} with version={}, services={}, user_agent={}, start_height={}", 
+                               peer_addr, version_msg.version, version_msg.services, version_msg.user_agent, version_msg.start_height);
+                    }
+                }
+                drop(pm);
+
+                // Send VerAck in response to Version (required for handshake completion)
+                if let Some(transport_addr) = transport_addr_for_verack {
+                    match ProtocolParser::serialize_message(&ProtocolMessage::Verack) {
+                        Ok(verack_msg) => {
+                            if let Err(e) = self.send_to_peer_by_transport(transport_addr.clone(), verack_msg).await {
+                                warn!("Failed to send VerAck to {:?}: {}", transport_addr, e);
+                            } else {
+                                debug!("Sent VerAck to {:?} (handshake completing)", transport_addr);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to serialize VerAck for {:?}: {}", transport_addr, e);
+                        }
+                    }
+                }
+                // Continue to process Version message through protocol layer
+            }
+            // Respond to Ping with Pong (required to keep connection alive)
+            ProtocolMessage::Ping(ping_msg) => {
+                // Send Pong with the same nonce to keep connection alive
+                let pong_msg = ProtocolMessage::Pong(PongMessage { nonce: ping_msg.nonce });
+                match ProtocolParser::serialize_message(&pong_msg) {
+                    Ok(pong_wire) => {
+                        let pm = self.peer_manager.lock().await;
+                        let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
+                        drop(pm);
+                        if let Some(transport_addr) = transport_addr {
+                            if let Err(e) = self.send_to_peer_by_transport(transport_addr, pong_wire).await {
+                                warn!("Failed to send Pong to {}: {}", peer_addr, e);
+                            } else {
+                                debug!("Sent Pong to {} (nonce={})", peer_addr, ping_msg.nonce);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to serialize Pong for {}: {}", peer_addr, e);
+                    }
+                }
+                return Ok(()); // Ping handled, no further processing needed
+            }
             // IBD Protection: Check GetHeaders requests (full chain sync)
             ProtocolMessage::GetHeaders(getheaders) => {
                 // Detect if this is a full chain request (empty locator = IBD)

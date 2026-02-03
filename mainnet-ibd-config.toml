@@ -1,0 +1,36 @@
+# Mainnet IBD Configuration with Incremental Pruning
+# This configuration enables incremental pruning during IBD with UTXO commitments
+
+[network]
+network = "mainnet"
+listen_address = "0.0.0.0:8333"
+
+[storage]
+data_dir = "~/.local/share/blvm-mainnet"
+
+[storage.pruning]
+# Pruning mode: normal (utxo-commitments disabled during spec migration)
+# Note: Incremental pruning still works, but without UTXO commitment verification
+[storage.pruning.mode]
+type = "normal"
+keep_from_height = 0
+min_recent_blocks = 144      # Keep at least 144 blocks
+
+# Enable incremental pruning during IBD (keeps storage bounded)
+incremental_prune_during_ibd = true
+prune_window_size = 144              # Keep last 144 blocks (~1 day)
+min_blocks_for_incremental_prune = 288  # Start pruning after 288 blocks (~2 days)
+auto_prune = true
+auto_prune_interval = 144
+min_blocks_to_keep = 144
+
+[rpc]
+enabled = true
+listen_address = "127.0.0.1:8332"
+# IMPORTANT: Set strong credentials for mainnet!
+# rpc_user = "your_username"
+# rpc_password = "strong_password_here"
+
+[logging]
+level = "info"  # Use "debug" for more detail during sync
+

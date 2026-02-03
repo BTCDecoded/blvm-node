@@ -468,7 +468,7 @@ impl RawTxRpc {
     /// Returns (transaction, all_witnesses) tuple where all_witnesses is Vec<Witness> (one per input)
     fn deserialize_transaction_with_witness(
         data: &[u8],
-    ) -> Result<(blvm_protocol::Transaction, Vec<blvm_consensus::Witness>), RpcError> {
+    ) -> Result<(blvm_protocol::Transaction, Vec<blvm_consensus::segwit::Witness>), RpcError> {
         use blvm_consensus::serialization::varint::decode_varint;
         use blvm_protocol::serialization::transaction::deserialize_transaction;
 
@@ -502,7 +502,7 @@ impl RawTxRpc {
                 for _ in 0..tx.inputs.len() {
                     if offset >= data.len() {
                         // No more witness data - create empty witness
-                        all_witnesses.push(blvm_consensus::Witness::new());
+                        all_witnesses.push(blvm_consensus::segwit::Witness::new());
                         continue;
                     }
 
@@ -514,7 +514,7 @@ impl RawTxRpc {
                     offset += varint_len;
 
                     // Parse each witness element
-                    let mut witness_stack = blvm_consensus::Witness::new();
+                    let mut witness_stack = blvm_consensus::segwit::Witness::new();
                     for _ in 0..stack_count {
                         if offset >= data.len() {
                             break;
@@ -544,13 +544,13 @@ impl RawTxRpc {
 
                 // Ensure we have witnesses for all inputs
                 while all_witnesses.len() < tx.inputs.len() {
-                    all_witnesses.push(blvm_consensus::Witness::new());
+                    all_witnesses.push(blvm_consensus::segwit::Witness::new());
                 }
 
                 all_witnesses
             } else {
                 // Non-SegWit transaction - empty witnesses for all inputs
-                vec![blvm_consensus::Witness::new(); tx.inputs.len()]
+                vec![blvm_consensus::segwit::Witness::new(); tx.inputs.len()]
             };
 
         Ok((tx, witnesses))
@@ -562,7 +562,7 @@ impl RawTxRpc {
     /// witnesses: Vec<Witness> - one witness stack per input
     fn calculate_wtxid(
         tx: &blvm_protocol::Transaction,
-        witnesses: &[blvm_consensus::Witness],
+        witnesses: &[blvm_consensus::segwit::Witness],
     ) -> String {
         use blvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(tx);
@@ -770,7 +770,7 @@ impl RawTxRpc {
     /// Returns hex string with witness data if witnesses provided, otherwise non-witness format
     fn serialize_transaction_with_witness(
         tx: &blvm_protocol::Transaction,
-        witnesses: Option<&[blvm_consensus::Witness]>,
+        witnesses: Option<&[blvm_consensus::segwit::Witness]>,
     ) -> String {
         use blvm_consensus::serialization::varint::encode_varint;
         use blvm_protocol::serialization::transaction::serialize_transaction;
@@ -839,7 +839,7 @@ impl RawTxRpc {
     /// Returns (base_size, total_size, weight, vsize)
     fn calculate_segwit_sizes(
         tx: &blvm_protocol::Transaction,
-        witnesses: Option<&[blvm_consensus::Witness]>,
+        witnesses: Option<&[blvm_consensus::segwit::Witness]>,
     ) -> (usize, usize, u64, usize) {
         use blvm_consensus::witness::{calculate_transaction_weight_segwit, weight_to_vsize};
         use blvm_protocol::serialization::transaction::serialize_transaction;
@@ -904,7 +904,7 @@ impl RawTxRpc {
                 // Try to get witness data if available (from raw block data or mempool)
                 // For now, we'll assume no witness data is available from storage
                 // In a full implementation, we'd retrieve witness data from block storage
-                let witnesses: Option<Vec<blvm_consensus::Witness>> = None;
+                let witnesses: Option<Vec<blvm_consensus::segwit::Witness>> = None;
 
                 // Calculate wtxid
                 let wtxid_hex = if let Some(ref witnesses_vec) = witnesses {
@@ -1782,7 +1782,10 @@ impl RawTxRpc {
         #[cfg(feature = "production")]
         {
             // Use SmallVec from blvm-consensus re-export
-            use blvm_consensus::smallvec::SmallVec;
+            #[cfg(feature = "production")]
+            use smallvec::SmallVec;
+            #[cfg(not(feature = "production"))]
+            use std::vec::Vec as SmallVec;
             let tx = Transaction {
                 version,
                 inputs: SmallVec::from_vec(tx_inputs),

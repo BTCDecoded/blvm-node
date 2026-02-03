@@ -5,6 +5,7 @@
 use crate::network::transport::TransportType;
 use anyhow::Result;
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use blvm_protocol::wire::{serialize_getheaders, deserialize_headers};
 use serde::{Deserialize, Serialize};
 
 /// Bitcoin protocol constants
@@ -118,6 +119,7 @@ pub enum ProtocolMessage {
     Block(BlockMessage),
     GetData(GetDataMessage),
     Inv(InvMessage),
+    NotFound(NotFoundMessage),
     Tx(TxMessage),
     // Compact Block Relay (BIP152)
     SendCmpct(SendCmpctMessage),
@@ -291,6 +293,12 @@ pub struct InventoryItem {
 /// Inventory message
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvMessage {
+    pub inventory: Vec<InventoryItem>,
+}
+
+/// Not found message (response to GetData when items are not available)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotFoundMessage {
     pub inventory: Vec<InventoryItem>,
 }
 
@@ -869,9 +877,11 @@ pub struct ProtocolParser;
 impl ProtocolParser {
     /// Parse a raw message into a protocol message
     pub fn parse_message(data: &[u8]) -> Result<ProtocolMessage> {
+        use tracing::{debug, warn};
+        
         // Validate message size
         if data.len() < 24 {
-            return Err(anyhow::anyhow!("Message too short"));
+            return Err(anyhow::anyhow!("Message too short: {} bytes", data.len()));
         }
 
         if data.len() > MAX_PROTOCOL_MESSAGE_LENGTH {
@@ -880,13 +890,20 @@ impl ProtocolParser {
 
         // Parse message header
         let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        debug!("Parsing message: magic=0x{:08x}, total_len={}", magic, data.len());
+        
         if magic != 0xd9b4bef9 {
-            return Err(anyhow::anyhow!("Invalid magic number"));
+            // Log first 24 bytes as hex for debugging
+            let header_hex: String = data.iter().take(24).map(|b| format!("{:02x}", b)).collect();
+            warn!("Invalid magic number 0x{:08x}, expected 0xd9b4bef9. Header hex: {}", magic, header_hex);
+            return Err(anyhow::anyhow!("Invalid magic number 0x{:08x}", magic));
         }
 
-        let command = String::from_utf8_lossy(&data[4..12])
+        let command = String::from_utf8_lossy(&data[4..16])
             .trim_end_matches('\0')
             .to_string();
+        
+        debug!("Message command: '{}', data_len={}", command, data.len());
 
         // Validate command string
         if !ALLOWED_COMMANDS.contains(&command.as_str()) {
@@ -943,14 +960,49 @@ impl ProtocolParser {
                 }))
             }
             "verack" => Ok(ProtocolMessage::Verack),
-            "ping" => Ok(ProtocolMessage::Ping(bincode::deserialize(payload)?)),
-            "pong" => Ok(ProtocolMessage::Pong(bincode::deserialize(payload)?)),
-            "getheaders" => Ok(ProtocolMessage::GetHeaders(bincode::deserialize(payload)?)),
-            "headers" => Ok(ProtocolMessage::Headers(bincode::deserialize(payload)?)),
+            "ping" => {
+                // Use proper Bitcoin wire format (8-byte nonce)
+                let wire_msg = blvm_protocol::wire::deserialize_ping(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize ping: {}", e))?;
+                Ok(ProtocolMessage::Ping(PingMessage { nonce: wire_msg.nonce }))
+            },
+            "pong" => {
+                // Use proper Bitcoin wire format (8-byte nonce)
+                let wire_msg = blvm_protocol::wire::deserialize_pong(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize pong: {}", e))?;
+                Ok(ProtocolMessage::Pong(PongMessage { nonce: wire_msg.nonce }))
+            },
+            "getheaders" => {
+                // Use proper Bitcoin wire format deserialization
+                let wire_msg = blvm_protocol::wire::deserialize_getheaders(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getheaders: {}", e))?;
+                Ok(ProtocolMessage::GetHeaders(GetHeadersMessage {
+                    version: wire_msg.version as i32,
+                    block_locator_hashes: wire_msg.block_locator_hashes,
+                    hash_stop: wire_msg.hash_stop,
+                }))
+            },
+            "headers" => {
+                // Use proper Bitcoin wire format deserialization
+                let wire_msg = deserialize_headers(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize headers: {}", e))?;
+                Ok(ProtocolMessage::Headers(HeadersMessage {
+                    headers: wire_msg.headers,
+                }))
+            },
             "getblocks" => Ok(ProtocolMessage::GetBlocks(bincode::deserialize(payload)?)),
             "block" => Ok(ProtocolMessage::Block(bincode::deserialize(payload)?)),
             "getdata" => Ok(ProtocolMessage::GetData(bincode::deserialize(payload)?)),
-            "inv" => Ok(ProtocolMessage::Inv(bincode::deserialize(payload)?)),
+            "inv" => {
+                // Use proper Bitcoin wire format (count varint + items)
+                let wire_msg = blvm_protocol::wire::deserialize_inv(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize inv: {}", e))?;
+                let inventory = wire_msg.inventory.into_iter()
+                    .map(|v| InventoryItem { inv_type: v.inv_type, hash: v.hash })
+                    .collect();
+                Ok(ProtocolMessage::Inv(InvMessage { inventory }))
+            },
+            "notfound" => Ok(ProtocolMessage::NotFound(bincode::deserialize(payload)?)),
             "tx" => Ok(ProtocolMessage::Tx(bincode::deserialize(payload)?)),
             // Compact Block Relay (BIP152)
             "sendcmpct" => Ok(ProtocolMessage::SendCmpct(bincode::deserialize(payload)?)),
@@ -1078,12 +1130,27 @@ impl ProtocolParser {
             ProtocolMessage::Verack => ("verack", vec![]),
             ProtocolMessage::Ping(msg) => ("ping", bincode::serialize(msg)?),
             ProtocolMessage::Pong(msg) => ("pong", bincode::serialize(msg)?),
-            ProtocolMessage::GetHeaders(msg) => ("getheaders", bincode::serialize(msg)?),
-            ProtocolMessage::Headers(msg) => ("headers", bincode::serialize(msg)?),
+            ProtocolMessage::GetHeaders(msg) => {
+                // Use proper Bitcoin wire format for getheaders
+                let wire_msg = blvm_protocol::network::GetHeadersMessage {
+                    version: msg.version as u32,
+                    block_locator_hashes: msg.block_locator_hashes.clone(),
+                    hash_stop: msg.hash_stop,
+                };
+                ("getheaders", serialize_getheaders(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?)
+            },
+            ProtocolMessage::Headers(msg) => {
+                // Use proper Bitcoin wire format for headers
+                let wire_msg = blvm_protocol::network::HeadersMessage {
+                    headers: msg.headers.clone(),
+                };
+                ("headers", blvm_protocol::wire::serialize_headers(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?)
+            },
             ProtocolMessage::GetBlocks(msg) => ("getblocks", bincode::serialize(msg)?),
             ProtocolMessage::Block(msg) => ("block", bincode::serialize(msg)?),
             ProtocolMessage::GetData(msg) => ("getdata", bincode::serialize(msg)?),
             ProtocolMessage::Inv(msg) => ("inv", bincode::serialize(msg)?),
+            ProtocolMessage::NotFound(msg) => ("notfound", bincode::serialize(msg)?),
             ProtocolMessage::Tx(msg) => ("tx", bincode::serialize(msg)?),
             // Compact Block Relay (BIP152)
             ProtocolMessage::SendCmpct(msg) => ("sendcmpct", bincode::serialize(msg)?),
