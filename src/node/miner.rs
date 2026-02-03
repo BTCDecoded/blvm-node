@@ -655,8 +655,8 @@ impl MiningCoordinator {
         // 4. Create coinbase transaction
         Ok(Transaction {
             version: 1,
-            inputs: blvm_protocol::tx_inputs![],
-            outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
+            inputs: crate::tx_inputs![],
+              outputs: crate::tx_outputs![blvm_protocol::TransactionOutput {
                 value: coinbase_value as i64,
                 script_pubkey: vec![
                     0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

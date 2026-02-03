@@ -446,6 +446,7 @@ impl Default for NodeConfig {
             persistent_peers: Vec::new(),
             enable_self_advertisement: true,
             dos_protection: None,
+            ibd_protection: None,
             relay: None,
             #[cfg(feature = "fibre")]
             fibre: None,

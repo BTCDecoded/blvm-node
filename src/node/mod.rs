@@ -346,6 +346,43 @@ impl Node {
         // Initialize peer connections automatically
         self.initialize_peer_connections().await?;
 
+        // Wait for peer handshakes to complete (Version/VerAck exchange)
+        // Process network messages during this time to handle Version/VerAck exchange
+        info!("Waiting for peer handshakes to complete...");
+        let handshake_timeout = tokio::time::Duration::from_secs(10);
+        let handshake_start = std::time::Instant::now();
+        let mut total_processed = 0usize;
+        while handshake_start.elapsed() < handshake_timeout {
+            // Process pending network messages without blocking (handles Version/VerAck)
+            match self.network.process_pending_messages().await {
+                Ok(count) => {
+                    if count > 0 {
+                        info!("Processed {} network messages during handshake", count);
+                        total_processed += count;
+                    }
+                }
+                Err(e) => {
+                    warn!("Error processing network messages during handshake: {}", e);
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        info!("Handshake period complete, processed {} total messages", total_processed);
+
+        // Spawn background message processing task BEFORE starting IBD
+        // This ensures Headers responses and other messages are processed during IBD
+        let network_for_processing = Arc::clone(&self.network);
+        let _message_processor = tokio::spawn(async move {
+            loop {
+                if let Err(e) = network_for_processing.process_messages().await {
+                    tracing::warn!("Error in background message processing: {}", e);
+                }
+                // Small sleep to prevent busy-looping if no messages
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        });
+        info!("Background message processor spawned");
+
         // Check if we need to do IBD and attempt parallel IBD if available
         let current_height = self.storage.chain().get_height()?.unwrap_or(0);
         let is_ibd = current_height == 0;
@@ -363,10 +400,20 @@ impl Node {
             if peer_addresses.len() >= 2 {
                 info!("Attempting parallel IBD with {} peers", peer_addresses.len());
                 
-                // Estimate target height (use a reasonable default or get from peers)
-                // For now, we'll use a large number and let parallel IBD handle it
-                // In a real implementation, we'd query peers for their best header height
-                let target_height = current_height + 1_000_000; // Large number, will be limited by actual chain
+                // Get target height from peer's start_height (best block height from Version messages)
+                // Use the highest reported height from all connected peers
+                let target_height = match self.network.get_highest_peer_start_height() {
+                    Some(peer_height) => {
+                        info!("Using peer-reported chain tip height: {} (current: {})", peer_height, current_height);
+                        peer_height.max(current_height) // Ensure target is at least current height
+                    }
+                    None => {
+                        // Fallback: if no peers have reported start_height yet, use a large number
+                        // The iterative header sync will stop when it reaches the actual chain tip
+                        warn!("No peer start_height available yet, using fallback target height");
+                        current_height + 1_000_000
+                    }
+                };
                 
                 // Attempt parallel IBD
                 let blockstore = Arc::clone(&self.storage.blocks());
@@ -477,14 +524,10 @@ impl Node {
 
         // Start module manager if enabled
         if let Some(ref mut module_manager) = self.module_manager {
-            // Create new Storage instance for modules (Storage doesn't implement Clone)
-            // Both instances use the same data directory, so they access the same data
             use crate::utils::env_or_default;
-            let data_dir = env_or_default("DATA_DIR", "data");
-            let storage_arc = Arc::new(
-                Storage::new(&data_dir)
-                    .map_err(|e| anyhow::anyhow!("Failed to create storage for modules: {}", e))?,
-            );
+            
+            // Reuse the existing storage instance (Redb only allows one connection)
+            let storage_arc = Arc::clone(&self.storage);
 
             // Get event manager from module manager
             let event_manager = module_manager.event_manager();
@@ -549,7 +592,8 @@ impl Node {
                 // Connect network manager to registry (using mutable reference)
                 // This allows the network to serve module requests
                 self.network
-                    .set_module_registry(Arc::clone(&module_registry_arc));
+                    .set_module_registry(Arc::clone(&module_registry_arc))
+                    .await;
 
                 // Connect module manager to registry (using mutable reference)
                 module_manager.set_module_registry(Arc::clone(&module_registry_arc));
@@ -633,9 +677,11 @@ impl Node {
 
                             // Connect to network manager (for P2P payments)
                             self.network
-                                .set_payment_processor(Arc::clone(&processor_arc));
+                                .set_payment_processor(Arc::clone(&processor_arc))
+                                .await;
                             self.network
-                                .set_payment_state_machine(Arc::clone(&state_machine_arc));
+                                .set_payment_state_machine(Arc::clone(&state_machine_arc))
+                                .await;
 
                             // Set merchant key from config if available
                             let merchant_key =
@@ -648,7 +694,7 @@ impl Node {
                                         }
                                     })
                                 });
-                            self.network.set_merchant_key(merchant_key);
+                            self.network.set_merchant_key(merchant_key).await;
 
                             // Set node payment address script from config if available
                             let node_script = payment_config
@@ -676,16 +722,18 @@ impl Node {
                                         }
                                     })
                                 });
-                            self.network.set_node_payment_script(node_script);
+                            self.network.set_node_payment_script(node_script).await;
 
                             // Set module encryption and modules directory in network manager
                             self.network
-                                .set_module_encryption(Arc::clone(&module_encryption));
+                                .set_module_encryption(Arc::clone(&module_encryption))
+                                .await;
                             if let Some(ref module_config) =
                                 self.config.as_ref().and_then(|c| c.modules.as_ref())
                             {
                                 self.network
-                                    .set_modules_dir(PathBuf::from(&module_config.modules_dir));
+                                    .set_modules_dir(PathBuf::from(&module_config.modules_dir))
+                                    .await;
                             }
 
                             // Connect to RPC manager (for HTTP payments)
@@ -801,7 +849,8 @@ impl Node {
                 // Note: NetworkManager is stored as a value, not Arc, so we need to use a mutable reference
                 // Since we're in start_components which is &mut self, we can do this
                 self.network
-                    .set_event_publisher(Some(Arc::clone(event_publisher)));
+                    .set_event_publisher(Some(Arc::clone(event_publisher)))
+                    .await;
                 info!("Event publisher set on network manager");
 
                 // Publish ConfigLoaded event for modules to react to node configuration

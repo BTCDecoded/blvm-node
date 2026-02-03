@@ -60,6 +60,7 @@ pub use blvm_protocol::mempool::Mempool;
 pub use blvm_protocol::{
     Block, BlockHeader, ByteString, ConsensusError, Hash, Integer, Natural, OutPoint, Result,
     Transaction, TransactionInput, TransactionOutput, UtxoSet, ValidationResult, UTXO,
+    tx_inputs, tx_outputs,
 };
 
 // Re-export protocol-engine types

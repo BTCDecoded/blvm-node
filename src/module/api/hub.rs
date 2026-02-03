@@ -448,6 +448,19 @@ impl ModuleApiHub {
                 result?;
                 ResponsePayload::Bool(true)
             }
+            // Metrics and Telemetry
+            RequestPayload::ReportMetric { metric } => {
+                self.node_api.report_metric(metric.clone()).await?;
+                ResponsePayload::MetricReported
+            }
+            RequestPayload::GetModuleMetrics { module_id } => {
+                let metrics = self.node_api.get_module_metrics(module_id).await?;
+                ResponsePayload::ModuleMetrics(metrics)
+            }
+            RequestPayload::GetAllMetrics => {
+                let metrics = self.node_api.get_all_metrics().await?;
+                ResponsePayload::AllMetrics(metrics)
+            }
             // Module Discovery API
             RequestPayload::DiscoverModules => {
                 let modules = self.node_api.discover_modules().await?;

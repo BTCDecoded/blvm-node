@@ -48,6 +48,12 @@ pub struct Peer {
     services: u64,
     /// Protocol version from version message
     version: u32,
+    /// User agent (subversion) from version message
+    /// Example: "/Satoshi:25.0.0/" for Bitcoin Core
+    user_agent: Option<String>,
+    /// Best block height from version message (peer's chain tip)
+    /// This indicates how many blocks the peer has
+    start_height: i32,
 }
 
 impl Peer {
@@ -65,65 +71,75 @@ impl Peer {
         let (send_tx, send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
         let transport_addr_clone = transport_addr.clone();
+        let transport_addr_write = transport_addr.clone();
         let message_tx_clone = message_tx.clone();
 
-        // Wrap connection in Arc<Mutex> to share between read and write tasks
+        // Use interior mutability pattern: TcpConnection has separate Arc<Mutex> for
+        // reader and writer internally, so we can share it via Arc without outer Mutex.
+        // This allows recv() and send() to run truly concurrently.
         use std::sync::Arc;
         use tokio::sync::Mutex;
         let conn = Arc::new(Mutex::new(conn));
-        let conn_read = Arc::clone(&conn);
-        let conn_write = Arc::clone(&conn);
 
-        // Spawn read task using TransportConnection::recv
+        // Clone for reader task
+        let conn_read = Arc::clone(&conn);
+
+        // Spawn read task - this task owns its locked access while reading
         tokio::spawn(async move {
             loop {
-                let data = {
-                    let mut conn_guard = conn_read.lock().await;
-                    match conn_guard.recv().await {
-                        Ok(data) => data,
-                        Err(e) => {
-                            warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
-                            break;
-                        }
-                    }
+                // Get mutable access and call recv - this blocks inside recv
+                // but that's fine since TcpConnection.recv() only locks its reader half
+                let result = {
+                    let mut guard = conn_read.lock().await;
+                    guard.recv().await
                 };
-
-                if data.is_empty() {
-                    break;
+                
+                match result {
+                    Ok(data) if data.is_empty() => {
+                        info!("Peer {:?} connection closed (empty read)", transport_addr_clone);
+                        break;
+                    }
+                    Ok(data) => {
+                        debug!("Received {} bytes from {:?}", data.len(), transport_addr_clone);
+                        let peer_addr = match &transport_addr_clone {
+                            super::transport::TransportAddr::Tcp(sock) => *sock,
+                            #[cfg(feature = "quinn")]
+                            super::transport::TransportAddr::Quinn(sock) => *sock,
+                            #[cfg(feature = "iroh")]
+                            super::transport::TransportAddr::Iroh(_) => {
+                                std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+                            }
+                        };
+                        let _ = message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_addr));
+                    }
+                    Err(e) => {
+                        warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
+                        break;
+                    }
                 }
-
-                let peer_addr = match &transport_addr_clone {
-                    super::transport::TransportAddr::Tcp(sock) => *sock,
-                    #[cfg(feature = "quinn")]
-                    super::transport::TransportAddr::Quinn(sock) => *sock,
-                    #[cfg(feature = "iroh")]
-                    super::transport::TransportAddr::Iroh(_) => {
-                        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-                    }
-                };
-                let _ = message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_addr));
             }
         });
 
-        // Spawn write task using TransportConnection::send
+        // Spawn write task with its own connection clone
+        let conn_write = conn;  // Take ownership since we don't need it anymore
         tokio::spawn(async move {
             let mut send_rx = send_rx;
 
             while let Some(data) = send_rx.recv().await {
-                let mut conn_guard = conn_write.lock().await;
-                match conn_guard.send(&data).await {
+                let result = {
+                    let mut guard = conn_write.lock().await;
+                    guard.send(&data).await
+                };
+                match result {
                     Ok(_) => {
-                        debug!("Sent {} bytes to peer", data.len());
+                        debug!("Sent {} bytes to peer {:?}", data.len(), transport_addr_write);
                     }
                     Err(e) => {
-                        warn!("Peer write error: {}", e);
-                        break; // Connection closed
+                        warn!("Peer write error for {:?}: {}", transport_addr_write, e);
+                        break;
                     }
                 }
             }
-
-            // Gracefully close connection on write task exit
-            // Connection will be closed when conn_guard is dropped
         });
 
         let now = SystemTime::now()
@@ -150,29 +166,149 @@ impl Peer {
             last_tx_received: None,
             services: 0, // Service flags from version message (set when version received)
             version: 0,  // Protocol version from version message (set when version received)
+            user_agent: None, // User agent from version message (set when version received)
+            start_height: 0, // Best block height from version message (set when version received)
         }
     }
 
     /// Create a new peer connection from a TCP stream (backward compatibility)
     ///
     /// This is a convenience method that wraps a TcpStream in a TcpConnection.
-    #[deprecated(note = "Use from_transport_connection instead for transport abstraction")]
+    #[deprecated(note = "Use from_tcp_stream_split instead for proper concurrent read/write")]
     pub fn new(
         stream: tokio::net::TcpStream,
         addr: SocketAddr,
         message_tx: mpsc::UnboundedSender<NetworkMessage>,
     ) -> Self {
-        use super::tcp_transport::TcpConnection;
+        Self::from_tcp_stream_split(stream, addr, message_tx)
+    }
+
+    /// Create a new peer from a TCP stream with properly split reader/writer
+    /// This allows concurrent read and write operations without deadlock
+    pub fn from_tcp_stream_split(
+        stream: tokio::net::TcpStream,
+        addr: SocketAddr,
+        message_tx: mpsc::UnboundedSender<NetworkMessage>,
+    ) -> Self {
         use super::transport::TransportAddr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tracing::{debug, info, warn};
 
         let peer_addr = stream.peer_addr().unwrap_or(addr);
-        let tcp_conn = TcpConnection {
-            stream,
-            peer_addr: TransportAddr::Tcp(peer_addr),
-            connected: true,
-        };
+        let transport_addr = TransportAddr::Tcp(peer_addr);
 
-        Self::from_transport_connection(tcp_conn, addr, TransportAddr::Tcp(addr), message_tx)
+        // Split the TCP stream into separate read and write halves
+        let (reader, writer) = tokio::io::split(stream);
+
+        // Create channel for sending messages to the write task
+        let (send_tx, mut send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        let transport_addr_clone = transport_addr.clone();
+        let transport_addr_write = transport_addr.clone();
+        let message_tx_clone = message_tx.clone();
+
+        // Spawn read task - owns the reader half exclusively
+        tokio::spawn(async move {
+            let mut reader = reader;
+            loop {
+                // Read Bitcoin wire format header (24 bytes)
+                let mut header = [0u8; 24];
+                match reader.read_exact(&mut header).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                            info!("Peer {:?} connection closed", transport_addr_clone);
+                        } else {
+                            warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
+                        }
+                        break;
+                    }
+                }
+
+                // Extract payload length from bytes 16-19 (little-endian)
+                let payload_len = u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
+
+                // Read payload if any
+                let data = if payload_len > 0 {
+                    if payload_len > 32 * 1024 * 1024 - 24 {
+                        warn!("Peer {:?} sent oversized message: {} bytes", transport_addr_clone, payload_len);
+                        break;
+                    }
+                    let mut payload = vec![0u8; payload_len];
+                    match reader.read_exact(&mut payload).await {
+                        Ok(_) => {
+                            let mut data = header.to_vec();
+                            data.extend_from_slice(&payload);
+                            data
+                        }
+                        Err(e) => {
+                            warn!("Peer read payload error for {:?}: {}", transport_addr_clone, e);
+                            break;
+                        }
+                    }
+                } else {
+                    header.to_vec()
+                };
+
+                debug!("Received {} bytes from {:?}", data.len(), transport_addr_clone);
+                let peer_socket = match &transport_addr_clone {
+                    TransportAddr::Tcp(sock) => *sock,
+                    #[cfg(feature = "quinn")]
+                    TransportAddr::Quinn(sock) => *sock,
+                    #[cfg(feature = "iroh")]
+                    TransportAddr::Iroh(_) => std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+                };
+                let _ = message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_socket));
+            }
+        });
+
+        // Spawn write task - owns the writer half exclusively  
+        tokio::spawn(async move {
+            let mut writer = writer;
+            while let Some(data) = send_rx.recv().await {
+                match writer.write_all(&data).await {
+                    Ok(_) => {
+                        if let Err(e) = writer.flush().await {
+                            warn!("Peer flush error for {:?}: {}", transport_addr_write, e);
+                            break;
+                        }
+                        debug!("Sent {} bytes to peer {:?}", data.len(), transport_addr_write);
+                    }
+                    Err(e) => {
+                        warn!("Peer write error for {:?}: {}", transport_addr_write, e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Self {
+            addr,
+            transport_addr,
+            send_tx,
+            message_tx,
+            connected: true,
+            conntime: now,
+            last_send: now,
+            last_recv: now,
+            bytes_sent: 0,
+            bytes_recv: 0,
+            quality_score: 0.5,
+            successful_exchanges: 0,
+            failed_exchanges: 0,
+            avg_response_time_ms: 0.0,
+            last_block_received: None,
+            last_tx_received: None,
+            services: 0,
+            version: 0,
+            user_agent: None,
+            start_height: 0,
+        }
     }
 
     /// Start the peer handler
@@ -334,6 +470,26 @@ impl Peer {
     /// Get protocol version
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Set user agent (called when version message received)
+    pub fn set_user_agent(&mut self, user_agent: String) {
+        self.user_agent = Some(user_agent);
+    }
+
+    /// Get user agent
+    pub fn user_agent(&self) -> Option<&String> {
+        self.user_agent.as_ref()
+    }
+
+    /// Set start height (best block height from version message)
+    pub fn set_start_height(&mut self, start_height: i32) {
+        self.start_height = start_height;
+    }
+
+    /// Get start height (best block height from version message)
+    pub fn start_height(&self) -> i32 {
+        self.start_height
     }
 
     /// Check if peer has a specific service flag

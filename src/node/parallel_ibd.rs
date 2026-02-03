@@ -130,14 +130,21 @@ impl ParallelIBD {
         );
 
         // Step 1: Download headers first (sequential, but fast)
+        // This will iteratively download headers until chain tip is reached
         info!("Downloading headers...");
         let network_for_headers = network.clone();
-        self.download_headers(start_height, target_height, peer_ids, &blockstore, network_for_headers)
+        let actual_synced_height = self.download_headers(start_height, target_height, peer_ids, &blockstore, network_for_headers)
             .await
             .context("Failed to download headers")?;
 
+        // Use the actual synced height (may be less than target_height if we reached chain tip)
+        let effective_end_height = actual_synced_height.min(target_height);
+        info!("Headers synced up to height {}, will download blocks for heights {} to {}", 
+            actual_synced_height, start_height, effective_end_height);
+
         // Step 2: Split into chunks and assign to peers
-        let chunks = self.create_chunks(start_height, target_height, peer_ids);
+        // Only create chunks for headers we actually have
+        let chunks = self.create_chunks(start_height, effective_end_height, peer_ids);
         info!("Created {} chunks for parallel download", chunks.len());
 
         // Step 3: Download chunks in parallel
@@ -193,6 +200,7 @@ impl ParallelIBD {
 
         // Step 5: Validate and store blocks sequentially
         info!("Validating and storing {} blocks...", downloaded_blocks.len());
+        let mut blocks_synced = 0;
         for (height, block, witnesses) in downloaded_blocks {
             if let Err(e) = self.validate_and_store_block(
                 &blockstore,
@@ -206,17 +214,20 @@ impl ParallelIBD {
                 error!("Failed to validate/store block at height {}: {}", height, e);
                 return Err(e);
             }
+            blocks_synced += 1;
 
             if height % 1000 == 0 {
                 info!("Processed {} blocks (height: {})", height - start_height + 1, height);
             }
         }
 
-        info!("Parallel IBD completed: {} blocks synced", target_height - start_height + 1);
+        info!("Parallel IBD completed: {} blocks synced (heights {} to {})", 
+            blocks_synced, start_height, effective_end_height);
         Ok(())
     }
 
     /// Download headers for the given height range
+    /// Iteratively requests headers until chain tip is reached (fewer than 2000 headers returned)
     async fn download_headers(
         &self,
         start_height: u64,
@@ -224,9 +235,9 @@ impl ParallelIBD {
         peer_ids: &[String],
         blockstore: &BlockStore,
         network: Option<Arc<NetworkManager>>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         info!(
-            "Downloading headers from height {} to {} ({} headers)",
+            "Downloading headers from height {} to {} (up to {} headers)",
             start_height,
             end_height,
             end_height - start_height + 1
@@ -237,91 +248,225 @@ impl ParallelIBD {
             Some(n) => n,
             None => {
                 warn!("NetworkManager not available, skipping header download");
-                return Ok(());
+                return Ok(start_height);
             }
         };
 
-        // Use first peer for header download (headers are small, sequential is fine)
+        // Select best peer for header download (prefer peer with highest start_height)
         if peer_ids.is_empty() {
             return Err(anyhow::anyhow!("No peers available for header download"));
         }
 
-        // Convert peer_id (String) to SocketAddr
-        let peer_addr = peer_ids[0]
-            .parse::<SocketAddr>()
-            .map_err(|_| anyhow::anyhow!("Invalid peer address: {}", peer_ids[0]))?;
-
-        // Build block locator hashes
-        // Start from the highest known header (or genesis if start_height is 0)
-        let mut locator_hashes = Vec::new();
+        // Find peer with highest start_height (best synced peer)
+        // Query network manager for each peer's start_height
+        let mut best_peer_addr: Option<SocketAddr> = None;
+        let mut best_start_height: i32 = -1;
         
-        // Get the hash at start_height - 1 (or highest available)
-        if start_height > 0 {
-            let locator_height = start_height.saturating_sub(1);
-            if let Ok(Some(locator_hash)) = blockstore.get_hash_by_height(locator_height) {
-                locator_hashes.push(locator_hash);
+        let pm = network.peer_manager().await;
+        for peer_id_str in peer_ids {
+            if let Ok(peer_addr) = peer_id_str.parse::<SocketAddr>() {
+                // Find peer by SocketAddr (try TCP transport address)
+                use crate::network::transport::TransportAddr;
+                let transport_addr = TransportAddr::Tcp(peer_addr);
+                let peer_start_height = if let Some(peer) = pm.get_peer(&transport_addr) {
+                    peer.start_height()
+                } else {
+                    0 // Default if peer not found
+                };
+                
+                if peer_start_height > best_start_height {
+                    best_start_height = peer_start_height;
+                    best_peer_addr = Some(peer_addr);
+                }
             }
         }
+        drop(pm); // Release lock before async operations
         
-        // If no locator found and start_height is 0, empty locator means start from genesis
-        // This is the standard Bitcoin protocol behavior
+        let mut current_peer_index = 0;
+        let peer_addrs: Vec<SocketAddr> = peer_ids.iter()
+            .filter_map(|id| id.parse::<SocketAddr>().ok())
+            .collect();
+        
+        if peer_addrs.is_empty() {
+            return Err(anyhow::anyhow!("No valid peer addresses found"));
+        }
+        
+        // Use best peer if found, otherwise use first peer
+        let mut peer_addr = best_peer_addr.unwrap_or(peer_addrs[0]);
 
-        // Create GetHeaders message
-        let get_headers = GetHeadersMessage {
-            version: 70015, // Protocol version
-            block_locator_hashes: locator_hashes,
-            hash_stop: [0; 32], // Request all headers up to end_height
-        };
+        let mut current_height = start_height;
+        let mut consecutive_failures = 0;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+        const BITCOIN_MAX_HEADERS_PER_RESPONSE: usize = 2000;
 
-        // Register pending Headers request
-        let headers_rx = network.register_headers_request(peer_addr);
-        
-        // Serialize and send message
-        let wire_msg = ProtocolParser::serialize_message(&ProtocolMessage::GetHeaders(get_headers))?;
-        
-        // Send request
-        network.send_to_peer(peer_addr, wire_msg).await
-            .context("Failed to send GetHeaders message")?;
+        // Iteratively download headers until we reach the chain tip
+        loop {
+            // Check if we've reached the target height
+            if current_height >= end_height {
+                info!("Reached target height {}, header sync complete", end_height);
+                break;
+            }
 
-        info!("Sent GetHeaders request, waiting for response...");
-        
-        // Wait for Headers response with timeout
-        let timeout_duration = Duration::from_secs(self.config.download_timeout_secs);
-        match timeout(timeout_duration, headers_rx).await {
-            Ok(Ok(headers)) => {
-                info!("Received {} headers from {}", headers.len(), peer_addr);
-                
-                // Store headers in BlockStore
-                let mut current_height = start_height;
-                for header in headers {
-                    // Calculate block hash from header
-                    let header_hash = blockstore.get_block_hash(&Block {
-                        header: header.clone(),
-                        transactions: vec![].into_boxed_slice(),
-                    });
-                    blockstore.store_header(&header_hash, &header)
-                        .context("Failed to store header")?;
-                    blockstore.store_height(current_height, &header_hash)
-                        .context("Failed to store height")?;
-                    current_height += 1;
-                    
-                    if current_height > end_height {
-                        break;
+            // Build block locator hashes
+            // Use the highest known header as locator
+            let mut locator_hashes = Vec::new();
+            
+            if current_height > 0 {
+                // Get the hash at current_height - 1 (the last header we have)
+                let locator_height = current_height.saturating_sub(1);
+                if let Ok(Some(locator_hash)) = blockstore.get_hash_by_height(locator_height) {
+                    locator_hashes.push(locator_hash);
+                } else {
+                    // Fallback: try to find any header we have
+                    let mut found = false;
+                    for h in (0..current_height).rev().take(10) {
+                        if let Ok(Some(hash)) = blockstore.get_hash_by_height(h) {
+                            locator_hashes.push(hash);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found && current_height == start_height && start_height == 0 {
+                        // Genesis case
+                        let genesis_hash: [u8; 32] = [
+                            0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72,
+                            0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63, 0xf7, 0x4f,
+                            0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c,
+                            0x68, 0xd6, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        ];
+                        locator_hashes.push(genesis_hash);
+                        info!("Using genesis block hash as locator for initial header sync");
                     }
                 }
-                
-                info!("Stored {} headers (heights {} to {})", 
-                    current_height - start_height, start_height, current_height - 1);
-                Ok(())
+            } else {
+                // For start_height = 0, include genesis block hash as locator
+                let genesis_hash: [u8; 32] = [
+                    0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72,
+                    0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63, 0xf7, 0x4f,
+                    0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c,
+                    0x68, 0xd6, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ];
+                locator_hashes.push(genesis_hash);
+                if current_height == start_height {
+                    info!("Using genesis block hash as locator for initial header sync");
+                }
             }
-            Ok(Err(_)) => {
-                Err(anyhow::anyhow!("Headers request channel closed"))
+
+            if locator_hashes.is_empty() {
+                return Err(anyhow::anyhow!("Failed to build locator hashes for height {}", current_height));
             }
-            Err(_) => {
-                Err(anyhow::anyhow!("Headers request timed out after {} seconds", 
-                    self.config.download_timeout_secs))
+
+            // Create GetHeaders message
+            let get_headers = GetHeadersMessage {
+                version: 70015, // Protocol version
+                block_locator_hashes: locator_hashes,
+                hash_stop: [0; 32], // Request all headers (0 means no stop)
+            };
+
+            // Register pending Headers request
+            let headers_rx = network.register_headers_request(peer_addr);
+            
+            // Serialize and send message
+            let wire_msg = ProtocolParser::serialize_message(&ProtocolMessage::GetHeaders(get_headers))?;
+            
+            // Send request
+            if let Err(e) = network.send_to_peer(peer_addr, wire_msg).await {
+                warn!("Failed to send GetHeaders message to {}: {}", peer_addr, e);
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    return Err(anyhow::anyhow!("Too many consecutive failures sending GetHeaders"));
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            debug!("Sent GetHeaders request for headers starting at height {}, waiting for response...", current_height);
+            
+            // Wait for Headers response with timeout
+            let timeout_duration = Duration::from_secs(self.config.download_timeout_secs);
+            match timeout(timeout_duration, headers_rx).await {
+                Ok(Ok(headers)) => {
+                    consecutive_failures = 0; // Reset failure counter on success
+                    
+                    if headers.is_empty() {
+                        info!("Received empty headers response - reached chain tip at height {}", current_height);
+                        break;
+                    }
+                    
+                    info!("Received {} headers from {} (starting at height {})", headers.len(), peer_addr, current_height);
+                    
+                    // Store headers in BlockStore
+                    let mut stored_count = 0;
+                    for header in headers {
+                        // Calculate block hash from header
+                        let header_hash = blockstore.get_block_hash(&Block {
+                            header: header.clone(),
+                            transactions: vec![].into_boxed_slice(),
+                        });
+                        blockstore.store_header(&header_hash, &header)
+                            .context("Failed to store header")?;
+                        blockstore.store_height(current_height, &header_hash)
+                            .context("Failed to store height")?;
+                        current_height += 1;
+                        stored_count += 1;
+                        
+                        // Safety check: don't exceed end_height
+                        if current_height > end_height {
+                            info!("Reached target height {}, stopping header sync", end_height);
+                            break;
+                        }
+                    }
+                    
+                    info!("Stored {} headers (heights {} to {})", 
+                        stored_count, current_height - stored_count, current_height - 1);
+                    
+                    // If we got fewer than the max, we've reached the chain tip
+                    if stored_count < BITCOIN_MAX_HEADERS_PER_RESPONSE as u64 {
+                        info!("Received {} headers (less than max {}), reached chain tip at height {}", 
+                            stored_count, BITCOIN_MAX_HEADERS_PER_RESPONSE, current_height - 1);
+                        break;
+                    }
+                    
+                    // Progress update every 10k headers
+                    if current_height % 10000 == 0 {
+                        info!("Header sync progress: {} headers synced (target: {})", 
+                            current_height - start_height, end_height - start_height);
+                    }
+                }
+                Ok(Err(_)) => {
+                    warn!("Headers request channel closed for peer {}", peer_addr);
+                    consecutive_failures += 1;
+                    // Try next peer
+                    current_peer_index = (current_peer_index + 1) % peer_addrs.len();
+                    peer_addr = peer_addrs[current_peer_index];
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES * peer_addrs.len() as u32 {
+                        return Err(anyhow::anyhow!("Headers request channel closed after {} attempts across all peers", consecutive_failures));
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(_) => {
+                    warn!("Headers request timed out after {} seconds for peer {}, trying next peer", 
+                        timeout_duration.as_secs(), peer_addr);
+                    consecutive_failures += 1;
+                    // Try next peer
+                    current_peer_index = (current_peer_index + 1) % peer_addrs.len();
+                    peer_addr = peer_addrs[current_peer_index];
+                    info!("Switching to peer {} for header download", peer_addr);
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES * peer_addrs.len() as u32 {
+                        return Err(anyhow::anyhow!("Headers request timed out after {} attempts across all peers", consecutive_failures));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
             }
         }
+        
+        let total_synced = current_height - start_height;
+        info!("Header sync complete: synced {} headers (heights {} to {})", 
+            total_synced, start_height, current_height - 1);
+        
+        Ok(current_height - 1) // Return the highest height we synced
     }
 
     /// Create chunks for parallel download

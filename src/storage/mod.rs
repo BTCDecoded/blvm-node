@@ -111,7 +111,7 @@ impl Storage {
                         )?
                     );
                     let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
-                    let chainstate = chainstate::ChainState::new(Arc::clone(&db))?);
+                    let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
                     let txindex = Arc::new(txindex::TxIndex::new(Arc::clone(&db))?);
                     return Ok(Self {
                         db,

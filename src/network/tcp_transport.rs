@@ -9,7 +9,7 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 /// TCP transport implementation
 ///
@@ -56,17 +56,38 @@ impl Transport for TcpTransport {
         let stream = TcpStream::connect(socket_addr).await?;
         let peer_addr = stream.peer_addr()?;
 
-        Ok(TcpConnection {
-            stream,
-            peer_addr: TransportAddr::Tcp(peer_addr),
-            connected: true,
-        })
+        Ok(TcpConnection::new(stream, TransportAddr::Tcp(peer_addr)))
+    }
+}
+
+impl TcpTransport {
+    /// Connect and return raw TcpStream (for use with Peer::from_tcp_stream_split)
+    pub async fn connect_stream(&self, addr: SocketAddr) -> Result<TcpStream> {
+        info!("Connecting to peer at {}", addr);
+        let stream = TcpStream::connect(addr).await?;
+        Ok(stream)
     }
 }
 
 /// TCP listener implementation
 pub struct TcpListener {
     listener: TokioTcpListener,
+}
+
+impl TcpListener {
+    /// Accept a raw TCP stream (for use with Peer::from_tcp_stream_split)
+    pub async fn accept_stream(&mut self) -> Result<(TcpStream, SocketAddr)> {
+        match self.listener.accept().await {
+            Ok((stream, addr)) => {
+                debug!("Accepted TCP connection from {}", addr);
+                Ok((stream, addr))
+            }
+            Err(e) => {
+                error!("Failed to accept TCP connection: {}", e);
+                Err(anyhow::anyhow!("Failed to accept connection: {}", e))
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -79,11 +100,7 @@ impl TransportListener for TcpListener {
                 debug!("Accepted TCP connection from {}", addr);
                 let peer_addr = stream.peer_addr()?;
                 Ok((
-                    TcpConnection {
-                        stream,
-                        peer_addr: TransportAddr::Tcp(peer_addr),
-                        connected: true,
-                    },
+                    TcpConnection::new(stream, TransportAddr::Tcp(peer_addr)),
                     TransportAddr::Tcp(addr),
                 ))
             }
@@ -101,75 +118,110 @@ impl TransportListener for TcpListener {
     }
 }
 
-/// TCP connection implementation
+/// TCP connection implementation with split read/write halves
+/// to allow concurrent read and write operations without deadlock.
+/// Uses interior mutability (Mutex) for each half so that external
+/// code can share the TcpConnection without deadlocks.
 pub struct TcpConnection {
-    pub(crate) stream: TcpStream,
+    pub(crate) reader: std::sync::Arc<tokio::sync::Mutex<tokio::io::ReadHalf<TcpStream>>>,
+    pub(crate) writer: std::sync::Arc<tokio::sync::Mutex<tokio::io::WriteHalf<TcpStream>>>,
     pub(crate) peer_addr: TransportAddr,
-    pub(crate) connected: bool,
+    pub(crate) connected: std::sync::atomic::AtomicBool,
+}
+
+impl TcpConnection {
+    /// Create a new TCP connection from a stream
+    pub fn new(stream: TcpStream, peer_addr: TransportAddr) -> Self {
+        let (reader, writer) = tokio::io::split(stream);
+        Self {
+            reader: std::sync::Arc::new(tokio::sync::Mutex::new(reader)),
+            writer: std::sync::Arc::new(tokio::sync::Mutex::new(writer)),
+            peer_addr,
+            connected: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl TransportConnection for TcpConnection {
     async fn send(&mut self, data: &[u8]) -> Result<()> {
-        if !self.connected {
+        use tokio::io::AsyncWriteExt;
+        use std::sync::atomic::Ordering;
+        
+        if !self.connected.load(Ordering::Relaxed) {
             return Err(anyhow::anyhow!("Connection closed"));
         }
 
-        // Write length prefix (4 bytes, big-endian)
-        let len = data.len() as u32;
-        self.stream.write_u32(len).await?;
-
-        // Write data
-        self.stream.write_all(data).await?;
+        // Lock writer half (doesn't block reader)
+        let mut writer = self.writer.lock().await;
+        
+        // Send data directly - it's already in Bitcoin wire format
+        // (magic + command + length + checksum + payload)
+        writer.write_all(data).await?;
+        writer.flush().await?;
 
         Ok(())
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
-        if !self.connected {
+        use tokio::io::AsyncReadExt;
+        use std::sync::atomic::Ordering;
+        
+        if !self.connected.load(Ordering::Relaxed) {
             return Ok(Vec::new()); // Graceful close
         }
 
-        // Read length prefix (4 bytes)
-        let len = match self.stream.read_u32().await {
-            Ok(len) => len as usize,
+        // Lock reader half (doesn't block writer)
+        let mut reader = self.reader.lock().await;
+
+        // Bitcoin wire format:
+        // - Magic (4 bytes)
+        // - Command (12 bytes)
+        // - Payload length (4 bytes, little-endian)
+        // - Checksum (4 bytes)
+        // - Payload (variable)
+        // Header total: 24 bytes
+
+        // Read header (24 bytes)
+        let mut header = [0u8; 24];
+        match reader.read_exact(&mut header).await {
+            Ok(_) => {}
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                    self.connected = false;
+                    self.connected.store(false, Ordering::Relaxed);
                     return Ok(Vec::new()); // Graceful close
                 }
-                return Err(anyhow::anyhow!("Failed to read length: {}", e));
+                return Err(anyhow::anyhow!("Failed to read header: {}", e));
             }
-        };
+        }
 
-        if len == 0 {
-            self.connected = false;
-            return Ok(Vec::new());
+        // Extract payload length from bytes 16-19 (little-endian)
+        let payload_len = u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
+
+        if payload_len == 0 {
+            // Message with no payload (like verack)
+            return Ok(header.to_vec());
         }
 
         // Validate message size before allocation (DoS protection)
         use crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH;
-        if len > MAX_PROTOCOL_MESSAGE_LENGTH {
+        if payload_len > MAX_PROTOCOL_MESSAGE_LENGTH - 24 {
             return Err(anyhow::anyhow!(
-                "Message too large: {} bytes (max: {} bytes)",
-                len,
-                MAX_PROTOCOL_MESSAGE_LENGTH
+                "Message payload too large: {} bytes (max: {} bytes)",
+                payload_len,
+                MAX_PROTOCOL_MESSAGE_LENGTH - 24
             ));
         }
 
-        // Read data
-        let mut buffer = vec![0u8; len];
-        let bytes_read = self.stream.read_exact(&mut buffer).await?;
+        // Read payload
+        let mut payload = vec![0u8; payload_len];
+        reader.read_exact(&mut payload).await?;
 
-        if bytes_read != len {
-            return Err(anyhow::anyhow!(
-                "Incomplete read: expected {} bytes, got {}",
-                len,
-                bytes_read
-            ));
-        }
+        // Combine header and payload
+        let mut message = header.to_vec();
+        message.extend_from_slice(&payload);
 
-        Ok(buffer)
+        Ok(message)
     }
 
     fn peer_addr(&self) -> TransportAddr {
@@ -177,15 +229,19 @@ impl TransportConnection for TcpConnection {
     }
 
     fn is_connected(&self) -> bool {
-        self.connected
-        // Note: In a real implementation, we might check stream state
-        // For now, rely on the connected flag
+        use std::sync::atomic::Ordering;
+        self.connected.load(Ordering::Relaxed)
     }
 
     async fn close(&mut self) -> Result<()> {
-        if self.connected {
-            self.stream.shutdown().await?;
-            self.connected = false;
+        use tokio::io::AsyncWriteExt;
+        use std::sync::atomic::Ordering;
+        
+        if self.connected.load(Ordering::Relaxed) {
+            // Shutdown the writer half to signal end of connection
+            let mut writer = self.writer.lock().await;
+            writer.shutdown().await?;
+            self.connected.store(false, Ordering::Relaxed);
         }
         Ok(())
     }
