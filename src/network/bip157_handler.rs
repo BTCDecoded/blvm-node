@@ -40,15 +40,16 @@ pub fn handle_getcfilters(
             // Get block hash by height, then get block
             if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height as u64) {
                 if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
-                    // Calculate block hash properly
+                    // Calculate block hash properly (80 bytes total)
+                    // CRITICAL: Must use 4-byte types for version/timestamp/bits/nonce (Bitcoin wire format)
                     use crate::storage::hashing::double_sha256;
-                    let mut header_data = Vec::new();
-                    header_data.extend_from_slice(&block.header.version.to_le_bytes());
-                    header_data.extend_from_slice(&block.header.prev_block_hash);
-                    header_data.extend_from_slice(&block.header.merkle_root);
-                    header_data.extend_from_slice(&block.header.timestamp.to_le_bytes());
-                    header_data.extend_from_slice(&block.header.bits.to_le_bytes());
-                    header_data.extend_from_slice(&block.header.nonce.to_le_bytes());
+                    let mut header_data = Vec::with_capacity(80);
+                    header_data.extend_from_slice(&(block.header.version as i32).to_le_bytes());    // 4 bytes
+                    header_data.extend_from_slice(&block.header.prev_block_hash);                    // 32 bytes
+                    header_data.extend_from_slice(&block.header.merkle_root);                        // 32 bytes
+                    header_data.extend_from_slice(&(block.header.timestamp as u32).to_le_bytes());  // 4 bytes
+                    header_data.extend_from_slice(&(block.header.bits as u32).to_le_bytes());       // 4 bytes
+                    header_data.extend_from_slice(&(block.header.nonce as u32).to_le_bytes());      // 4 bytes
                     let calculated_hash = double_sha256(&header_data);
 
                     // Check if this is the stop hash

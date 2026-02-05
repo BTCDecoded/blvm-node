@@ -43,6 +43,31 @@ pub struct BlockStore {
     bitcoin_core_reader: Option<Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>>,
 }
 
+impl Clone for BlockStore {
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            blocks: Arc::clone(&self.blocks),
+            headers: Arc::clone(&self.headers),
+            height_index: Arc::clone(&self.height_index),
+            hash_to_height: Arc::clone(&self.hash_to_height),
+            witnesses: Arc::clone(&self.witnesses),
+            recent_headers: Arc::clone(&self.recent_headers),
+            block_metadata: Arc::clone(&self.block_metadata),
+            #[cfg(feature = "block-compression")]
+            block_compression_enabled: self.block_compression_enabled,
+            #[cfg(feature = "block-compression")]
+            block_compression_level: self.block_compression_level,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_enabled: self.witness_compression_enabled,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_level: self.witness_compression_level,
+            #[cfg(feature = "rocksdb")]
+            bitcoin_core_reader: self.bitcoin_core_reader.clone(),
+        }
+    }
+}
+
 impl BlockStore {
     /// Create a new block store
     pub fn new(db: Arc<dyn Database>) -> Result<Self> {
@@ -359,6 +384,36 @@ impl BlockStore {
         Ok(())
     }
 
+    /// Store multiple headers and heights in a single batch operation
+    /// This is MUCH faster than individual inserts for IBD - uses atomic batch writes
+    pub fn store_headers_batch(&self, entries: &[(Hash, BlockHeader, u64)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        
+        // Create batch writers for each tree
+        let mut headers_batch = self.headers.batch();
+        let mut heights_batch = self.height_index.batch();
+        let mut hash_to_height_batch = self.hash_to_height.batch();
+        
+        // Pre-serialize and add to batches
+        for (hash, header, height) in entries {
+            let header_data = bincode::serialize(header)?;
+            let height_bytes = height.to_be_bytes();
+            
+            headers_batch.put(hash.as_slice(), &header_data);
+            heights_batch.put(&height_bytes, hash.as_slice());
+            hash_to_height_batch.put(hash.as_slice(), &height_bytes);
+        }
+        
+        // Commit all batches atomically
+        headers_batch.commit()?;
+        heights_batch.commit()?;
+        hash_to_height_batch.commit()?;
+        
+        Ok(())
+    }
+
     /// Get block hash by height
     pub fn get_hash_by_height(&self, height: u64) -> Result<Option<Hash>> {
         let height_bytes = height.to_be_bytes();
@@ -424,17 +479,20 @@ impl BlockStore {
         self.block_hash(block)
     }
 
+    #[inline]
     fn block_hash(&self, block: &Block) -> Hash {
         use crate::storage::hashing::double_sha256;
 
-        // Serialize block header for hashing
-        let mut header_data = Vec::new();
-        header_data.extend_from_slice(&block.header.version.to_le_bytes());
-        header_data.extend_from_slice(&block.header.prev_block_hash);
-        header_data.extend_from_slice(&block.header.merkle_root);
-        header_data.extend_from_slice(&block.header.timestamp.to_le_bytes());
-        header_data.extend_from_slice(&block.header.bits.to_le_bytes());
-        header_data.extend_from_slice(&block.header.nonce.to_le_bytes());
+        // OPTIMIZATION: Use stack-allocated array instead of heap Vec
+        // Serialize block header for hashing (80 bytes total)
+        // CRITICAL: Must use 4-byte types for version/timestamp/bits/nonce (Bitcoin wire format)
+        let mut header_data = [0u8; 80];
+        header_data[0..4].copy_from_slice(&(block.header.version as i32).to_le_bytes());    // 4 bytes
+        header_data[4..36].copy_from_slice(&block.header.prev_block_hash);                   // 32 bytes
+        header_data[36..68].copy_from_slice(&block.header.merkle_root);                      // 32 bytes
+        header_data[68..72].copy_from_slice(&(block.header.timestamp as u32).to_le_bytes()); // 4 bytes
+        header_data[72..76].copy_from_slice(&(block.header.bits as u32).to_le_bytes());      // 4 bytes
+        header_data[76..80].copy_from_slice(&(block.header.nonce as u32).to_le_bytes());     // 4 bytes
 
         // Calculate Bitcoin double SHA256 hash
         double_sha256(&header_data)
@@ -474,5 +532,39 @@ impl BlockStore {
     /// Check if a block body exists (not just header)
     pub fn has_block_body(&self, hash: &Hash) -> Result<bool> {
         self.blocks.contains_key(hash.as_slice())
+    }
+
+    // ============================================================
+    // Tree accessors for batch operations (used by BufferedBlockStore)
+    // ============================================================
+
+    /// Get reference to blocks tree for batch operations
+    pub fn blocks_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.blocks))
+    }
+
+    /// Get reference to witnesses tree for batch operations
+    pub fn witnesses_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.witnesses))
+    }
+
+    /// Get reference to height index tree for batch operations
+    pub fn height_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.height_index))
+    }
+
+    /// Get reference to hash-to-height tree for batch operations
+    pub fn hash_to_height_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.hash_to_height))
+    }
+
+    /// Get reference to headers tree for batch operations
+    pub fn headers_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.headers))
+    }
+
+    /// Get reference to block metadata tree for batch operations
+    pub fn metadata_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.block_metadata))
     }
 }
