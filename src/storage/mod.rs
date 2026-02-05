@@ -3,11 +3,13 @@
 //! This module provides persistent storage for blocks, UTXO set, and chain state.
 //! Supports multiple database backends via feature flags (sled, redb).
 
+pub mod assumeutxo;
 pub mod bitcoin_core_blocks;
 pub mod bitcoin_core_detection;
 pub mod bitcoin_core_format;
 pub mod bitcoin_core_storage;
 pub mod blockstore;
+pub mod buffered_store;
 pub mod chainstate;
 #[cfg(kani)]
 pub mod chainstate_proofs;
@@ -24,6 +26,7 @@ pub mod txindex;
 pub mod utxostore;
 #[cfg(kani)]
 pub mod utxostore_proofs;
+pub mod wal;
 
 use crate::config::PruningConfig;
 use anyhow::Result;

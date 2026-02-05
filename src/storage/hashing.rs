@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 /// 32-byte hash as array
 ///
 /// Performance optimization: Uses OptimizedSha256 in production mode for SHA-NI acceleration
+#[inline]
 pub fn double_sha256(data: &[u8]) -> [u8; 32] {
     #[cfg(feature = "production")]
     {

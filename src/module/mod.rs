@@ -15,6 +15,7 @@
 pub mod api;
 pub mod encryption;
 pub mod hooks;
+pub mod integration;
 pub mod inter_module;
 pub mod ipc;
 pub mod loader;
@@ -37,6 +38,8 @@ pub use process::{ModuleProcess, ModuleProcessMonitor, ModuleProcessSpawner};
 pub use traits::{
     EventType, Module, ModuleContext, ModuleError, ModuleMetadata, ModuleState, NodeAPI,
 };
+pub use api::NodeApiIpc;
+pub use integration::ModuleIntegration;
 
 // Re-export IPC protocol types
 pub use ipc::protocol::{EventMessage, EventPayload, ModuleMessage};

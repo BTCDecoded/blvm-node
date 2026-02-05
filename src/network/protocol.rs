@@ -1000,8 +1000,22 @@ impl ProtocolParser {
                 }))
             },
             "getblocks" => Ok(ProtocolMessage::GetBlocks(bincode::deserialize(payload)?)),
-            "block" => Ok(ProtocolMessage::Block(bincode::deserialize(payload)?)),
-            "getdata" => Ok(ProtocolMessage::GetData(bincode::deserialize(payload)?)),
+            "block" => {
+                // Use proper Bitcoin wire format deserialization
+                let block = blvm_protocol::wire::deserialize_block(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
+                // Note: witnesses are skipped in block deserialization for now
+                Ok(ProtocolMessage::Block(BlockMessage { block, witnesses: vec![] }))
+            },
+            "getdata" => {
+                // Use proper Bitcoin wire format deserialization  
+                let wire_msg = blvm_protocol::wire::deserialize_getdata(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getdata: {}", e))?;
+                let inventory = wire_msg.inventory.into_iter()
+                    .map(|v| InventoryItem { inv_type: v.inv_type, hash: v.hash })
+                    .collect();
+                Ok(ProtocolMessage::GetData(GetDataMessage { inventory }))
+            },
             "inv" => {
                 // Use proper Bitcoin wire format (count varint + items)
                 let wire_msg = blvm_protocol::wire::deserialize_inv(payload)
@@ -1157,7 +1171,16 @@ impl ProtocolParser {
             },
             ProtocolMessage::GetBlocks(msg) => ("getblocks", bincode::serialize(msg)?),
             ProtocolMessage::Block(msg) => ("block", bincode::serialize(msg)?),
-            ProtocolMessage::GetData(msg) => ("getdata", bincode::serialize(msg)?),
+            ProtocolMessage::GetData(msg) => {
+                // Use proper Bitcoin wire format for getdata
+                let wire_msg = blvm_protocol::network::GetDataMessage {
+                    inventory: msg.inventory.iter().map(|i| blvm_protocol::network::InventoryVector {
+                        inv_type: i.inv_type,
+                        hash: i.hash,
+                    }).collect(),
+                };
+                ("getdata", blvm_protocol::wire::serialize_getdata(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?)
+            },
             ProtocolMessage::Inv(msg) => ("inv", bincode::serialize(msg)?),
             ProtocolMessage::NotFound(msg) => ("notfound", bincode::serialize(msg)?),
             ProtocolMessage::Tx(msg) => ("tx", bincode::serialize(msg)?),

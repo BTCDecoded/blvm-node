@@ -12,9 +12,12 @@ pub mod dos_protection;
 pub mod ibd_protection;
 pub mod bandwidth_protection;
 pub mod inventory;
+pub mod lan_discovery;
+pub mod lan_security;
 pub mod message_bridge;
 pub mod module_registry_extensions;
 pub mod peer;
+pub mod peer_scoring;
 pub mod protocol;
 pub mod protocol_adapter;
 pub mod protocol_extensions;
@@ -1863,10 +1866,15 @@ impl NetworkManager {
     /// Initialize peer connections after startup
     ///
     /// This is automatically called by `start()` to:
+    /// 0. Discover and connect to LAN sibling nodes FIRST (priority)
     /// 1. Discover peers from DNS seeds (for TCP/Quinn transports)
     /// 2. Connect to persistent peers from config
     /// 3. Discover Iroh peers (if Iroh is enabled) - uses Iroh's DERP servers and gossip
     /// 4. Connect to peers from address database to reach target count
+    ///
+    /// LAN sibling nodes (local Bitcoin Core, Umbrel, Start9, etc.) are discovered
+    /// automatically by scanning the local network for port 8333. These peers are
+    /// connected first and given priority for block downloads during IBD.
     ///
     /// Note: The address database now supports both SocketAddr-based addresses (TCP/Quinn)
     /// and Iroh NodeIds. Iroh peers are discovered through:
@@ -1881,6 +1889,32 @@ impl NetworkManager {
         port: u16,
         target_peer_count: usize,
     ) -> Result<()> {
+        // 0. PRIORITY: Discover and connect to LAN sibling nodes FIRST
+        // These are local Bitcoin nodes (Bitcoin Core, Umbrel, Start9, etc.)
+        // that can provide blocks at LAN speeds (~1ms latency vs ~100-5000ms internet)
+        info!("Discovering LAN sibling nodes...");
+        let lan_nodes = lan_discovery::discover_lan_bitcoin_nodes_with_port(port).await;
+        let mut lan_connected = 0;
+        
+        for lan_addr in &lan_nodes {
+            info!("Connecting to LAN sibling node: {}", lan_addr);
+            match self.connect_to_peer(*lan_addr).await {
+                Ok(_) => {
+                    lan_connected += 1;
+                    // Add to persistent peers so we always try to reconnect
+                    self.add_persistent_peer(*lan_addr);
+                    info!("Connected to LAN sibling node: {} (will be prioritized for IBD)", lan_addr);
+                }
+                Err(e) => {
+                    warn!("Failed to connect to LAN node {}: {}", lan_addr, e);
+                }
+            }
+        }
+        
+        if lan_connected > 0 {
+            info!("Connected to {} LAN sibling node(s) - these will be prioritized for block downloads", lan_connected);
+        }
+
         // 1. Discover peers from DNS seeds (only for TCP/Quinn, not Iroh)
         let should_discover_dns = self.transport_preference.allows_tcp() || {
             #[cfg(feature = "quinn")]
@@ -4565,11 +4599,17 @@ impl NetworkManager {
 
                     // Check rate limiting before processing - drop lock before async
                     // Note: transport_addr_opt was previously computed but not used - removed for now
-                    let should_process = {
+                    // SKIP rate limiting for LAN peers - they're trusted and fast
+                    let is_lan = crate::network::peer_scoring::is_lan_peer(&peer_addr);
+                    let should_process = if is_lan {
+                        true // LAN peers bypass rate limiting for maximum IBD speed
+                    } else {
                         let mut rates = self.peer_message_rates.lock().await;
                         let rate_limiter = rates.entry(peer_addr).or_insert_with(|| {
-                            // Default: 100 burst, 10 messages/second
-                            PeerRateLimiter::new(100, 10)
+                            // IBD-optimized: 10000 burst, 1000 messages/second
+                            // During IBD we need to handle many block messages per second
+                            // from fast peers without rate limiting them
+                            PeerRateLimiter::new(10000, 1000)
                         });
                         rate_limiter.check_and_consume()
                     };
@@ -5170,14 +5210,19 @@ impl NetworkManager {
             ProtocolMessage::Block(block_msg) => {
                 // Check if there's a pending Block request for this peer
                 use blvm_protocol::segwit::Witness;
-                // Calculate block hash - use double SHA256 of serialized header
-                use sha2::{Digest, Sha256};
-                let header_bytes = bincode::serialize(&block_msg.block.header)
-                    .unwrap_or_default();
-                let hash1 = Sha256::digest(&header_bytes);
-                let hash2 = Sha256::digest(hash1);
-                let mut block_hash = [0u8; 32];
-                block_hash.copy_from_slice(&hash2);
+                // Calculate block hash using proper Bitcoin format:
+                // double_sha256 of 80-byte header (version + prev_hash + merkle_root + timestamp + bits + nonce)
+                // CRITICAL: Must use 4-byte types for version/timestamp/bits/nonce (Bitcoin wire format)
+                use crate::storage::hashing::double_sha256;
+                let header = &block_msg.block.header;
+                let mut header_bytes = Vec::with_capacity(80);
+                header_bytes.extend_from_slice(&(header.version as i32).to_le_bytes());    // 4 bytes
+                header_bytes.extend_from_slice(&header.prev_block_hash);                    // 32 bytes
+                header_bytes.extend_from_slice(&header.merkle_root);                        // 32 bytes
+                header_bytes.extend_from_slice(&(header.timestamp as u32).to_le_bytes());  // 4 bytes
+                header_bytes.extend_from_slice(&(header.bits as u32).to_le_bytes());       // 4 bytes
+                header_bytes.extend_from_slice(&(header.nonce as u32).to_le_bytes());      // 4 bytes
+                let block_hash = double_sha256(&header_bytes);
                 // Convert Vec<Vec<Vec<u8>>> to Vec<Vec<Witness>>
                 // BlockMessage.witnesses is Vec<Vec<Vec<u8>>> where:
                 // - Outer Vec: one per transaction

@@ -62,9 +62,21 @@ impl Transport for TcpTransport {
 
 impl TcpTransport {
     /// Connect and return raw TcpStream (for use with Peer::from_tcp_stream_split)
+    /// 
+    /// Includes a 10-second connection timeout to prevent blocking on unresponsive peers.
     pub async fn connect_stream(&self, addr: SocketAddr) -> Result<TcpStream> {
+        use tokio::time::{timeout, Duration};
+        
         info!("Connecting to peer at {}", addr);
-        let stream = TcpStream::connect(addr).await?;
+        
+        // 10 second connection timeout - prevents blocking on unresponsive peers
+        const CONNECT_TIMEOUT_SECS: u64 = 10;
+        
+        let stream = timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), TcpStream::connect(addr))
+            .await
+            .map_err(|_| anyhow::anyhow!("Connection timeout to {}", addr))?
+            .map_err(|e| anyhow::anyhow!("Connection failed to {}: {}", addr, e))?;
+        
         Ok(stream)
     }
 }
