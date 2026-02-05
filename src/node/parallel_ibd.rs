@@ -543,6 +543,9 @@ impl ParallelIBD {
         // Bounded channel: REORDER_BUFFER_SIZE blocks max in flight
         // Each block is ~500KB average, so 1000 blocks = ~500MB
         const REORDER_BUFFER_SIZE: usize = 1000;
+        // Maximum blocks allowed in the reorder buffer before pausing downloads
+        // This prevents OOM when downloads outpace validation
+        const MAX_REORDER_BUFFER: usize = 50000;
         let (block_tx, mut block_rx) = tokio::sync::mpsc::channel::<(u64, Block, Vec<Vec<Witness>>)>(REORDER_BUFFER_SIZE);
         
         // DYNAMIC WORK DISPATCH with PRIORITY CHUNKS:
@@ -847,6 +850,48 @@ impl ParallelIBD {
             
             // Add to reorder buffer
             reorder_buffer.insert(height, (block, witnesses));
+            
+            // BACKPRESSURE: If reorder buffer is too large, drain some blocks before accepting more
+            // This prevents OOM when downloads outpace validation (e.g., fast LAN peer)
+            if reorder_buffer.len() > MAX_REORDER_BUFFER {
+                warn!("Reorder buffer exceeded {} blocks, draining before accepting more downloads...", MAX_REORDER_BUFFER);
+                while reorder_buffer.len() > MAX_REORDER_BUFFER / 2 {
+                    if let Some((block, witnesses)) = reorder_buffer.remove(&next_height) {
+                        #[cfg(not(debug_assertions))]
+                        {
+                            if let Err(e) = self.validate_block_only(&blockstore, protocol, utxo_set, &block, &witnesses, next_height) {
+                                error!("Validation failed during backpressure drain at height {}: {}", next_height, e);
+                                break;
+                            }
+                        }
+                        #[cfg(debug_assertions)]
+                        {
+                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                self.validate_block_only(&blockstore, protocol, utxo_set, &block, &witnesses, next_height)
+                            }));
+                            if let Err(e) = result.unwrap_or_else(|_| Err(anyhow::anyhow!("panic during validation"))) {
+                                error!("Validation failed during backpressure drain at height {}: {}", next_height, e);
+                                break;
+                            }
+                        }
+                        pending_blocks.push((block, witnesses, next_height));
+                        blocks_synced += 1;
+                        next_height += 1;
+                        
+                        // Flush storage periodically
+                        if blocks_synced % STORAGE_FLUSH_INTERVAL == 0 {
+                            if let Err(e) = self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks) {
+                                error!("Failed to flush blocks during backpressure: {}", e);
+                            }
+                        }
+                    } else {
+                        // Gap in blocks - can't drain further
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                info!("Drained reorder buffer to {} blocks", reorder_buffer.len());
+            }
             
             // Flush all consecutive blocks starting from next_height
             while let Some((block, witnesses)) = reorder_buffer.remove(&next_height) {
