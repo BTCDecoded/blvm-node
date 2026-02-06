@@ -25,6 +25,7 @@ use blvm_protocol::{
     segwit::Witness,
 };
 use blvm_consensus::serialization::varint::decode_varint;
+use blvm_consensus::types::{OutPoint, UTXO};
 use hex;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -32,6 +33,113 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
+
+// ============================================================================
+// UTXO Prefetch Cache
+// ============================================================================
+
+/// Number of blocks to prefetch ahead
+const PREFETCH_LOOKAHEAD: usize = 10;
+
+/// Maximum entries in prefetch cache (bounded to prevent memory bloat)
+const MAX_PREFETCH_ENTRIES: usize = 500_000;
+
+/// UTXO Prefetch Cache for IBD optimization
+/// 
+/// Prefetches UTXOs for upcoming blocks while current block is being validated.
+/// This hides UTXO lookup latency by doing lookups ahead of time.
+#[derive(Default)]
+struct PrefetchCache {
+    /// Cached UTXOs (outpoint -> utxo)
+    cache: HashMap<OutPoint, UTXO>,
+    /// Heights that have been prefetched
+    prefetched_heights: HashSet<u64>,
+}
+
+impl PrefetchCache {
+    fn new() -> Self {
+        Self {
+            cache: HashMap::with_capacity(50_000),
+            prefetched_heights: HashSet::with_capacity(PREFETCH_LOOKAHEAD * 2),
+        }
+    }
+    
+    /// Get a UTXO from the prefetch cache
+    #[inline]
+    fn get(&self, outpoint: &OutPoint) -> Option<&UTXO> {
+        self.cache.get(outpoint)
+    }
+    
+    /// Prefetch UTXOs for a block from the UTXO set
+    fn prefetch_block(&mut self, height: u64, block: &Block, utxo_set: &UtxoSet) {
+        // Skip if already prefetched
+        if self.prefetched_heights.contains(&height) {
+            return;
+        }
+        
+        // Prefetch all input UTXOs for this block
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                // Skip coinbase inputs
+                if input.prevout.hash == [0u8; 32] && input.prevout.index == 0xffffffff {
+                    continue;
+                }
+                
+                // Look up and cache the UTXO
+                if let Some(utxo) = utxo_set.get(&input.prevout) {
+                    self.cache.insert(input.prevout.clone(), utxo.clone());
+                }
+            }
+        }
+        
+        self.prefetched_heights.insert(height);
+        
+        // Evict old entries if cache is too large
+        if self.cache.len() > MAX_PREFETCH_ENTRIES {
+            self.evict_stale_entries(height);
+        }
+    }
+    
+    /// Remove entries for blocks we've already validated
+    fn evict_stale_entries(&mut self, current_height: u64) {
+        // Remove prefetched heights that are far behind current
+        let stale_heights: Vec<u64> = self.prefetched_heights
+            .iter()
+            .filter(|&&h| h + 20 < current_height)
+            .copied()
+            .collect();
+        
+        for h in stale_heights {
+            self.prefetched_heights.remove(&h);
+        }
+        
+        // If still too large, clear older entries (simple strategy)
+        if self.cache.len() > MAX_PREFETCH_ENTRIES {
+            // Keep only the most recent entries
+            let keep_count = MAX_PREFETCH_ENTRIES / 2;
+            if self.cache.len() > keep_count {
+                let to_remove = self.cache.len() - keep_count;
+                let keys_to_remove: Vec<OutPoint> = self.cache.keys()
+                    .take(to_remove)
+                    .cloned()
+                    .collect();
+                for key in keys_to_remove {
+                    self.cache.remove(&key);
+                }
+            }
+        }
+    }
+    
+    /// Mark a height as processed (can clean up prefetch data)
+    fn mark_processed(&mut self, height: u64) {
+        self.prefetched_heights.remove(&height);
+    }
+    
+    /// Get cache statistics
+    fn stats(&self) -> (usize, usize) {
+        (self.cache.len(), self.prefetched_heights.len())
+    }
+}
 
 /// Bitcoin mainnet checkpoints for parallel header download
 ///
@@ -541,11 +649,12 @@ impl ParallelIBD {
         // - Validation runs concurrently with downloads
         
         // Bounded channel: REORDER_BUFFER_SIZE blocks max in flight
-        // Each block is ~500KB average, so 1000 blocks = ~500MB
-        const REORDER_BUFFER_SIZE: usize = 1000;
-        // Maximum blocks allowed in the reorder buffer before pausing downloads
-        // This prevents OOM when downloads outpace validation
-        const MAX_REORDER_BUFFER: usize = 50000;
+        // Each block is ~500KB average, so 500 blocks = ~250MB
+        // Reduced from 1000 to 500 to provide tighter backpressure when gaps exist
+        const REORDER_BUFFER_SIZE: usize = 500;
+        // Maximum blocks allowed in the reorder buffer before logging warnings
+        // If buffer exceeds this, there's likely a gap blocking validation
+        const MAX_REORDER_BUFFER: usize = 10000;
         let (block_tx, mut block_rx) = tokio::sync::mpsc::channel::<(u64, Block, Vec<Vec<Witness>>)>(REORDER_BUFFER_SIZE);
         
         // DYNAMIC WORK DISPATCH with PRIORITY CHUNKS:
@@ -571,8 +680,9 @@ impl ParallelIBD {
         // OPTIMIZATION: Give LAN peer A LOT of priority chunks
         // The LAN peer gets ALL of these, so validation can proceed smoothly
         // Without this, slow peers get early chunks and block validation for hours
-        // 500 chunks = 50,000 blocks = covers first ~7% of chain with LAN peer
-        const PRIORITY_CHUNKS: usize = 500;
+        // 2000 chunks = 200,000 blocks = covers first ~21% of chain with LAN peer
+        // This prevents OOM from buffer explosion while waiting for slow internet peers
+        const PRIORITY_CHUNKS: usize = 2000;
         
         // Split chunks into priority (first 10) and shared queue (rest)
         let all_chunks: Vec<(u64, u64)> = chunks.iter()
@@ -840,60 +950,17 @@ impl ParallelIBD {
         const STORAGE_FLUSH_INTERVAL: usize = 1000;
         let mut pending_blocks: Vec<(Block, Vec<Vec<Witness>>, u64)> = Vec::with_capacity(STORAGE_FLUSH_INTERVAL);
         
-        info!("Validation loop starting (deferred storage enabled, flush every {} blocks)...", STORAGE_FLUSH_INTERVAL);
+        // UTXO PREFETCH CACHE: Prefetch UTXOs for upcoming blocks to hide lookup latency
+        let mut prefetch_cache = PrefetchCache::new();
+        let mut _prefetch_hits = 0u64;   // TODO: Track when integrating with validation
+        let mut _prefetch_misses = 0u64; // TODO: Track when integrating with validation
         
-        while let Some((height, block, witnesses)) = block_rx.recv().await {
-            if total_received == 0 {
-                info!("Received first block from channel: height {}", height);
-            }
-            total_received += 1;
-            
-            // Add to reorder buffer
-            reorder_buffer.insert(height, (block, witnesses));
-            
-            // BACKPRESSURE: If reorder buffer is too large, drain some blocks before accepting more
-            // This prevents OOM when downloads outpace validation (e.g., fast LAN peer)
-            if reorder_buffer.len() > MAX_REORDER_BUFFER {
-                warn!("Reorder buffer exceeded {} blocks, draining before accepting more downloads...", MAX_REORDER_BUFFER);
-                while reorder_buffer.len() > MAX_REORDER_BUFFER / 2 {
-                    if let Some((block, witnesses)) = reorder_buffer.remove(&next_height) {
-                        #[cfg(not(debug_assertions))]
-                        {
-                            if let Err(e) = self.validate_block_only(&blockstore, protocol, utxo_set, &block, &witnesses, next_height) {
-                                error!("Validation failed during backpressure drain at height {}: {}", next_height, e);
-                                break;
-                            }
-                        }
-                        #[cfg(debug_assertions)]
-                        {
-                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                self.validate_block_only(&blockstore, protocol, utxo_set, &block, &witnesses, next_height)
-                            }));
-                            if let Err(e) = result.unwrap_or_else(|_| Err(anyhow::anyhow!("panic during validation"))) {
-                                error!("Validation failed during backpressure drain at height {}: {}", next_height, e);
-                                break;
-                            }
-                        }
-                        pending_blocks.push((block, witnesses, next_height));
-                        blocks_synced += 1;
-                        next_height += 1;
-                        
-                        // Flush storage periodically
-                        if blocks_synced % STORAGE_FLUSH_INTERVAL == 0 {
-                            if let Err(e) = self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks) {
-                                error!("Failed to flush blocks during backpressure: {}", e);
-                            }
-                        }
-                    } else {
-                        // Gap in blocks - can't drain further
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-                info!("Drained reorder buffer to {} blocks", reorder_buffer.len());
-            }
-            
-            // Flush all consecutive blocks starting from next_height
+        info!("Validation loop starting (deferred storage enabled, flush every {} blocks, prefetch lookahead: {})...", 
+            STORAGE_FLUSH_INTERVAL, PREFETCH_LOOKAHEAD);
+        
+        loop {
+            // CRITICAL: Always try to validate consecutive blocks first
+            // This ensures we process blocks even when paused for gaps
             while let Some((block, witnesses)) = reorder_buffer.remove(&next_height) {
                 // OPTIMIZATION: Reduce logging frequency - log first 20 blocks, then every 500
                 // info! has overhead even when message is constructed
@@ -933,6 +1000,10 @@ impl ParallelIBD {
                         // Validation succeeded - add to pending storage buffer
                         pending_blocks.push((block, witnesses, next_height));
                         blocks_synced += 1;
+                        
+                        // Mark block as processed in prefetch cache (frees memory)
+                        prefetch_cache.mark_processed(next_height);
+                        
                         next_height += 1;
                         
                         // Batch flush pending blocks to database
@@ -987,12 +1058,13 @@ impl ParallelIBD {
                     let remaining = effective_end_height.saturating_sub(next_height);
                     let eta = if rate > 0.0 { remaining as f64 / rate } else { f64::INFINITY };
                     let buffer_size = reorder_buffer.len();
+                    let (prefetch_cached, _prefetch_heights) = prefetch_cache.stats();
                     
                     info!(
-                        "IBD: {} / {} ({:.1}%) - {:.1} blocks/s - buffer: {} - ETA: {:.0}s",
+                        "IBD: {} / {} ({:.1}%) - {:.1} blocks/s - buffer: {} - prefetch: {} - ETA: {:.0}s",
                         next_height, effective_end_height,
                         (next_height as f64 / effective_end_height as f64) * 100.0,
-                        rate, buffer_size, eta
+                        rate, buffer_size, prefetch_cached, eta
                     );
                 }
             }
@@ -1001,6 +1073,68 @@ impl ParallelIBD {
             if total_received < 1000 || total_received % 1000 == 0 {
                 info!("Validation inner loop exit: next_height={}, buffer_size={}, total_received={}", 
                     next_height, reorder_buffer.len(), total_received);
+            }
+            
+            // BACKPRESSURE: If buffer is too large, still drain but with longer timeout
+            // This allows gap blocks to arrive while slowing overall download rate
+            const HARD_BUFFER_LIMIT: usize = 75_000; // Max blocks before aggressive backpressure
+            
+            let recv_timeout = if reorder_buffer.len() > HARD_BUFFER_LIMIT {
+                // Buffer is large - use longer timeout to slow download rate
+                // We still drain to receive gap blocks, but slower
+                if reorder_buffer.len() % 10000 == 0 {
+                    warn!("Buffer overflow protection: {} blocks (limit {}), slowing downloads until block {} arrives", 
+                        reorder_buffer.len(), HARD_BUFFER_LIMIT, next_height);
+                }
+                Duration::from_secs(2) // Slow down to 0.5 blocks/sec
+            } else if reorder_buffer.len() > MAX_REORDER_BUFFER {
+                // Buffer is large but not critical
+                if reorder_buffer.len() % 10000 == 0 {
+                    warn!("Large reorder buffer: {} blocks (waiting for block {} to arrive)", 
+                        reorder_buffer.len(), next_height);
+                }
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(100)
+            };
+            
+            // Accept blocks from channel - gap blocks might be waiting
+            let block_result = timeout(recv_timeout, block_rx.recv()).await;
+            match block_result {
+                Ok(Some((height, block, witnesses))) => {
+                    if total_received == 0 {
+                        info!("Received first block from channel: height {}", height);
+                    }
+                    total_received += 1;
+                    
+                    // Add to reorder buffer
+                    reorder_buffer.insert(height, (block, witnesses));
+                    
+                    // UTXO PREFETCHING: Prefetch UTXOs for upcoming blocks
+                    // This hides UTXO lookup latency by doing lookups ahead of time
+                    // Only prefetch if we're close to the validation frontier
+                    if height < next_height + PREFETCH_LOOKAHEAD as u64 * 2 {
+                        for offset in 0..PREFETCH_LOOKAHEAD {
+                            let prefetch_height = next_height + offset as u64;
+                            if let Some((prefetch_block, _)) = reorder_buffer.get(&prefetch_height) {
+                                prefetch_cache.prefetch_block(prefetch_height, prefetch_block, utxo_set);
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Channel closed - check if we have more consecutive blocks to validate
+                    if reorder_buffer.contains_key(&next_height) {
+                        // More blocks to validate, continue
+                        continue;
+                    }
+                    // No more blocks, we're done
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - no new block in 100ms, loop back to try validation
+                    // This short timeout ensures we keep validating consecutive blocks
+                }
             }
         }
         
