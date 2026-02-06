@@ -42,25 +42,109 @@ use tracing::{debug, error, info, warn};
 const PREFETCH_LOOKAHEAD: usize = 10;
 
 /// Maximum entries in prefetch cache (bounded to prevent memory bloat)
-const MAX_PREFETCH_ENTRIES: usize = 500_000;
+/// This is a fallback; actual limit is calculated dynamically based on available memory
+const MAX_PREFETCH_ENTRIES: usize = 100_000;
+
+// ============================================================================
+// Dynamic Memory Management (Cross-Platform)
+// ============================================================================
+
+/// Calculate dynamic buffer limit based on available system memory and block height.
+/// Works on Linux, macOS, Windows, and other platforms via sysinfo crate.
+#[cfg(feature = "sysinfo")]
+fn calculate_dynamic_buffer_limit(current_height: u64) -> usize {
+    use sysinfo::System;
+    
+    let sys = System::new_all();
+    let available_bytes = sys.available_memory();
+    let total_bytes = sys.total_memory();
+    let available_mb = available_bytes / (1024 * 1024);
+    let total_mb = total_bytes / (1024 * 1024);
+    
+    // Estimate average block size based on height (in KB)
+    // Block sizes have grown over time due to increased usage and SegWit
+    let avg_block_size_kb: u64 = match current_height {
+        0..=100_000 => 150,        // Early blocks: small, few transactions
+        100_001..=300_000 => 300,  // Growth period
+        300_001..=480_000 => 500,  // Pre-SegWit peak
+        480_001..=700_000 => 800,  // SegWit adoption
+        _ => 1500,                  // Modern blocks: 1-2MB average
+    };
+    
+    // Reserve 30% of available memory for buffer (conservative to leave room for UTXO set)
+    let buffer_memory_mb = (available_mb * 30) / 100;
+    
+    // Calculate max blocks that fit, with overhead factor (2x for witnesses, metadata)
+    let effective_block_size_kb = avg_block_size_kb * 2;
+    let max_blocks = if effective_block_size_kb > 0 {
+        (buffer_memory_mb * 1024) / effective_block_size_kb
+    } else {
+        10_000
+    };
+    
+    // Clamp to reasonable bounds
+    let limit = (max_blocks as usize).clamp(5_000, 150_000);
+    
+    info!(
+        "Dynamic buffer limit: {} blocks (available: {}MB / {}MB, block size estimate: {}KB)",
+        limit, available_mb, total_mb, avg_block_size_kb
+    );
+    
+    limit
+}
+
+/// Fallback when sysinfo is not available - use conservative fixed limits
+#[cfg(not(feature = "sysinfo"))]
+fn calculate_dynamic_buffer_limit(_current_height: u64) -> usize {
+    // Conservative default for unknown systems
+    warn!("sysinfo not available, using conservative buffer limit of 20,000 blocks");
+    20_000
+}
+
+/// Calculate dynamic prefetch cache limit based on available memory
+#[cfg(feature = "sysinfo")]
+fn calculate_dynamic_prefetch_limit() -> usize {
+    use sysinfo::System;
+    
+    let sys = System::new_all();
+    let available_mb = sys.available_memory() / (1024 * 1024);
+    
+    // Reserve 5% of available memory for prefetch cache
+    // Each UTXO entry is roughly 100 bytes (outpoint + value + script)
+    let cache_memory_mb = (available_mb * 5) / 100;
+    let max_entries = (cache_memory_mb * 1024 * 1024) / 100; // 100 bytes per entry
+    
+    (max_entries as usize).clamp(10_000, 500_000)
+}
+
+#[cfg(not(feature = "sysinfo"))]
+fn calculate_dynamic_prefetch_limit() -> usize {
+    50_000 // Conservative default
+}
 
 /// UTXO Prefetch Cache for IBD optimization
 /// 
 /// Prefetches UTXOs for upcoming blocks while current block is being validated.
 /// This hides UTXO lookup latency by doing lookups ahead of time.
-#[derive(Default)]
 struct PrefetchCache {
     /// Cached UTXOs (outpoint -> utxo)
     cache: HashMap<OutPoint, UTXO>,
     /// Heights that have been prefetched
     prefetched_heights: HashSet<u64>,
+    /// Maximum entries (dynamically calculated based on available memory)
+    max_entries: usize,
 }
 
 impl PrefetchCache {
     fn new() -> Self {
+        Self::with_limit(MAX_PREFETCH_ENTRIES)
+    }
+    
+    fn with_limit(max_entries: usize) -> Self {
         Self {
-            cache: HashMap::with_capacity(50_000),
+            cache: HashMap::with_capacity(max_entries.min(50_000)),
             prefetched_heights: HashSet::with_capacity(PREFETCH_LOOKAHEAD * 2),
+            max_entries,
         }
     }
     
@@ -94,8 +178,8 @@ impl PrefetchCache {
         
         self.prefetched_heights.insert(height);
         
-        // Evict old entries if cache is too large
-        if self.cache.len() > MAX_PREFETCH_ENTRIES {
+        // Evict old entries if cache is too large (using dynamic limit)
+        if self.cache.len() > self.max_entries {
             self.evict_stale_entries(height);
         }
     }
@@ -114,9 +198,9 @@ impl PrefetchCache {
         }
         
         // If still too large, clear older entries (simple strategy)
-        if self.cache.len() > MAX_PREFETCH_ENTRIES {
+        if self.cache.len() > self.max_entries {
             // Keep only the most recent entries
-            let keep_count = MAX_PREFETCH_ENTRIES / 2;
+            let keep_count = self.max_entries / 2;
             if self.cache.len() > keep_count {
                 let to_remove = self.cache.len() - keep_count;
                 let keys_to_remove: Vec<OutPoint> = self.cache.keys()
@@ -950,13 +1034,18 @@ impl ParallelIBD {
         const STORAGE_FLUSH_INTERVAL: usize = 1000;
         let mut pending_blocks: Vec<(Block, Vec<Vec<Witness>>, u64)> = Vec::with_capacity(STORAGE_FLUSH_INTERVAL);
         
+        // DYNAMIC MEMORY MANAGEMENT: Calculate buffer limits based on available system memory
+        // This adapts to the system's capabilities instead of using fixed limits
+        let dynamic_buffer_limit = calculate_dynamic_buffer_limit(start_height);
+        let dynamic_prefetch_limit = calculate_dynamic_prefetch_limit();
+        
         // UTXO PREFETCH CACHE: Prefetch UTXOs for upcoming blocks to hide lookup latency
-        let mut prefetch_cache = PrefetchCache::new();
+        let mut prefetch_cache = PrefetchCache::with_limit(dynamic_prefetch_limit);
         let mut _prefetch_hits = 0u64;   // TODO: Track when integrating with validation
         let mut _prefetch_misses = 0u64; // TODO: Track when integrating with validation
         
-        info!("Validation loop starting (deferred storage enabled, flush every {} blocks, prefetch lookahead: {})...", 
-            STORAGE_FLUSH_INTERVAL, PREFETCH_LOOKAHEAD);
+        info!("Validation loop starting (deferred storage enabled, flush every {} blocks, prefetch lookahead: {}, buffer limit: {}, prefetch limit: {})...", 
+            STORAGE_FLUSH_INTERVAL, PREFETCH_LOOKAHEAD, dynamic_buffer_limit, dynamic_prefetch_limit);
         
         loop {
             // CRITICAL: Always try to validate consecutive blocks first
@@ -1077,16 +1166,16 @@ impl ParallelIBD {
             
             // BACKPRESSURE: If buffer is too large, still drain but with longer timeout
             // This allows gap blocks to arrive while slowing overall download rate
-            const HARD_BUFFER_LIMIT: usize = 75_000; // Max blocks before aggressive backpressure
+            // Limit is calculated dynamically based on available system memory
             
-            let recv_timeout = if reorder_buffer.len() > HARD_BUFFER_LIMIT {
-                // Buffer is large - use longer timeout to slow download rate
-                // We still drain to receive gap blocks, but slower
-                if reorder_buffer.len() % 10000 == 0 {
-                    warn!("Buffer overflow protection: {} blocks (limit {}), slowing downloads until block {} arrives", 
-                        reorder_buffer.len(), HARD_BUFFER_LIMIT, next_height);
+            let recv_timeout = if reorder_buffer.len() > dynamic_buffer_limit {
+                // Buffer is at dynamic limit - use very long timeout to nearly stop downloads
+                // We still drain to receive gap blocks, but very slowly
+                if reorder_buffer.len() % 5000 == 0 {
+                    warn!("Buffer overflow protection: {} blocks (limit {}), pausing downloads until block {} arrives", 
+                        reorder_buffer.len(), dynamic_buffer_limit, next_height);
                 }
-                Duration::from_secs(2) // Slow down to 0.5 blocks/sec
+                Duration::from_secs(10) // Nearly stop - 0.1 blocks/sec
             } else if reorder_buffer.len() > MAX_REORDER_BUFFER {
                 // Buffer is large but not critical
                 if reorder_buffer.len() % 10000 == 0 {
