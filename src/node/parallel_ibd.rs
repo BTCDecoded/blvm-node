@@ -18,12 +18,14 @@ use crate::network::NetworkManager;
 use crate::network::protocol::{GetHeadersMessage, HeadersMessage, ProtocolMessage, ProtocolParser};
 use crate::network::inventory::MSG_BLOCK;
 use crate::storage::blockstore::BlockStore;
+use crate::storage::disk_utxo::DiskBackedUtxoSet;
 use crate::storage::Storage;
 use anyhow::{Context, Result};
 use blvm_protocol::{
     BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult,
     segwit::Witness,
 };
+
 use blvm_consensus::serialization::varint::decode_varint;
 use blvm_consensus::types::{OutPoint, UTXO};
 use hex;
@@ -71,19 +73,22 @@ fn calculate_dynamic_buffer_limit(current_height: u64) -> usize {
         _ => 1500,                  // Modern blocks: 1-2MB average
     };
     
-    // Reserve 30% of available memory for buffer (conservative to leave room for UTXO set)
-    let buffer_memory_mb = (available_mb * 30) / 100;
+    // Reserve 15% of available memory for buffer (conservative: leave room for UTXO set,
+    // redb memory-mapped pages, pending blocks, and process overhead)
+    let buffer_memory_mb = (available_mb * 15) / 100;
     
-    // Calculate max blocks that fit, with overhead factor (2x for witnesses, metadata)
-    let effective_block_size_kb = avg_block_size_kb * 2;
+    // Calculate max blocks that fit, with overhead factor (3x for witnesses, metadata, deserialized structs)
+    let effective_block_size_kb = avg_block_size_kb * 3;
     let max_blocks = if effective_block_size_kb > 0 {
         (buffer_memory_mb * 1024) / effective_block_size_kb
     } else {
-        10_000
+        2_000
     };
     
-    // Clamp to reasonable bounds
-    let limit = (max_blocks as usize).clamp(5_000, 150_000);
+    // Clamp to reasonable bounds - keep small to avoid OOM on 16GB systems
+    // The reorder buffer + redb mmap + UTXO set + pending blocks all compete for RAM
+    // redb memory-maps the entire database file, so as the DB grows, available RAM shrinks
+    let limit = (max_blocks as usize).clamp(200, 1_000);
     
     info!(
         "Dynamic buffer limit: {} blocks (available: {}MB / {}MB, block size estimate: {}KB)",
@@ -109,17 +114,19 @@ fn calculate_dynamic_prefetch_limit() -> usize {
     let sys = System::new_all();
     let available_mb = sys.available_memory() / (1024 * 1024);
     
-    // Reserve 5% of available memory for prefetch cache
-    // Each UTXO entry is roughly 100 bytes (outpoint + value + script)
-    let cache_memory_mb = (available_mb * 5) / 100;
-    let max_entries = (cache_memory_mb * 1024 * 1024) / 100; // 100 bytes per entry
+    // Reserve 2% of available memory for prefetch cache
+    // Each UTXO entry is roughly 400 bytes (outpoint + UTXO + HashMap overhead)
+    // Reduced from 5% to 2% to avoid memory pressure
+    let cache_memory_mb = (available_mb * 2) / 100;
+    let max_entries = (cache_memory_mb * 1024 * 1024) / 400; // 400 bytes per entry
     
-    (max_entries as usize).clamp(10_000, 500_000)
+    // Much lower max: 50k instead of 500k to prevent memory bloat
+    (max_entries as usize).clamp(5_000, 50_000)
 }
 
 #[cfg(not(feature = "sysinfo"))]
 fn calculate_dynamic_prefetch_limit() -> usize {
-    50_000 // Conservative default
+    20_000 // Conservative default
 }
 
 /// UTXO Prefetch Cache for IBD optimization
@@ -426,10 +433,11 @@ impl Default for ParallelIBDConfig {
                 .map(|n| n.get())
                 .unwrap_or(4),
             chunk_size: 100,  // Very small chunks = fast peers grab more work naturally
-            // IBD Optimization: High concurrency for parallel chunk downloads
-            // This allows many chunks to download simultaneously per peer
-            // Combined with 16-deep pipelining per chunk = high throughput
-            max_concurrent_per_peer: 64,
+            // IBD Optimization: Moderate concurrency for parallel chunk downloads
+            // Reduced from 64 to 16 to limit memory pressure on 16GB systems.
+            // The UTXO set grows to 5-8GB by block 350k, so we can't afford
+            // to have too many in-flight blocks consuming RAM simultaneously.
+            max_concurrent_per_peer: 16,
             checkpoint_interval: 10_000,
             download_timeout_secs: 60,  // Allow 60s for blocks (later blocks are 1-4MB)
         }
@@ -566,6 +574,19 @@ async fn download_header_range(
                 
                 // Process headers
                 for header in headers {
+                    // Verify proof of work before accepting header
+                    match blvm_consensus::pow::check_proof_of_work(&header) {
+                        Ok(true) => {},
+                        Ok(false) => {
+                            warn!("Header at height {} failed PoW check, skipping", current_height);
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!("Header at height {} PoW check error: {}, skipping", current_height, e);
+                            continue;
+                        }
+                    }
+                    
                     // Calculate hash
                     let mut header_data = Vec::with_capacity(80);
                     header_data.extend_from_slice(&(header.version as i32).to_le_bytes());
@@ -733,22 +754,39 @@ impl ParallelIBD {
         // - Validation runs concurrently with downloads
         
         // Bounded channel: REORDER_BUFFER_SIZE blocks max in flight
-        // Each block is ~500KB average, so 500 blocks = ~250MB
-        // Reduced from 1000 to 500 to provide tighter backpressure when gaps exist
-        const REORDER_BUFFER_SIZE: usize = 500;
+        // Each block is ~500KB average at 300k+, so 100 blocks = ~50MB in channel
+        // Reduced from 200 to 100 to limit memory pressure on 16GB systems.
+        // The UTXO set alone grows to 5-8GB by block 350k.
+        const REORDER_BUFFER_SIZE: usize = 100;
         // Maximum blocks allowed in the reorder buffer before logging warnings
-        // If buffer exceeds this, there's likely a gap blocking validation
-        const MAX_REORDER_BUFFER: usize = 10000;
+        // Reduced from 2000 to 500 to prevent runaway memory growth from gaps
+        const MAX_REORDER_BUFFER: usize = 500;
         let (block_tx, mut block_rx) = tokio::sync::mpsc::channel::<(u64, Block, Vec<Vec<Witness>>)>(REORDER_BUFFER_SIZE);
         
-        // DYNAMIC WORK DISPATCH with PRIORITY CHUNKS:
-        // The first few chunks (0-999) are CRITICAL for validation to start.
-        // We pre-assign these to the fastest peer(s) to avoid blocking validation.
-        // Remaining chunks go to the shared work queue for dynamic dispatch.
+        // Single shared work queue - ordered by height (lowest first)
+        //
+        // KEY DESIGN: LAN workers pop from the FRONT (low heights → validation needs these NOW)
+        //             WAN workers pop from the BACK (high heights → pre-fetching for later)
+        //
+        // This prevents WAN peers from grabbing early chunks that would block validation.
+        // LAN downloads the blocks validation needs immediately at 1ms latency.
+        // WAN pre-downloads future blocks at 30-100ms latency, ready when we get there.
+        let all_chunks: Vec<(u64, u64)> = chunks.iter()
+            .map(|c| (c.start_height, c.end_height))
+            .collect();
+        let work_queue: std::collections::VecDeque<(u64, u64)> = all_chunks.into_iter().collect();
+        let work_queue = Arc::new(tokio::sync::Mutex::new(work_queue));
         
-        // Sort peers by score (highest first) to identify fastest peers
-        // filtered_peers is Vec<String>, need to parse to SocketAddr
-        let mut scored_peers: Vec<(String, f64)> = filtered_peers.iter()
+        // Track validation progress so workers don't race too far ahead
+        // Reduced from 100k to 5k to limit memory usage on 16GB systems.
+        // At block 300k+, each block is ~500KB, so 5k blocks = ~2.5GB max in-flight data.
+        // Combined with the UTXO set (5-8GB) and redb mmap, this keeps total under 14GB.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        const MAX_AHEAD_BLOCKS: u64 = 5_000;
+        let validation_height = Arc::new(AtomicU64::new(start_height));
+        
+        // Identify LAN vs WAN peers by score
+        let scored_peers: Vec<(String, f64)> = filtered_peers.iter()
             .map(|p| {
                 let score = if let Ok(addr) = p.parse::<SocketAddr>() {
                     self.peer_scorer.get_score(&addr)
@@ -758,101 +796,32 @@ impl ParallelIBD {
                 (p.clone(), score)
             })
             .collect();
-        scored_peers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         
-        // Number of priority chunks to pre-assign (blocks 0-999 = 10 chunks of 100)
-        // OPTIMIZATION: Give LAN peer A LOT of priority chunks
-        // The LAN peer gets ALL of these, so validation can proceed smoothly
-        // Without this, slow peers get early chunks and block validation for hours
-        // 2000 chunks = 200,000 blocks = covers first ~21% of chain with LAN peer
-        // This prevents OOM from buffer explosion while waiting for slow internet peers
-        const PRIORITY_CHUNKS: usize = 2000;
-        
-        // Split chunks into priority (first 10) and shared queue (rest)
-        let all_chunks: Vec<(u64, u64)> = chunks.iter()
-            .map(|c| (c.start_height, c.end_height))
-            .collect();
-        
-        let (priority_chunks, queue_chunks): (Vec<_>, Vec<_>) = all_chunks.iter()
-            .cloned()
-            .enumerate()
-            .partition(|(i, _)| *i < PRIORITY_CHUNKS);
-        
-        let priority_chunks: Vec<(u64, u64)> = priority_chunks.into_iter().map(|(_, c)| c).collect();
-        let queue_chunks: Vec<(u64, u64)> = queue_chunks.into_iter().map(|(_, c)| c).collect();
-        
-        info!("IBD: Pre-assigning {} priority chunks to fastest peers, {} chunks to shared queue",
-            priority_chunks.len(), queue_chunks.len());
-        
-        // SHARED priority queue - ALL workers drain this FIRST before touching shared queue
-        // This ensures early blocks (0-50000) are downloaded before any high-height blocks
-        let priority_queue: std::collections::VecDeque<(u64, u64)> = priority_chunks.clone().into_iter().collect();
-        let priority_queue = Arc::new(tokio::sync::Mutex::new(priority_queue));
-        
-        // Shared work queue (FIFO) for non-priority chunks
-        let work_queue: std::collections::VecDeque<(u64, u64)> = queue_chunks.into_iter().collect();
-        let work_queue = Arc::new(tokio::sync::Mutex::new(work_queue));
-        
-        // Spawn one worker per peer - each worker grabs chunks from the shared queue
-        let mut download_handles = Vec::new();
-        
-        // Pre-assign priority chunks to fastest peer(s) using String peer IDs
-        // OPTIMIZATION: If we have a LAN peer, give it ALL priority chunks!
-        // LAN peers are 1000x faster than external peers, so don't split work.
-        let priority_assignments: Vec<(String, Vec<(u64, u64)>)> = {
-            let mut assignments: Vec<(String, Vec<(u64, u64)>)> = Vec::new();
-            let remaining_priority = priority_chunks.clone();
-            
-            // Check if best peer is a LAN peer (score >= 2.5 indicates LAN bonus)
-            // NOTE: LAN multiplier is now 3.0 (reduced from 10.0 for security)
-            let best_peer = &scored_peers[0];
-            let is_lan_peer = best_peer.1 >= 2.5;
-            
-            if is_lan_peer && !remaining_priority.is_empty() {
-                // LAN peer gets ALL priority chunks - it's 1000x faster!
-                info!("IBD: LAN peer {} detected (score {:.2}), assigning ALL {} priority chunks",
-                    best_peer.0, best_peer.1, remaining_priority.len());
-                assignments.push((best_peer.0.clone(), remaining_priority));
-            } else {
-                // No LAN peer - distribute among top 3 fastest peers
-                for (i, chunk) in remaining_priority.into_iter().enumerate() {
-                    let peer_idx = i % scored_peers.len().min(3);
-                    let peer = scored_peers[peer_idx].0.clone();
-                    
-                    if let Some(existing) = assignments.iter_mut().find(|(p, _)| *p == peer) {
-                        existing.1.push(chunk);
-                    } else {
-                        assignments.push((peer, vec![chunk]));
-                    }
-                }
-            }
-            assignments
-        };
-        
-        // Log priority assignments
-        for (peer, chunks) in &priority_assignments {
-            let chunk_ranges: Vec<String> = chunks.iter().map(|(s, e)| format!("{}-{}", s, e)).collect();
-            info!("IBD: Pre-assigned priority chunks [{}] to fast peer {} (score: {:.2})", 
-                chunk_ranges.join(", "), peer, 
-                scored_peers.iter().find(|(p, _)| p == peer).map(|(_, s)| *s).unwrap_or(0.0));
+        let lan_count = scored_peers.iter().filter(|(_, s)| *s >= 2.5).count();
+        let wan_count = scored_peers.len() - lan_count;
+        info!("IBD: {} LAN peers, {} WAN peers, {} total chunks in queue", 
+            lan_count, wan_count, work_queue.lock().await.len());
+        if lan_count > 0 {
+            info!("IBD: LAN peers download from FRONT (low heights), WAN peers from BACK (high heights)");
         }
         
+        let mut download_handles = Vec::new();
+        
         for peer_id in &filtered_peers {
-            // Check if this is a LAN peer (score >= 2.5 indicates LAN bonus)
-            // NOTE: LAN multiplier is now 3.0 (reduced from 10.0 for security)
             let peer_score = scored_peers.iter()
                 .find(|(p, _)| p == peer_id)
                 .map(|(_, s)| *s)
                 .unwrap_or(1.0);
             let is_lan = peer_score >= 2.5;
             
-            // LAN peers get 1 worker for priority chunks, then more workers for shared queue
-            // CRITICAL: Multiple LAN workers caused race conditions causing early exit
-            // With 1 worker, it sequentially drains all 500 priority chunks (0-50000 blocks)
-            // Then it moves to shared queue alongside internet peers
-            let worker_count = 1; // Simplified: all peers get 1 worker to avoid race conditions
+            // LAN peers get more workers since they download faster
+            // Reduced from 6/2 to 4/2 to limit memory pressure
+            let worker_count = if is_lan { 4 } else { 2 };
             
-            for worker_idx in 0..worker_count {
+            info!("IBD: {} workers for peer {} (LAN: {}, score: {:.2})", 
+                worker_count, peer_id, is_lan, peer_score);
+            
+            for _worker_idx in 0..worker_count {
             let peer_id = peer_id.clone();
             let config = self.config.clone();
             let blockstore_clone = Arc::clone(&blockstore);
@@ -860,117 +829,67 @@ impl ParallelIBD {
             let tx = block_tx.clone();
             let peer_scorer_clone = Arc::clone(&self.peer_scorer);
             let work_queue_clone = Arc::clone(&work_queue);
+            let validation_height_clone = Arc::clone(&validation_height);
+            let is_lan_worker = is_lan;
             let semaphore = self
                 .peer_semaphores
                 .get(&peer_id)
                 .ok_or_else(|| anyhow::anyhow!("Peer {} not found", peer_id))?
                 .clone();
-            
-            // Clone priority queue reference for this worker
-            // ONLY LAN workers access the priority queue - internet peers go directly to shared queue
-            // This prevents slow peers from grabbing early blocks and blocking validation
-            let priority_queue_clone = if is_lan {
-                Some(Arc::clone(&priority_queue))
-            } else {
-                None // Internet peers skip priority queue
-            };
 
-            // Spawn worker task for this peer - LAN peers drain priority queue first, then all go to shared queue
             let handle = tokio::spawn(async move {
                 let mut chunks_completed = 0u64;
                 let mut blocks_downloaded = 0u64;
                 let mut consecutive_failures = 0u32;
-                const MAX_CONSECUTIVE_FAILURES: u32 = 10; // Exit after 10 consecutive failures
+                const MAX_CONSECUTIVE_FAILURES: u32 = 10;
                 
-                // PHASE 1: Drain priority queue (LAN peers ONLY)
-                // This ensures early blocks (0-50000) are downloaded by LAN peer at 1-2ms latency
-                // Internet peers skip this phase entirely - they'd take 40-60 seconds per chunk
-                if let Some(ref pq) = priority_queue_clone {
-                    loop {
-                        // Try to get a priority chunk (only LAN workers race for these)
-                        let priority_chunk = {
-                            let mut queue = pq.lock().await;
-                            queue.pop_front()
-                        };
-                        
-                        let (start, end) = match priority_chunk {
-                            Some(chunk) => chunk,
-                            None => break, // Priority queue empty, move to shared queue
-                        };
-                        
-                        info!("Peer {} handling PRIORITY chunk {} - {} (critical for validation)", peer_id, start, end);
-                        
-                        let _permit = match semaphore.acquire().await {
-                            Ok(permit) => permit,
-                            Err(_) => {
-                                warn!("Semaphore closed for peer {}, stopping worker", peer_id);
-                                return Ok::<(), anyhow::Error>(());
-                            }
-                        };
-                        
-                        match Self::download_chunk(start, end, &peer_id, network_clone.clone(), &blockstore_clone, &config, peer_scorer_clone.clone()).await {
-                            Ok(blocks) => {
-                                consecutive_failures = 0;
-                                let block_count = blocks.len();
-                                for (height, block, witnesses) in blocks {
-                                    if tx.send((height, block, witnesses)).await.is_err() {
-                                        warn!("Block channel closed during priority download at height {}", height);
-                                        return Ok(());
-                                    }
-                                }
-                                chunks_completed += 1;
-                                blocks_downloaded += block_count as u64;
-                                info!("Peer {} completed PRIORITY chunk {} - {} ({} blocks)", peer_id, start, end, block_count);
-                            }
-                            Err(e) => {
-                                // Priority chunk failed - re-queue for another LAN worker to retry
-                                warn!("Peer {} FAILED priority chunk {} - {}: {} - re-queuing", 
-                                    peer_id, start, end, e);
-                                let mut queue = pq.lock().await;
-                                queue.push_front((start, end)); // Push to front for immediate retry
-                                consecutive_failures += 1;
-                            }
-                        }
-                    }
-                }
-                
-                // PHASE 2: Grab remaining chunks from shared queue
                 loop {
-                    // Grab next chunk from queue (FIFO - lowest heights first)
+                    let current_validation = validation_height_clone.load(Ordering::Relaxed);
+                    
                     let (start, end) = {
                         let mut queue = work_queue_clone.lock().await;
-                        match queue.pop_front() {
-                            Some(chunk) => {
-                                let remaining = queue.len();
-                                info!("Peer {} grabbed chunk {} - {} (queue remaining: {})", peer_id, chunk.0, chunk.1, remaining);
-                                chunk
-                            },
-                            None => {
-                                info!("Peer {} found empty queue, exiting worker", peer_id);
-                                break; // No more work
+                        
+                        if queue.is_empty() {
+                            break; // No more work
+                        }
+                        
+                        if is_lan_worker {
+                            // LAN: pop from FRONT - download what validation needs next
+                            // Check if front chunk is too far ahead
+                            if let Some(&(chunk_start, _)) = queue.front() {
+                                if chunk_start > current_validation + MAX_AHEAD_BLOCKS {
+                                    drop(queue);
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                    continue;
+                                }
                             }
+                            queue.pop_front().unwrap()
+                        } else {
+                            // WAN: pop from BACK - pre-fetch high blocks for later
+                            // Check if back chunk is too far ahead
+                            if let Some(&(chunk_start, _)) = queue.back() {
+                                if chunk_start > current_validation + MAX_AHEAD_BLOCKS {
+                                    drop(queue);
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                    continue;
+                                }
+                            }
+                            queue.pop_back().unwrap()
                         }
                     };
                     
-                    // Acquire semaphore permit (limits concurrent downloads per peer)
-                    // Handle semaphore closure gracefully (shouldn't happen, but prevents panic)
                     let _permit = match semaphore.acquire().await {
                         Ok(permit) => permit,
-                        Err(_) => {
-                            warn!("Semaphore closed for peer {}, stopping worker", peer_id);
-                            break; // Exit worker loop
-                        }
+                        Err(_) => break,
                     };
                     
                     match Self::download_chunk(start, end, &peer_id, network_clone.clone(), &blockstore_clone, &config, peer_scorer_clone.clone()).await {
                         Ok(blocks) => {
-                            consecutive_failures = 0; // Reset on success
+                            consecutive_failures = 0;
                             let block_count = blocks.len();
                             for (height, block, witnesses) in blocks {
-                                // This will block if channel is full (backpressure)
                                 if tx.send((height, block, witnesses)).await.is_err() {
-                                    warn!("Block channel closed, stopping download at height {}", height);
-                                    return Ok(());
+                                    return Ok::<(), anyhow::Error>(());
                                 }
                             }
                             chunks_completed += 1;
@@ -978,36 +897,35 @@ impl ParallelIBD {
                         }
                         Err(e) => {
                             consecutive_failures += 1;
-                            warn!("Peer {} failed to download chunk {} - {} (failure {}/{}): {}", 
+                            warn!("Peer {} failed chunk {}-{} ({}/{}): {}", 
                                 peer_id, start, end, consecutive_failures, MAX_CONSECUTIVE_FAILURES, e);
                             
-                            // Re-queue the failed chunk for another peer to try (at front for priority)
+                            // Re-queue failed chunk at appropriate end
                             let mut queue = work_queue_clone.lock().await;
-                            queue.push_front((start, end));
-                            drop(queue); // Release lock before sleeping
+                            if is_lan_worker {
+                                queue.push_front((start, end));
+                            } else {
+                                queue.push_back((start, end));
+                            }
+                            drop(queue);
                             
-                            // Exit this peer's worker if too many consecutive failures
-                            // This allows healthy peers to take over the work
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                                warn!("Peer {} exceeded max failures ({}), exiting worker to let others handle remaining work", 
-                                    peer_id, MAX_CONSECUTIVE_FAILURES);
+                                warn!("Peer {} exceeded max failures, stopping worker", peer_id);
                                 break;
                             }
                             
-                            // Brief sleep to let other peers grab the failed chunk
-                            // Exponential backoff: 5s, 10s, 20s...
                             let backoff_secs = 5 * (1 << (consecutive_failures - 1).min(4));
                             tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                         }
                     }
                 }
                 
-                info!("Peer {} completed: {} chunks, {} blocks", peer_id, chunks_completed, blocks_downloaded);
+                info!("Peer {} done: {} chunks, {} blocks", peer_id, chunks_completed, blocks_downloaded);
                 Ok::<(), anyhow::Error>(())
             });
 
-            download_handles.push((0, handle)); // 0 is placeholder since chunks are dynamic
-            } // End of for worker_idx loop
+            download_handles.push((0, handle));
+            }
         }
         
         // Drop the original sender so the channel closes when all workers complete
@@ -1023,29 +941,78 @@ impl ParallelIBD {
         // buffer and flushed in batches of 1000 blocks. This improves IBD
         // performance from ~2 blocks/sec to ~50+ blocks/sec.
         use std::collections::BTreeMap;
+        use std::collections::VecDeque;
         let mut reorder_buffer: BTreeMap<u64, (Block, Vec<Vec<Witness>>)> = BTreeMap::new();
         let mut next_height = start_height;
         let mut blocks_synced = 0;
         let mut total_received = 0;
         let validation_start = std::time::Instant::now();
+        let mut last_rate_log_time = validation_start;
+        let mut last_rate_log_blocks = 0u64;
+        
+        // Track last 11 block headers for BIP113 median-time-past calculation
+        // This avoids reading headers from the database on every block
+        let mut recent_headers_buf: VecDeque<blvm_consensus::types::BlockHeader> = VecDeque::with_capacity(12);
         
         // DEFERRED STORAGE: Buffer validated blocks for batch commit
-        // This avoids per-block database writes which are the main bottleneck
-        const STORAGE_FLUSH_INTERVAL: usize = 1000;
+        // Keep flush interval small to avoid OOM on systems with limited RAM (16GB)
+        // During flush, block data is serialized into additional Vecs (~2x memory peak)
+        // Plus redb mmaps the entire database file, consuming virtual memory
+        // Reduced from 500 to 250 — at block 300k+ blocks are ~500KB each,
+        // so 250 blocks = ~125MB pending, plus ~250MB peak during serialization
+        const STORAGE_FLUSH_INTERVAL: usize = 250;
         let mut pending_blocks: Vec<(Block, Vec<Vec<Witness>>, u64)> = Vec::with_capacity(STORAGE_FLUSH_INTERVAL);
+        let skip_storage = false;
         
         // DYNAMIC MEMORY MANAGEMENT: Calculate buffer limits based on available system memory
         // This adapts to the system's capabilities instead of using fixed limits
         let dynamic_buffer_limit = calculate_dynamic_buffer_limit(start_height);
-        let dynamic_prefetch_limit = calculate_dynamic_prefetch_limit();
         
-        // UTXO PREFETCH CACHE: Prefetch UTXOs for upcoming blocks to hide lookup latency
-        let mut prefetch_cache = PrefetchCache::with_limit(dynamic_prefetch_limit);
-        let mut _prefetch_hits = 0u64;   // TODO: Track when integrating with validation
-        let mut _prefetch_misses = 0u64; // TODO: Track when integrating with validation
+        // DISK-BACKED UTXO SET: Keeps memory bounded by spilling cold UTXOs to disk.
+        // Only a bounded cache lives in RAM; the rest is on redb.
+        // Before each block, needed UTXOs are prefetched from disk.
+        // After each block, changes are synced to disk and cold entries evicted.
+        //
+        // Max cache entries: 5M entries ≈ 2.5GB (leaves ~7GB for OS, redb mmap, app on 16GB)
+        // With batch eviction (10% trigger / 20% headroom), eviction runs every ~500 blocks
+        // instead of every block, dramatically reducing overhead.
+        // Flush threshold: 100k pending writes ≈ every 50 blocks of UTXO changes
+        const MAX_UTXO_CACHE_ENTRIES: usize = 12_000_000;
+        const UTXO_FLUSH_THRESHOLD: usize = 50_000;  // Reduced from 100k for smaller, more frequent batches
         
-        info!("Validation loop starting (deferred storage enabled, flush every {} blocks, prefetch lookahead: {}, buffer limit: {}, prefetch limit: {})...", 
-            STORAGE_FLUSH_INTERVAL, PREFETCH_LOOKAHEAD, dynamic_buffer_limit, dynamic_prefetch_limit);
+        let mut disk_utxo: Option<DiskBackedUtxoSet> = if let Some(storage_ref) = storage {
+            match storage_ref.open_tree("ibd_utxos") {
+                Ok(tree) => {
+                    let mut du = DiskBackedUtxoSet::new(tree, MAX_UTXO_CACHE_ENTRIES, UTXO_FLUSH_THRESHOLD);
+                    if start_height <= 1 {
+                        // Fresh IBD from genesis — stale data from a previous run is invalid.
+                        // Start in pure memory mode (no disk ops until cache reaches 80%).
+                        info!("Fresh IBD: starting in pure memory mode (disk sync deferred until cache reaches 80%)");
+                    } else {
+                        if let Err(e) = du.initialize_count() {
+                            warn!("Failed to initialize disk UTXO count: {}", e);
+                        }
+                    }
+                    info!("DiskBackedUtxoSet initialized: max_cache={}, flush_threshold={}", 
+                        MAX_UTXO_CACHE_ENTRIES, UTXO_FLUSH_THRESHOLD);
+                    Some(du)
+                }
+                Err(e) => {
+                    warn!("Failed to create disk UTXO tree: {}. Falling back to in-memory only.", e);
+                    None
+                }
+            }
+        } else {
+            warn!("No storage available for disk-backed UTXO set. Using in-memory only (may OOM).");
+            None
+        };
+        
+        info!("Validation loop starting (deferred storage enabled, flush every {} blocks, buffer limit: {}, disk_utxo: {})...", 
+            STORAGE_FLUSH_INTERVAL, dynamic_buffer_limit, disk_utxo.is_some());
+        
+        // Memory monitoring: log RSS and available memory every N blocks
+        let mut last_memory_log_height: u64 = 0;
+        const MEMORY_LOG_INTERVAL: u64 = 5_000; // Log every 5k blocks
         
         loop {
             // CRITICAL: Always try to validate consecutive blocks first
@@ -1058,79 +1025,110 @@ impl ParallelIBD {
                         next_height, reorder_buffer.len(), pending_blocks.len());
                 }
                 
-                // OPTIMIZATION: Direct call without panic catching in production
-                // Panic catching has measurable overhead per block. The assertion 
-                // failures it was designed to catch have been fixed.
-                // NOTE: We validate but DEFER storage until batch flush
-                #[cfg(debug_assertions)]
-                let validation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.validate_block_only(
-                        &blockstore,
-                        protocol,
-                        utxo_set,
-                        &block,
-                        &witnesses,
-                        next_height,
-                    )
-                }));
+                // Build recent headers slice for BIP113 median-time-past
+                // Optimization: Use make_contiguous() to get a slice without cloning
+                let recent_headers_opt: Option<&[blvm_consensus::types::BlockHeader]> = if recent_headers_buf.is_empty() {
+                    None
+                } else {
+                    // VecDeque::make_contiguous() makes the buffer contiguous, allowing slice access
+                    // This avoids cloning all headers every block (11 headers × 80 bytes = 880 bytes saved)
+                    recent_headers_buf.make_contiguous();
+                    let (slice, _) = recent_headers_buf.as_slices();
+                    // After make_contiguous(), second slice is always empty
+                    Some(slice)
+                };
                 
-                #[cfg(not(debug_assertions))]
-                let validation_result: Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>> = Ok(self.validate_block_only(
+                // DISK-BACKED UTXO: Only prefetch when in disk-backed mode
+                // In memory mode (cache < 80%), skip ALL disk I/O for maximum speed
+                if let Some(ref mut du) = disk_utxo {
+                    if du.needs_disk_ops() {
+                        if let Err(e) = du.prefetch_block(&block) {
+                            error!("Failed to prefetch UTXOs for block {}: {}", next_height, e);
+                            return Err(e);
+                        }
+                    }
+                }
+                
+                // Get the UTXO cache to pass to validation.
+                let utxo_ref: &mut UtxoSet = if let Some(ref mut du) = disk_utxo {
+                    du.cache_mut()
+                } else {
+                    utxo_set
+                };
+                
+                // Validate block directly (no catch_unwind — panic=abort makes it dead code)
+                // Returns pre-computed tx_ids, eliminating redundant double-SHA256.
+                let validation_start = std::time::Instant::now();
+                let validation_result = self.validate_block_only(
                     &blockstore,
                     protocol,
-                    utxo_set,
+                    utxo_ref,
                     &block,
                     &witnesses,
                     next_height,
-                ));
+                    recent_headers_opt,
+                );
+                let validation_time = validation_start.elapsed();
+                if next_height < 1000 {
+                    info!("Block {} validation took {:?} ({} txs, {} inputs total)", 
+                        next_height, validation_time, block.transactions.len(),
+                        block.transactions.iter().map(|tx| tx.inputs.len()).sum::<usize>());
+                }
                 
                 match validation_result {
-                    Ok(Ok(())) => {
-                        // Validation succeeded - add to pending storage buffer
-                        pending_blocks.push((block, witnesses, next_height));
+                    Ok(tx_ids) => {
+                        // DISK-BACKED UTXO: Check cache pressure and sync if needed
+                        if let Some(ref mut du) = disk_utxo {
+                            // Check if we need to transition to disk-backed mode
+                            if let Err(e) = du.check_pressure() {
+                                error!("Failed to check UTXO pressure at height {}: {}", next_height, e);
+                                return Err(e);
+                            }
+                            
+                            // Only sync/evict in disk-backed mode
+                            if du.needs_disk_ops() {
+                                // tx_ids already computed by connect_block_ibd — zero redundant hashing!
+                                if let Err(e) = du.sync_block_with_txids(&block, next_height, &tx_ids) {
+                                    error!("Failed to sync UTXO changes to disk at height {}: {}", next_height, e);
+                                    return Err(e);
+                                }
+                                du.evict_if_needed();
+                            }
+                        }
+                        
                         blocks_synced += 1;
                         
-                        // Mark block as processed in prefetch cache (frees memory)
-                        prefetch_cache.mark_processed(next_height);
+                        // Track recent headers for BIP113 MTP (keep last 11)
+                        // Optimization: Extract header before moving block to avoid unnecessary clone
+                        let header_to_track = block.header.clone();
+                        if !skip_storage {
+                            pending_blocks.push((block, witnesses, next_height - 1));
+                        }
+                        recent_headers_buf.push_back(header_to_track);
+                        if recent_headers_buf.len() > 11 {
+                            recent_headers_buf.pop_front();
+                        }
                         
                         next_height += 1;
                         
-                        // Batch flush pending blocks to database
-                        if pending_blocks.len() >= STORAGE_FLUSH_INTERVAL {
-                            let flush_start = std::time::Instant::now();
-                            self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks)?;
-                            let flush_time = flush_start.elapsed();
-                            debug!("Flushed {} blocks in {:?}", STORAGE_FLUSH_INTERVAL, flush_time);
+                        // Update shared validation height (allows download workers to track progress)
+                        validation_height.store(next_height, Ordering::Relaxed);
+                        
+                        if !skip_storage {
+                            if pending_blocks.len() >= STORAGE_FLUSH_INTERVAL {
+                                let flush_start = std::time::Instant::now();
+                                self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks)?;
+                                let flush_time = flush_start.elapsed();
+                                debug!("Flushed {} blocks in {:?}", STORAGE_FLUSH_INTERVAL, flush_time);
+                            }
                         }
                     }
-                    Ok(Err(e)) => {
-                        // Flush pending blocks before returning error
-                        if !pending_blocks.is_empty() {
+                    Err(e) => {
+                        if !skip_storage && !pending_blocks.is_empty() {
                             let _ = self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks);
                         }
                         error!("Failed to validate block at height {}: {}", next_height, e);
                         return Err(e);
-                    }
-                    Err(panic) => {
-                        // Flush pending blocks before returning error
-                        if !pending_blocks.is_empty() {
-                            let _ = self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks);
-                        }
-                        let panic_msg = if let Some(s) = panic.downcast_ref::<String>() {
-                            s.clone()
-                        } else if let Some(s) = panic.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else {
-                            "Unknown panic".to_string()
-                        };
-                        error!(
-                            "PANIC during block validation at height {}: {}",
-                            next_height, panic_msg
-                        );
-                        return Err(anyhow::anyhow!(
-                            "Panic during block validation at height {}: {}",
-                            next_height, panic_msg
-                        ));
                     }
                 }
                 
@@ -1142,19 +1140,70 @@ impl ParallelIBD {
 
                 // Progress logging every 1000 blocks
                 if blocks_synced % 1000 == 0 {
-                    let elapsed = validation_start.elapsed().as_secs_f64();
-                    let rate = blocks_synced as f64 / elapsed;
+                    // Calculate incremental rate (blocks in last 1000 blocks / time since last log)
+                    let time_since_last_log = last_rate_log_time.elapsed().as_secs_f64();
+                    let blocks_since_last_log = blocks_synced - last_rate_log_blocks;
+                    let incremental_rate = if time_since_last_log > 0.0 {
+                        blocks_since_last_log as f64 / time_since_last_log
+                    } else {
+                        0.0
+                    };
+                    
+                    // Also calculate average rate for ETA
+                    let total_elapsed = validation_start.elapsed().as_secs_f64();
+                    let average_rate = blocks_synced as f64 / total_elapsed;
                     let remaining = effective_end_height.saturating_sub(next_height);
-                    let eta = if rate > 0.0 { remaining as f64 / rate } else { f64::INFINITY };
+                    let eta = if average_rate > 0.0 { remaining as f64 / average_rate } else { f64::INFINITY };
                     let buffer_size = reorder_buffer.len();
-                    let (prefetch_cached, _prefetch_heights) = prefetch_cache.stats();
+                    
+                    // Update for next calculation
+                    last_rate_log_time = std::time::Instant::now();
+                    last_rate_log_blocks = blocks_synced;
                     
                     info!(
-                        "IBD: {} / {} ({:.1}%) - {:.1} blocks/s - buffer: {} - prefetch: {} - ETA: {:.0}s",
+                        "IBD: {} / {} ({:.1}%) - {:.1} blocks/s (avg: {:.1}) - buffer: {} - ETA: {:.0}s",
                         next_height, effective_end_height,
                         (next_height as f64 / effective_end_height as f64) * 100.0,
-                        rate, buffer_size, prefetch_cached, eta
+                        incremental_rate, average_rate, buffer_size, eta
                     );
+                }
+                
+                // Memory monitoring: log RSS and system memory every MEMORY_LOG_INTERVAL blocks
+                if next_height >= last_memory_log_height + MEMORY_LOG_INTERVAL {
+                    last_memory_log_height = next_height;
+                    // Read RSS from /proc/self/statm (Linux)
+                    let rss_mb = std::fs::read_to_string("/proc/self/statm")
+                        .ok()
+                        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+                        .map(|pages| pages * 4 / 1024) // pages to MB (4KB pages)
+                        .unwrap_or(0);
+                    // Read available memory from /proc/meminfo
+                    let available_mb = std::fs::read_to_string("/proc/meminfo")
+                        .ok()
+                        .and_then(|s| {
+                            s.lines()
+                                .find(|l| l.starts_with("MemAvailable:"))
+                                .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+                                .map(|kb| kb / 1024)
+                        })
+                        .unwrap_or(0);
+                    let (cache_entries, total_utxos) = if let Some(ref du) = disk_utxo {
+                        (du.cache_len(), du.total_len())
+                    } else {
+                        (utxo_set.len(), utxo_set.len())
+                    };
+                    info!(
+                        "MEMORY at height {}: RSS={}MB, available={}MB, UTXO cache={}, total_utxos={}, reorder_buf={}, pending={}",
+                        next_height, rss_mb, available_mb, cache_entries, total_utxos, reorder_buffer.len(), pending_blocks.len()
+                    );
+                    // Log disk-backed UTXO stats
+                    if let Some(ref du) = disk_utxo {
+                        du.log_stats(next_height);
+                    }
+                    // Warn if getting tight
+                    if available_mb > 0 && available_mb < 2048 {
+                        warn!("LOW MEMORY: only {}MB available! UTXO cache has {} entries", available_mb, cache_entries);
+                    }
                 }
             }
             
@@ -1198,18 +1247,7 @@ impl ParallelIBD {
                     
                     // Add to reorder buffer
                     reorder_buffer.insert(height, (block, witnesses));
-                    
-                    // UTXO PREFETCHING: Prefetch UTXOs for upcoming blocks
-                    // This hides UTXO lookup latency by doing lookups ahead of time
-                    // Only prefetch if we're close to the validation frontier
-                    if height < next_height + PREFETCH_LOOKAHEAD as u64 * 2 {
-                        for offset in 0..PREFETCH_LOOKAHEAD {
-                            let prefetch_height = next_height + offset as u64;
-                            if let Some((prefetch_block, _)) = reorder_buffer.get(&prefetch_height) {
-                                prefetch_cache.prefetch_block(prefetch_height, prefetch_block, utxo_set);
-                            }
-                        }
-                    }
+                    // Prefetch cache disabled - was consuming memory but never used for lookups
                 }
                 Ok(None) => {
                     // Channel closed - check if we have more consecutive blocks to validate
@@ -1228,9 +1266,19 @@ impl ParallelIBD {
         }
         
         // Flush any remaining pending blocks
-        if !pending_blocks.is_empty() {
+        if !skip_storage && !pending_blocks.is_empty() {
             info!("Flushing final {} pending blocks", pending_blocks.len());
             self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks)?;
+        }
+        
+        // Flush disk-backed UTXO set
+        if let Some(ref mut du) = disk_utxo {
+            info!("Flushing disk-backed UTXO set...");
+            match du.flush() {
+                Ok(count) => info!("Flushed {} pending UTXO operations to disk", count),
+                Err(e) => warn!("Failed to flush UTXO operations: {}", e),
+            }
+            du.log_stats(next_height);
         }
         
         // Check for any remaining blocks in reorder buffer (indicates gaps)
@@ -1377,6 +1425,19 @@ impl ParallelIBD {
             
             // Store headers
             for header in headers {
+                // Verify proof of work before accepting header
+                match blvm_consensus::pow::check_proof_of_work(&header) {
+                    Ok(true) => {},
+                    Ok(false) => {
+                        warn!("Header at height {} failed PoW check, skipping", current_height);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("Header at height {} PoW check error: {}, skipping", current_height, e);
+                        continue;
+                    }
+                }
+                
                 // Calculate hash
                 let mut header_data = Vec::with_capacity(80);
                 header_data.extend_from_slice(&(header.version as i32).to_le_bytes());
@@ -1589,6 +1650,19 @@ impl ParallelIBD {
                     let mut batch_entries: Vec<(Hash, BlockHeader, u64)> = Vec::with_capacity(headers.len());
                     
                     for header in &headers {
+                        // Verify proof of work before accepting header
+                        match blvm_consensus::pow::check_proof_of_work(header) {
+                            Ok(true) => {},
+                            Ok(false) => {
+                                warn!("Header at height {} failed PoW check, skipping", current_height);
+                                continue;
+                            }
+                            Err(e) => {
+                                warn!("Header at height {} PoW check error: {}, skipping", current_height, e);
+                                continue;
+                            }
+                        }
+                        
                         // Calculate hash (80-byte header format)
                         let mut header_data = Vec::with_capacity(80);
                         header_data.extend_from_slice(&(header.version as i32).to_le_bytes());
@@ -1611,16 +1685,17 @@ impl ParallelIBD {
                     
                     // Store all headers in one batch operation
                     // Use spawn_blocking to avoid blocking the async executor
-                    debug!("Storing {} headers in batch...", batch_entries.len());
+                    let batch_count = batch_entries.len();
+                    debug!("Storing {} headers in batch...", batch_count);
                     let store_start = std::time::Instant::now();
                     let blockstore_clone = blockstore.clone();
-                    let entries_clone = batch_entries.clone();
+                    // Optimization: Move batch_entries instead of cloning (we don't need it after this)
                     tokio::task::spawn_blocking(move || {
-                        blockstore_clone.store_headers_batch(&entries_clone)
+                        blockstore_clone.store_headers_batch(&batch_entries)
                     }).await
                         .context("Failed to spawn blocking task")?
                         .context("Failed to store headers batch")?;
-                    debug!("Stored {} headers in {:?}", batch_entries.len(), store_start.elapsed());
+                    debug!("Stored {} headers in {:?}", batch_count, store_start.elapsed());
                     
                     // Progress logging every 20k headers
                     if current_height > last_progress_log && current_height - last_progress_log >= 20000 {
@@ -1726,7 +1801,7 @@ impl ParallelIBD {
         // Calculate how many chunks each peer should get (proportional to score)
         // Fast peer (score 5.0) gets 5x more chunks than slow peer (score 1.0)
         let total_chunks = ((end_height - start_height) / self.config.chunk_size + 1) as usize;
-        let mut peer_chunk_counts: Vec<usize> = peer_scores.iter()
+        let peer_chunk_counts: Vec<usize> = peer_scores.iter()
             .map(|score| ((score / total_score) * total_chunks as f64).ceil() as usize)
             .collect();
         
@@ -1968,7 +2043,7 @@ impl ParallelIBD {
         height: u64,
     ) -> Result<()> {
         // Prepare validation context
-        let (stored_witnesses, recent_headers) =
+        let (stored_witnesses, _recent_headers) =
             prepare_block_validation_context(blockstore, block, height)?;
 
         // Use witnesses from download or stored witnesses
@@ -2019,34 +2094,28 @@ impl ParallelIBD {
 
     /// Validate a block WITHOUT storing it (for deferred storage mode)
     ///
-    /// OPTIMIZED FOR IBD: Avoids database reads by:
-    /// 1. Using witnesses directly from download (no DB lookup)
-    /// 2. Using cached recent headers (passed in, not read from DB)
-    /// 3. Calling connect_block directly (no intermediate validation context)
+    /// Calls connect_block_ibd directly — bypasses protocol layer for maximum speed.
+    /// Returns pre-computed tx_ids so the caller avoids redundant double-SHA256.
     #[inline]
     fn validate_block_only(
         &self,
         _blockstore: &BlockStore,
-        protocol: &BitcoinProtocolEngine,
+        _protocol: &BitcoinProtocolEngine,
         utxo_set: &mut UtxoSet,
         block: &Block,
         witnesses: &[Vec<Witness>],
         height: u64,
-    ) -> Result<()> {
-        // CRITICAL: Use witnesses from download directly - NO DATABASE READ
-        // We already have witnesses from the download, don't waste time reading from DB
-        
-        // OPTIMIZATION: Avoid unnecessary allocations in the hot path
-        // For early blocks (especially genesis), witnesses may be empty because they're coinbase-only.
-        // We use Cow to avoid cloning when witnesses already exist.
+        recent_headers: Option<&[blvm_consensus::types::BlockHeader]>,
+    ) -> Result<Vec<Hash>> {
         use std::borrow::Cow;
         
+        // Optimization: Pre-allocate empty witnesses Vec to avoid nested iterator allocations
         let witnesses_cow: Cow<'_, [Vec<blvm_consensus::segwit::Witness>]> = if witnesses.is_empty() {
-            // Create empty witnesses for each transaction (one empty vec per tx)
-            // Only allocate when witnesses are truly empty (early/coinbase blocks)
-            Cow::Owned(block.transactions.iter()
-                .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
-                .collect())
+            let mut empty_witnesses = Vec::with_capacity(block.transactions.len());
+            for tx in &block.transactions {
+                empty_witnesses.push(vec![Vec::new(); tx.inputs.len()]);
+            }
+            Cow::Owned(empty_witnesses)
         } else if witnesses.len() != block.transactions.len() {
             return Err(anyhow::anyhow!(
                 "Witness count mismatch at height {}: {} witnesses for {} transactions",
@@ -2055,48 +2124,29 @@ impl ParallelIBD {
                 block.transactions.len()
             ));
         } else {
-            // OPTIMIZATION: Use borrowed reference - NO CLONE!
             Cow::Borrowed(witnesses)
         };
         let witnesses = witnesses_cow.as_ref();
 
-        // FAST PATH: Call connect_block directly without intermediate validation context
-        // This avoids:
-        // 1. prepare_block_validation_context (2 DB reads)
-        // 2. validate_block_with_context's duplicate get_recent_headers (1 more DB read)
-        //
-        // For IBD, we don't need median-time-past for early blocks (BIP113 activates at block 419328)
-        // And we're already building headers sequentially, so we track them in memory
-        
         let network_time = crate::utils::time::current_timestamp();
         
-        // For blocks before BIP113 activation (419328), median time-past isn't needed
-        // This saves us from reading 11 headers from the database for EVERY block
-        let recent_headers: Option<&[blvm_consensus::types::BlockHeader]> = None;
-        
-        // Create minimal validation context - just height and network time
-        let mut context = blvm_protocol::validation::ProtocolValidationContext::new(
-            protocol.get_protocol_version(), 
-            height
-        )?;
-        context.context_data.insert("median_time_past".to_string(), "0".to_string());
-        context.context_data.insert("network_time".to_string(), network_time.to_string());
-        
-        let (result, new_utxo_set) = protocol.validate_and_connect_block(
+        let owned_utxo = std::mem::take(utxo_set);
+        let (result, new_utxo_set, tx_ids) = blvm_consensus::block::connect_block_ibd(
             block,
             witnesses,
-            utxo_set,
+            owned_utxo,
             height,
             recent_headers,
-            &context,
+            network_time,
+            blvm_consensus::types::Network::Mainnet,
         )?;
 
-        // Update UTXO set if valid
-        if matches!(result, ValidationResult::Valid) {
-            *utxo_set = new_utxo_set;
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Block validation failed at height {}", height))
+        *utxo_set = new_utxo_set;
+        match result {
+            ValidationResult::Valid => Ok(tx_ids),
+            ValidationResult::Invalid(reason) => {
+                Err(anyhow::anyhow!("Block validation failed at height {}: {}", height, reason))
+            }
         }
     }
 
@@ -2107,7 +2157,7 @@ impl ParallelIBD {
     fn flush_pending_blocks(
         &self,
         blockstore: &BlockStore,
-        storage: Option<&Arc<Storage>>,
+        _storage: Option<&Arc<Storage>>,
         pending: &mut Vec<(Block, Vec<Vec<Witness>>, u64)>,
     ) -> Result<()> {
         if pending.is_empty() {
@@ -2117,18 +2167,86 @@ impl ParallelIBD {
         let count = pending.len();
         let start = std::time::Instant::now();
 
+        // Pre-compute all block hashes ONCE (avoids 4x redundant double SHA256 per block)
+        // Parallelize hash computation and serialization for better CPU utilization
+        let (block_hashes, block_data, header_data): (Vec<Hash>, Vec<Vec<u8>>, Vec<Vec<u8>>) = {
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                let block_hashes: Vec<Hash> = pending.par_iter()
+                    .map(|(block, _, _)| blockstore.get_block_hash(block))
+                    .collect();
+
+                // Parallel serialize all block data
+                let block_data: Vec<Vec<u8>> = pending.par_iter()
+                    .map(|(block, _, _)| bincode::serialize(block).unwrap())
+                    .collect();
+
+                // Parallel serialize all header data (with caching)
+                use crate::storage::serialization_cache::{get_cached_serialized_header, cache_serialized_header};
+                let header_data: Vec<Vec<u8>> = pending.par_iter()
+                    .zip(block_hashes.par_iter())
+                    .map(|((block, _, _), block_hash)| {
+                        // Check cache first
+                        if let Some(cached) = get_cached_serialized_header(block_hash) {
+                            return (*cached).clone();  // Clone Arc contents (cheap)
+                        }
+                        
+                        // Cache miss - serialize
+                        let serialized = bincode::serialize(&block.header).unwrap();
+                        
+                        // Cache it
+                        cache_serialized_header(*block_hash, serialized.clone());
+                        
+                        serialized
+                    })
+                    .collect();
+                
+                (block_hashes, block_data, header_data)
+            }
+            
+            #[cfg(not(feature = "rayon"))]
+            {
+                let block_hashes: Vec<Hash> = pending.iter()
+                    .map(|(block, _, _)| blockstore.get_block_hash(block))
+                    .collect();
+
+                // Pre-serialize all block data
+                let block_data: Vec<Vec<u8>> = pending.iter()
+                    .map(|(block, _, _)| bincode::serialize(block).unwrap())
+                    .collect();
+
+                // Pre-serialize all header data (with caching)
+                use crate::storage::serialization_cache::{get_cached_serialized_header, cache_serialized_header};
+                let header_data: Vec<Vec<u8>> = pending.iter()
+                    .zip(block_hashes.iter())
+                    .map(|((block, _, _), block_hash)| {
+                        // Check cache first
+                        if let Some(cached) = get_cached_serialized_header(block_hash) {
+                            return (*cached).clone();  // Clone Arc contents (cheap)
+                        }
+                        
+                        // Cache miss - serialize
+                        let serialized = bincode::serialize(&block.header).unwrap();
+                        
+                        // Cache it
+                        cache_serialized_header(*block_hash, serialized.clone());
+                        
+                        serialized
+                    })
+                    .collect();
+                
+                (block_hashes, block_data, header_data)
+            }
+        };
+
         // Batch write blocks
         {
             let blocks_tree = blockstore.blocks_tree()?;
             let mut batch = blocks_tree.batch();
-            
-            for (block, _, _) in pending.iter() {
-                let block_hash = blockstore.get_block_hash(block);
-                let block_data = bincode::serialize(block)
-                    .map_err(|e| anyhow::anyhow!("Failed to serialize block: {}", e))?;
-                batch.put(&block_hash, &block_data);
+            for (i, data) in block_data.iter().enumerate() {
+                batch.put(&block_hashes[i], data);
             }
-            
             batch.commit()?;
         }
 
@@ -2136,63 +2254,77 @@ impl ParallelIBD {
         {
             let headers_tree = blockstore.headers_tree()?;
             let mut batch = headers_tree.batch();
-            
-            for (block, _, _) in pending.iter() {
-                let block_hash = blockstore.get_block_hash(block);
-                let header_data = bincode::serialize(&block.header)
-                    .map_err(|e| anyhow::anyhow!("Failed to serialize header: {}", e))?;
-                batch.put(&block_hash, &header_data);
+            for (i, data) in header_data.iter().enumerate() {
+                batch.put(&block_hashes[i], data);
             }
-            
             batch.commit()?;
         }
 
-        // Batch write witnesses
+        // Batch write witnesses (skip if all empty - common in early chain)
+        // Parallelize witness serialization for better CPU utilization
         {
-            let witnesses_tree = blockstore.witnesses_tree()?;
-            let mut batch = witnesses_tree.batch();
-            
-            for (block, witnesses, _) in pending.iter() {
-                if !witnesses.is_empty() {
-                    let block_hash = blockstore.get_block_hash(block);
-                    let witness_data = bincode::serialize(witnesses)
-                        .map_err(|e| anyhow::anyhow!("Failed to serialize witnesses: {}", e))?;
-                    batch.put(&block_hash, &witness_data);
+            let has_witnesses = pending.iter().any(|(_, w, _)| !w.is_empty());
+            if has_witnesses {
+                let witnesses_tree = blockstore.witnesses_tree()?;
+                let mut batch = witnesses_tree.batch();
+                
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    // Parallel serialize witnesses
+                    let witness_data_vec: Vec<(usize, Vec<u8>)> = pending.par_iter()
+                        .enumerate()
+                        .filter_map(|(i, (_, witnesses, _))| {
+                            if !witnesses.is_empty() {
+                                match bincode::serialize(witnesses) {
+                                    Ok(data) => Some((i, data)),
+                                    Err(_) => None,
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    
+                    for (i, data) in witness_data_vec {
+                        batch.put(&block_hashes[i], &data);
+                    }
                 }
+                
+                #[cfg(not(feature = "rayon"))]
+                {
+                    for (i, (_, witnesses, _)) in pending.iter().enumerate() {
+                        if !witnesses.is_empty() {
+                            let witness_data = bincode::serialize(witnesses)
+                                .map_err(|e| anyhow::anyhow!("Failed to serialize witnesses: {}", e))?;
+                            batch.put(&block_hashes[i], &witness_data);
+                        }
+                    }
+                }
+                
+                batch.commit()?;
             }
-            
-            batch.commit()?;
         }
 
         // Batch write height index
         {
             let height_tree = blockstore.height_tree()?;
             let mut batch = height_tree.batch();
-            
-            for (block, _, height) in pending.iter() {
-                let block_hash = blockstore.get_block_hash(block);
+            for (i, (_, _, height)) in pending.iter().enumerate() {
                 let height_key = height.to_be_bytes();
-                batch.put(&height_key, &block_hash);
+                batch.put(&height_key, &block_hashes[i]);
             }
-            
             batch.commit()?;
         }
 
         // Store recent headers (needed for MTP calculation)
-        // Only store the last 11 headers
+        // Only store the last 11 headers (minimal overhead, sequential is fine)
         for (block, _, height) in pending.iter().rev().take(11) {
             blockstore.store_recent_header(*height, &block.header)?;
         }
 
-        // Index transactions if storage is available
-        if let Some(storage) = storage {
-            for (block, _, height) in pending.iter() {
-                let block_hash = blockstore.get_block_hash(block);
-                if let Err(e) = storage.index_block(block, &block_hash, *height) {
-                    warn!("Failed to index block transactions at height {}: {}", height, e);
-                }
-            }
-        }
+        // Skip transaction indexing during IBD - it's not needed until sync is complete
+        // and causes massive slowdowns due to individual writes per transaction
 
         pending.clear();
 
@@ -2217,7 +2349,7 @@ mod tests {
     fn test_parallel_ibd_config_default() {
         let config = ParallelIBDConfig::default();
         assert!(config.num_workers > 0);
-        assert_eq!(config.chunk_size, 500);
+        assert_eq!(config.chunk_size, 100);
         assert_eq!(config.max_concurrent_per_peer, 64);
     }
 

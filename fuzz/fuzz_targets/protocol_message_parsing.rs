@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use reference_node::network::protocol::ProtocolParser;
+use blvm_node::network::protocol::ProtocolParser;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz protocol message parsing with malformed/corrupted data
@@ -76,8 +76,8 @@ fuzz_target!(|data: &[u8]| {
     // 6. Test UTXO commitment message parsing (if feature enabled)
     #[cfg(feature = "utxo-commitments")]
     {
-        use reference_node::network::protocol_extensions::deserialize_filtered_block;
-        use reference_node::network::protocol_extensions::deserialize_utxo_set;
+        use blvm_node::network::protocol_extensions::deserialize_filtered_block;
+        use blvm_node::network::protocol_extensions::deserialize_utxo_set;
         let _utxo_result = deserialize_utxo_set(data);
         let _filtered_result = deserialize_filtered_block(data);
     }

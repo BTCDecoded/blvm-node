@@ -1,4 +1,4 @@
-//! Node orchestration for reference-node
+//! Node orchestration for blvm-node
 //!
 //! This module provides sync coordination, mempool management,
 //! mining coordination, and overall node state management.
@@ -103,7 +103,7 @@ impl Node {
         pruning_config: Option<crate::config::PruningConfig>,
         indexing_config: Option<crate::config::IndexingConfig>,
     ) -> Result<Self> {
-        info!("Initializing reference-node");
+        info!("Initializing node");
 
         // Initialize components
         let protocol_version = protocol_version.unwrap_or(ProtocolVersion::Regtest);
@@ -111,14 +111,18 @@ impl Node {
         let protocol_arc = Arc::new(protocol);
 
         // Create storage with configuration
+        info!("[NODE_INIT] Creating storage...");
         use crate::storage::database::default_backend;
         let backend = default_backend();
+        info!("[NODE_INIT] Using backend: {:?}", backend);
+        info!("[NODE_INIT] Calling Storage::with_backend_pruning_and_indexing()...");
         let storage = Storage::with_backend_pruning_and_indexing(
             data_dir,
             backend,
             pruning_config,
             indexing_config,
         )?;
+        info!("[NODE_INIT] Storage created successfully");
         let storage_arc = Arc::new(storage);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
 
@@ -298,20 +302,24 @@ impl Node {
 
     /// Start the node
     pub async fn start(&mut self) -> Result<()> {
-        info!("Starting reference-node");
+        info!("[NODE] Starting node");
 
         // Start all components
+        info!("[NODE] Calling start_components()...");
         self.start_components().await?;
+        info!("[NODE] start_components() completed");
 
         // Main node loop
+        info!("[NODE] Starting main run loop...");
         self.run().await?;
+        info!("[NODE] Main run loop exited");
 
         Ok(())
     }
 
     /// Start all node components
     async fn start_components(&mut self) -> Result<()> {
-        info!("Starting node components");
+        info!("[START_COMPONENTS] Starting node components");
 
         // Validate security configuration and emit warnings
         if let Some(ref config) = self.config {
@@ -331,24 +339,37 @@ impl Node {
         // In a real implementation, each component would be started in separate tasks
         // For now, we'll just initialize them
 
-        info!("RPC server initialized");
+        // Start RPC server
+        info!("[START_COMPONENTS] Starting RPC server...");
+        if let Err(e) = self.rpc.start().await {
+            warn!("[START_COMPONENTS] Failed to start RPC server: {}", e);
+            // Continue anyway - RPC might be optional
+        } else {
+            info!("[START_COMPONENTS] RPC server started on {}", self.rpc.rpc_addr());
+        }
+
         info!("Network manager initialized");
         info!("Sync coordinator initialized");
         info!("Mempool manager initialized");
         info!("Mining coordinator initialized");
 
         // Start network manager
+        info!("[START_COMPONENTS] About to call network.start() on {:?}", self.network_addr);
         if let Err(e) = self.network.start(self.network_addr).await {
-            warn!("Failed to start network manager: {}", e);
+            warn!("[START_COMPONENTS] Failed to start network manager: {}", e);
             // Continue anyway - network might be optional
+        } else {
+            info!("[START_COMPONENTS] network.start() completed successfully");
         }
 
         // Initialize peer connections automatically
+        info!("[START_COMPONENTS] Initializing peer connections...");
         self.initialize_peer_connections().await?;
+        info!("[START_COMPONENTS] Peer connections initialized");
 
         // Wait for peer handshakes to complete (Version/VerAck exchange)
         // Process network messages during this time to handle Version/VerAck exchange
-        info!("Waiting for peer handshakes to complete...");
+        info!("[START_COMPONENTS] Waiting for peer handshakes to complete...");
         let handshake_timeout = tokio::time::Duration::from_secs(10);
         let handshake_start = std::time::Instant::now();
         let mut total_processed = 0usize;
@@ -367,7 +388,7 @@ impl Node {
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
-        info!("Handshake period complete, processed {} total messages", total_processed);
+        info!("[START_COMPONENTS] Handshake period complete, processed {} total messages", total_processed);
 
         // Spawn background message processing task BEFORE starting IBD
         // This ensures Headers responses and other messages are processed during IBD
@@ -381,39 +402,61 @@ impl Node {
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         });
-        info!("Background message processor spawned");
+        info!("[START_COMPONENTS] Background message processor spawned");
 
         // Check if we need to do IBD and attempt parallel IBD if available
-        let current_height = self.storage.chain().get_height()?.unwrap_or(0);
+        info!("[START_COMPONENTS] Checking if IBD is needed...");
+        let current_height = match self.storage.chain().get_height() {
+            Ok(Some(h)) => {
+                info!("[START_COMPONENTS] Storage returned height: {}", h);
+                h
+            }
+            Ok(None) => {
+                info!("[START_COMPONENTS] Storage returned None for height, using 0");
+                0
+            }
+            Err(e) => {
+                warn!("[START_COMPONENTS] Error getting height from storage: {}, using 0", e);
+                0
+            }
+        };
         let is_ibd = current_height == 0;
         
+        info!("[START_COMPONENTS] IBD check: current_height={}, is_ibd={}", current_height, is_ibd);
+        
         if is_ibd {
-            info!("Detected IBD (height: {}), checking for parallel IBD support...", current_height);
+            info!("[START_COMPONENTS] Detected IBD (height: {}), checking for parallel IBD support...", current_height);
             
             // Get connected peers for parallel IBD
+            info!("[START_COMPONENTS] Getting peer addresses...");
             let peer_addresses: Vec<String> = self.network
                 .peer_addresses()
                 .iter()
                 .map(|addr| addr.to_string())
                 .collect();
             
+            info!("[START_COMPONENTS] IBD: Found {} peer addresses: {:?}", peer_addresses.len(), peer_addresses);
+            
             if peer_addresses.len() >= 2 {
-                info!("Attempting parallel IBD with {} peers", peer_addresses.len());
+                info!("[START_COMPONENTS] Attempting parallel IBD with {} peers", peer_addresses.len());
                 
                 // Get target height from peer's start_height (best block height from Version messages)
                 // Use the highest reported height from all connected peers
+                info!("[START_COMPONENTS] Getting highest peer start_height...");
                 let target_height = match self.network.get_highest_peer_start_height() {
                     Some(peer_height) => {
-                        info!("Using peer-reported chain tip height: {} (current: {})", peer_height, current_height);
+                        info!("[START_COMPONENTS] Using peer-reported chain tip height: {} (current: {})", peer_height, current_height);
                         peer_height.max(current_height) // Ensure target is at least current height
                     }
                     None => {
                         // Fallback: if no peers have reported start_height yet, use a large number
                         // The iterative header sync will stop when it reaches the actual chain tip
-                        warn!("No peer start_height available yet, using fallback target height");
+                        warn!("[START_COMPONENTS] No peer start_height available yet, using fallback target height");
                         current_height + 1_000_000
                     }
                 };
+                
+                info!("[START_COMPONENTS] Starting parallel IBD: current_height={}, target_height={}", current_height, target_height);
                 
                 // Attempt parallel IBD
                 let blockstore = Arc::clone(&self.storage.blocks());
@@ -421,6 +464,7 @@ impl Node {
                 let protocol_arc = Arc::clone(&self.protocol);
                 let mut utxo_set = blvm_protocol::UtxoSet::new();
                 
+                info!("[START_COMPONENTS] Calling sync_coordinator.start_parallel_ibd()...");
                 match self.sync_coordinator.start_parallel_ibd(
                     current_height,
                     target_height,
@@ -432,22 +476,26 @@ impl Node {
                     peer_addresses,
                 ).await {
                     Ok(true) => {
-                        info!("Parallel IBD completed successfully");
+                        info!("[START_COMPONENTS] Parallel IBD completed successfully");
                         // Update current height after parallel IBD
                         let new_height = self.storage.chain().get_height()?.unwrap_or(0);
-                        info!("IBD completed, current height: {}", new_height);
+                        info!("[START_COMPONENTS] IBD completed, current height: {}", new_height);
                     }
                     Ok(false) => {
-                        info!("Parallel IBD not available or failed, will use sequential sync");
+                        info!("[START_COMPONENTS] Parallel IBD not available or failed");
                     }
                     Err(e) => {
-                        warn!("Parallel IBD error: {}, will use sequential sync", e);
+                        warn!("[START_COMPONENTS] Parallel IBD error: {}", e);
                     }
                 }
             } else {
-                info!("Not enough peers for parallel IBD (have {}, need 2), will use sequential sync", peer_addresses.len());
+                info!("[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need 2), waiting for more peers...", peer_addresses.len());
             }
+        } else {
+            info!("[START_COMPONENTS] Not in IBD (current_height={}), skipping IBD", current_height);
         }
+        
+        info!("[START_COMPONENTS] Component startup complete");
 
         // Prune on startup if configured
         if let Some(pruning_manager) = self.storage.pruning() {
@@ -979,6 +1027,7 @@ impl Node {
         Ok(())
     }
 
+
     /// Main node run loop
     async fn run(&mut self) -> Result<()> {
         info!("Node running - main loop started");
@@ -1462,7 +1511,7 @@ impl Node {
 
     /// Stop the node
     pub async fn stop(&mut self) -> Result<()> {
-        info!("Stopping reference-node");
+        info!("Stopping node");
 
         // Publish NodeShutdown event to modules (give them time to clean up)
         if let Some(ref event_publisher) = self.event_publisher {

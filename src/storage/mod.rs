@@ -1,4 +1,4 @@
-//! Storage layer for reference-node
+//! Storage layer for blvm-node
 //!
 //! This module provides persistent storage for blocks, UTXO set, and chain state.
 //! Supports multiple database backends via feature flags (sled, redb).
@@ -18,6 +18,8 @@ pub mod commitment_store;
 #[cfg(kani)]
 pub mod cryptographic_proofs;
 pub mod database;
+pub mod disk_utxo;
+pub mod serialization_cache;
 pub mod hashing;
 #[cfg(kani)]
 pub mod kani_helpers;

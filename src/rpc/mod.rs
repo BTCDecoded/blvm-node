@@ -1,4 +1,4 @@
-//! RPC interface for reference-node
+//! RPC interface for blvm-node
 //!
 //! This module provides JSON-RPC server, blockchain query methods,
 //! network info methods, transaction submission, and mining methods.
@@ -13,6 +13,8 @@ pub mod network;
 #[cfg(feature = "bip70-http")]
 pub mod payment;
 pub mod rawtx;
+#[cfg(feature = "miniscript")]
+pub mod miniscript;
 #[cfg(feature = "rest-api")]
 pub mod rest;
 #[cfg(kani)]
@@ -514,27 +516,10 @@ impl RpcManager {
             None
         };
 
-        // Wait for shutdown signal
-        shutdown_rx.recv().await;
-
-        // Shutdown TCP server
-        tcp_handle.abort();
-        info!("TCP RPC server stopped");
-
-        // Shutdown QUIC server if it was started
-        #[cfg(feature = "quinn")]
-        if let Some(handle) = quinn_handle {
-            handle.abort();
-            info!("QUIC RPC server stopped");
-        }
-
-        // Shutdown REST API server if it was started
-        #[cfg(feature = "rest-api")]
-        if let Some(handle) = rest_api_handle {
-            handle.abort();
-            info!("REST API server stopped");
-        }
-
+        // Don't wait for shutdown - return immediately after spawning servers
+        // Shutdown is handled via the shutdown channels stored in self.shutdown_tx
+        // The spawned tasks will continue running in the background
+        // The stop() method sends shutdown signals via those channels
         Ok(())
     }
 

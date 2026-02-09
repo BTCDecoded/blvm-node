@@ -146,20 +146,17 @@ pub fn validate_block_with_context(
         .context_data
         .insert("network_time".to_string(), network_time.to_string());
 
-    // Validate block with protocol validation
+    // Validate block with protocol validation — move UTXO set in, no clone
+    let owned_utxo = std::mem::take(utxo_set);
     let (result, new_utxo_set) = protocol.validate_and_connect_block(
         block,
         witnesses,
-        utxo_set,
+        owned_utxo,
         height,
         recent_headers.as_deref(),
         &context,
     )?;
 
-    // Update UTXO set if valid
-    if matches!(result, ValidationResult::Valid) {
-        *utxo_set = new_utxo_set;
-    }
-
+    *utxo_set = new_utxo_set;
     Ok(result)
 }

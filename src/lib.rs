@@ -10,7 +10,7 @@
 //! 1. Orange Paper (mathematical foundation)
 //! 2. consensus-proof (pure math implementation)
 //! 3. protocol-engine (Bitcoin abstraction) ← USED HERE
-//! 4. reference-node (full node implementation) ← THIS CRATE
+//! 4. blvm-node (full node implementation) ← THIS CRATE
 //! 5. developer-sdk (ergonomic API - future)
 //!
 //! ## Design Principles
@@ -31,7 +31,7 @@
 #![allow(clippy::inherent_to_string_shadow_display)]
 
 // Memory allocator optimization using mimalloc (faster than default allocator)
-// Note: Only in reference-node, not consensus-proof, to maintain Kani compatibility
+// Note: Only in blvm-node, not consensus-proof, to maintain Kani compatibility
 // Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
 #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
 #[global_allocator]
@@ -50,6 +50,8 @@ pub mod utils;
 pub mod validation;
 #[cfg(feature = "zmq")]
 pub mod zmq;
+#[cfg(feature = "miniscript")]
+pub mod miniscript;
 
 // Re-export config module
 pub use config::*;
@@ -66,8 +68,8 @@ pub use blvm_protocol::{
 // Re-export protocol-engine types
 pub use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 
-/// Main reference node implementation
-pub struct ReferenceNode {
+/// Main node implementation
+pub struct Node {
     protocol: BitcoinProtocolEngine,
     /// Storage for blockchain data (optional, can be added via builder pattern)
     storage: Option<std::sync::Arc<crate::storage::Storage>>,
@@ -77,8 +79,8 @@ pub struct ReferenceNode {
     mempool_manager: Option<std::sync::Arc<crate::node::mempool::MempoolManager>>,
 }
 
-impl ReferenceNode {
-    /// Create a new reference node with specified protocol variant
+impl Node {
+    /// Create a new node with specified protocol variant
     /// Defaults to Regtest for safe development/testing
     pub fn new(version: Option<ProtocolVersion>) -> anyhow::Result<Self> {
         let version = version.unwrap_or(ProtocolVersion::Regtest);
@@ -143,8 +145,8 @@ mod tests {
 
     #[test]
     fn test_protocol_integration() {
-        // Test that protocol-engine works in reference-node context
-        let node = ReferenceNode::new(Some(ProtocolVersion::Regtest)).unwrap();
+        // Test that protocol-engine works in blvm-node context
+        let node = Node::new(Some(ProtocolVersion::Regtest)).unwrap();
         let protocol = node.protocol();
 
         // Verify protocol version
@@ -157,7 +159,7 @@ mod tests {
     #[test]
     fn test_consensus_integration() {
         // Test consensus validation through protocol-engine
-        let node = ReferenceNode::new(None).unwrap(); // Uses default Regtest
+        let node = Node::new(None).unwrap(); // Uses default Regtest
         let protocol = node.protocol();
 
         // Create a simple transaction
@@ -177,16 +179,16 @@ mod tests {
     }
 
     #[test]
-    fn test_reference_node_creation() {
+    fn test_node_creation() {
         // Test default (Regtest) creation
-        let node = ReferenceNode::new(None).unwrap();
+        let node = Node::new(None).unwrap();
         assert_eq!(
             node.protocol().get_protocol_version(),
             ProtocolVersion::Regtest
         );
 
         // Test mainnet creation
-        let mainnet_node = ReferenceNode::new(Some(ProtocolVersion::BitcoinV1)).unwrap();
+        let mainnet_node = Node::new(Some(ProtocolVersion::BitcoinV1)).unwrap();
         assert_eq!(
             mainnet_node.protocol().get_protocol_version(),
             ProtocolVersion::BitcoinV1

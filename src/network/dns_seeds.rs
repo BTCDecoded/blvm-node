@@ -4,9 +4,8 @@
 //! Based on Bitcoin Core's DNS seed mechanism.
 
 use crate::network::protocol::NetworkAddress;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
-use tokio::net::lookup_host;
 use tracing::{info, warn};
 
 /// Bitcoin DNS seeds (mainnet)
@@ -61,16 +60,24 @@ pub async fn resolve_dns_seeds(
 
 /// Resolve a single DNS seed
 async fn resolve_dns_seed(seed: &str, port: u16) -> Result<Vec<NetworkAddress>, String> {
-    // Create hostname:port string for DNS lookup
-    let hostname = format!("{seed}:{port}");
-
-    // Perform DNS lookup with timeout
+    // Use std::net::ToSocketAddrs which handles DNS resolution properly
+    // Format: "hostname:port" works with ToSocketAddrs
+    let hostname_with_port = format!("{seed}:{port}");
+    
+    // Perform DNS lookup with timeout using tokio::task::spawn_blocking
+    // since ToSocketAddrs is blocking
     let timeout = Duration::from_secs(5);
-    let lookup_result = tokio::time::timeout(timeout, lookup_host(&hostname))
-        .await
-        .map_err(|_| format!("DNS lookup timeout for {seed}"))?;
-
-    let socket_addrs = lookup_result.map_err(|e| format!("DNS lookup failed for {seed}: {e}"))?;
+    let hostname_clone = hostname_with_port.clone();
+    let socket_addrs = tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || {
+            hostname_clone.to_socket_addrs().map(|iter| iter.collect::<Vec<_>>())
+        })
+    )
+    .await
+    .map_err(|_| format!("DNS lookup timeout for {seed}"))?
+    .map_err(|e| format!("DNS lookup task failed for {seed}: {e}"))?
+    .map_err(|e| format!("DNS lookup failed for {seed}: {e}"))?;
 
     // Convert SocketAddr to NetworkAddress
     let mut addresses = Vec::new();

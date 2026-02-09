@@ -68,7 +68,7 @@ pub fn handle_getcfilters(
                         for tx in &block.transactions {
                             for input in &tx.inputs {
                                 if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
-                                    prev_scripts.push(utxo.script_pubkey);
+                                    prev_scripts.push(utxo.script_pubkey.clone());
                                 }
                             }
                         }

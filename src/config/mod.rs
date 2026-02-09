@@ -1,4 +1,4 @@
-//! Configuration management for reference-node
+//! Configuration management for blvm-node
 //!
 //! Handles configuration loading, validation, and transport selection.
 

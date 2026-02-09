@@ -1,9 +1,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use protocol_engine::types::{BlockHeader, Hash, OutPoint, UTXO};
-use reference_node::node::mempool::MempoolManager;
-use reference_node::rpc::mining::MiningRpc;
-use reference_node::storage::Storage;
+use blvm_node::node::mempool::MempoolManager;
+use blvm_node::rpc::mining::MiningRpc;
+use blvm_node::storage::Storage;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;

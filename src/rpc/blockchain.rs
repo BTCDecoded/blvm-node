@@ -262,10 +262,10 @@ impl BlockchainRpc {
             let chainwork = storage
                 .chain()
                 .get_chainwork(&best_hash)?
-                .unwrap_or_else(|| {
-                    // Fallback: calculate total work if cache miss
-                    storage.chain().calculate_total_work().unwrap_or(0) as u128
-                });
+                .unwrap_or(0u128);
+            // CRITICAL FIX: Removed calculate_total_work() fallback - it iterates over ALL blocks
+            // (357k+ iterations) causing 3+ minute RPC delays. If chainwork isn't cached,
+            // return 0 instead of doing expensive calculation.
             let chainwork_hex = Self::format_chainwork(chainwork);
 
             Ok(json!({

@@ -7,7 +7,7 @@ use blvm_protocol::ProtocolVersion;
 #[test]
 fn test_protocol_integration() {
     // Test that bllvm-protocol works in bllvm-node context
-    let node = ReferenceNode::new(Some(ProtocolVersion::Regtest)).unwrap();
+    let node = Node::new(Some(ProtocolVersion::Regtest)).unwrap();
     let protocol = node.protocol();
     
     // Verify protocol version
@@ -20,7 +20,7 @@ fn test_protocol_integration() {
 #[test]
 fn test_consensus_integration() {
     // Test consensus validation through bllvm-protocol
-    let node = ReferenceNode::new(None).unwrap(); // Uses default Regtest
+    let node = Node::new(None).unwrap(); // Uses default Regtest
     let protocol = node.protocol();
     
     // Create a simple transaction
@@ -42,10 +42,10 @@ fn test_consensus_integration() {
 #[test]
 fn test_blvm_node_creation() {
     // Test default (Regtest) creation
-    let node = ReferenceNode::new(None).unwrap();
+    let node = Node::new(None).unwrap();
     assert_eq!(node.protocol().get_protocol_version(), &ProtocolVersion::Regtest);
     
     // Test mainnet creation
-    let mainnet_node = ReferenceNode::new(Some(ProtocolVersion::BitcoinV1)).unwrap();
+    let mainnet_node = Node::new(Some(ProtocolVersion::BitcoinV1)).unwrap();
     assert_eq!(mainnet_node.protocol().get_protocol_version(), &ProtocolVersion::BitcoinV1);
 }
