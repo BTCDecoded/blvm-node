@@ -11,7 +11,7 @@ The `bip21` module provides utilities to register the `bitcoin:` URI scheme with
 ### Example: Generate All Registration Files
 
 ```rust
-use reference_node::bip21::UriSchemeRegistration;
+use blvm_node::bip21::UriSchemeRegistration;
 
 // Configure registration
 let registration = UriSchemeRegistration::new(
@@ -157,7 +157,7 @@ This should launch your application with the URI as an argument.
 Your application should accept the URI as a command-line argument and parse it:
 
 ```rust
-use reference_node::bip21::BitcoinUri;
+use blvm_node::bip21::BitcoinUri;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

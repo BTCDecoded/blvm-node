@@ -1,4 +1,4 @@
-//! Simple example module for reference-node
+//! Simple example module for blvm-node
 //!
 //! This module demonstrates:
 //! - Module lifecycle (init, start, stop, shutdown)

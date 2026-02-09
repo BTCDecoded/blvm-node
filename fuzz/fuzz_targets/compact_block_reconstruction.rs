@@ -1,11 +1,11 @@
 #![no_main]
 use bllvm_consensus::{Block, BlockHeader, Hash, Transaction, TransactionOutput};
 use libfuzzer_sys::fuzz_target;
-use reference_node::network::compact_blocks::{
+use blvm_node::network::compact_blocks::{
     calculate_short_tx_id, calculate_tx_hash, create_compact_block, is_quic_transport,
     recommended_compact_block_version, should_prefer_compact_blocks,
 };
-use reference_node::network::transport::TransportType;
+use blvm_node::network::transport::TransportType;
 use std::collections::HashSet;
 
 fuzz_target!(|data: &[u8]| {

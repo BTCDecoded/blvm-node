@@ -121,7 +121,7 @@ fn test_validate_and_connect_block_uses_protocol_validation() {
     let result = protocol.validate_and_connect_block(
         &block,
         &witnesses,
-        &utxos,
+        utxos,
         0,
         None,
         &context,

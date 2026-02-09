@@ -1,4 +1,4 @@
-//! Network layer for reference-node
+//! Network layer for blvm-node
 //!
 //! This module provides P2P networking, peer management, and Bitcoin protocol
 //! message handling for communication with other Bitcoin nodes.

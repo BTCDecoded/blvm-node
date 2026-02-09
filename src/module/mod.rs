@@ -1,4 +1,4 @@
-//! Module system for reference-node
+//! Module system for blvm-node
 //!
 //! This module provides process-isolated module support, enabling optional features
 //! (Lightning, merge mining, privacy enhancements) without affecting consensus or

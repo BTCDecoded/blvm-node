@@ -1,9 +1,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use reference_node::network::compact_blocks::{
+use blvm_node::network::compact_blocks::{
     is_quic_transport, recommended_compact_block_version, should_prefer_compact_blocks,
 };
-use reference_node::network::transport::TransportType;
+use blvm_node::network::transport::TransportType;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz transport-aware negotiation logic

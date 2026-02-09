@@ -24,12 +24,13 @@ fn create_test_block() -> Block {
     }
 }
 
-fn create_empty_witnesses() -> Vec<Witness> {
+fn create_empty_witnesses() -> Vec<Vec<Witness>> {
     vec![]
 }
 
-fn create_test_witnesses() -> Vec<Witness> {
-    vec![vec![vec![0x01, 0x02, 0x03]]] // Single witness (Witness = Vec<Vec<u8>>)
+fn create_test_witnesses() -> Vec<Vec<Witness>> {
+    // One transaction with one witness containing one stack item [0x01, 0x02, 0x03]
+    vec![vec![vec![vec![0x01, 0x02, 0x03]]]]
 }
 
 fn create_test_storage() -> (TempDir, Arc<Storage>) {

@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 #[cfg(feature = "bip70-http")]
 use super::payment;
+#[cfg(feature = "miniscript")]
+use super::miniscript::miniscript_rpc;
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};
 use crate::module::rpc::handler::ModuleRpcHandler;
 use crate::node::metrics::MetricsCollector;
@@ -1421,6 +1423,18 @@ impl RpcServer {
                     ))
                 }
             }
+            #[cfg(feature = "miniscript")]
+            "getdescriptorinfo" => {
+                miniscript_rpc::get_descriptor_info(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
+            #[cfg(feature = "miniscript")]
+            "analyzepsbt" => {
+                miniscript_rpc::analyze_psbt(&params)
+                    .await
+                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+            }
 
             _ => {
                 // Check module endpoints
@@ -1514,6 +1528,10 @@ impl RpcServer {
             "logging",
             "gethealth",
             "getmetrics",
+            #[cfg(feature = "miniscript")]
+            "getdescriptorinfo",
+            #[cfg(feature = "miniscript")]
+            "analyzepsbt",
         ];
 
         if core_methods.contains(&method.as_str()) {

@@ -84,7 +84,7 @@ impl NetworkRpc {
         } else {
             Ok(json!({
                 "version": 70015,
-                "subversion": "/reference-node:0.1.0/",
+                "subversion": "/blvm-node:0.1.0/",
                 "protocolversion": 70015,
                 "localservices": "0000000000000001",
                 "localrelay": true,

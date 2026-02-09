@@ -338,6 +338,7 @@ mod redb_impl {
     static RECENT_HEADERS_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("recent_headers");
     static UTXOS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("utxos");
+    static IBD_UTXOS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("ibd_utxos");
     static SPENT_OUTPUTS_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("spent_outputs");
     static CHAIN_INFO_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chain_info");
@@ -383,15 +384,45 @@ mod redb_impl {
             use std::sync::Mutex;
             // Global mutex to serialize database creation (prevents lock conflicts in tests)
             static DB_CREATE_MUTEX: Mutex<()> = Mutex::new(());
+            tracing::info!("[REDB] Acquiring DB_CREATE_MUTEX...");
             let _guard = DB_CREATE_MUTEX.lock().unwrap();
+            tracing::info!("[REDB] DB_CREATE_MUTEX acquired");
 
             let db_path = data_dir.as_ref().join("redb.db");
+            tracing::info!("[REDB] Database path: {:?}", db_path);
+            tracing::info!("[REDB] Database path absolute: {:?}", std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone()));
+            let exists = db_path.exists();
+            tracing::info!("[REDB] db_path.exists() = {}", exists);
             // Try to open existing database first, then create if it doesn't exist
-            let db = if db_path.exists() {
-                // Database exists, try to open it
-                match RedbDb::open(&db_path) {
+            let db = if exists {
+                // Gather diagnostic information about the database file
+                let file_size = std::fs::metadata(&db_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let file_size_mb = file_size / (1024 * 1024);
+                tracing::info!("[REDB] Database file exists, size: {} MB ({})", file_size_mb, file_size);
+                
+                // Check if database is locked by another process
+                // redb uses file locking, so if another process has it open, open() will fail immediately
+                tracing::info!("[REDB] Attempting to open database (this may take time for large databases)...");
+                tracing::info!("[REDB] Note: redb validates checksums on open, which can be slow for large databases");
+                tracing::info!("[REDB] If this hangs, redb may be performing crash recovery validation");
+                
+                use std::time::Instant;
+                let start_time = Instant::now();
+                
+                // Open the database - this may take time for large databases
+                // redb performs checksum validation during open, especially after crashes
+                let open_result = RedbDb::open(&db_path);
+                
+                let elapsed = start_time.elapsed();
+                tracing::info!("[REDB] Database open completed in {:?}", elapsed);
+                
+                match open_result {
                     Ok(db) => {
+                        tracing::info!("[REDB] Database opened successfully in {:?}, opening tables...", elapsed);
                         // Database exists and is openable, use it
+                        let table_start = Instant::now();
                         let write_txn = db.begin_write()?;
                         {
                             // Open all tables to ensure they exist
@@ -402,6 +433,7 @@ mod redb_impl {
                             let _ = write_txn.open_table(WITNESSES_TABLE)?;
                             let _ = write_txn.open_table(RECENT_HEADERS_TABLE)?;
                             let _ = write_txn.open_table(UTXOS_TABLE)?;
+                            let _ = write_txn.open_table(IBD_UTXOS_TABLE)?;
                             let _ = write_txn.open_table(SPENT_OUTPUTS_TABLE)?;
                             let _ = write_txn.open_table(CHAIN_INFO_TABLE)?;
                             let _ = write_txn.open_table(WORK_CACHE_TABLE)?;
@@ -426,29 +458,31 @@ mod redb_impl {
                             let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
                             let _ = write_txn.open_table(UTXO_COMMITMENTS_TABLE)?;
                             let _ = write_txn.open_table(COMMITMENT_HEIGHT_INDEX_TABLE)?;
-                            // Payment system tables
-                            let _ = write_txn.open_table(VAULTS_TABLE)?;
-                            let _ = write_txn.open_table(POOLS_TABLE)?;
-                            let _ = write_txn.open_table(BATCHES_TABLE)?;
-                            // Module storage table
-                            let _ = write_txn.open_table(MODULES_TABLE)?;
                         }
                         write_txn.commit()?;
+                        let table_elapsed = table_start.elapsed();
+                        tracing::info!("[REDB] Tables opened and committed in {:?}", table_elapsed);
                         db
                     }
-                    Err(_) => {
-                        // Can't open existing database, create new one
+                    Err(e) => {
+                        tracing::warn!("[REDB] Failed to open existing database after {:?}: {}", elapsed, e);
+                        tracing::warn!("[REDB] Error details: {:?}", e);
+                        tracing::info!("[REDB] Creating new database...");
                         RedbDb::create(&db_path)?
                     }
                 }
             } else {
+                tracing::info!("[REDB] Database doesn't exist, creating new one...");
                 // Database doesn't exist, create new one
                 RedbDb::create(&db_path)?
             };
+            tracing::info!("[REDB] Database created/opened, initializing tables...");
 
             // Initialize all tables in a write transaction
+            tracing::info!("[REDB] Beginning write transaction to initialize tables...");
             let write_txn = db.begin_write()?;
             {
+                tracing::info!("[REDB] Opening all tables...");
                 // Open all tables to ensure they exist
                 let _ = write_txn.open_table(BLOCKS_TABLE)?;
                 let _ = write_txn.open_table(HEADERS_TABLE)?;
@@ -457,6 +491,7 @@ mod redb_impl {
                 let _ = write_txn.open_table(WITNESSES_TABLE)?;
                 let _ = write_txn.open_table(RECENT_HEADERS_TABLE)?;
                 let _ = write_txn.open_table(UTXOS_TABLE)?;
+                let _ = write_txn.open_table(IBD_UTXOS_TABLE)?;
                 let _ = write_txn.open_table(SPENT_OUTPUTS_TABLE)?;
                 let _ = write_txn.open_table(CHAIN_INFO_TABLE)?;
                 let _ = write_txn.open_table(WORK_CACHE_TABLE)?;
@@ -499,6 +534,7 @@ mod redb_impl {
                 "witnesses" => Some(&WITNESSES_TABLE),
                 "recent_headers" => Some(&RECENT_HEADERS_TABLE),
                 "utxos" => Some(&UTXOS_TABLE),
+                "ibd_utxos" => Some(&IBD_UTXOS_TABLE),
                 "spent_outputs" => Some(&SPENT_OUTPUTS_TABLE),
                 "chain_info" => Some(&CHAIN_INFO_TABLE),
                 "work_cache" => Some(&WORK_CACHE_TABLE),

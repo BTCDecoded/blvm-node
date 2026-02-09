@@ -1,6 +1,6 @@
 //! UTXO Commitments Network Client Implementation
 //!
-//! Implements UtxoCommitmentsNetworkClient trait for reference-node's NetworkManager.
+//! Implements UtxoCommitmentsNetworkClient trait for blvm-node's NetworkManager.
 //! Works with both TCP and Iroh transports via the transport abstraction layer.
 //!
 //! This enables UTXO commitments to work seamlessly with:
