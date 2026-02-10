@@ -355,7 +355,7 @@ impl AssumeUtxoManager {
         };
         
         // Read UTXOs
-        let mut utxo_set = HashMap::with_capacity(utxo_count as usize);
+        let mut utxo_set = UtxoSet::with_capacity_and_hasher(utxo_count as usize, Default::default());
         
         for i in 0..utxo_count {
             reader.read_exact(&mut buf4)?;

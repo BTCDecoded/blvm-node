@@ -733,7 +733,7 @@ impl PruningManager {
         use blvm_protocol::UtxoSet;
 
         // Start with empty UTXO set (genesis)
-        let mut utxo_set = UtxoSet::new();
+        let mut utxo_set = UtxoSet::default();
 
         // If target height is 0, return empty UTXO set (genesis)
         if target_height == 0 {

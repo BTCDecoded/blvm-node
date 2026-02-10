@@ -191,7 +191,7 @@ impl SyncCoordinator {
         // Check if we have enough peers for parallel IBD (need at least 2)
         if peer_addresses.len() < 2 {
             debug!(
-                "Not enough peers for parallel IBD (have {}, need 2), falling back to sequential",
+                "Not enough peers for parallel IBD (have {}, need 2). Sequential sync is not supported.",
                 peer_addresses.len()
             );
             return Ok(false);
@@ -232,9 +232,8 @@ impl SyncCoordinator {
                 Ok(true)
             }
             Err(e) => {
-                warn!("Parallel IBD failed: {}, falling back to sequential sync", e);
-                // Fall back to sequential sync
-                Ok(false)
+                error!("Parallel IBD failed: {}. Sequential sync is not supported - IBD must succeed in parallel mode.", e);
+                Err(e)
             }
         }
     }

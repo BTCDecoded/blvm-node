@@ -463,7 +463,7 @@ impl MiningRpc {
                 .get_all_utxos()
                 .map_err(|e| RpcError::internal_error(format!("Failed to get UTXO set: {e}")))
         } else {
-            Ok(UtxoSet::new())
+            Ok(UtxoSet::default())
         }
     }
 

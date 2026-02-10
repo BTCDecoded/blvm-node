@@ -114,7 +114,7 @@ impl DiskBackedUtxoSet {
         flush_threshold: usize,
     ) -> Self {
         Self {
-            cache: HashMap::with_capacity(max_cache_entries.min(2_000_000)),
+            cache: UtxoSet::with_capacity_and_hasher(max_cache_entries.min(2_000_000), Default::default()),
             disk: disk_tree,
             max_cache_entries,
             total_utxo_count: 0,

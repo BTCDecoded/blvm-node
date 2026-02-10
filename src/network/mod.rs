@@ -665,7 +665,7 @@ impl NetworkManager {
             peer_rx,
             filter_service: crate::network::filter_service::BlockFilterService::new(),
             consensus: ConsensusProof::new(),
-            utxo_set: Arc::new(Mutex::new(UtxoSet::new())),
+            utxo_set: Arc::new(Mutex::new(UtxoSet::default())),
             mempool: Arc::new(Mutex::new(Mempool::new())),
             protocol_engine: None,
             storage: None,

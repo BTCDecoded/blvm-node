@@ -20,7 +20,7 @@ use anyhow::Result;
 use hex;
 use secp256k1;
 use std::net::SocketAddr;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::NodeConfig;
 use crate::module::api::events::EventManager;
@@ -462,7 +462,7 @@ impl Node {
                 let blockstore = Arc::clone(&self.storage.blocks());
                 let storage_arc = Arc::clone(&self.storage);
                 let protocol_arc = Arc::clone(&self.protocol);
-                let mut utxo_set = blvm_protocol::UtxoSet::new();
+                let mut utxo_set = blvm_protocol::UtxoSet::default();
                 
                 info!("[START_COMPONENTS] Calling sync_coordinator.start_parallel_ibd()...");
                 match self.sync_coordinator.start_parallel_ibd(
@@ -482,10 +482,11 @@ impl Node {
                         info!("[START_COMPONENTS] IBD completed, current height: {}", new_height);
                     }
                     Ok(false) => {
-                        info!("[START_COMPONENTS] Parallel IBD not available or failed");
+                        warn!("[START_COMPONENTS] Parallel IBD not available (not enough peers or already synced)");
                     }
                     Err(e) => {
-                        warn!("[START_COMPONENTS] Parallel IBD error: {}", e);
+                        error!("[START_COMPONENTS] Parallel IBD failed: {}. Sequential sync is not supported.", e);
+                        return Err(e);
                     }
                 }
             } else {
@@ -1037,7 +1038,7 @@ impl Node {
 
         // Get initial state for block processing
         let mut current_height = self.storage.chain().get_height()?.unwrap_or(0);
-        let mut utxo_set = blvm_protocol::UtxoSet::new();
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
 
         // Main node loop - coordinates between all components and handles shutdown signals
         loop {

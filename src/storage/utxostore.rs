@@ -212,7 +212,7 @@ impl UtxoStore {
 
     /// Load the entire UTXO set
     pub fn load_utxo_set(&self) -> Result<UtxoSet> {
-        let mut utxo_set = HashMap::new();
+        let mut utxo_set = UtxoSet::default();
 
         for result in self.utxos.iter() {
             let (key, value) = result?;

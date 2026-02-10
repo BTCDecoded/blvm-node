@@ -575,7 +575,7 @@ impl MiningCoordinator {
                 .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?
         } else {
             // No storage - use empty UTXO set (will result in 0 fees)
-            blvm_protocol::UtxoSet::new()
+            blvm_protocol::UtxoSet::default()
         };
 
         // Select transactions from mempool (with UTXO set for accurate fee calculation)

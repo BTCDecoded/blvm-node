@@ -80,7 +80,7 @@ impl MempoolManager {
         Self {
             transactions: HashMap::new(),
             mempool: Mempool::new(),
-            utxo_set: HashMap::new(),
+            utxo_set: UtxoSet::default(),
             spent_outputs: HashSet::new(),
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
@@ -101,7 +101,7 @@ impl MempoolManager {
         Self {
             transactions: HashMap::new(),
             mempool: Mempool::new(),
-            utxo_set: HashMap::new(),
+            utxo_set: UtxoSet::default(),
             spent_outputs: HashSet::new(),
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
