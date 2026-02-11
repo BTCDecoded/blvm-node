@@ -641,7 +641,7 @@ impl MiningRpc {
             .map_err(|e| RpcError::invalid_params(format!("Failed to deserialize block: {e}")))?;
 
         // Validate serialized size to match consensus serialization (defensive check)
-        // Uses consensus serialization via bllvm_protocol::serialization re-exports.
+        // Uses consensus serialization via blvm_protocol::serialization re-exports.
         let include_witness = true;
         if !blvm_protocol::serialization::block::validate_block_serialized_size(
             &block,

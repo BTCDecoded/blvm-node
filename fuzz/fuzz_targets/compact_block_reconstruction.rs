@@ -1,5 +1,5 @@
 #![no_main]
-use bllvm_consensus::{Block, BlockHeader, Hash, Transaction, TransactionOutput};
+use blvm_consensus::{Block, BlockHeader, Hash, Transaction, TransactionOutput};
 use libfuzzer_sys::fuzz_target;
 use blvm_node::network::compact_blocks::{
     calculate_short_tx_id, calculate_tx_hash, create_compact_block, is_quic_transport,

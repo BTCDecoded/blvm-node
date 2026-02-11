@@ -21,7 +21,7 @@ pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Vec<Witness>>)> 
         .map_err(|e| anyhow::anyhow!("Failed to parse block from wire format: {}", e))?;
 
     // Validate that consensus serialization matches the original wire size
-    // Uses consensus serialization through bllvm_protocol::serialization re-exports.
+    // Uses consensus serialization through blvm_protocol::serialization re-exports.
     let include_witness = true;
     if !blvm_protocol::serialization::block::validate_block_serialized_size(
         &block,

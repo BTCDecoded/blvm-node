@@ -51,8 +51,8 @@ bytes = "=1.10.1"  # Updated for iroh 0.95 compatibility (requires ^1.7)
 uuid = { version = "=1.6.0", features = ["v4"] }
 toml = "=0.8.2"
 
-# Cryptography - EXACT VERSIONS for security
-secp256k1 = "=0.28.2"  # For BIP70 Bitcoin signature verification
+# Cryptography - use local fork (same as blvm-consensus/blvm-protocol)
+secp256k1 = { path = "../secp256k1-fork" }
 sha2 = "=0.10.9"
 ripemd = "=0.1.3"
 hex = "=0.4.3"
@@ -291,9 +291,4 @@ name = "migrate-bitcoin-core"
 path = "tools/migrate-bitcoin-core.rs"
 required-features = ["rocksdb"]
 
-# Patch secp256k1 to use custom fork with batch Schnorr verification
-# This resolves cc crate version conflicts between iroh (requires cc >= 1.0.69 via ring)
-# and miniscript's bitcoin crate (which uses secp256k1-sys requiring cc <= 1.0.41)
-# By patching to our custom fork, we use a newer secp256k1-sys that's compatible with newer cc
-[patch.crates-io]
-secp256k1 = { git = "https://github.com/secsovereign/rust-secp256k1.git", branch = "batch-schnorr-verification" }
+# secp256k1 now direct path dep above; no patch needed

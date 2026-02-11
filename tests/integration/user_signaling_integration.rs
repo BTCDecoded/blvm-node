@@ -7,7 +7,7 @@
 //! - Tampering detection
 
 use blvm_node::governance::user_signaling::{UserSignalingManager, UserSignal, SignalType};
-use bllvm_sdk::governance::GovernanceKeypair;
+use blvm_sdk::governance::GovernanceKeypair;
 use std::collections::HashMap;
 
 #[test]

@@ -147,11 +147,11 @@ mod tests {
         // Generate proof
         let proof = tree.generate_proof(&outpoint).unwrap();
         
-        // Serialize proof (as protocol would)
-        let proof_bytes = bincode::serialize(&proof).unwrap();
-        
+        // Serialize proof (as protocol would - custom wire format)
+        let proof_bytes = UtxoMerkleTree::serialize_proof_for_wire(proof).unwrap();
+
         // Deserialize proof (as client would)
-        let proof_deserialized: sparse_merkle_tree::MerkleProof = bincode::deserialize(&proof_bytes).unwrap();
+        let proof_deserialized = UtxoMerkleTree::deserialize_proof_from_wire(&proof_bytes).unwrap();
         
         // Create protocol message
         let proof_msg = UTXOProofMessage {

@@ -30,7 +30,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging using standard utility (respects RUST_LOG)
-    bllvm_node::utils::init_module_logging("simple_module", None);
+    blvm_node::utils::init_module_logging("simple_module", None);
 
     let args = Args::parse();
 

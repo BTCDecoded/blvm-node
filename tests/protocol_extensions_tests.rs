@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 fn create_test_storage() -> Arc<Storage> {
     // Create a minimal test storage with temp directory
-    let temp_dir = std::env::temp_dir().join(format!("bllvm_test_{}", std::process::id()));
+    let temp_dir = std::env::temp_dir().join(format!("blvm_test_{}", std::process::id()));
     std::fs::create_dir_all(&temp_dir).unwrap();
     let storage = Storage::new(&temp_dir).unwrap();
     Arc::new(storage)

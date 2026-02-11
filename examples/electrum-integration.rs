@@ -6,7 +6,7 @@
 //! Note: This is a configuration example. For a full running node, use the bllvm binary
 //! with the generated config.toml file.
 
-use bllvm_node::config::NodeConfig;
+use blvm_node::config::NodeConfig;
 
 fn main() -> anyhow::Result<()> {
     println!("bllvm-node Electrum Integration Configuration");
@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     // RPC configuration
     // Note: RPC port is set via command line (--rpc-port) or defaults
     // RPC auth is optional - configure in generated config.toml if needed
-    config.rpc_auth = Some(bllvm_node::config::RpcAuthConfig {
+    config.rpc_auth = Some(blvm_node::config::RpcAuthConfig {
         required: false, // No auth required for localhost
         tokens: Vec::new(),
         certificates: Vec::new(),

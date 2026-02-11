@@ -3,7 +3,7 @@
 //! This is a minimal RPC server that can be used for benchmarking.
 //! It starts an HTTP/JSON-RPC server on the specified address.
 
-use bllvm_node::rpc::RpcManager;
+use blvm_node::rpc::RpcManager;
 use std::net::SocketAddr;
 use tokio::signal;
 use tracing::{error, info};
@@ -11,7 +11,7 @@ use tracing::{error, info};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging using standard utility (respects RUST_LOG)
-    bllvm_node::utils::init_logging(None);
+    blvm_node::utils::init_logging(None);
 
     // Get server address from args or use default
     let server_addr: SocketAddr = match std::env::args().nth(1) {

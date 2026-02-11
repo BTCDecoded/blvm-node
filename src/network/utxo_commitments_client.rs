@@ -630,24 +630,32 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // We're in an async context - block on the async operation
             handle.block_on(async {
                 let network = self.network_manager.read().await;
-                // Extract connected peer addresses from peer_states
-                network
+                // Extract connected peer addresses - collect to avoid holding lock across await
+                let peer_addrs: Vec<String> = network
                     .peer_states
                     .read()
                     .await
                     .keys()
                     .map(|addr| format!("tcp:{}", addr))
-                    .collect()
+                    .collect();
+                peer_addrs
             })
         } else {
             // Not in async context - return empty (caller should use async version)
             vec![]
         }
     }
+}
 
+/// Additional methods on UtxoCommitmentsClient (not part of the trait).
+/// request_utxo_proof returns raw proof bytes - deserialize to MerkleProof in verification code.
+#[cfg(feature = "utxo-commitments")]
+impl UtxoCommitmentsClient {
     /// Request UTXO proof from a peer
     ///
     /// Sends GetUTXOProof message and awaits UTXOProof response.
+    /// Returns (UTXO, proof_bytes). Proof bytes can be deserialized to sparse_merkle_tree::MerkleProof
+    /// by verification code that has the sparse-merkle-tree dependency.
     /// Works with both TCP and Iroh transports automatically.
     pub fn request_utxo_proof(
         &self,
@@ -657,7 +665,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         block_height: Natural,
         block_hash: Hash,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(blvm_consensus::types::UTXO, sparse_merkle_tree::MerkleProof), anyhow::Error>> + Send + '_>,
+        Box<dyn std::future::Future<Output = Result<(blvm_consensus::types::UTXO, Vec<u8>), anyhow::Error>> + Send + '_>,
     > {
         let network_manager = self.network_manager.clone();
         let peer_id = peer_id.to_string();
@@ -736,11 +744,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                             let proof_msg = deserialize_utxo_proof(&response_data)
                                 .map_err(|e| anyhow::anyhow!("Failed to parse UTXOProof response: {}", e))?;
 
-                            // Deserialize proof
-                            let proof: sparse_merkle_tree::MerkleProof = bincode::deserialize(&proof_msg.proof)
-                                .map_err(|e| anyhow::anyhow!("Failed to deserialize proof: {}", e))?;
-
-                            // Reconstruct UTXO
+                            // Reconstruct UTXO; proof bytes passed through for caller to deserialize
                             let utxo = blvm_consensus::types::UTXO {
                                 value: proof_msg.value,
                                 script_pubkey: proof_msg.script_pubkey,
@@ -748,7 +752,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                 is_coinbase: proof_msg.is_coinbase,
                             };
 
-                            Ok((utxo, proof))
+                            Ok((utxo, proof_msg.proof))
                         }
                         Err(_) => Err(anyhow::anyhow!("Response channel closed"))
                     }

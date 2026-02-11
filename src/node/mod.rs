@@ -736,11 +736,8 @@ impl Node {
                             let merchant_key =
                                 payment_config.merchant_key.as_ref().and_then(|hex_key| {
                                     hex::decode(hex_key).ok().and_then(|bytes| {
-                                        if bytes.len() == 32 {
-                                            secp256k1::SecretKey::from_slice(&bytes).ok()
-                                        } else {
-                                            None
-                                        }
+                                        let arr: [u8; 32] = bytes.try_into().ok()?;
+                                        secp256k1::SecretKey::from_secret_bytes(arr).ok()
                                     })
                                 });
                             self.network.set_merchant_key(merchant_key).await;
@@ -1253,8 +1250,8 @@ impl Node {
                                         ..
                                     } => {
                                         // Prune to keep_from_height, respecting min_blocks
-                                        let effective_keep = keep_from_height
-                                            .max(current_height.saturating_sub(*min_blocks));
+                                        let sub = current_height.saturating_sub(*min_blocks);
+                                        let effective_keep = (*keep_from_height).max(sub);
                                         Some(effective_keep)
                                     }
                                     #[cfg(not(feature = "utxo-commitments"))]

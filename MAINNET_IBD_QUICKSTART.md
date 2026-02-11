@@ -39,6 +39,8 @@ cargo build --release --features "production,utxo-commitments"
     --listen-addr 0.0.0.0:8333
 ```
 
+To run with assume-valid (skip sig verification below a height), set `ASSUME_VALID_HEIGHT` when you start the node, e.g. `ASSUME_VALID_HEIGHT=150000`.
+
 ## 📊 Monitor Progress
 
 **In another terminal:**

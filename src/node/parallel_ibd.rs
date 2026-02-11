@@ -1128,6 +1128,8 @@ impl ParallelIBD {
                             let _ = self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks);
                         }
                         error!("Failed to validate block at height {}: {}", next_height, e);
+                        // Dump block, witnesses, and UTXO set so a test case can be built
+                        Self::dump_failed_block(next_height, &block, &witnesses, utxo_ref, &e);
                         return Err(e);
                     }
                 }
@@ -1255,7 +1257,24 @@ impl ParallelIBD {
                         // More blocks to validate, continue
                         continue;
                     }
-                    // No more blocks, we're done
+                    // Channel closed but we haven't reached end_height yet
+                    // This means download workers finished prematurely or there's a gap
+                    if next_height < effective_end_height {
+                        warn!("Channel closed at height {} but end_height is {} - waiting for missing blocks", 
+                            next_height, effective_end_height);
+                        // Wait a bit longer for gap blocks to arrive
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        // Check again if we have the next block
+                        if reorder_buffer.contains_key(&next_height) {
+                            continue;
+                        }
+                        // Still no block - this is a real gap, error out
+                        return Err(anyhow::anyhow!(
+                            "IBD stopped at height {} (expected {}) - missing block {} (channel closed, buffer empty)",
+                            next_height, effective_end_height, next_height
+                        ));
+                    }
+                    // We've reached the end, we're done
                     break;
                 }
                 Err(_) => {
@@ -2148,6 +2167,69 @@ impl ParallelIBD {
                 Err(anyhow::anyhow!("Block validation failed at height {}: {}", height, reason))
             }
         }
+    }
+
+    /// When block validation fails, dump block, witnesses, and UTXO set to disk so a test case can be built.
+    /// Directory: $BLVM_IBD_FAILURE_DUMP_DIR or /tmp/blvm_ibd_failure, then height_{height}/.
+    /// Files: block.bin, witnesses.bin, utxo_set.bin, info.txt (height, error reason).
+    fn dump_failed_block(
+        height: u64,
+        block: &Block,
+        witnesses: &[Vec<Witness>],
+        utxo_set: &UtxoSet,
+        err: &anyhow::Error,
+    ) {
+        let base = std::env::var("BLVM_IBD_FAILURE_DUMP_DIR").unwrap_or_else(|_| "/tmp/blvm_ibd_failure".to_string());
+        let dir = std::path::Path::new(&base).join(format!("height_{}", height));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            error!("Failed to create dump dir {}: {}", dir.display(), e);
+            return;
+        }
+        let block_path = dir.join("block.bin");
+        let witnesses_path = dir.join("witnesses.bin");
+        let utxo_path = dir.join("utxo_set.bin");
+        let info_path = dir.join("info.txt");
+
+        if let Ok(f) = std::fs::File::create(&block_path) {
+            if let Err(e) = bincode::serialize_into(std::io::BufWriter::new(f), block) {
+                error!("Failed to serialize block to {}: {}", block_path.display(), e);
+            }
+        } else {
+            error!("Failed to create {}", block_path.display());
+        }
+        if let Ok(f) = std::fs::File::create(&witnesses_path) {
+            if let Err(e) = bincode::serialize_into(std::io::BufWriter::new(f), witnesses) {
+                error!("Failed to serialize witnesses to {}: {}", witnesses_path.display(), e);
+            }
+        } else {
+            error!("Failed to create {}", witnesses_path.display());
+        }
+        if let Ok(f) = std::fs::File::create(&utxo_path) {
+            if let Err(e) = bincode::serialize_into(std::io::BufWriter::new(f), utxo_set) {
+                error!("Failed to serialize utxo_set to {}: {}", utxo_path.display(), e);
+            }
+        } else {
+            error!("Failed to create {}", utxo_path.display());
+        }
+        let info = format!(
+            "height={}\nerror={}\ntxs={}\ninputs={}\nutxo_len={}\n",
+            height,
+            err,
+            block.transactions.len(),
+            block.transactions.iter().map(|tx| tx.inputs.len()).sum::<usize>(),
+            utxo_set.len(),
+        );
+        if let Err(e) = std::fs::write(&info_path, info) {
+            error!("Failed to write {}: {}", info_path.display(), e);
+        }
+        eprintln!(
+            "[IBD_FAILURE_DUMP] Block {} validation failed. Test data written to:\n  {}",
+            height,
+            dir.display(),
+        );
+        eprintln!(
+            "  block.bin, witnesses.bin, utxo_set.bin, info.txt\n  Load with bincode::deserialize_from for a repro test."
+        );
     }
 
     /// Flush pending blocks to storage using batch writes

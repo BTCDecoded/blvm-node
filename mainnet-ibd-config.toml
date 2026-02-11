@@ -1,6 +1,8 @@
 # Mainnet IBD Configuration with Incremental Pruning
 # This configuration enables incremental pruning during IBD with UTXO commitments
 
+transport_preference = "tcponly"
+
 [network]
 network = "mainnet"
 listen_address = "0.0.0.0:8333"

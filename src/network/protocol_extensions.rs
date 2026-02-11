@@ -149,14 +149,16 @@ pub async fn handle_get_filtered_block(
         ));
     };
 
-    // Create spam filter from preferences
+    // Create spam filter from preferences (use Default for new fields, override from message)
     #[cfg(feature = "utxo-commitments")]
-    let spam_filter_config = blvm_protocol::spam_filter::SpamFilterConfig {
-        filter_ordinals: message.filter_preferences.filter_ordinals,
-        filter_dust: message.filter_preferences.filter_dust,
-        filter_brc20: message.filter_preferences.filter_brc20,
-        dust_threshold: message.filter_preferences.min_output_value as i64,
-        min_output_value: message.filter_preferences.min_output_value as i64,
+    let spam_filter_config = {
+        let mut config = blvm_protocol::spam_filter::SpamFilterConfig::default();
+        config.filter_ordinals = message.filter_preferences.filter_ordinals;
+        config.filter_dust = message.filter_preferences.filter_dust;
+        config.filter_brc20 = message.filter_preferences.filter_brc20;
+        config.dust_threshold = message.filter_preferences.min_output_value as i64;
+        config.min_output_value = message.filter_preferences.min_output_value as i64;
+        config
     };
     #[cfg(feature = "utxo-commitments")]
     let spam_filter = SpamFilter::with_config(spam_filter_config);
@@ -210,8 +212,9 @@ pub async fn handle_get_filtered_block(
 
     #[cfg(feature = "utxo-commitments")]
     // Add outputs from filtered transactions
-    for tx in &filtered_txs {
+    for (tx_idx, tx) in filtered_txs.iter().enumerate() {
         let txid = calculate_txid(tx);
+        let is_coinbase_tx = transaction_indices.get(tx_idx) == Some(&0);
         for (output_idx, output) in tx.outputs.iter().enumerate() {
             use blvm_protocol::OutPoint;
             let outpoint = OutPoint {
@@ -223,6 +226,7 @@ pub async fn handle_get_filtered_block(
                 value: output.value,
                 script_pubkey: output.script_pubkey.clone(),
                 height: block_height, // Use the block height from the message
+                is_coinbase: is_coinbase_tx,
             };
             if let Err(e) = utxo_tree.insert(outpoint, utxo) {
                 // Log error but continue
@@ -326,7 +330,7 @@ pub async fn handle_get_utxo_proof(
     use blvm_consensus::types::OutPoint;
     let outpoint = OutPoint {
         hash: message.tx_hash,
-        index: message.output_index,
+        index: message.output_index as u64,
     };
 
     // Find UTXO in set
@@ -339,8 +343,8 @@ pub async fn handle_get_utxo_proof(
         .generate_proof(&outpoint)
         .map_err(|e| anyhow::anyhow!("Failed to generate proof: {:?}", e))?;
 
-    // Serialize proof to bytes
-    let proof_bytes = bincode::serialize(&proof)
+    // Serialize proof to bytes (use custom format to avoid serde version conflicts)
+    let proof_bytes = UtxoMerkleTree::serialize_proof_for_wire(proof)
         .map_err(|e| anyhow::anyhow!("Failed to serialize proof: {:?}", e))?;
 
     Ok(crate::network::protocol::UTXOProofMessage {
