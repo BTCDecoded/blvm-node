@@ -3,14 +3,14 @@
 //! This file contains profiling code that can be conditionally compiled
 //! to measure where time is spent in the RPC request/response cycle.
 //! 
-//! Usage: Compile with `--features profiling` to enable timing measurements.
+//! Usage: Compile with `--features profile` to enable timing measurements.
 //! 
 //! This is TEMPORARY - remove after profiling is complete.
 
-#[cfg(feature = "profiling")]
+#[cfg(feature = "profile")]
 use std::time::Instant;
 
-#[cfg(feature = "profiling")]
+#[cfg(feature = "profile")]
 pub struct RpcTiming {
     pub http_parse_start: Instant,
     pub http_parse_end: Option<Instant>,
@@ -24,7 +24,7 @@ pub struct RpcTiming {
     pub http_build_end: Option<Instant>,
 }
 
-#[cfg(feature = "profiling")]
+#[cfg(feature = "profile")]
 impl RpcTiming {
     pub fn new() -> Self {
         Self {
@@ -74,10 +74,10 @@ impl RpcTiming {
     }
 }
 
-#[cfg(not(feature = "profiling"))]
+#[cfg(not(feature = "profile"))]
 pub struct RpcTiming;
 
-#[cfg(not(feature = "profiling"))]
+#[cfg(not(feature = "profile"))]
 impl RpcTiming {
     pub fn new() -> Self {
         Self

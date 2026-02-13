@@ -8,13 +8,13 @@
 //! - Blocks in the same chain branch must be validated sequentially (UTXO dependencies)
 //! - Only independent block branches can be validated in parallel
 //!
-//! Reference: Bitcoin Core's parallel block validation for IBD
+//! Reference: parallel block validation for IBD
 
 use anyhow::Result;
 use blvm_protocol::block::connect_block;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::types::Network;
-use blvm_protocol::{Block, UtxoSet, ValidationResult};
+use blvm_protocol::{Block, BlockHeader, UtxoSet, ValidationResult};
 use crate::utils::current_timestamp;
 
 /// Block validation context
@@ -66,7 +66,7 @@ impl ParallelBlockValidator {
             &witnesses,
             context.prev_utxo_set.clone(),
             context.height,
-            None, // No recent headers for single block validation
+            None::<&[BlockHeader]>, // No recent headers for single block validation
             network_time,
             network,
         )?;
@@ -115,7 +115,7 @@ impl ParallelBlockValidator {
                         witnesses.as_slice(),
                         context.prev_utxo_set.clone(),
                         context.height,
-                        None, // No recent headers for parallel validation
+                        None::<&[BlockHeader]>, // No recent headers for parallel validation
                         network_time,
                         network,
                     )?;
@@ -144,7 +144,7 @@ impl ParallelBlockValidator {
                         witnesses.as_slice(),
                         context.prev_utxo_set.clone(),
                         context.height,
-                        None, // No recent headers for parallel validation
+                        None::<&[BlockHeader]>, // No recent headers for parallel validation
                         network_time,
                         network,
                     )?;
@@ -184,7 +184,7 @@ impl ParallelBlockValidator {
                 &witnesses,
                 context.prev_utxo_set.clone(),
                 context.height,
-                None, // No recent headers for sequential validation
+                None::<&[BlockHeader]>, // No recent headers for sequential validation
                 network_time,
                 network,
             )?;

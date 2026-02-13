@@ -42,7 +42,7 @@ use crate::rpc::rest::RestApiServer;
 
 /// RPC manager that coordinates all RPC operations
 ///
-/// Supports both TCP (default, Bitcoin Core compatible) and optional QUIC transport.
+/// Supports both TCP (default, standard compatible) and optional QUIC transport.
 pub struct RpcManager {
     server_addr: SocketAddr,
     quinn_addr: Option<SocketAddr>,
@@ -79,7 +79,7 @@ pub struct RpcManager {
 }
 
 impl RpcManager {
-    /// Create a new RPC manager with TCP only (Bitcoin Core compatible)
+    /// Create a new RPC manager with TCP only (standard compatible)
     pub fn new(server_addr: SocketAddr) -> Self {
         Self {
             server_addr,

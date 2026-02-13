@@ -98,7 +98,7 @@ mod tests {
         let data = b"hello world";
         let result = double_sha256(data);
 
-        // This should match Bitcoin Core's double SHA256
+        // This should match standard double SHA256
         // (We'll verify this matches actual Bitcoin behavior)
         assert_eq!(result.len(), 32);
 

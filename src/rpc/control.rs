@@ -197,7 +197,7 @@ impl ControlRpc {
             }
             "mallocinfo" => {
                 // Mallocinfo format (XML) - not implemented
-                // Bitcoin Core returns XML, but we'll return empty string for now
+                // Standard returns XML, but we'll return empty string for now
                 Ok(json!(""))
             }
             _ => Err(RpcError::invalid_params(format!(

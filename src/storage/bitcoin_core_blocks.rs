@@ -1,7 +1,6 @@
-//! Bitcoin Core block file reader
+//! Block file reader
 //!
-//! Reads blocks from Bitcoin Core's `blk*.dat` files.
-//! Bitcoin Core stores blocks in a simple format:
+//! Reads blocks from `blk*.dat` files (standard block file format).
 //! - Magic bytes (4 bytes): 0xF9BEB4D9 for mainnet
 //! - Block size (4 bytes, little-endian)
 //! - Block data (variable length)
@@ -17,7 +16,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// Magic bytes for Bitcoin Core block files
+/// Magic bytes for block files
 const MAGIC_MAINNET: [u8; 4] = [0xF9, 0xBE, 0xB4, 0xD9];
 const MAGIC_TESTNET: [u8; 4] = [0x0B, 0x11, 0x09, 0x07];
 const MAGIC_REGTEST: [u8; 4] = [0xFA, 0xBF, 0xB5, 0xDA];
@@ -40,9 +39,9 @@ struct BlockIndexCache {
     entries: Vec<(Hash, BlockLocation)>,
 }
 
-/// Bitcoin Core block file reader
+/// Block file reader
 ///
-/// Reads blocks from Bitcoin Core's `blk*.dat` files.
+/// Reads blocks from `blk*.dat` files.
 /// Builds an index of block hashes to file locations for fast lookups.
 pub struct BitcoinCoreBlockReader {
     blocks_dir: PathBuf,

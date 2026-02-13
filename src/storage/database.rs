@@ -1,10 +1,48 @@
 //! Database abstraction layer
 //!
-//! Provides a unified interface for different database backends (sled, redb, rocksdb).
+//! Provides a unified interface for different database backends (tidesdb, redb, sled, rocksdb).
 //! Allows switching between storage engines via feature flags.
+//!
+//! All backends must support the same set of tree names. Module trees (module_{id}_{name})
+//! use a shared "modules" storage with key prefixes for isolation.
 
 use anyhow::Result;
 use std::path::Path;
+
+/// All known tree names (excluding dynamic module_* which use shared "modules").
+/// Used by RocksDB for open_cf_descriptors and for backend parity validation.
+pub const KNOWN_TREE_NAMES: &[&str] = &[
+    "blocks",
+    "headers",
+    "height_index",
+    "hash_to_height",
+    "witnesses",
+    "recent_headers",
+    "utxos",
+    "ibd_utxos",
+    "spent_outputs",
+    "chain_info",
+    "work_cache",
+    "chainwork_cache",
+    "utxo_stats_cache",
+    "network_hashrate_cache",
+    "invalid_blocks",
+    "chain_tips",
+    "block_metadata",
+    "tx_by_hash",
+    "tx_by_block",
+    "tx_metadata",
+    "address_tx_index",
+    "address_output_index",
+    "address_input_index",
+    "value_index",
+    "utxo_commitments",
+    "commitment_height_index",
+    "vaults",
+    "pools",
+    "batches",
+    "modules",
+];
 
 /// Database abstraction trait
 ///
@@ -105,12 +143,58 @@ pub enum DatabaseBackend {
     Sled,
     Redb,
     RocksDB,
+    TidesDB,
 }
 
-/// Create a database instance based on backend type
+/// Resolve config backend to concrete DatabaseBackend.
+/// Returns Err if the requested backend's feature is not enabled.
+pub fn backend_from_config(
+    config: crate::config::DatabaseBackendConfig,
+) -> Result<DatabaseBackend> {
+    use crate::config::DatabaseBackendConfig;
+    match config {
+        DatabaseBackendConfig::Sled => {
+            #[cfg(feature = "sled")]
+            return Ok(DatabaseBackend::Sled);
+            #[cfg(not(feature = "sled"))]
+            return Err(anyhow::anyhow!(
+                "Sled backend not available (feature not enabled)"
+            ));
+        }
+        DatabaseBackendConfig::Redb => {
+            #[cfg(feature = "redb")]
+            return Ok(DatabaseBackend::Redb);
+            #[cfg(not(feature = "redb"))]
+            return Err(anyhow::anyhow!(
+                "Redb backend not available (feature not enabled)"
+            ));
+        }
+        DatabaseBackendConfig::Rocksdb => {
+            #[cfg(feature = "rocksdb")]
+            return Ok(DatabaseBackend::RocksDB);
+            #[cfg(not(feature = "rocksdb"))]
+            return Err(anyhow::anyhow!(
+                "RocksDB backend not available (build with --features rocksdb)"
+            ));
+        }
+        DatabaseBackendConfig::Tidesdb => {
+            #[cfg(feature = "tidesdb")]
+            return Ok(DatabaseBackend::TidesDB);
+            #[cfg(not(feature = "tidesdb"))]
+            return Err(anyhow::anyhow!(
+                "TidesDB backend not available (build with --features tidesdb)"
+            ));
+        }
+        DatabaseBackendConfig::Auto => Ok(default_backend()),
+    }
+}
+
+/// Create a database instance based on backend type.
+/// When `storage_config` is provided and backend is TidesDB, uses tidesdb.* config options.
 pub fn create_database<P: AsRef<Path>>(
     data_dir: P,
     backend: DatabaseBackend,
+    storage_config: Option<&crate::config::StorageConfig>,
 ) -> Result<Box<dyn Database>> {
     match backend {
         #[cfg(feature = "sled")]
@@ -131,29 +215,39 @@ pub fn create_database<P: AsRef<Path>>(
         DatabaseBackend::RocksDB => Err(anyhow::anyhow!(
             "RocksDB backend not available (feature not enabled)"
         )),
+        #[cfg(feature = "tidesdb")]
+        DatabaseBackend::TidesDB => Ok(Box::new(tidesdb_impl::TidesDBDatabase::new(
+            data_dir,
+            storage_config.and_then(|s| s.tidesdb.as_ref()),
+        )?)),
+        #[cfg(not(feature = "tidesdb"))]
+        DatabaseBackend::TidesDB => Err(anyhow::anyhow!(
+            "TidesDB backend not available (build with --features tidesdb)"
+        )),
     }
 }
 
 /// Get default database backend
 ///
-/// Returns the preferred backend (redb if available, otherwise sled).
-/// This function will not panic - it returns a backend if at least one is available.
+/// Returns the preferred backend: TidesDB (if available) > Redb > Sled.
 pub fn default_backend() -> DatabaseBackend {
+    #[cfg(feature = "tidesdb")]
+    {
+        return DatabaseBackend::TidesDB;
+    }
     #[cfg(feature = "redb")]
     {
-        DatabaseBackend::Redb
+        return DatabaseBackend::Redb;
     }
-    #[cfg(all(not(feature = "redb"), feature = "sled"))]
+    #[cfg(feature = "sled")]
     {
-        DatabaseBackend::Sled
+        return DatabaseBackend::Sled;
     }
-    #[cfg(all(not(feature = "redb"), not(feature = "sled")))]
+    #[cfg(feature = "rocksdb")]
     {
-        // This should never happen if features are properly configured,
-        // but we return Redb as a sentinel value that will fail gracefully
-        // in create_database() with a clear error message
-        DatabaseBackend::Redb
+        return DatabaseBackend::RocksDB;
     }
+    DatabaseBackend::Redb // fallback (redb usually always enabled)
 }
 
 /// Get fallback database backend
@@ -162,16 +256,46 @@ pub fn default_backend() -> DatabaseBackend {
 /// Returns None if no fallback is available.
 pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
     match primary {
-        DatabaseBackend::Redb => {
-            #[cfg(feature = "sled")]
+        DatabaseBackend::TidesDB => {
+            #[cfg(feature = "redb")]
             {
-                Some(DatabaseBackend::Sled)
+                Some(DatabaseBackend::Redb)
             }
-            #[cfg(all(not(feature = "sled"), feature = "rocksdb"))]
+            #[cfg(all(not(feature = "redb"), feature = "rocksdb"))]
             {
                 Some(DatabaseBackend::RocksDB)
             }
-            #[cfg(all(not(feature = "sled"), not(feature = "rocksdb")))]
+            #[cfg(all(not(feature = "redb"), not(feature = "rocksdb"), feature = "sled"))]
+            {
+                Some(DatabaseBackend::Sled)
+            }
+            #[cfg(all(
+                not(feature = "redb"),
+                not(feature = "rocksdb"),
+                not(feature = "sled")
+            ))]
+            {
+                None
+            }
+        }
+        DatabaseBackend::Redb => {
+            #[cfg(feature = "tidesdb")]
+            {
+                Some(DatabaseBackend::TidesDB)
+            }
+            #[cfg(all(not(feature = "tidesdb"), feature = "sled"))]
+            {
+                Some(DatabaseBackend::Sled)
+            }
+            #[cfg(all(not(feature = "tidesdb"), not(feature = "sled"), feature = "rocksdb"))]
+            {
+                Some(DatabaseBackend::RocksDB)
+            }
+            #[cfg(all(
+                not(feature = "tidesdb"),
+                not(feature = "sled"),
+                not(feature = "rocksdb")
+            ))]
             {
                 None
             }
@@ -191,15 +315,23 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
             }
         }
         DatabaseBackend::RocksDB => {
-            #[cfg(feature = "redb")]
+            #[cfg(feature = "tidesdb")]
+            {
+                Some(DatabaseBackend::TidesDB)
+            }
+            #[cfg(all(not(feature = "tidesdb"), feature = "redb"))]
             {
                 Some(DatabaseBackend::Redb)
             }
-            #[cfg(all(not(feature = "redb"), feature = "sled"))]
+            #[cfg(all(not(feature = "tidesdb"), not(feature = "redb"), feature = "sled"))]
             {
                 Some(DatabaseBackend::Sled)
             }
-            #[cfg(all(not(feature = "redb"), not(feature = "sled")))]
+            #[cfg(all(
+                not(feature = "tidesdb"),
+                not(feature = "redb"),
+                not(feature = "sled")
+            ))]
             {
                 None
             }
@@ -229,6 +361,24 @@ mod sled_impl {
 
     impl Database for SledDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
+            // Module trees use shared "modules" tree with key prefix (same as redb)
+            if name.starts_with("module_") {
+                let parts: Vec<&str> = name.splitn(3, '_').collect();
+                if parts.len() == 3 && parts[0] == "module" {
+                    let module_id = parts[1].to_string();
+                    let tree_name = parts[2].to_string();
+                    let modules_tree = self.db.open_tree("modules")?;
+                    let inner = SledTree {
+                        tree: Arc::new(modules_tree),
+                    };
+                    return Ok(Box::new(SledModuleTree {
+                        inner: Arc::new(inner),
+                        module_id,
+                        tree_name,
+                    }));
+                }
+            }
+
             let tree = self.db.open_tree(name)?;
             Ok(Box::new(SledTree {
                 tree: Arc::new(tree),
@@ -286,6 +436,111 @@ mod sled_impl {
                 batch: sled::Batch::default(),
                 op_count: 0,
             })
+        }
+    }
+
+    /// Module tree wrapper - uses shared "modules" tree with key prefix (parity with redb)
+    struct SledModuleTree {
+        inner: Arc<SledTree>,
+        module_id: String,
+        tree_name: String,
+    }
+
+    impl SledModuleTree {
+        fn key_prefix(&self) -> Vec<u8> {
+            format!("module_{}_{}_", self.module_id, self.tree_name).into_bytes()
+        }
+        fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
+            let mut n = self.key_prefix();
+            n.extend_from_slice(key);
+            n
+        }
+    }
+
+    impl Tree for SledModuleTree {
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            self.inner.insert(&self.namespace_key(key), value)
+        }
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            self.inner.get(&self.namespace_key(key))
+        }
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            self.inner.remove(&self.namespace_key(key))
+        }
+        fn contains_key(&self, key: &[u8]) -> Result<bool> {
+            self.inner.contains_key(&self.namespace_key(key))
+        }
+        fn clear(&self) -> Result<()> {
+            let prefix = self.key_prefix();
+            let keys: Vec<Vec<u8>> = self
+                .inner
+                .iter()
+                .filter_map(|r| match r {
+                    Ok((k, _)) if k.starts_with(&prefix) => Some(Ok(k)),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<_>>()?;
+            for k in keys {
+                self.inner.remove(&k)?;
+            }
+            Ok(())
+        }
+        fn len(&self) -> Result<usize> {
+            let prefix = self.key_prefix();
+            let mut count = 0;
+            for item in self.inner.iter() {
+                match item {
+                    Ok((k, _)) if k.starts_with(&prefix) => count += 1,
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(count)
+        }
+        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
+            let prefix = self.key_prefix();
+            Box::new(
+                self.inner
+                    .iter()
+                    .filter_map(move |item| match item {
+                        Ok((k, v)) if k.starts_with(&prefix) => {
+                            Some(Ok((k[prefix.len()..].to_vec(), v)))
+                        }
+                        Ok(_) => None,
+                        Err(e) => Some(Err(e)),
+                    }),
+            )
+        }
+        fn batch(&self) -> Box<dyn BatchWriter + '_> {
+            Box::new(SledModuleBatchWriter {
+                inner: self.inner.batch(),
+                key_prefix: self.key_prefix(),
+            })
+        }
+    }
+
+    struct SledModuleBatchWriter<'a> {
+        inner: Box<dyn BatchWriter + 'a>,
+        key_prefix: Vec<u8>,
+    }
+
+    impl<'a> BatchWriter for SledModuleBatchWriter<'a> {
+        fn put(&mut self, key: &[u8], value: &[u8]) {
+            let mut k = self.key_prefix.clone();
+            k.extend_from_slice(key);
+            self.inner.put(&k, value);
+        }
+        fn delete(&mut self, key: &[u8]) {
+            let mut k = self.key_prefix.clone();
+            k.extend_from_slice(key);
+            self.inner.delete(&k);
+        }
+        fn commit(self: Box<Self>) -> Result<()> {
+            self.inner.commit()
+        }
+        fn len(&self) -> usize {
+            self.inner.len()
         }
     }
 
@@ -388,6 +643,16 @@ mod redb_impl {
             let _guard = DB_CREATE_MUTEX.lock().unwrap();
             tracing::info!("[REDB] DB_CREATE_MUTEX acquired");
 
+            // redb cache size: BLVM_DBCACHE_MB env (default 450, matches Core -dbcache)
+            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(450);
+            let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
+            let mut builder = RedbDb::builder();
+            builder.set_cache_size(dbcache_bytes);
+            tracing::info!("[REDB] Cache size: {} MB (set via BLVM_DBCACHE_MB or config)", dbcache_mb);
+
             let db_path = data_dir.as_ref().join("redb.db");
             tracing::info!("[REDB] Database path: {:?}", db_path);
             tracing::info!("[REDB] Database path absolute: {:?}", std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone()));
@@ -413,7 +678,7 @@ mod redb_impl {
                 
                 // Open the database - this may take time for large databases
                 // redb performs checksum validation during open, especially after crashes
-                let open_result = RedbDb::open(&db_path);
+                let open_result = builder.open(&db_path);
                 
                 let elapsed = start_time.elapsed();
                 tracing::info!("[REDB] Database open completed in {:?}", elapsed);
@@ -468,13 +733,13 @@ mod redb_impl {
                         tracing::warn!("[REDB] Failed to open existing database after {:?}: {}", elapsed, e);
                         tracing::warn!("[REDB] Error details: {:?}", e);
                         tracing::info!("[REDB] Creating new database...");
-                        RedbDb::create(&db_path)?
+                        builder.create(&db_path)?
                     }
                 }
             } else {
                 tracing::info!("[REDB] Database doesn't exist, creating new one...");
                 // Database doesn't exist, create new one
-                RedbDb::create(&db_path)?
+                builder.create(&db_path)?
             };
             tracing::info!("[REDB] Database created/opened, initializing tables...");
 
@@ -975,46 +1240,50 @@ pub mod rocksdb_impl {
         /// Create a new RocksDB database
         pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
             let db_path = data_dir.as_ref().join("rocksdb");
-
             let mut opts = Options::default();
             opts.create_if_missing(true);
             opts.create_missing_column_families(true);
 
-            // Define column families for each tree type
-            let cfs = vec![
-                ColumnFamilyDescriptor::new("default", Options::default()),
-                ColumnFamilyDescriptor::new("blocks", Options::default()),
-                ColumnFamilyDescriptor::new("headers", Options::default()),
-                ColumnFamilyDescriptor::new("height_index", Options::default()),
-                ColumnFamilyDescriptor::new("hash_to_height", Options::default()),
-                ColumnFamilyDescriptor::new("witnesses", Options::default()),
-                ColumnFamilyDescriptor::new("recent_headers", Options::default()),
-                ColumnFamilyDescriptor::new("utxos", Options::default()),
-                ColumnFamilyDescriptor::new("spent_outputs", Options::default()),
-                ColumnFamilyDescriptor::new("chain_info", Options::default()),
-                ColumnFamilyDescriptor::new("work_cache", Options::default()),
-                ColumnFamilyDescriptor::new("chainwork_cache", Options::default()),
-                ColumnFamilyDescriptor::new("utxo_stats_cache", Options::default()),
-                ColumnFamilyDescriptor::new("network_hashrate_cache", Options::default()),
-                ColumnFamilyDescriptor::new("invalid_blocks", Options::default()),
-                ColumnFamilyDescriptor::new("chain_tips", Options::default()),
-                ColumnFamilyDescriptor::new("tx_by_hash", Options::default()),
-                ColumnFamilyDescriptor::new("tx_by_block", Options::default()),
-                ColumnFamilyDescriptor::new("tx_metadata", Options::default()),
-                ColumnFamilyDescriptor::new("modules", Options::default()),
-            ];
+            // Build CF list: default + all known trees (parity with redb)
+            let mut cfs = vec![ColumnFamilyDescriptor::new("default", Options::default())];
+            cfs.extend(
+                super::KNOWN_TREE_NAMES
+                    .iter()
+                    .map(|n| ColumnFamilyDescriptor::new(*n, Options::default())),
+            );
 
-            let db = DB::open_cf_descriptors(&opts, &db_path, cfs)?;
+            // If existing DB may have extra CFs (e.g. old module_* per-CF), merge for reopen
+            let db = if db_path.exists() {
+                let mut cf_descriptors = cfs.clone();
+                let known: std::collections::HashSet<_> = ["default"]
+                    .iter()
+                    .chain(super::KNOWN_TREE_NAMES)
+                    .map(|s| (*s).to_string())
+                    .collect();
+                if let Ok(existing) = rocksdb::DB::list_cf(&opts, &db_path) {
+                    for name in existing {
+                        if !known.contains(&name) {
+                            cf_descriptors.push(ColumnFamilyDescriptor::new(
+                                name,
+                                Options::default(),
+                            ));
+                        }
+                    }
+                }
+                DB::open_cf_descriptors(&opts, &db_path, cf_descriptors)?
+            } else {
+                DB::open_cf_descriptors(&opts, &db_path, cfs)?
+            };
 
             Ok(Self { db: Arc::new(db) })
         }
 
-        /// Open RocksDB with Bitcoin Core LevelDB format
+        /// Open RocksDB with LevelDB format
         ///
-        /// Opens an existing Bitcoin Core chainstate database (LevelDB format).
+        /// Opens an existing chainstate database (LevelDB format).
         /// RocksDB can read LevelDB databases directly (backward compatible).
         pub fn open_bitcoin_core<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
-            // Open existing Bitcoin Core chainstate database (LevelDB format)
+            // Open existing chainstate database (LevelDB format)
             // RocksDB can read LevelDB databases directly
             let chainstate_path = data_dir.as_ref().join("chainstate");
 
@@ -1035,14 +1304,42 @@ pub mod rocksdb_impl {
 
     impl Database for RocksDBDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            // Get or create column family
-            let cf = if let Some(cf) = self.db.cf_handle(name) {
-                cf
+            // Module trees use shared "modules" CF with key prefix (same as redb)
+            if name.starts_with("module_") {
+                let parts: Vec<&str> = name.splitn(3, '_').collect();
+                if parts.len() == 3 && parts[0] == "module" {
+                    let module_id = parts[1].to_string();
+                    let tree_name = parts[2].to_string();
+                    let modules_cf = self
+                        .db
+                        .cf_handle("modules")
+                        .ok_or_else(|| anyhow::anyhow!("modules column family not found"))?;
+                    let inner = RocksDBTree {
+                        db: Arc::clone(&self.db),
+                        cf: Arc::new(modules_cf),
+                        name: "modules".to_string(),
+                    };
+                    return Ok(Box::new(RocksDBModuleTree {
+                        inner: Arc::new(inner),
+                        module_id,
+                        tree_name,
+                    }));
+                }
+            }
+
+            // Known trees use pre-created CF. Others create on demand (e.g. WAL, tests).
+            let cf = if let Some(handle) = self.db.cf_handle(name) {
+                handle
+            } else if super::KNOWN_TREE_NAMES.contains(&name) {
+                return Err(anyhow::anyhow!(
+                    "Column family {} should exist but was not found",
+                    name
+                ));
             } else {
-                // Create new column family if it doesn't exist
                 let opts = Options::default();
                 self.db.create_cf(name, &opts)?;
-                self.db.cf_handle(name)
+                self.db
+                    .cf_handle(name)
                     .ok_or_else(|| anyhow::anyhow!("Failed to create column family: {}", name))?
             };
 
@@ -1133,6 +1430,111 @@ pub mod rocksdb_impl {
         }
     }
 
+    /// Module tree wrapper - uses shared "modules" CF with key prefix (parity with redb)
+    struct RocksDBModuleTree {
+        inner: Arc<RocksDBTree>,
+        module_id: String,
+        tree_name: String,
+    }
+
+    impl RocksDBModuleTree {
+        fn key_prefix(&self) -> Vec<u8> {
+            format!("module_{}_{}_", self.module_id, self.tree_name).into_bytes()
+        }
+        fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
+            let mut n = self.key_prefix();
+            n.extend_from_slice(key);
+            n
+        }
+    }
+
+    impl Tree for RocksDBModuleTree {
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            self.inner.insert(&self.namespace_key(key), value)
+        }
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            self.inner.get(&self.namespace_key(key))
+        }
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            self.inner.remove(&self.namespace_key(key))
+        }
+        fn contains_key(&self, key: &[u8]) -> Result<bool> {
+            self.inner.contains_key(&self.namespace_key(key))
+        }
+        fn clear(&self) -> Result<()> {
+            let prefix = self.key_prefix();
+            let keys: Vec<Vec<u8>> = self
+                .inner
+                .iter()
+                .filter_map(|r| match r {
+                    Ok((k, _)) if k.starts_with(&prefix) => Some(Ok(k)),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<_>>()?;
+            for k in keys {
+                self.inner.remove(&k)?;
+            }
+            Ok(())
+        }
+        fn len(&self) -> Result<usize> {
+            let prefix = self.key_prefix();
+            let mut count = 0;
+            for item in self.inner.iter() {
+                match item {
+                    Ok((k, _)) if k.starts_with(&prefix) => count += 1,
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(count)
+        }
+        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
+            let prefix = self.key_prefix();
+            Box::new(
+                self.inner
+                    .iter()
+                    .filter_map(move |item| match item {
+                        Ok((k, v)) if k.starts_with(&prefix) => {
+                            Some(Ok((k[prefix.len()..].to_vec(), v)))
+                        }
+                        Ok(_) => None,
+                        Err(e) => Some(Err(e)),
+                    }),
+            )
+        }
+        fn batch(&self) -> Box<dyn BatchWriter + '_> {
+            Box::new(RocksDBModuleBatchWriter {
+                inner: self.inner.batch(),
+                key_prefix: self.key_prefix(),
+            })
+        }
+    }
+
+    struct RocksDBModuleBatchWriter<'a> {
+        inner: Box<dyn BatchWriter + 'a>,
+        key_prefix: Vec<u8>,
+    }
+
+    impl<'a> BatchWriter for RocksDBModuleBatchWriter<'a> {
+        fn put(&mut self, key: &[u8], value: &[u8]) {
+            let mut k = self.key_prefix.clone();
+            k.extend_from_slice(key);
+            self.inner.put(&k, value);
+        }
+        fn delete(&mut self, key: &[u8]) {
+            let mut k = self.key_prefix.clone();
+            k.extend_from_slice(key);
+            self.inner.delete(&k);
+        }
+        fn commit(self: Box<Self>) -> Result<()> {
+            self.inner.commit()
+        }
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+    }
+
     /// RocksDB batch writer using native WriteBatch
     ///
     /// RocksDB's WriteBatch is highly optimized for bulk operations.
@@ -1161,6 +1563,386 @@ pub mod rocksdb_impl {
 
         fn len(&self) -> usize {
             self.op_count
+        }
+    }
+}
+
+// TidesDB implementation
+#[cfg(feature = "tidesdb")]
+mod tidesdb_impl {
+    use super::{BatchWriter, Database, Tree};
+    use anyhow::Result;
+    use std::path::Path;
+    use std::sync::Arc;
+    use tidesdb::{ColumnFamilyConfig, CompressionAlgorithm, Config, LogLevel, SyncMode, TidesDB};
+
+    pub struct TidesDBDatabase {
+        db: Arc<TidesDB>,
+        tidesdb_config: Option<crate::config::TidesDBConfig>,
+    }
+
+    impl TidesDBDatabase {
+        pub fn new<P: AsRef<Path>>(
+            data_dir: P,
+            tidesdb_config: Option<&crate::config::TidesDBConfig>,
+        ) -> Result<Self> {
+            let db_path = data_dir.as_ref().join("tidesdb");
+            std::fs::create_dir_all(&db_path)?;
+
+            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(450);
+            let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
+
+            let flush_threads: i32 = std::env::var("BLVM_TIDESDB_FLUSH_THREADS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4);
+            let compact_threads: i32 = std::env::var("BLVM_TIDESDB_COMPACT_THREADS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4);
+            let config = Config::new(&db_path)
+                .block_cache_size(dbcache_bytes)
+                .num_flush_threads(flush_threads)
+                .num_compaction_threads(compact_threads)
+                .log_level(LogLevel::Warn);
+
+            let db = TidesDB::open(config)
+                .map_err(|e| anyhow::anyhow!("TidesDB open failed: {}", e))?;
+
+            Ok(Self {
+                db: Arc::new(db),
+                tidesdb_config: tidesdb_config.cloned(),
+            })
+        }
+
+        /// Tuned config per tree for IBD/block sync performance.
+        fn cf_config_for_tree(&self, name: &str) -> ColumnFamilyConfig {
+            let base = ColumnFamilyConfig::default().compression_algorithm(CompressionAlgorithm::None);
+            let utxo_threshold = self
+                .tidesdb_config
+                .as_ref()
+                .map(|c| c.utxo_klog_threshold)
+                .unwrap_or(0);
+
+            match name {
+                "ibd_utxos" => base
+                    .klog_value_threshold(utxo_threshold)
+                    .write_buffer_size(256 * 1024 * 1024) // 256MB memtable, fewer flushes
+                    .enable_bloom_filter(true)
+                    .bloom_fpr(0.01)
+                    .sync_mode(SyncMode::Interval)
+                    .sync_interval_us(1_000_000), // 1s sync interval during IBD
+                "blocks" => base
+                    .klog_value_threshold(4 * 1024 * 1024) // blocks up to 4MB to vlog
+                    .write_buffer_size(256 * 1024 * 1024)
+                    .enable_bloom_filter(true)
+                    .sync_mode(SyncMode::Interval)
+                    .sync_interval_us(1_000_000),
+                "utxos" => base
+                    .klog_value_threshold(utxo_threshold)
+                    .write_buffer_size(128 * 1024 * 1024)
+                    .enable_bloom_filter(true),
+                _ => base,
+            }
+        }
+
+        fn get_or_create_cf(&self, name: &str) -> Result<tidesdb::ColumnFamily> {
+            if let Ok(cf) = self.db.get_column_family(name) {
+                return Ok(cf);
+            }
+            let cf_config = self.cf_config_for_tree(name);
+            self.db
+                .create_column_family(name, cf_config)
+                .map_err(|e| anyhow::anyhow!("TidesDB create_column_family failed: {}", e))?;
+            self.db
+                .get_column_family(name)
+                .map_err(|e| anyhow::anyhow!("TidesDB get_column_family failed: {}", e))
+        }
+    }
+
+    impl Database for TidesDBDatabase {
+        fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
+            if name.starts_with("module_") {
+                let parts: Vec<&str> = name.splitn(3, '_').collect();
+                if parts.len() == 3 && parts[0] == "module" {
+                    let module_id = parts[1].to_string();
+                    let tree_name = parts[2].to_string();
+                    let modules_cf = self.get_or_create_cf("modules")?;
+                    let inner = TidesDBTree {
+                        db: Arc::clone(&self.db),
+                        cf: Arc::new(modules_cf),
+                        name: "modules".to_string(),
+                    };
+                    return Ok(Box::new(TidesDBModuleTree {
+                        inner: Arc::new(inner),
+                        module_id,
+                        tree_name,
+                    }));
+                }
+            }
+
+            let cf = self.get_or_create_cf(name)?;
+            Ok(Box::new(TidesDBTree {
+                db: Arc::clone(&self.db),
+                cf: Arc::new(cf),
+                name: name.to_string(),
+            }))
+        }
+
+        fn flush(&self) -> Result<()> {
+            // TidesDB has no global flush(); no-op per implementation plan.
+            Ok(())
+        }
+    }
+
+    struct TidesDBTree {
+        db: Arc<TidesDB>,
+        cf: Arc<tidesdb::ColumnFamily>,
+        name: String,
+    }
+
+    fn tidesdb_get_to_option(
+        txn: &tidesdb::Transaction,
+        cf: &tidesdb::ColumnFamily,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        match txn.get(cf, key) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("TidesDB get failed: {}", e)),
+        }
+    }
+
+    impl Tree for TidesDBTree {
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            let mut txn = self.db.begin_transaction()?;
+            txn.put(&self.cf, key, value, -1)?;
+            txn.commit().map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
+        }
+
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            let txn = self.db.begin_transaction()?;
+            tidesdb_get_to_option(&txn, &self.cf, key)
+        }
+
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            let mut txn = self.db.begin_transaction()?;
+            txn.delete(&self.cf, key)?;
+            txn.commit().map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
+        }
+
+        fn contains_key(&self, key: &[u8]) -> Result<bool> {
+            Ok(self.get(key)?.is_some())
+        }
+
+        fn clear(&self) -> Result<()> {
+            let txn = self.db.begin_transaction()?;
+            let mut iter = txn.new_iterator(&self.cf)?;
+            iter.seek_to_first()?;
+            let mut keys = Vec::new();
+            while iter.is_valid() {
+                keys.push(iter.key()?);
+                iter.next()?;
+            }
+            drop(iter);
+            drop(txn);
+
+            if keys.is_empty() {
+                return Ok(());
+            }
+            let mut txn = self.db.begin_transaction()?;
+            for k in keys {
+                txn.delete(&self.cf, &k)?;
+            }
+            txn.commit().map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
+        }
+
+        fn len(&self) -> Result<usize> {
+            let stats = self.cf.get_stats()?;
+            Ok(stats.total_keys as usize)
+        }
+
+        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
+            let txn = match self.db.begin_transaction() {
+                Ok(t) => t,
+                Err(e) => {
+                    return Box::new(std::iter::once(Err(anyhow::anyhow!(
+                        "TidesDB begin_transaction failed: {}",
+                        e
+                    ))));
+                }
+            };
+            let mut iter = match txn.new_iterator(&self.cf) {
+                Ok(i) => i,
+                Err(e) => {
+                    return Box::new(std::iter::once(Err(anyhow::anyhow!(
+                        "TidesDB new_iterator failed: {}",
+                        e
+                    ))));
+                }
+            };
+            let _ = iter.seek_to_first();
+            let mut items = Vec::new();
+            while iter.is_valid() {
+                match (iter.key(), iter.value()) {
+                    (Ok(k), Ok(v)) => items.push(Ok((k, v))),
+                    (Err(e), _) | (_, Err(e)) => {
+                        items.push(Err(anyhow::anyhow!("TidesDB iter: {}", e)));
+                        break;
+                    }
+                }
+                if let Err(e) = iter.next() {
+                    items.push(Err(anyhow::anyhow!("TidesDB iter next: {}", e)));
+                    break;
+                }
+            }
+            Box::new(items.into_iter())
+        }
+
+        fn batch(&self) -> Box<dyn BatchWriter + '_> {
+            Box::new(TidesDBBatchWriter {
+                db: Arc::clone(&self.db),
+                cf: Arc::clone(&self.cf),
+                pending: Vec::new(),
+            })
+        }
+    }
+
+    struct TidesDBModuleTree {
+        inner: Arc<TidesDBTree>,
+        module_id: String,
+        tree_name: String,
+    }
+
+    impl TidesDBModuleTree {
+        fn key_prefix(&self) -> Vec<u8> {
+            format!("module_{}_{}_", self.module_id, self.tree_name).into_bytes()
+        }
+        fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
+            let mut n = self.key_prefix();
+            n.extend_from_slice(key);
+            n
+        }
+    }
+
+    impl Tree for TidesDBModuleTree {
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            self.inner.insert(&self.namespace_key(key), value)
+        }
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            self.inner.get(&self.namespace_key(key))
+        }
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            self.inner.remove(&self.namespace_key(key))
+        }
+        fn contains_key(&self, key: &[u8]) -> Result<bool> {
+            self.inner.contains_key(&self.namespace_key(key))
+        }
+        fn clear(&self) -> Result<()> {
+            let prefix = self.key_prefix();
+            let keys: Vec<Vec<u8>> = self
+                .inner
+                .iter()
+                .filter_map(|r| match r {
+                    Ok((k, _)) if k.starts_with(&prefix) => Some(Ok(k)),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<_>>()?;
+            for k in keys {
+                self.inner.remove(&k)?;
+            }
+            Ok(())
+        }
+        fn len(&self) -> Result<usize> {
+            let prefix = self.key_prefix();
+            let mut count = 0;
+            for item in self.inner.iter() {
+                match item {
+                    Ok((k, _)) if k.starts_with(&prefix) => count += 1,
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(count)
+        }
+        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
+            let prefix = self.key_prefix();
+            Box::new(
+                self.inner
+                    .iter()
+                    .filter_map(move |item| match item {
+                        Ok((k, v)) if k.starts_with(&prefix) => {
+                            Some(Ok((k[prefix.len()..].to_vec(), v)))
+                        }
+                        Ok(_) => None,
+                        Err(e) => Some(Err(e)),
+                    }),
+            )
+        }
+        fn batch(&self) -> Box<dyn BatchWriter + '_> {
+            Box::new(TidesDBModuleBatchWriter {
+                inner: self.inner.batch(),
+                key_prefix: self.key_prefix(),
+            })
+        }
+    }
+
+    struct TidesDBModuleBatchWriter<'a> {
+        inner: Box<dyn BatchWriter + 'a>,
+        key_prefix: Vec<u8>,
+    }
+
+    impl<'a> BatchWriter for TidesDBModuleBatchWriter<'a> {
+        fn put(&mut self, key: &[u8], value: &[u8]) {
+            let mut k = self.key_prefix.clone();
+            k.extend_from_slice(key);
+            self.inner.put(&k, value);
+        }
+        fn delete(&mut self, key: &[u8]) {
+            let mut k = self.key_prefix.clone();
+            k.extend_from_slice(key);
+            self.inner.delete(&k);
+        }
+        fn commit(self: Box<Self>) -> Result<()> {
+            self.inner.commit()
+        }
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+    }
+
+    struct TidesDBBatchWriter {
+        db: Arc<TidesDB>,
+        cf: Arc<tidesdb::ColumnFamily>,
+        pending: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    }
+
+    impl BatchWriter for TidesDBBatchWriter {
+        fn put(&mut self, key: &[u8], value: &[u8]) {
+            self.pending.push((key.to_vec(), Some(value.to_vec())));
+        }
+        fn delete(&mut self, key: &[u8]) {
+            self.pending.push((key.to_vec(), None));
+        }
+        fn commit(self: Box<Self>) -> Result<()> {
+            if self.pending.is_empty() {
+                return Ok(());
+            }
+            let mut txn = self.db.begin_transaction()?;
+            for (key, value) in self.pending {
+                match value {
+                    Some(v) => txn.put(&self.cf, &key, &v, -1)?,
+                    None => txn.delete(&self.cf, &key)?,
+                }
+            }
+            txn.commit().map_err(|e| anyhow::anyhow!("TidesDB batch commit failed: {}", e))
+        }
+        fn len(&self) -> usize {
+            self.pending.len()
         }
     }
 }

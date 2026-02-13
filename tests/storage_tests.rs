@@ -605,7 +605,7 @@ async fn test_chainstate_work_accumulation() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, default_backend, Database};
     let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
+        std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
     let chainstate = ChainState::new(db_arc).unwrap();
 
     // Test work accumulation
@@ -646,7 +646,7 @@ async fn test_chainstate_persistence() {
     // Create first chainstate
     {
         use blvm_node::storage::database::{create_database, default_backend};
-        let db_arc = std::sync::Arc::from(create_database(db_path, default_backend()).unwrap());
+        let db_arc = std::sync::Arc::from(create_database(db_path, default_backend(), None).unwrap());
         let chainstate = ChainState::new(db_arc).unwrap();
 
         let header = TestBlockBuilder::new()
@@ -665,7 +665,7 @@ async fn test_chainstate_persistence() {
     // Reopen and verify persistence
     {
         use blvm_node::storage::database::{create_database, default_backend};
-        let db_arc = std::sync::Arc::from(create_database(db_path, default_backend()).unwrap());
+        let db_arc = std::sync::Arc::from(create_database(db_path, default_backend(), None).unwrap());
         let chainstate = ChainState::new(db_arc).unwrap();
 
         let chain_info = chainstate.load_chain_info().unwrap();
@@ -680,7 +680,7 @@ async fn test_utxostore_concurrent_operations() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, default_backend, Database};
     let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
+        std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
     let utxostore = UtxoStore::new(db_arc).unwrap();
 
     // Create multiple UTXOs
@@ -735,7 +735,7 @@ async fn test_txindex_lookup_paths() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, default_backend, Database};
     let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
+        std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
     let txindex = TxIndex::new(db_arc).unwrap();
 
     // Create test transaction
@@ -786,7 +786,7 @@ fn test_redb_tree_clear() {
 
     let temp_dir = TempDir::new().unwrap();
     let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
+        std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
 
     // Open a valid table (redb requires pre-defined tables)
     // Use "blocks" table which is always available
@@ -829,7 +829,7 @@ async fn test_storage_integration_workflow() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, default_backend, Database};
     let db_arc: std::sync::Arc<dyn Database> =
-        std::sync::Arc::from(create_database(temp_dir.path(), default_backend()).unwrap());
+        std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
 
     // Initialize all storage components
     let blockstore = BlockStore::new(db_arc.clone()).unwrap();
@@ -914,6 +914,7 @@ fn test_block_compression_roundtrip() {
     let db = Arc::from(blvm_node::storage::database::create_database(
         temp_dir.path(),
         blvm_node::storage::database::DatabaseBackend::Sled,
+        None,
     )
     .unwrap());
     
@@ -961,7 +962,7 @@ fn test_block_compression_roundtrip() {
 fn test_module_tree_isolation_redb() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb).unwrap());
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     // Create two module trees with different module IDs
     let tree1 = db.open_tree("module_abc123_state").unwrap();
@@ -985,7 +986,7 @@ fn test_module_tree_isolation_redb() {
 fn test_module_tree_operations_redb() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb).unwrap());
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     let tree = db.open_tree("module_test123_cache").unwrap();
 
@@ -1018,7 +1019,7 @@ fn test_module_tree_operations_redb() {
 fn test_module_tree_iter_redb() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb).unwrap());
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     let tree = db.open_tree("module_test456_data").unwrap();
 
@@ -1045,7 +1046,7 @@ fn test_module_tree_iter_redb() {
 fn test_module_tree_multiple_trees_same_module_redb() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb).unwrap());
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     // Create multiple trees for the same module
     let state_tree = db.open_tree("module_mod123_state").unwrap();
@@ -1069,7 +1070,7 @@ fn test_module_tree_multiple_trees_same_module_redb() {
 fn test_module_tree_isolation_sled() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled).unwrap());
+    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled, None).unwrap());
 
     // Create two module trees with different module IDs
     let tree1 = db.open_tree("module_abc123_state").unwrap();
@@ -1098,13 +1099,13 @@ fn test_module_tree_backend_compatibility() {
     use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
     
     // Test with redb
-    let db_redb = Arc::from(create_database(temp_dir1.path(), DatabaseBackend::Redb).unwrap());
+    let db_redb = Arc::from(create_database(temp_dir1.path(), DatabaseBackend::Redb, None).unwrap());
     let tree_redb = db_redb.open_tree("module_test_state").unwrap();
     tree_redb.insert(b"key", b"value").unwrap();
     assert_eq!(tree_redb.get(b"key").unwrap(), Some(b"value".to_vec()));
 
     // Test with sled
-    let db_sled = Arc::from(create_database(temp_dir2.path(), DatabaseBackend::Sled).unwrap());
+    let db_sled = Arc::from(create_database(temp_dir2.path(), DatabaseBackend::Sled, None).unwrap());
     let tree_sled = db_sled.open_tree("module_test_state").unwrap();
     tree_sled.insert(b"key", b"value").unwrap();
     assert_eq!(tree_sled.get(b"key").unwrap(), Some(b"value".to_vec()));
@@ -1117,6 +1118,7 @@ fn test_block_compression_ratio() {
     let db = Arc::from(blvm_node::storage::database::create_database(
         temp_dir.path(),
         blvm_node::storage::database::DatabaseBackend::Sled,
+        None,
     )
     .unwrap());
     
@@ -1165,6 +1167,7 @@ fn test_witness_compression_roundtrip() {
     let db = Arc::from(blvm_node::storage::database::create_database(
         temp_dir.path(),
         blvm_node::storage::database::DatabaseBackend::Sled,
+        None,
     )
     .unwrap());
     
@@ -1203,6 +1206,7 @@ fn test_utxo_compression_roundtrip() {
     let db = Arc::from(blvm_node::storage::database::create_database(
         temp_dir.path(),
         blvm_node::storage::database::DatabaseBackend::Sled,
+        None,
     )
     .unwrap());
     
@@ -1247,6 +1251,7 @@ fn test_utxo_compression_auto_detection() {
     let db = Arc::from(blvm_node::storage::database::create_database(
         temp_dir.path(),
         blvm_node::storage::database::DatabaseBackend::Sled,
+        None,
     )
     .unwrap());
     

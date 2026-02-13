@@ -151,7 +151,7 @@ impl Migrator {
 
         // Create destination database (redb)
         info!("Creating destination database...");
-        let dest_db = Arc::from(create_database(dest_dir, DatabaseBackend::Redb)?);
+        let dest_db = Arc::from(create_database(dest_dir, DatabaseBackend::Redb, None)?);
 
         let progress = Arc::new(MigrationProgress {
             coins_migrated: AtomicU64::new(0),

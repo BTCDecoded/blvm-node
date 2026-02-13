@@ -38,7 +38,7 @@ pub struct BlockStore {
     witness_compression_enabled: bool,
     #[cfg(feature = "witness-compression")]
     witness_compression_level: u32,
-    /// Optional Bitcoin Core block file reader for fallback reading
+    /// Optional block file reader for fallback reading
     #[cfg(feature = "rocksdb")]
     bitcoin_core_reader: Option<Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>>,
 }
@@ -111,7 +111,7 @@ impl BlockStore {
         )
     }
 
-    /// Create a new block store with compression settings and optional Bitcoin Core reader
+    /// Create a new block store with compression settings and optional block file reader
     fn new_with_compression_and_reader(
         db: Arc<dyn Database>,
         #[cfg(feature = "block-compression")]
@@ -321,7 +321,7 @@ impl BlockStore {
     /// Get a block by hash
     ///
     /// First tries to get the block from the database.
-    /// If not found and Bitcoin Core block files are available, falls back to reading from files.
+    /// If not found and block files are available, falls back to reading from files.
     pub fn get_block(&self, hash: &Hash) -> Result<Option<Block>> {
         if let Some(data) = self.blocks.get(hash.as_slice())? {
             // Decompress if data is compressed (auto-detect via zstd magic bytes)
@@ -339,7 +339,7 @@ impl BlockStore {
             let block: Block = bincode::deserialize(&block_data)?;
             Ok(Some(block))
         } else {
-            // Block not in database, try Bitcoin Core block files if available
+            // Block not in database, try block files if available
             #[cfg(feature = "rocksdb")]
             {
                 if let Some(reader) = &self.bitcoin_core_reader {

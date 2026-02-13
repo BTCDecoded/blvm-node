@@ -18,7 +18,9 @@ use crate::network::NetworkManager;
 use crate::network::protocol::{GetHeadersMessage, HeadersMessage, ProtocolMessage, ProtocolParser};
 use crate::network::inventory::MSG_BLOCK;
 use crate::storage::blockstore::BlockStore;
-use crate::storage::disk_utxo::DiskBackedUtxoSet;
+use crate::storage::disk_utxo::{
+    block_input_keys, block_input_keys_batch, load_keys_from_disk, DiskBackedUtxoSet, OutPointKey,
+};
 use crate::storage::Storage;
 use anyhow::{Context, Result};
 use blvm_protocol::{
@@ -104,6 +106,44 @@ fn calculate_dynamic_buffer_limit(_current_height: u64) -> usize {
     // Conservative default for unknown systems
     warn!("sysinfo not available, using conservative buffer limit of 20,000 blocks");
     20_000
+}
+
+/// Storage flush interval: 1000 when RAM>=24GB (reduces flush frequency ~2% IBD gain), else 500.
+#[cfg(feature = "sysinfo")]
+fn calculate_storage_flush_interval() -> usize {
+    use sysinfo::System;
+    let sys = System::new_all();
+    let total_gb = sys.total_memory() / (1024 * 1024 * 1024);
+    if total_gb >= 24 {
+        1000
+    } else {
+        500
+    }
+}
+
+#[cfg(not(feature = "sysinfo"))]
+fn calculate_storage_flush_interval() -> usize {
+    500
+}
+
+/// TidesDB hard limit: max ops per transaction (TDB_MAX_TXN_OPS=100000 in tidesdb.c).
+/// Batches exceeding this return TDB_ERR_TOO_LARGE. Use 50k for safety margin.
+const TIDESDB_MAX_TXN_OPS: usize = 50_000;
+
+/// UTXO flush threshold: 400k when RAM>=24GB (reduces disk flush frequency ~3-5% IBD gain), else 200k.
+/// Capped at TIDESDB_MAX_TXN_OPS when using TidesDB backend (configured via BLVM_UTXO_FLUSH_THRESHOLD).
+#[cfg(feature = "sysinfo")]
+fn calculate_utxo_flush_threshold() -> usize {
+    use sysinfo::System;
+    let sys = System::new_all();
+    let total_gb = sys.total_memory() / (1024 * 1024 * 1024);
+    let raw = if total_gb >= 24 { 400_000 } else { 200_000 };
+    raw.min(TIDESDB_MAX_TXN_OPS)
+}
+
+#[cfg(not(feature = "sysinfo"))]
+fn calculate_utxo_flush_threshold() -> usize {
+    200_000.min(TIDESDB_MAX_TXN_OPS)
 }
 
 /// Calculate dynamic prefetch cache limit based on available memory
@@ -941,7 +981,6 @@ impl ParallelIBD {
         // buffer and flushed in batches of 1000 blocks. This improves IBD
         // performance from ~2 blocks/sec to ~50+ blocks/sec.
         use std::collections::BTreeMap;
-        use std::collections::VecDeque;
         let mut reorder_buffer: BTreeMap<u64, (Block, Vec<Vec<Witness>>)> = BTreeMap::new();
         let mut next_height = start_height;
         let mut blocks_synced = 0;
@@ -950,18 +989,37 @@ impl ParallelIBD {
         let mut last_rate_log_time = validation_start;
         let mut last_rate_log_blocks = 0u64;
         
+        // IBD Profiling (when profile feature enabled): BLVM_IBD_PROFILE=1 logs every block, =100 every 100th. BLVM_IBD_PROFILE_SLOW_MS=50 logs when any phase > 50ms.
+        // Disk I/O breakdown: prefetch, validation, sync, evict, flush (ms each). Use BLVM_IBD_DISK_PROFILE=1 for disk-focused logging.
+        #[cfg(feature = "profile")]
+        let (ibd_profile_sample, ibd_profile_slow_ms, ibd_profile, ibd_disk_profile) = {
+            let sample: u64 = std::env::var("BLVM_IBD_PROFILE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let slow: u64 = std::env::var("BLVM_IBD_PROFILE_SLOW_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let disk: bool = std::env::var("BLVM_IBD_DISK_PROFILE").ok().map(|s| s == "1" || s == "true").unwrap_or(false);
+            let on = sample > 0 || disk;
+            if on {
+                info!("IBD profiling ENABLED: sample_interval={}, slow_threshold_ms={}, disk_io={}", sample, slow, disk);
+            }
+            (sample, slow, on, disk)
+        };
+        #[cfg(not(feature = "profile"))]
+        let (ibd_profile_sample, ibd_profile_slow_ms, ibd_profile, ibd_disk_profile) = (0u64, 0u64, false, false);
+        
         // Track last 11 block headers for BIP113 median-time-past calculation
-        // This avoids reading headers from the database on every block
-        let mut recent_headers_buf: VecDeque<blvm_consensus::types::BlockHeader> = VecDeque::with_capacity(12);
+        // Vec + drain keeps contiguity; avoids VecDeque::make_contiguous() per-block alloc
+        let mut recent_headers_buf: Vec<Arc<BlockHeader>> = Vec::with_capacity(12);
         
         // DEFERRED STORAGE: Buffer validated blocks for batch commit
         // Keep flush interval small to avoid OOM on systems with limited RAM (16GB)
         // During flush, block data is serialized into additional Vecs (~2x memory peak)
         // Plus redb mmaps the entire database file, consuming virtual memory
-        // Reduced from 500 to 250 — at block 300k+ blocks are ~500KB each,
-        // so 250 blocks = ~125MB pending, plus ~250MB peak during serialization
-        const STORAGE_FLUSH_INTERVAL: usize = 250;
-        let mut pending_blocks: Vec<(Block, Vec<Vec<Witness>>, u64)> = Vec::with_capacity(STORAGE_FLUSH_INTERVAL);
+        // 500 blocks: ~250MB pending. 1000: ~500MB. Fewer flushes = less blocking (flush 337-791ms)
+        // Tunable via BLVM_STORAGE_FLUSH_INTERVAL; auto-tune: 1000 when RAM>=24GB for ~2% IBD gain
+        let storage_flush_interval: usize = std::env::var("BLVM_STORAGE_FLUSH_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| calculate_storage_flush_interval());
+        let mut pending_blocks: Vec<(Block, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)> = Vec::with_capacity(storage_flush_interval);
         let skip_storage = false;
         
         // DYNAMIC MEMORY MANAGEMENT: Calculate buffer limits based on available system memory
@@ -973,28 +1031,30 @@ impl ParallelIBD {
         // Before each block, needed UTXOs are prefetched from disk.
         // After each block, changes are synced to disk and cold entries evicted.
         //
-        // Max cache entries: 5M entries ≈ 2.5GB (leaves ~7GB for OS, redb mmap, app on 16GB)
-        // With batch eviction (10% trigger / 20% headroom), eviction runs every ~500 blocks
-        // instead of every block, dramatically reducing overhead.
-        // Flush threshold: 100k pending writes ≈ every 50 blocks of UTXO changes
-        const MAX_UTXO_CACHE_ENTRIES: usize = 12_000_000;
-        const UTXO_FLUSH_THRESHOLD: usize = 50_000;  // Reduced from 100k for smaller, more frequent batches
+        // Configurable via env: BLVM_UTXO_CACHE_ENTRIES, BLVM_UTXO_FLUSH_THRESHOLD
+        let max_utxo_cache_entries: usize = std::env::var("BLVM_UTXO_CACHE_ENTRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20_000_000);
+        let utxo_flush_threshold: usize = std::env::var("BLVM_UTXO_FLUSH_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(calculate_utxo_flush_threshold)
+            .min(TIDESDB_MAX_TXN_OPS);
         
         let mut disk_utxo: Option<DiskBackedUtxoSet> = if let Some(storage_ref) = storage {
             match storage_ref.open_tree("ibd_utxos") {
                 Ok(tree) => {
-                    let mut du = DiskBackedUtxoSet::new(tree, MAX_UTXO_CACHE_ENTRIES, UTXO_FLUSH_THRESHOLD);
+                    let mut du = DiskBackedUtxoSet::new(tree, max_utxo_cache_entries, utxo_flush_threshold);
                     if start_height <= 1 {
-                        // Fresh IBD from genesis — stale data from a previous run is invalid.
-                        // Start in pure memory mode (no disk ops until cache reaches 80%).
-                        info!("Fresh IBD: starting in pure memory mode (disk sync deferred until cache reaches 80%)");
+                        info!("Fresh IBD: unified path (incremental flush from block 1)");
                     } else {
                         if let Err(e) = du.initialize_count() {
                             warn!("Failed to initialize disk UTXO count: {}", e);
                         }
                     }
                     info!("DiskBackedUtxoSet initialized: max_cache={}, flush_threshold={}", 
-                        MAX_UTXO_CACHE_ENTRIES, UTXO_FLUSH_THRESHOLD);
+                        max_utxo_cache_entries, utxo_flush_threshold);
                     Some(du)
                 }
                 Err(e) => {
@@ -1006,9 +1066,32 @@ impl ParallelIBD {
             warn!("No storage available for disk-backed UTXO set. Using in-memory only (may OOM).");
             None
         };
+
+        // Batched lookahead prefetch: load UTXOs for N+1..N+K in one TidesDB round-trip.
+        // Reduces spawn_blocking overhead and amortizes disk access across multiple blocks.
+        // Tunable via BLVM_UTXO_PREFETCH_LOOKAHEAD (default 8; Phase 2 tuning).
+        let utxo_prefetch_lookahead: usize = std::env::var("BLVM_UTXO_PREFETCH_LOOKAHEAD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8)
+            .clamp(1, 16);
         
-        info!("Validation loop starting (deferred storage enabled, flush every {} blocks, buffer limit: {}, disk_utxo: {})...", 
-            STORAGE_FLUSH_INTERVAL, dynamic_buffer_limit, disk_utxo.is_some());
+        info!("Validation loop starting (deferred storage enabled, flush every {} blocks, buffer limit: {}, disk_utxo: {}, utxo_prefetch_lookahead: {})...", 
+            storage_flush_interval, dynamic_buffer_limit, disk_utxo.is_some(), utxo_prefetch_lookahead);
+        let mut prefetch_queue: std::collections::VecDeque<(u64, tokio::task::JoinHandle<Result<HashMap<OutPointKey, UTXO>>>)> =
+            std::collections::VecDeque::new();
+        const MAX_PREFETCHES_IN_FLIGHT: usize = 2; // Pipeline N+1 and N+2 prefetches (Phase 2)
+
+        // Async flush: run storage flush on background thread. Fully overlapped: do NOT await
+        // previous flush before spawning next. Cap 8 in flight to reduce validation stalls (Phase A).
+        let mut flush_handles: std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>> =
+            std::collections::VecDeque::new();
+        const MAX_FLUSHES_IN_FLIGHT: usize = 8;
+
+        // Async UTXO flush: same pattern as block storage. Cap 8 in flight to reduce stalls (Phase A).
+        let mut utxo_flush_handles: std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>> =
+            std::collections::VecDeque::new();
+        const MAX_UTXO_FLUSHES_IN_FLIGHT: usize = 8;
         
         // Memory monitoring: log RSS and available memory every N blocks
         let mut last_memory_log_height: u64 = 0;
@@ -1017,7 +1100,112 @@ impl ParallelIBD {
         loop {
             // CRITICAL: Always try to validate consecutive blocks first
             // This ensures we process blocks even when paused for gaps
-            while let Some((block, witnesses)) = reorder_buffer.remove(&next_height) {
+            while let Some((mut block, witnesses)) = reorder_buffer.remove(&next_height) {
+                // PREFETCH OVERLAP: Find and merge any pending prefetch for this block.
+                let mut prefetch_await_ms: u64 = 0;
+                let prefetch_idx = prefetch_queue.iter().position(|(h, _)| *h == next_height);
+                if let Some(idx) = prefetch_idx {
+                    let (prefetch_height, handle) = prefetch_queue.remove(idx).expect("idx valid");
+                    let wait_start = std::time::Instant::now();
+                    debug!(
+                        "[IBD_DEBUG] Block {}: awaiting UTXO prefetch from disk",
+                        next_height
+                    );
+                    match handle.await {
+                        Ok(Ok(buffer)) if !buffer.is_empty() => {
+                            if let Some(ref mut du) = disk_utxo {
+                                du.merge_prefetch_buffer(buffer);
+                            }
+                            prefetch_await_ms = wait_start.elapsed().as_millis() as u64;
+                            debug!(
+                                "[IBD_DEBUG] Block {}: UTXO prefetch completed (waited {}ms)",
+                                next_height,
+                                prefetch_await_ms
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            prefetch_await_ms = wait_start.elapsed().as_millis() as u64;
+                            warn!("Prefetch for block {} failed: {}", next_height, e);
+                        }
+                        Err(e) => {
+                            prefetch_await_ms = wait_start.elapsed().as_millis() as u64;
+                            warn!("Prefetch task for block {} panicked: {}", next_height, e);
+                        }
+                        _ => {
+                            prefetch_await_ms = wait_start.elapsed().as_millis() as u64;
+                            debug!(
+                                "[IBD_DEBUG] Block {}: UTXO prefetch completed empty (waited {}ms)",
+                                next_height,
+                                prefetch_await_ms
+                            );
+                        }
+                    }
+                }
+                // Discard any prefetches for blocks we've skipped (gaps)
+                prefetch_queue.retain(|(h, _)| *h >= next_height);
+
+                // EARLY PREFETCH: Spawn prefetch for N+1..N+K *before* gap-fill + validation.
+                // Gives prefetch max overlap (gap-fill + validate + sync + evict) so it often
+                // completes before we need it, reducing await time on next iteration.
+                if let Some(ref du) = disk_utxo {
+                    if prefetch_queue.len() < MAX_PREFETCHES_IN_FLIGHT {
+                        let blocks: Vec<&Block> = (1..=utxo_prefetch_lookahead)
+                            .filter_map(|off| {
+                                let h = next_height + off as u64;
+                                reorder_buffer.get(&h).map(|(b, _)| b)
+                            })
+                            .collect();
+                        if !blocks.is_empty() {
+                            let keys = block_input_keys_batch(&blocks);
+                            if !keys.is_empty() {
+                                let disk = du.disk_clone_for_prefetch();
+                                let first_height = next_height + 1;
+                                let handle =
+                                    tokio::task::spawn_blocking(move || load_keys_from_disk(disk, keys));
+                                prefetch_queue.push_back((first_height, handle));
+                            }
+                        }
+                    }
+                }
+
+                // GAP-FILL: Load cache misses from disk OFF the critical path (spawn_blocking).
+                // Replaces disk I/O that was inside prefetch_block / block_in_place.
+                // Must not hold &disk_utxo across await (Rust borrow rules).
+                #[cfg(feature = "profile")]
+                let gap_fill_start = std::time::Instant::now();
+                let keys = disk_utxo
+                    .as_ref()
+                    .map(|du| du.collect_gaps(&block))
+                    .unwrap_or_default();
+                if !keys.is_empty() {
+                    let disk = disk_utxo
+                        .as_ref()
+                        .map(|du| du.disk_clone_for_prefetch())
+                        .expect("disk_utxo.is_some when keys non-empty");
+                    let handle =
+                        tokio::task::spawn_blocking(move || load_keys_from_disk(disk, keys));
+                    match handle.await {
+                        Ok(Ok(buffer)) => {
+                            if let Some(ref mut du) = disk_utxo {
+                                du.merge_prefetch_buffer(buffer);
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            error!("Gap-fill disk load failed for block {}: {}", next_height, e);
+                            return Err(anyhow::anyhow!("Gap-fill failed: {}", e));
+                        }
+                        Err(e) => {
+                            error!("Gap-fill task panicked for block {}: {}", next_height, e);
+                            return Err(anyhow::anyhow!("Gap-fill task panicked: {}", e));
+                        }
+                    }
+                }
+                #[cfg(feature = "profile")]
+                let gap_fill_ms = gap_fill_start.elapsed().as_millis() as u64;
+                #[cfg(not(feature = "profile"))]
+                #[allow(dead_code)]
+                let gap_fill_ms = 0u64;
+
                 // OPTIMIZATION: Reduce logging frequency - log first 20 blocks, then every 500
                 // info! has overhead even when message is constructed
                 if next_height < 20 || next_height % 500 == 0 {
@@ -1025,50 +1213,70 @@ impl ParallelIBD {
                         next_height, reorder_buffer.len(), pending_blocks.len());
                 }
                 
-                // Build recent headers slice for BIP113 median-time-past
-                // Optimization: Use make_contiguous() to get a slice without cloning
-                let recent_headers_opt: Option<&[blvm_consensus::types::BlockHeader]> = if recent_headers_buf.is_empty() {
+                // Build recent headers slice for BIP113 median-time-past (Vec is always contiguous)
+                let recent_headers_opt: Option<&[Arc<BlockHeader>]> = if recent_headers_buf.is_empty() {
                     None
                 } else {
-                    // VecDeque::make_contiguous() makes the buffer contiguous, allowing slice access
-                    // This avoids cloning all headers every block (11 headers × 80 bytes = 880 bytes saved)
-                    recent_headers_buf.make_contiguous();
-                    let (slice, _) = recent_headers_buf.as_slices();
-                    // After make_contiguous(), second slice is always empty
-                    Some(slice)
+                    Some(recent_headers_buf.as_slice())
                 };
                 
-                // DISK-BACKED UTXO: Only prefetch when in disk-backed mode
-                // In memory mode (cache < 80%), skip ALL disk I/O for maximum speed
-                if let Some(ref mut du) = disk_utxo {
-                    if du.needs_disk_ops() {
-                        if let Err(e) = du.prefetch_block(&block) {
-                            error!("Failed to prefetch UTXOs for block {}: {}", next_height, e);
-                            return Err(e);
+                // Run validate + sync + evict off tokio worker (block_in_place).
+                // Gap-fill (disk I/O) runs above before block_in_place to keep it off critical path.
+                let (prefetch_ms, validation_result, sync_ms, evict_ms, validation_time, utxo_flush_batch) =
+                    tokio::task::block_in_place(|| {
+                        // Apply pending/flushing hits only (in-memory); disk loads done via gap-fill above
+                        let prefetch_ms = 0u64; // Gap-fill runs outside block_in_place
+                        if let Some(ref mut du) = disk_utxo {
+                            du.apply_pending_hits(&block);
                         }
-                    }
+
+                        let utxo_ref: &mut UtxoSet = if let Some(ref mut du) = disk_utxo {
+                            du.cache_mut()
+                        } else {
+                            utxo_set
+                        };
+
+                        let validation_start = std::time::Instant::now();
+                        let validation_result = self.validate_block_only(
+                            &blockstore,
+                            protocol,
+                            utxo_ref,
+                            &block,
+                            &witnesses,
+                            next_height,
+                            recent_headers_opt,
+                        );
+                        let validation_time = validation_start.elapsed();
+
+                        let (sync_ms, evict_ms, utxo_flush_batch) = match &validation_result {
+                            Ok(tx_ids) => {
+                                if let Some(ref mut du) = disk_utxo {
+                                    // Prefetch for N+1 spawned early (before gap-fill) for max overlap
+                                    let t_sync = std::time::Instant::now();
+                                    let sync_res = du.sync_block_with_txids(&block, next_height, tx_ids);
+                                    if let Err(e) = sync_res {
+                                        return (prefetch_ms, Err(anyhow::anyhow!("{}", e)), 0, 0, validation_time, None);
+                                    }
+                                    let sync_ms = t_sync.elapsed().as_millis() as u64;
+                                    let t_evict = std::time::Instant::now();
+                                    du.evict_if_needed();
+                                    let evict_ms = t_evict.elapsed().as_millis() as u64;
+                                    let batch = du.maybe_take_flush_batch();
+                                    (sync_ms, evict_ms, batch)
+                                } else {
+                                    (0u64, 0u64, None)
+                                }
+                            }
+                            Err(_) => (0u64, 0u64, None),
+                        };
+
+                        (prefetch_ms, validation_result, sync_ms, evict_ms, validation_time, utxo_flush_batch)
+                    });
+                
+                if let Err(ref e) = validation_result {
+                    error!("Failed to prefetch/validate block at height {}: {}", next_height, e);
+                    return Err(anyhow::anyhow!("{}", e));
                 }
-                
-                // Get the UTXO cache to pass to validation.
-                let utxo_ref: &mut UtxoSet = if let Some(ref mut du) = disk_utxo {
-                    du.cache_mut()
-                } else {
-                    utxo_set
-                };
-                
-                // Validate block directly (no catch_unwind — panic=abort makes it dead code)
-                // Returns pre-computed tx_ids, eliminating redundant double-SHA256.
-                let validation_start = std::time::Instant::now();
-                let validation_result = self.validate_block_only(
-                    &blockstore,
-                    protocol,
-                    utxo_ref,
-                    &block,
-                    &witnesses,
-                    next_height,
-                    recent_headers_opt,
-                );
-                let validation_time = validation_start.elapsed();
                 if next_height < 1000 {
                     info!("Block {} validation took {:?} ({} txs, {} inputs total)", 
                         next_height, validation_time, block.transactions.len(),
@@ -1076,37 +1284,61 @@ impl ParallelIBD {
                 }
                 
                 match validation_result {
-                    Ok(tx_ids) => {
-                        // DISK-BACKED UTXO: Check cache pressure and sync if needed
-                        if let Some(ref mut du) = disk_utxo {
-                            // Check if we need to transition to disk-backed mode
-                            if let Err(e) = du.check_pressure() {
-                                error!("Failed to check UTXO pressure at height {}: {}", next_height, e);
-                                return Err(e);
-                            }
-                            
-                            // Only sync/evict in disk-backed mode
-                            if du.needs_disk_ops() {
-                                // tx_ids already computed by connect_block_ibd — zero redundant hashing!
-                                if let Err(e) = du.sync_block_with_txids(&block, next_height, &tx_ids) {
-                                    error!("Failed to sync UTXO changes to disk at height {}: {}", next_height, e);
-                                    return Err(e);
-                                }
-                                du.evict_if_needed();
-                            }
-                        }
-                        
+                    Ok(_tx_ids) => {
+                        // Sync/evict already done in block_in_place
                         blocks_synced += 1;
-                        
-                        // Track recent headers for BIP113 MTP (keep last 11)
-                        // Optimization: Extract header before moving block to avoid unnecessary clone
-                        let header_to_track = block.header.clone();
-                        if !skip_storage {
-                            pending_blocks.push((block, witnesses, next_height - 1));
+                        let n_txs = block.transactions.len();
+                        let n_inputs: usize = block.transactions.iter().map(|tx| tx.inputs.len()).sum();
+
+                        // Async UTXO flush: spawn batch without blocking validation
+                        if let Some(batch) = utxo_flush_batch {
+                            if let Some(ref mut du) = disk_utxo {
+                                while utxo_flush_handles.len() >= MAX_UTXO_FLUSHES_IN_FLIGHT {
+                                    let in_flight = utxo_flush_handles.len();
+                                    let wait_start = std::time::Instant::now();
+                                    debug!(
+                                        "[IBD_DEBUG] Block {}: awaiting UTXO flush slot (in_flight={}, batch_size={})",
+                                        next_height,
+                                        in_flight,
+                                        batch.len()
+                                    );
+                                    let handle = utxo_flush_handles.pop_front().expect("non-empty");
+                                    match handle.await {
+                                        Ok(Ok(())) => {
+                                            du.mark_flush_complete();
+                                            debug!(
+                                                "[IBD_DEBUG] Block {}: UTXO flush slot free (waited {}ms)",
+                                                next_height,
+                                                wait_start.elapsed().as_millis()
+                                            );
+                                        }
+                                        Ok(Err(e)) => return Err(e),
+                                        Err(e) => return Err(anyhow::anyhow!("UTXO flush task panicked: {}", e)),
+                                    }
+                                }
+                                let disk = du.disk_clone_for_prefetch();
+                                let batch_size = batch.len();
+                                utxo_flush_handles.push_back(tokio::task::spawn_blocking(move || {
+                                    DiskBackedUtxoSet::flush_batch_to_disk(&batch, disk.as_ref()).map(|_| ())
+                                }));
+                                debug!(
+                                    "[IBD_DEBUG] Block {}: spawned UTXO flush (batch_size={}, in_flight={})",
+                                    next_height,
+                                    batch_size,
+                                    utxo_flush_handles.len()
+                                );
+                            }
                         }
-                        recent_headers_buf.push_back(header_to_track);
+
+                        // Track recent headers for BIP113 MTP (keep last 11)
+                        // Extract header with mem::take to avoid clone; share via Rc between buf and pending
+                        let header_rc = Arc::new(std::mem::take(&mut block.header));
+                        if !skip_storage {
+                            pending_blocks.push((block, Arc::clone(&header_rc), witnesses, next_height - 1));
+                        }
+                        recent_headers_buf.push(header_rc);
                         if recent_headers_buf.len() > 11 {
-                            recent_headers_buf.pop_front();
+                            recent_headers_buf.remove(0);
                         }
                         
                         next_height += 1;
@@ -1114,29 +1346,102 @@ impl ParallelIBD {
                         // Update shared validation height (allows download workers to track progress)
                         validation_height.store(next_height, Ordering::Relaxed);
                         
-                        if !skip_storage {
-                            if pending_blocks.len() >= STORAGE_FLUSH_INTERVAL {
-                                let flush_start = std::time::Instant::now();
-                                self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks)?;
-                                let flush_time = flush_start.elapsed();
-                                debug!("Flushed {} blocks in {:?}", STORAGE_FLUSH_INTERVAL, flush_time);
+                        // Prefetch(N+1) is now spawned before sync (inside block_in_place) to overlap with sync+evict
+                        
+                        let flush_ms = if !skip_storage && pending_blocks.len() >= storage_flush_interval {
+                            let flush_start = std::time::Instant::now();
+                            // Fully overlapped async flush: await only when 2 flushes in flight (backpressure)
+                            while flush_handles.len() >= MAX_FLUSHES_IN_FLIGHT {
+                                let in_flight = flush_handles.len();
+                                let wait_start = std::time::Instant::now();
+                                debug!(
+                                    "[IBD_DEBUG] Block {}: awaiting block storage flush slot (in_flight={}, pending_blocks={})",
+                                    next_height,
+                                    in_flight,
+                                    pending_blocks.len()
+                                );
+                                let handle = flush_handles.pop_front().expect("non-empty");
+                                match handle.await {
+                                    Ok(Ok(())) => {
+                                        debug!(
+                                            "[IBD_DEBUG] Block {}: block storage flush slot free (waited {}ms)",
+                                            next_height,
+                                            wait_start.elapsed().as_millis()
+                                        );
+                                    }
+                                    Ok(Err(e)) => return Err(e),
+                                    Err(e) => return Err(anyhow::anyhow!("Flush task panicked: {}", e)),
+                                }
+                            }
+                            let to_flush = std::mem::take(&mut pending_blocks);
+                            let blockstore_clone = Arc::clone(&blockstore);
+                            let storage_clone = storage.map(|s| Arc::clone(s));
+                            let to_flush_count = to_flush.len();
+                            flush_handles.push_back(tokio::task::spawn_blocking(move || {
+                                Self::do_flush_to_storage(
+                                    blockstore_clone.as_ref(),
+                                    storage_clone.as_ref(),
+                                    to_flush,
+                                )
+                            }));
+                            let flush_elapsed = flush_start.elapsed().as_millis() as u64;
+                            debug!(
+                                "[IBD_DEBUG] Block {}: spawned block storage flush (blocks={}, in_flight={}, await_took={}ms)",
+                                next_height,
+                                to_flush_count,
+                                flush_handles.len(),
+                                flush_elapsed
+                            );
+                            flush_elapsed
+                        } else {
+                            0
+                        };
+                        if !skip_storage && pending_blocks.is_empty() && flush_ms > 0 {
+                            debug!("Started async flush of {} blocks (overlapped, {} in flight)", storage_flush_interval, flush_handles.len());
+                        }
+                        
+                        // IBD Profiling: log per-block breakdown when enabled (profile feature)
+                        // [IBD_PROFILE] prefetch_await, gap_fill, validation, sync, evict, flush (ms). disk_total = I/O phases.
+                        #[cfg(feature = "profile")]
+                        if ibd_profile {
+                            let val_ms = validation_time.as_millis() as u64;
+                            let total_ms = prefetch_await_ms + gap_fill_ms + prefetch_ms + val_ms + sync_ms + evict_ms + flush_ms;
+                            let disk_total = prefetch_await_ms + gap_fill_ms + prefetch_ms + sync_ms + evict_ms + flush_ms;
+                            let should_log = (ibd_profile_sample == 1 || next_height % ibd_profile_sample == 0)
+                                || (ibd_disk_profile && (prefetch_await_ms > 0 || gap_fill_ms > 0 || prefetch_ms > 0 || sync_ms > 0 || evict_ms > 0))
+                                || (ibd_profile_slow_ms > 0 && (prefetch_await_ms >= ibd_profile_slow_ms || gap_fill_ms >= ibd_profile_slow_ms || prefetch_ms >= ibd_profile_slow_ms || val_ms >= ibd_profile_slow_ms || sync_ms >= ibd_profile_slow_ms || evict_ms >= ibd_profile_slow_ms || flush_ms >= ibd_profile_slow_ms));
+                            if should_log && total_ms > 0 {
+                                blvm_consensus::profile_log!(
+                                    "[IBD_PROFILE] height={} total_ms={} prefetch_await={} gap_fill={} prefetch={} validation={} sync={} evict={} flush={} disk_total={} txs={} inputs={}",
+                                    next_height, total_ms, prefetch_await_ms, gap_fill_ms, prefetch_ms, val_ms, sync_ms, evict_ms, flush_ms, disk_total, n_txs, n_inputs
+                                );
                             }
                         }
                     }
                     Err(e) => {
+                        for handle in utxo_flush_handles.drain(..) {
+                            if let Ok(Ok(())) = handle.await {
+                                if let Some(ref mut du) = disk_utxo {
+                                    du.mark_flush_complete();
+                                }
+                            }
+                        }
+                        for handle in flush_handles.drain(..) {
+                            let _ = handle.await;
+                        }
                         if !skip_storage && !pending_blocks.is_empty() {
                             let _ = self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks);
                         }
                         error!("Failed to validate block at height {}: {}", next_height, e);
-                        // Dump block, witnesses, and UTXO set so a test case can be built
-                        Self::dump_failed_block(next_height, &block, &witnesses, utxo_ref, &e);
+                        let utxo_for_dump = if let Some(ref mut du) = disk_utxo { du.cache_mut() } else { utxo_set };
+                        Self::dump_failed_block(next_height, &block, &witnesses, utxo_for_dump, &e);
                         return Err(e);
                     }
                 }
                 
-                // CRITICAL: Yield to the runtime every 10 blocks
-                // This allows download workers to make progress while validation runs
-                if blocks_synced % 10 == 0 {
+                // CRITICAL: Yield to the runtime every 50 blocks (Phase C: was 10)
+                // Allows download workers to make progress while reducing context-switch overhead
+                if blocks_synced % 50 == 0 {
                     tokio::task::yield_now().await;
                 }
 
@@ -1170,25 +1475,28 @@ impl ParallelIBD {
                     );
                 }
                 
-                // Memory monitoring: log RSS and system memory every MEMORY_LOG_INTERVAL blocks
+                // Memory monitoring: log RSS and system memory every MEMORY_LOG_INTERVAL blocks (Phase B: file I/O off critical path)
                 if next_height >= last_memory_log_height + MEMORY_LOG_INTERVAL {
                     last_memory_log_height = next_height;
-                    // Read RSS from /proc/self/statm (Linux)
-                    let rss_mb = std::fs::read_to_string("/proc/self/statm")
-                        .ok()
-                        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
-                        .map(|pages| pages * 4 / 1024) // pages to MB (4KB pages)
-                        .unwrap_or(0);
-                    // Read available memory from /proc/meminfo
-                    let available_mb = std::fs::read_to_string("/proc/meminfo")
-                        .ok()
-                        .and_then(|s| {
-                            s.lines()
-                                .find(|l| l.starts_with("MemAvailable:"))
-                                .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-                                .map(|kb| kb / 1024)
-                        })
-                        .unwrap_or(0);
+                    let (rss_mb, available_mb) = tokio::task::spawn_blocking(|| {
+                        let rss = std::fs::read_to_string("/proc/self/statm")
+                            .ok()
+                            .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+                            .map(|pages| pages * 4 / 1024)
+                            .unwrap_or(0);
+                        let avail = std::fs::read_to_string("/proc/meminfo")
+                            .ok()
+                            .and_then(|s| {
+                                s.lines()
+                                    .find(|l| l.starts_with("MemAvailable:"))
+                                    .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+                                    .map(|kb| kb / 1024)
+                            })
+                            .unwrap_or(0);
+                        (rss, avail)
+                    })
+                    .await
+                    .unwrap_or((0, 0));
                     let (cache_entries, total_utxos) = if let Some(ref du) = disk_utxo {
                         (du.cache_len(), du.total_len())
                     } else {
@@ -1198,21 +1506,22 @@ impl ParallelIBD {
                         "MEMORY at height {}: RSS={}MB, available={}MB, UTXO cache={}, total_utxos={}, reorder_buf={}, pending={}",
                         next_height, rss_mb, available_mb, cache_entries, total_utxos, reorder_buffer.len(), pending_blocks.len()
                     );
-                    // Log disk-backed UTXO stats
                     if let Some(ref du) = disk_utxo {
                         du.log_stats(next_height);
                     }
-                    // Warn if getting tight
                     if available_mb > 0 && available_mb < 2048 {
                         warn!("LOW MEMORY: only {}MB available! UTXO cache has {} entries", available_mb, cache_entries);
                     }
                 }
             }
             
-            // Log when exiting inner loop - helps debug why validation stalls
-            if total_received < 1000 || total_received % 1000 == 0 {
-                info!("Validation inner loop exit: next_height={}, buffer_size={}, total_received={}", 
-                    next_height, reorder_buffer.len(), total_received);
+            // Log when exiting inner loop (no consecutive block in buffer) - helps debug validation stalls
+            if next_height < 100 || next_height % 5000 == 0 || reorder_buffer.len() < 10 {
+                debug!(
+                    "[IBD_DEBUG] Block {}: waiting for block from channel (buffer_size={})",
+                    next_height,
+                    reorder_buffer.len()
+                );
             }
             
             // BACKPRESSURE: If buffer is too large, still drain but with longer timeout
@@ -1284,7 +1593,25 @@ impl ParallelIBD {
             }
         }
         
-        // Flush any remaining pending blocks
+        // Await all in-flight UTXO flushes, then block storage flushes
+        for handle in utxo_flush_handles.drain(..) {
+            match handle.await {
+                Ok(Ok(())) => {
+                    if let Some(ref mut du) = disk_utxo {
+                        du.mark_flush_complete();
+                    }
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(anyhow::anyhow!("UTXO flush task panicked: {}", e)),
+            }
+        }
+        for handle in flush_handles.drain(..) {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(anyhow::anyhow!("Flush task panicked: {}", e)),
+            }
+        }
         if !skip_storage && !pending_blocks.is_empty() {
             info!("Flushing final {} pending blocks", pending_blocks.len());
             self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks)?;
@@ -2124,7 +2451,7 @@ impl ParallelIBD {
         block: &Block,
         witnesses: &[Vec<Witness>],
         height: u64,
-        recent_headers: Option<&[blvm_consensus::types::BlockHeader]>,
+        recent_headers: Option<&[Arc<BlockHeader>]>,
     ) -> Result<Vec<Hash>> {
         use std::borrow::Cow;
         
@@ -2222,13 +2549,9 @@ impl ParallelIBD {
         if let Err(e) = std::fs::write(&info_path, info) {
             error!("Failed to write {}: {}", info_path.display(), e);
         }
-        eprintln!(
-            "[IBD_FAILURE_DUMP] Block {} validation failed. Test data written to:\n  {}",
-            height,
-            dir.display(),
-        );
-        eprintln!(
-            "  block.bin, witnesses.bin, utxo_set.bin, info.txt\n  Load with bincode::deserialize_from for a repro test."
+        info!(
+            "IBD_FAILURE_DUMP: Block {} validation failed. Test data written to: {} (block.bin, witnesses.bin, utxo_set.bin, info.txt). Run: ./scripts/ibd_failure_to_repro_test.sh {}",
+            height, dir.display(), height
         );
     }
 
@@ -2240,7 +2563,17 @@ impl ParallelIBD {
         &self,
         blockstore: &BlockStore,
         _storage: Option<&Arc<Storage>>,
-        pending: &mut Vec<(Block, Vec<Vec<Witness>>, u64)>,
+        pending: &mut Vec<(Block, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)>,
+    ) -> Result<()> {
+        let to_flush = std::mem::take(pending);
+        Self::do_flush_to_storage(blockstore, _storage, to_flush)
+    }
+
+    /// Core flush logic. Takes ownership of pending. Used by sync flush and async spawn.
+    fn do_flush_to_storage(
+        blockstore: &BlockStore,
+        _storage: Option<&Arc<Storage>>,
+        mut pending: Vec<(Block, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)>,
     ) -> Result<()> {
         if pending.is_empty() {
             return Ok(());
@@ -2249,38 +2582,38 @@ impl ParallelIBD {
         let count = pending.len();
         let start = std::time::Instant::now();
 
+        // Restore headers into blocks (they have Default placeholder from mem::take during validation)
+        for (block, header_rc, _, _) in pending.iter_mut() {
+            block.header = header_rc.as_ref().clone();
+        }
+
         // Pre-compute all block hashes ONCE (avoids 4x redundant double SHA256 per block)
         // Parallelize hash computation and serialization for better CPU utilization
-        let (block_hashes, block_data, header_data): (Vec<Hash>, Vec<Vec<u8>>, Vec<Vec<u8>>) = {
+        // header_data uses Arc to avoid cloning Vec on cache hit (batch.put accepts &[u8] via .as_slice())
+        let (block_hashes, block_data, header_data): (Vec<Hash>, Vec<Vec<u8>>, Vec<Arc<Vec<u8>>>) = {
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
                 let block_hashes: Vec<Hash> = pending.par_iter()
-                    .map(|(block, _, _)| blockstore.get_block_hash(block))
+                    .map(|(block, _, _, _)| blockstore.get_block_hash(block))
                     .collect();
 
                 // Parallel serialize all block data
                 let block_data: Vec<Vec<u8>> = pending.par_iter()
-                    .map(|(block, _, _)| bincode::serialize(block).unwrap())
+                    .map(|(block, _, _, _)| bincode::serialize(block).unwrap())
                     .collect();
 
                 // Parallel serialize all header data (with caching)
                 use crate::storage::serialization_cache::{get_cached_serialized_header, cache_serialized_header};
-                let header_data: Vec<Vec<u8>> = pending.par_iter()
+                let header_data: Vec<Arc<Vec<u8>>> = pending.par_iter()
                     .zip(block_hashes.par_iter())
-                    .map(|((block, _, _), block_hash)| {
-                        // Check cache first
+                    .map(|((block, _, _, _), block_hash)| {
                         if let Some(cached) = get_cached_serialized_header(block_hash) {
-                            return (*cached).clone();  // Clone Arc contents (cheap)
+                            return cached;  // Arc::clone already done in get; no Vec clone
                         }
-                        
-                        // Cache miss - serialize
                         let serialized = bincode::serialize(&block.header).unwrap();
-                        
-                        // Cache it
                         cache_serialized_header(*block_hash, serialized.clone());
-                        
-                        serialized
+                        Arc::new(serialized)
                     })
                     .collect();
                 
@@ -2290,31 +2623,25 @@ impl ParallelIBD {
             #[cfg(not(feature = "rayon"))]
             {
                 let block_hashes: Vec<Hash> = pending.iter()
-                    .map(|(block, _, _)| blockstore.get_block_hash(block))
+                    .map(|(block, _, _, _)| blockstore.get_block_hash(block))
                     .collect();
 
                 // Pre-serialize all block data
                 let block_data: Vec<Vec<u8>> = pending.iter()
-                    .map(|(block, _, _)| bincode::serialize(block).unwrap())
+                    .map(|(block, _, _, _)| bincode::serialize(block).unwrap())
                     .collect();
 
                 // Pre-serialize all header data (with caching)
                 use crate::storage::serialization_cache::{get_cached_serialized_header, cache_serialized_header};
-                let header_data: Vec<Vec<u8>> = pending.iter()
+                let header_data: Vec<Arc<Vec<u8>>> = pending.iter()
                     .zip(block_hashes.iter())
-                    .map(|((block, _, _), block_hash)| {
-                        // Check cache first
+                    .map(|((block, _, _, _), block_hash)| {
                         if let Some(cached) = get_cached_serialized_header(block_hash) {
-                            return (*cached).clone();  // Clone Arc contents (cheap)
+                            return cached;
                         }
-                        
-                        // Cache miss - serialize
                         let serialized = bincode::serialize(&block.header).unwrap();
-                        
-                        // Cache it
                         cache_serialized_header(*block_hash, serialized.clone());
-                        
-                        serialized
+                        Arc::new(serialized)
                     })
                     .collect();
                 
@@ -2337,7 +2664,7 @@ impl ParallelIBD {
             let headers_tree = blockstore.headers_tree()?;
             let mut batch = headers_tree.batch();
             for (i, data) in header_data.iter().enumerate() {
-                batch.put(&block_hashes[i], data);
+                batch.put(&block_hashes[i], data.as_slice());
             }
             batch.commit()?;
         }
@@ -2345,7 +2672,7 @@ impl ParallelIBD {
         // Batch write witnesses (skip if all empty - common in early chain)
         // Parallelize witness serialization for better CPU utilization
         {
-            let has_witnesses = pending.iter().any(|(_, w, _)| !w.is_empty());
+            let has_witnesses = pending.iter().any(|(_, _, w, _)| !w.is_empty());
             if has_witnesses {
                 let witnesses_tree = blockstore.witnesses_tree()?;
                 let mut batch = witnesses_tree.batch();
@@ -2356,7 +2683,7 @@ impl ParallelIBD {
                     // Parallel serialize witnesses
                     let witness_data_vec: Vec<(usize, Vec<u8>)> = pending.par_iter()
                         .enumerate()
-                        .filter_map(|(i, (_, witnesses, _))| {
+                        .filter_map(|(i, (_, _, witnesses, _))| {
                             if !witnesses.is_empty() {
                                 match bincode::serialize(witnesses) {
                                     Ok(data) => Some((i, data)),
@@ -2375,7 +2702,7 @@ impl ParallelIBD {
                 
                 #[cfg(not(feature = "rayon"))]
                 {
-                    for (i, (_, witnesses, _)) in pending.iter().enumerate() {
+                    for (i, (_, _, witnesses, _)) in pending.iter().enumerate() {
                         if !witnesses.is_empty() {
                             let witness_data = bincode::serialize(witnesses)
                                 .map_err(|e| anyhow::anyhow!("Failed to serialize witnesses: {}", e))?;
@@ -2392,7 +2719,7 @@ impl ParallelIBD {
         {
             let height_tree = blockstore.height_tree()?;
             let mut batch = height_tree.batch();
-            for (i, (_, _, height)) in pending.iter().enumerate() {
+            for (i, (_, _, _, height)) in pending.iter().enumerate() {
                 let height_key = height.to_be_bytes();
                 batch.put(&height_key, &block_hashes[i]);
             }
@@ -2401,14 +2728,12 @@ impl ParallelIBD {
 
         // Store recent headers (needed for MTP calculation)
         // Only store the last 11 headers (minimal overhead, sequential is fine)
-        for (block, _, height) in pending.iter().rev().take(11) {
+        for (block, _, _, height) in pending.iter().rev().take(11) {
             blockstore.store_recent_header(*height, &block.header)?;
         }
 
         // Skip transaction indexing during IBD - it's not needed until sync is complete
         // and causes massive slowdowns due to individual writes per transaction
-
-        pending.clear();
 
         let elapsed = start.elapsed();
         info!(

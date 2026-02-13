@@ -1,11 +1,11 @@
 //! RPC Error Types
 //!
-//! Bitcoin Core-compatible JSON-RPC error codes and error handling
+//! Standard-compatible JSON-RPC error codes and error handling
 
 use serde_json::{json, Value};
 use std::fmt;
 
-/// JSON-RPC error codes (Bitcoin Core compatible)
+/// JSON-RPC error codes (standard compatible)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcErrorCode {
     /// Parse error (-32700)
@@ -20,7 +20,7 @@ pub enum RpcErrorCode {
     InternalError,
     /// Server error (reserved -32000 to -32099)
     ServerError(i32),
-    /// Bitcoin Core specific errors
+    /// Protocol-specific errors
     /// Transaction already in block chain (-1)
     TxAlreadyInChain,
     /// Transaction rejected (-25)

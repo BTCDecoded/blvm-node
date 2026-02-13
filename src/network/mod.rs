@@ -917,7 +917,7 @@ impl NetworkManager {
     }
 
     /// Check if address is onion (Tor) - placeholder for future implementation
-    /// In Bitcoin Core, this checks for .onion domains, but we'd need DNS resolution
+    /// Standard implementation checks for .onion domains; we'd need DNS resolution
     /// For now, this is a placeholder that returns false
     pub(crate) fn is_onion_address(_addr: &SocketAddr) -> bool {
         // TODO: Implement proper .onion detection when DNS resolution is available
@@ -926,7 +926,7 @@ impl NetworkManager {
     }
 
     /// Evict extra outbound peers if we have too many
-    /// Bitcoin Core protects up to MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT peers
+    /// Standard policy protects up to MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT peers
     /// based on block announcement recency
     #[allow(dead_code)]
     async fn evict_extra_outbound_peers(&self) {
@@ -1872,7 +1872,7 @@ impl NetworkManager {
     /// 3. Discover Iroh peers (if Iroh is enabled) - uses Iroh's DERP servers and gossip
     /// 4. Connect to peers from address database to reach target count
     ///
-    /// LAN sibling nodes (local Bitcoin Core, Umbrel, Start9, etc.) are discovered
+    /// LAN sibling nodes (local nodes, Umbrel, Start9, etc.) are discovered
     /// automatically by scanning the local network for port 8333. These peers are
     /// connected first and given priority for block downloads during IBD.
     ///
@@ -1890,7 +1890,7 @@ impl NetworkManager {
         target_peer_count: usize,
     ) -> Result<()> {
         // 0. PRIORITY: Discover and connect to LAN sibling nodes FIRST
-        // These are local Bitcoin nodes (Bitcoin Core, Umbrel, Start9, etc.)
+        // These are local Bitcoin nodes (Umbrel, Start9, etc.)
         // that can provide blocks at LAN speeds (~1ms latency vs ~100-5000ms internet)
         info!("Discovering LAN sibling nodes...");
         let lan_nodes = lan_discovery::discover_lan_bitcoin_nodes_with_port(port).await;
@@ -4135,7 +4135,7 @@ impl NetworkManager {
                 }
                 NetworkMessage::InventoryReceived(data) => {
                     info!("Inventory received: {} bytes", data.len());
-                    // Parse and validate inventory size (Bitcoin Core compatibility)
+                    // Parse and validate inventory size (protocol compatibility)
                     // Note: InventoryReceived doesn't include peer_addr, so validation
                     // should be done in the protocol message handler where peer_addr is available
                     // For now, we'll validate here but can't disconnect without peer address
@@ -4969,7 +4969,7 @@ impl NetworkManager {
             }
             // IBD Protection: Check GetData requests for blocks (IBD serving)
             ProtocolMessage::GetData(getdata) => {
-                // Validate inventory size (Bitcoin Core compatibility)
+                // Validate inventory size (protocol compatibility)
                 if getdata.inventory.len() > crate::network::protocol::MAX_INV_SZ {
                     warn!(
                         "getdata message size = {} exceeds MAX_INV_SZ ({}), disconnecting peer {}",
@@ -5083,7 +5083,7 @@ impl NetworkManager {
                     .send(NetworkMessage::GetCfcheckptReceived(data, peer_addr));
                 return Ok(());
             }
-            // Validate Inv messages (Bitcoin Core compatibility)
+            // Validate Inv messages (protocol compatibility)
             ProtocolMessage::Inv(inv_msg) => {
                 // Validate inventory size BEFORE routing to InventoryReceived
                 if inv_msg.inventory.len() > crate::network::protocol::MAX_INV_SZ {
@@ -5156,7 +5156,7 @@ impl NetworkManager {
             }
             // Headers and Block messages (for IBD)
             ProtocolMessage::Headers(headers_msg) => {
-                // Validate headers size (Bitcoin Core compatibility)
+                // Validate headers size (protocol compatibility)
                 if headers_msg.headers.len() > crate::network::protocol::MAX_HEADERS_RESULTS {
                     warn!(
                         "headers message size = {} exceeds MAX_HEADERS_RESULTS ({}), disconnecting peer {}",
@@ -5638,9 +5638,9 @@ impl NetworkManager {
         let storage_ref = self.storage.as_ref();
         let responses = handle_getcfilters(&request, &self.filter_service, storage_ref)?;
 
-        // Check CPU time limit (Bitcoin Core disconnects if filter generation takes too long)
+        // Check CPU time limit (disconnect if filter generation takes too long)
         let cpu_time_ms = cpu_start.elapsed().as_millis() as u64;
-        const MAX_FILTER_CPU_TIME_MS: u64 = 5000; // 5 seconds (Bitcoin Core uses similar limit)
+        const MAX_FILTER_CPU_TIME_MS: u64 = 5000; // 5 seconds
         if cpu_time_ms > MAX_FILTER_CPU_TIME_MS {
             // CPU time limit exceeded - disconnect peer (filter service violation)
             warn!("Filter service CPU time limit exceeded ({}ms > {}ms) for peer {}, disconnecting", 
@@ -6049,7 +6049,7 @@ impl NetworkManager {
     async fn handle_get_addr(&self, peer_addr: SocketAddr) -> Result<()> {
         use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
 
-        // Get fresh addresses from database (up to 2500, Bitcoin Core limit)
+        // Get fresh addresses from database (up to 2500)
         let ban_list = self.ban_list.read().await.clone();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager.lock().await;
@@ -6074,7 +6074,7 @@ impl NetworkManager {
 
     /// Handle Addr message - store addresses and optionally relay
     async fn handle_addr(&self, peer_addr: SocketAddr, msg: AddrMessage) -> Result<()> {
-        // Validate message size (Bitcoin Core compatibility)
+        // Validate message size (protocol compatibility)
         if msg.addresses.len() > crate::network::protocol::MAX_ADDR_TO_SEND {
             warn!(
                 "addr message size = {} exceeds MAX_ADDR_TO_SEND ({}), disconnecting peer {}",
@@ -6121,7 +6121,7 @@ impl NetworkManager {
         addresses: &[NetworkAddress],
     ) -> Result<()> {
         use crate::network::protocol::{AddrMessage, ProtocolMessage, ProtocolParser};
-        // Rate limiting: don't send addr messages too frequently (Bitcoin Core: ~every 2.4 hours)
+        // Rate limiting: don't send addr messages too frequently (~every 2.4 hours)
         let now = current_timestamp();
         let min_interval = 2 * 60 * 60 + 24 * 60; // 2.4 hours in seconds
 
@@ -6149,7 +6149,7 @@ impl NetworkManager {
             return Ok(());
         }
 
-        // Limit to 1000 addresses per message (Bitcoin Core limit)
+        // Limit to 1000 addresses per message
         let addresses_to_relay: Vec<NetworkAddress> = filtered.into_iter().take(1000).collect();
 
         // Create Addr message

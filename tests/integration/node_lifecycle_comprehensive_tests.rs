@@ -53,13 +53,16 @@ async fn test_node_startup_with_pruning_config() {
     };
     
     // Create node with pruning config
+    let storage_config = blvm_node::config::StorageConfig {
+        pruning: Some(pruning_config),
+        ..Default::default()
+    };
     let mut node = Node::with_storage_config(
         data_dir,
         network_addr,
         rpc_addr,
         None,
-        Some(pruning_config),
-        None,
+        Some(&storage_config),
     ).unwrap();
     
     // Start node
@@ -91,13 +94,16 @@ async fn test_node_startup_with_indexing_config() {
     };
     
     // Create node with indexing config
+    let storage_config = blvm_node::config::StorageConfig {
+        indexing: Some(indexing_config),
+        ..Default::default()
+    };
     let mut node = Node::with_storage_config(
         data_dir,
         network_addr,
         rpc_addr,
         None,
-        None,
-        Some(indexing_config),
+        Some(&storage_config),
     ).unwrap();
     
     // Start node

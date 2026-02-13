@@ -1,14 +1,14 @@
-//! Bitcoin Core data directory detection
+//! Data directory detection
 //!
-//! Detects existing Bitcoin Core installations and their database format.
+//! Detects existing node installations and their database format.
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Bitcoin Core database format
+/// Database format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseFormat {
-    /// LevelDB format (standard for Bitcoin Core)
+    /// LevelDB format (standard chainstate)
     LevelDB,
 }
 

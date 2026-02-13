@@ -13,6 +13,7 @@ fn create_test_blockstore() -> (TempDir, Arc<BlockStore>) {
         create_database(
             temp_dir.path(),
             blvm_node::storage::database::DatabaseBackend::Redb,
+            None,
         )
         .unwrap(),
     );

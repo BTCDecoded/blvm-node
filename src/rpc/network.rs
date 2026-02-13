@@ -190,7 +190,7 @@ impl NetworkRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: ping");
 
-        // Core's ping RPC just sets a flag, actual ping happens in network thread
+        // Ping RPC just sets a flag, actual ping happens in network thread
         // Network manager should handle ping in background task if needed
 
         Ok(Value::Null)

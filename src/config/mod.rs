@@ -75,7 +75,7 @@ impl Default for ModuleConfig {
 /// Network timing and connection behavior configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkTimingConfig {
-    /// Target number of peers to connect to (Bitcoin Core uses 8-125)
+    /// Target number of peers to connect to (reference: 8-125)
     #[serde(default = "default_target_peer_count")]
     pub target_peer_count: usize,
 
@@ -1099,6 +1099,13 @@ pub struct StorageConfig {
     #[serde(default = "default_storage_path")]
     pub data_dir: String,
 
+    /// redb/LevelDB internal cache size (MB). Like Core -dbcache. Default 450.
+    #[serde(default = "default_dbcache_mb")]
+    pub dbcache_mb: usize,
+
+    /// TidesDB-specific options (when database_backend = tidesdb)
+    pub tidesdb: Option<TidesDBConfig>,
+
     /// Pruning configuration
     pub pruning: Option<PruningConfig>,
 
@@ -1114,6 +1121,27 @@ pub struct StorageConfig {
     pub compression: Option<CompressionConfig>,
 }
 
+/// TidesDB backend configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TidesDBConfig {
+    /// Klog value threshold (bytes). Values <= this stay inline (fast); larger go to vlog.
+    /// 0 = all to vlog (slowest, safest). Default 64KB for most UTXOs inline.
+    #[serde(default = "default_tidesdb_utxo_klog_threshold")]
+    pub utxo_klog_threshold: usize,
+}
+
+fn default_tidesdb_utxo_klog_threshold() -> usize {
+    64 * 1024
+}
+
+impl Default for TidesDBConfig {
+    fn default() -> Self {
+        Self {
+            utxo_klog_threshold: default_tidesdb_utxo_klog_threshold(),
+        }
+    }
+}
+
 /// Database backend configuration
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1122,6 +1150,10 @@ pub enum DatabaseBackendConfig {
     Sled,
     /// Use redb database (default, recommended)
     Redb,
+    /// Use RocksDB (LSM, good for IBD; requires --features rocksdb)
+    Rocksdb,
+    /// Use TidesDB (LSM, optional; requires --features tidesdb)
+    Tidesdb,
     /// Auto-select based on availability
     Auto,
 }
@@ -1132,6 +1164,10 @@ fn default_database_backend() -> DatabaseBackendConfig {
 
 fn default_storage_path() -> String {
     "data".to_string()
+}
+
+fn default_dbcache_mb() -> usize {
+    450
 }
 
 /// Storage cache configuration
@@ -1177,6 +1213,8 @@ impl Default for StorageConfig {
         Self {
             database_backend: DatabaseBackendConfig::Auto,
             data_dir: "data".to_string(),
+            dbcache_mb: 450,
+            tidesdb: None,
             pruning: None,
             cache: None,
             indexing: None,
@@ -1974,7 +2012,7 @@ impl RbfConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EvictionStrategy {
-    /// Evict lowest fee rate transactions first (Bitcoin Core default)
+    /// Evict lowest fee rate transactions first (standard default)
     LowestFeeRate,
 
     /// Evict oldest transactions first (FIFO)
@@ -2095,7 +2133,7 @@ fn default_max_ancestor_count() -> u32 {
 }
 
 fn default_max_ancestor_size() -> u64 {
-    101_000 // 101 kB (Bitcoin Core default)
+    101_000 // 101 kB (reference default)
 }
 
 fn default_max_descendant_count() -> u32 {
@@ -2103,7 +2141,7 @@ fn default_max_descendant_count() -> u32 {
 }
 
 fn default_max_descendant_size() -> u64 {
-    101_000 // 101 kB (Bitcoin Core default)
+    101_000 // 101 kB (reference default)
 }
 
 fn default_eviction_strategy() -> EvictionStrategy {

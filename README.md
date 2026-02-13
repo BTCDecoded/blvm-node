@@ -36,7 +36,7 @@ Tier 4 of the 6-tier Bitcoin Commons architecture (BLVM technology stack):
 - **Payment Processing**: CTV (CheckTemplateVerify) support for advanced payment flows
 - **Advanced Indexing**: Address and value range indexing for efficient queries
 - **RPC Interface**: Full RPC server implementation with Bitcoin Core compatibility
-- **Storage**: UTXO set management and chain state with multiple backends (sled, redb, rocksdb)
+- **Storage**: UTXO set management and chain state with multiple backends (tidesdb, redb, sled, rocksdb)
 - **Module System**: Process-isolated modules for optional features
 - **P2P Governance**: Governance message relay via P2P protocol
 
@@ -46,9 +46,18 @@ See [Security](#security) for production considerations.
 
 Supports multiple database backends via feature flags:
 
-- **sled** (default): Embedded key-value store
+- **tidesdb** (default): LSM-tree key-value store; benchmarks show strong IBD performance
 - **redb**: Embedded database with ACID transactions
+- **sled**: Embedded key-value store (fallback)
 - **rocksdb** (optional): High-performance database with Bitcoin Core compatibility
+
+**TidesDB** (default backend):
+- Requires TidesDB C library installed before building
+- Quick install: `./scripts/install-tidesdb.sh` (installs to `~/.local` by default)
+- Or manually: clone [tidesdb](https://github.com/tidesdb/tidesdb), then `cmake -S . -B build && cmake --build build && sudo cmake --install build`
+- Linux deps: `libzstd-dev`, `liblz4-dev`, `libsnappy-dev`; macOS: `brew install zstd lz4 snappy`
+- After install, set `PKG_CONFIG_PATH` and `LD_LIBRARY_PATH` to the install prefix (see script output)
+- Verify: `cargo run --example verify_tidesdb`
 
 **RocksDB Features:**
 - Automatic Bitcoin Core data directory detection
@@ -60,7 +69,7 @@ Enable RocksDB with the `rocksdb` feature:
 cargo build --features rocksdb
 ```
 
-**Note**: RocksDB requires `libclang` system dependency. RocksDB and erlay features are mutually exclusive due to dependency conflicts.
+**Note**: RocksDB requires `libclang` system dependency. RocksDB and erlay features are mutually exclusive due to dependency conflicts. To use redb without TidesDB: `cargo build --no-default-features --features redb,...`
 
 ## Configuration
 

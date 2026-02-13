@@ -423,12 +423,12 @@ impl RawTxRpc {
                 Vec::<String>::new()
             };
 
-            // Build fees object matching Core's format
+            // Build fees object (standard format)
             let mut fees_obj = json!({
                 "base": fee_btc
             });
 
-            // Add effective-feerate if transaction is allowed (Core only includes this when allowed)
+            // Add effective-feerate if transaction is allowed
             if allowed {
                 fees_obj.as_object_mut().unwrap().insert(
                     "effective-feerate".to_string(),
@@ -1321,7 +1321,7 @@ impl RawTxRpc {
                         RpcError::internal_error(format!("Failed to build merkle proof: {e}"))
                     })?;
 
-                // Serialize proof (simplified - Bitcoin Core uses a more complex format)
+                // Serialize proof (simplified format)
                 let mut proof_bytes = Vec::new();
                 proof_bytes.push(proof_hashes.len() as u8);
                 for hash in &proof_hashes {

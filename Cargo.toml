@@ -31,6 +31,7 @@ blvm-consensus = { path = "../blvm-consensus", optional = true }
 sled = { version = "=0.34.7", optional = true }
 redb = { version = "=1.4", optional = true }
 rocksdb = { version = "0.21", optional = true }
+tidesdb = { git = "https://github.com/tidesdb/tidesdb-rs.git", optional = true }
 
 # Networking layer - EXACT VERSIONS for security
 tokio = { version = "=1.48.0", features = ["full", "rt-multi-thread"] }  # Updated for iroh 0.95 compatibility (requires ^1.44.1)
@@ -163,7 +164,7 @@ rustls = { version = "0.21", optional = true }
 # iroh 0.95 uses actively maintained dependencies and fixes all known security issues.
 
 [features]
-default = ["sysinfo", "redb", "nix", "libc", "production", "governance", "zmq"]
+default = ["sysinfo", "tidesdb", "redb", "nix", "libc", "production", "governance", "zmq"]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
 # Note: utxo-commitments removed from default - it's experimental only
 iroh = ["dep:iroh"]
@@ -183,11 +184,14 @@ sled = ["dep:sled"]
 redb = ["dep:redb"]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
 rocksdb = ["dep:rocksdb"]
+tidesdb = ["dep:tidesdb"]
 # Process sandboxing (Unix)
 nix = ["dep:nix", "dep:libc"]
 libc = ["dep:libc"]
 # Production optimizations (parallel block validation, etc.)
 production = ["blvm-protocol/production", "dep:rayon", "dep:lru", "dep:blvm-consensus", "dep:smallvec"]
+# Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
+profile = ["blvm-protocol/profile"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF
 dandelion = []
 # CTV (BIP119 CheckTemplateVerify) - passed through from blvm-protocol
@@ -280,6 +284,11 @@ path = "examples/electrum-integration.rs"
 [[example]]
 name = "wallet-integration"
 path = "examples/wallet-integration.rs"
+
+[[example]]
+name = "verify_tidesdb"
+path = "examples/verify_tidesdb.rs"
+required-features = ["tidesdb"]
 
 # Tools
 [[bin]]

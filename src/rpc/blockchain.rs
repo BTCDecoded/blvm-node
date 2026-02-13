@@ -141,7 +141,7 @@ impl BlockchainRpc {
     /// Calculate hash_serialized_2 for UTXO set (double SHA256)
     ///
     /// Serializes UTXO set deterministically and computes double SHA256 hash.
-    /// Matches Bitcoin Core's gettxoutsetinfo hash_serialized_2 calculation.
+    /// Matches gettxoutsetinfo hash_serialized_2 calculation.
     fn calculate_utxo_set_hash(utxo_set: &blvm_protocol::UtxoSet) -> [u8; 32] {
         use crate::storage::hashing::double_sha256;
 

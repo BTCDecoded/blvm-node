@@ -5,7 +5,7 @@
 //! 2. Scanning the local subnet for port 8333 (Bitcoin P2P)
 //! 3. Returning discovered nodes for priority connection
 //!
-//! This enables massive IBD speedups when a local Bitcoin Core or other
+//! This enables massive IBD speedups when a local node or other
 //! Bitcoin node is available on the LAN (e.g., Start9, Umbrel, RaspiBlitz).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};

@@ -49,7 +49,7 @@ pub struct Peer {
     /// Protocol version from version message
     version: u32,
     /// User agent (subversion) from version message
-    /// Example: "/Satoshi:25.0.0/" for Bitcoin Core
+    /// Example: "/Satoshi:25.0.0/" for standard nodes
     user_agent: Option<String>,
     /// Best block height from version message (peer's chain tip)
     /// This indicates how many blocks the peer has
@@ -72,7 +72,7 @@ pub struct Peer {
     pending_ping_nonce: Option<u64>,
     /// Timestamp when ping was sent (for timeout detection)
     ping_sent_time: Option<u64>,
-    /// Ping timeout in seconds (default: 20 minutes, Bitcoin Core uses longer)
+    /// Ping timeout in seconds (default: 20 minutes)
     ping_timeout_seconds: u64,
 }
 
@@ -636,7 +636,7 @@ impl Peer {
 
     /// Check if peer has NoBan permission (won't be disconnected for misbehavior)
     pub fn has_noban_permission(&self) -> bool {
-        // NoBan flag = 1 (Bitcoin Core: NetPermissionFlags::NoBan)
+        // NoBan flag = 1 (NetPermissionFlags::NoBan)
         (self.permissions & 1) != 0
     }
 

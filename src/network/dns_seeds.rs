@@ -1,7 +1,7 @@
 //! DNS Seed Resolution for Peer Discovery
 //!
 //! Resolves Bitcoin DNS seeds to discover initial peer addresses.
-//! Based on Bitcoin Core's DNS seed mechanism.
+//! Based on the standard DNS seed mechanism.
 
 use crate::network::protocol::NetworkAddress;
 use std::net::{SocketAddr, ToSocketAddrs};

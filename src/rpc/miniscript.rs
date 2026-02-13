@@ -48,7 +48,7 @@ pub mod miniscript_rpc {
                 let checksum = miniscript_support::calculate_descriptor_checksum(descriptor_str);
                 let is_range = miniscript_support::is_range_descriptor(descriptor_str);
                 
-                // Return descriptor info (Bitcoin Core compatible format)
+                // Return descriptor info (standard compatible format)
                 Ok(json!({
                     "descriptor": descriptor_str,
                     "checksum": checksum,

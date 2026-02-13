@@ -84,24 +84,19 @@ impl Node {
         rpc_addr: SocketAddr,
         protocol_version: Option<ProtocolVersion>,
     ) -> Result<Self> {
-        Self::with_storage_config(
-            data_dir,
-            network_addr,
-            rpc_addr,
-            protocol_version,
-            None,
-            None,
-        )
+        Self::with_storage_config(data_dir, network_addr, rpc_addr, protocol_version, None)
     }
 
     /// Create a new node with storage configuration
+    ///
+    /// When `storage_config` is `Some`, uses its `database_backend`, `pruning`, and `indexing`.
+    /// When `None`, uses default backend and no pruning/indexing.
     pub fn with_storage_config(
         data_dir: &str,
         network_addr: SocketAddr,
         rpc_addr: SocketAddr,
         protocol_version: Option<ProtocolVersion>,
-        pruning_config: Option<crate::config::PruningConfig>,
-        indexing_config: Option<crate::config::IndexingConfig>,
+        storage_config: Option<&crate::config::StorageConfig>,
     ) -> Result<Self> {
         info!("Initializing node");
 
@@ -112,8 +107,17 @@ impl Node {
 
         // Create storage with configuration
         info!("[NODE_INIT] Creating storage...");
-        use crate::storage::database::default_backend;
-        let backend = default_backend();
+        let (backend, pruning_config, indexing_config) = if let Some(sc) = storage_config {
+            let backend = crate::storage::database::backend_from_config(sc.database_backend)?;
+            (
+                backend,
+                sc.pruning.clone(),
+                sc.indexing.clone(),
+            )
+        } else {
+            use crate::storage::database::default_backend;
+            (default_backend(), None, None)
+        };
         info!("[NODE_INIT] Using backend: {:?}", backend);
         info!("[NODE_INIT] Calling Storage::with_backend_pruning_and_indexing()...");
         let storage = Storage::with_backend_pruning_and_indexing(
@@ -121,6 +125,7 @@ impl Node {
             backend,
             pruning_config,
             indexing_config,
+            storage_config,
         )?;
         info!("[NODE_INIT] Storage created successfully");
         let storage_arc = Arc::new(storage);
@@ -175,6 +180,10 @@ impl Node {
 
     /// Set node configuration
     pub fn with_config(mut self, config: NodeConfig) -> Result<Self> {
+        // Initialize Rayon pool for script verification (uses BLVM_CONSENSUS_PERFORMANCE_SCRIPT_VERIFICATION_THREADS)
+        #[cfg(all(feature = "production", feature = "rayon"))]
+        blvm_consensus::config::init_rayon_for_script_verification();
+
         // Auto-detect governance server if configured (best-effort, non-blocking)
         #[cfg(feature = "governance")]
         {

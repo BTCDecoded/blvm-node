@@ -1,7 +1,7 @@
 //! Storage layer for blvm-node
 //!
 //! This module provides persistent storage for blocks, UTXO set, and chain state.
-//! Supports multiple database backends via feature flags (sled, redb).
+//! Supports multiple database backends via feature flags (tidesdb, redb, sled, rocksdb).
 
 pub mod assumeutxo;
 pub mod bitcoin_core_blocks;
@@ -57,31 +57,31 @@ pub struct Storage {
 impl Storage {
     /// Create a new storage instance with default backend
     ///
-    /// Attempts to use the default backend (redb), and gracefully falls back
-    /// to sled if redb fails and sled is available.
+    /// Attempts to use the default backend (TidesDB if available, else Redb), and gracefully
+    /// falls back to alternatives if the primary fails.
     /// 
-    /// If Bitcoin Core data is detected, will use RocksDB to read it.
+    /// If existing node data is detected, will use RocksDB to read it.
     pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
-        // Check for Bitcoin Core data first (if RocksDB is available)
+        // Check for existing node data first (if RocksDB is available)
         #[cfg(feature = "rocksdb")]
         {
             use bitcoin_core_detection::BitcoinCoreNetwork;
             use bitcoin_core_storage::BitcoinCoreStorage;
             
-            // Try to detect Bitcoin Core mainnet data
+            // Try to detect existing mainnet data
             if let Ok(Some(backend)) = BitcoinCoreStorage::detect_and_open(
                 data_dir.as_ref(),
                 BitcoinCoreNetwork::Mainnet,
             ) {
                 if backend == DatabaseBackend::RocksDB {
-                    info!("Bitcoin Core data detected, opening with RocksDB backend");
-                    // Open Bitcoin Core database directly and initialize storage
+                    info!("Existing node data detected, opening with RocksDB backend");
+                    // Open existing database directly and initialize storage
                     let db = Arc::from(BitcoinCoreStorage::open_bitcoin_core_database(
                         data_dir.as_ref(),
                         BitcoinCoreNetwork::Mainnet,
                     )?);
                     
-                    // Create Bitcoin Core block file reader if blocks directory exists
+                    // Create block file reader if blocks directory exists
                     // Use cache directory for index persistence
                     let block_reader = if let Some(core_dir) = BitcoinCoreDetection::detect_data_dir(BitcoinCoreNetwork::Mainnet)? {
                         let blocks_dir = core_dir.join("blocks");
@@ -93,11 +93,11 @@ impl Storage {
                                 Some(data_dir.as_ref()),
                             ) {
                                 Ok(reader) => {
-                                    info!("Bitcoin Core block files detected, enabling block file reader with index cache");
+                                    info!("Block files detected, enabling block file reader with index cache");
                                     Some(Arc::new(reader))
                                 }
                                 Err(e) => {
-                                    warn!("Failed to initialize Bitcoin Core block file reader: {}", e);
+                                    warn!("Failed to initialize block file reader: {}", e);
                                     None
                                 }
                             }
@@ -169,7 +169,7 @@ impl Storage {
         backend: DatabaseBackend,
         pruning_config: Option<PruningConfig>,
     ) -> Result<Self> {
-        Self::with_backend_pruning_and_indexing(data_dir, backend, pruning_config, None)
+        Self::with_backend_pruning_and_indexing(data_dir, backend, pruning_config, None, None)
     }
 
     /// Create a new storage instance with backend, pruning, and indexing config
@@ -178,6 +178,7 @@ impl Storage {
         backend: DatabaseBackend,
         pruning_config: Option<PruningConfig>,
         indexing_config: Option<crate::config::IndexingConfig>,
+        storage_config: Option<&crate::config::StorageConfig>,
     ) -> Result<Self> {
         #[cfg(feature = "compression")]
         {
@@ -187,12 +188,13 @@ impl Storage {
                 pruning_config,
                 indexing_config,
                 None,
+                storage_config,
             )
         }
         #[cfg(not(feature = "compression"))]
         {
             // When compression feature is disabled, use the internal implementation
-            let db = Arc::from(create_database(data_dir, backend)?);
+            let db = Arc::from(create_database(data_dir, backend, storage_config)?);
             let blockstore = Arc::new(blockstore::BlockStore::new(Arc::clone(&db))?);
             let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
             let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
@@ -255,8 +257,9 @@ impl Storage {
         pruning_config: Option<PruningConfig>,
         indexing_config: Option<crate::config::IndexingConfig>,
         compression_config: Option<crate::config::CompressionConfig>,
+        storage_config: Option<&crate::config::StorageConfig>,
     ) -> Result<Self> {
-        let db = Arc::from(create_database(data_dir, backend)?);
+        let db = Arc::from(create_database(data_dir, backend, storage_config)?);
 
         // Configure block store with compression settings
         #[cfg(feature = "compression")]

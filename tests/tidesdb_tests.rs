@@ -1,25 +1,25 @@
-//! RocksDB backend tests
+//! TidesDB backend tests
 //!
-//! Tests for RocksDB database backend implementation, including
-//! Bitcoin Core LevelDB format compatibility.
+//! Tests for TidesDB database backend implementation.
+//! Requires: TidesDB C library installed, build with --features tidesdb
 
-#[cfg(feature = "rocksdb")]
-mod rocksdb_tests {
-    use blvm_node::storage::database::{create_database, DatabaseBackend, Database, Tree};
+#[cfg(feature = "tidesdb")]
+mod tidesdb_tests {
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend, Tree};
     use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
-    fn test_rocksdb_creation() {
+    fn test_tidesdb_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let db = create_database(temp_dir.path(), DatabaseBackend::RocksDB, None);
+        let db = create_database(temp_dir.path(), DatabaseBackend::TidesDB, None);
         assert!(db.is_ok());
     }
 
     #[test]
-    fn test_rocksdb_tree_operations() {
+    fn test_tidesdb_tree_operations() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
 
         let tree = db.open_tree("test_tree").unwrap();
 
@@ -52,9 +52,9 @@ mod rocksdb_tests {
     }
 
     #[test]
-    fn test_rocksdb_tree_isolation() {
+    fn test_tidesdb_tree_isolation() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
 
         let tree1 = db.open_tree("tree1").unwrap();
         let tree2 = db.open_tree("tree2").unwrap();
@@ -69,9 +69,9 @@ mod rocksdb_tests {
     }
 
     #[test]
-    fn test_rocksdb_iteration() {
+    fn test_tidesdb_iteration() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
 
         let tree = db.open_tree("test_tree").unwrap();
 
@@ -92,7 +92,7 @@ mod rocksdb_tests {
             .map(|item| item.unwrap())
             .collect();
 
-        // Sort for comparison (RocksDB iteration order may vary)
+        // Sort for comparison (iteration order may vary)
         collected.sort_by(|a, b| a.0.cmp(&b.0));
 
         assert_eq!(collected.len(), 3);
@@ -102,9 +102,9 @@ mod rocksdb_tests {
     }
 
     #[test]
-    fn test_rocksdb_dynamic_tree_creation() {
+    fn test_tidesdb_dynamic_tree_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
 
         // Create multiple trees dynamically
         for i in 0..10 {
@@ -122,21 +122,21 @@ mod rocksdb_tests {
     }
 
     #[test]
-    fn test_rocksdb_flush() {
+    fn test_tidesdb_flush() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
 
         let tree = db.open_tree("test_tree").unwrap();
         tree.insert(b"key", b"value").unwrap();
 
-        // Flush should succeed
+        // Flush should succeed (no-op for TidesDB)
         assert!(db.flush().is_ok());
     }
 
     #[test]
-    fn test_rocksdb_large_data() {
+    fn test_tidesdb_large_data() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
 
         let tree = db.open_tree("test_tree").unwrap();
 
@@ -149,17 +149,16 @@ mod rocksdb_tests {
     }
 }
 
-#[cfg(not(feature = "rocksdb"))]
-mod rocksdb_tests {
+#[cfg(not(feature = "tidesdb"))]
+mod tidesdb_tests {
     #[test]
-    fn test_rocksdb_not_available() {
-        // Test that RocksDB backend is not available when feature is disabled
+    fn test_tidesdb_not_available() {
+        // TidesDB backend is not available when feature is disabled
         use blvm_node::storage::database::{create_database, DatabaseBackend};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let result = create_database(temp_dir.path(), DatabaseBackend::RocksDB, None);
+        let result = create_database(temp_dir.path(), DatabaseBackend::TidesDB, None);
         assert!(result.is_err());
     }
 }
-
