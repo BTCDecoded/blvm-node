@@ -46,20 +46,12 @@ See [Security](#security) for production considerations.
 
 Supports multiple database backends via feature flags:
 
-- **tidesdb** (default): LSM-tree key-value store; benchmarks show strong IBD performance
+- **rocksdb** (default): High-performance database with Bitcoin Core compatibility; strong IBD performance
 - **redb**: Embedded database with ACID transactions
 - **sled**: Embedded key-value store (fallback)
-- **rocksdb** (optional): High-performance database with Bitcoin Core compatibility
+- **tidesdb** (optional): LSM-tree key-value store; requires TidesDB C library
 
-**TidesDB** (default backend):
-- Requires TidesDB C library installed before building
-- Quick install: `./scripts/install-tidesdb.sh` (installs to `~/.local` by default)
-- Or manually: clone [tidesdb](https://github.com/tidesdb/tidesdb), then `cmake -S . -B build && cmake --build build && sudo cmake --install build`
-- Linux deps: `libzstd-dev`, `liblz4-dev`, `libsnappy-dev`; macOS: `brew install zstd lz4 snappy`
-- After install, set `PKG_CONFIG_PATH` and `LD_LIBRARY_PATH` to the install prefix (see script output)
-- Verify: `cargo run --example verify_tidesdb`
-
-**RocksDB Features:**
+**RocksDB** (default backend):
 - Automatic Bitcoin Core data directory detection
 - Direct access to Bitcoin Core block files (`blk*.dat`)
 - Bitcoin Core format parsing and storage integration
@@ -69,7 +61,7 @@ Enable RocksDB with the `rocksdb` feature:
 cargo build --features rocksdb
 ```
 
-**Note**: RocksDB requires `libclang` system dependency. RocksDB and erlay features are mutually exclusive due to dependency conflicts. To use redb without TidesDB: `cargo build --no-default-features --features redb,...`
+**Note**: RocksDB requires `libclang` system dependency. RocksDB and erlay features are mutually exclusive due to dependency conflicts. To use redb instead: `cargo build --no-default-features --features redb,...`
 
 ## Configuration
 

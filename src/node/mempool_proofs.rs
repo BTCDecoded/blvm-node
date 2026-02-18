@@ -13,7 +13,6 @@ mod kani_proofs {
     use crate::node::mempool::MempoolManager;
     use blvm_protocol::{OutPoint, Transaction, UtxoSet};
     use kani::*;
-    use std::collections::HashMap;
 
     /// Proof limits for mempool operations
     mod proof_limits {
@@ -230,8 +229,8 @@ mod kani_proofs {
 
         let tx = create_bounded_transaction(input_count, output_count);
 
-        // Create UTXO set with values for inputs
-        let mut utxo_set: UtxoSet = HashMap::new();
+        // Create UTXO set with values for inputs (UtxoSet::default() for production FxHashMap compatibility)
+        let mut utxo_set = UtxoSet::default();
         let mut expected_input_total = 0u64;
 
         for (i, input) in tx.inputs.iter().enumerate() {
@@ -274,8 +273,8 @@ mod kani_proofs {
     fn verify_prioritization_correctness() {
         let mut mempool = MempoolManager::new();
 
-        // Create UTXO set
-        let mut utxo_set: UtxoSet = HashMap::new();
+        // Create UTXO set (UtxoSet::default() for production FxHashMap compatibility)
+        let mut utxo_set = UtxoSet::default();
 
         // Create two transactions with different fee rates
         let tx1 = create_bounded_transaction(1, 1);
@@ -355,8 +354,8 @@ mod kani_proofs {
 
         let tx = create_bounded_transaction(input_count, output_count);
 
-        // Create UTXO set
-        let mut utxo_set: UtxoSet = HashMap::new();
+        // Create UTXO set (UtxoSet::default() for production FxHashMap compatibility)
+        let mut utxo_set = UtxoSet::default();
         for input in &tx.inputs {
             let input_value: i64 = kani::any();
             kani::assume(input_value >= 0);

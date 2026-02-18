@@ -2,13 +2,12 @@
 # This configuration enables incremental pruning during IBD with UTXO commitments
 
 transport_preference = "tcponly"
-
-[network]
-network = "mainnet"
-listen_address = "0.0.0.0:8333"
+listen_addr = "0.0.0.0:8333"
+protocol_version = "BitcoinV1"
 
 [storage]
 data_dir = "~/.local/share/blvm-mainnet"
+database_backend = "rocksdb"
 # TidesDB tuning (when database_backend = "tidesdb"):
 # [storage.tidesdb]
 # utxo_klog_threshold = 65536   # Values <= this stay inline (fast). 0 = all to vlog. Default 64KB.

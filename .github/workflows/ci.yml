@@ -299,12 +299,20 @@ jobs:
           repository: BTCDecoded/bllvm-consensus
           path: _temp-consensus-proof
       
+      - name: Checkout blvm-spec-lock (consensus path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/blvm-spec-lock
+          path: _temp-spec-lock
+      
       - name: Move dependencies to parent directory
         run: |
           if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
           if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           mv _temp-protocol-engine ../bllvm-protocol
           mv _temp-consensus-proof ../bllvm-consensus
+          mv _temp-spec-lock ../blvm-spec-lock
       
       - name: Setup local dependencies for build
         run: |

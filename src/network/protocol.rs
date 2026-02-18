@@ -5,6 +5,7 @@
 use crate::network::transport::TransportType;
 use anyhow::Result;
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use blvm_protocol::segwit::Witness;
 use blvm_protocol::wire::{serialize_getheaders, deserialize_headers};
 use serde::{Deserialize, Serialize};
 
@@ -280,10 +281,9 @@ pub struct GetBlocksMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockMessage {
     pub block: Block,
-    /// Witness data for each transaction in the block (one Witness per transaction)
-    /// This is populated when parsing from Bitcoin wire format
+    /// Witness data: Vec<Vec<Witness>> - one Vec<Witness> per transaction, one Witness per input
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub witnesses: Vec<Vec<Vec<u8>>>,
+    pub witnesses: Vec<Vec<Witness>>,
 }
 
 /// Get data message
@@ -1001,11 +1001,10 @@ impl ProtocolParser {
             },
             "getblocks" => Ok(ProtocolMessage::GetBlocks(bincode::deserialize(payload)?)),
             "block" => {
-                // Use proper Bitcoin wire format deserialization
-                let block = blvm_protocol::wire::deserialize_block(payload)
+                // Use consensus wire format (Bitcoin block + witness structure)
+                let (block, witnesses) = blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
-                // Note: witnesses are skipped in block deserialization for now
-                Ok(ProtocolMessage::Block(BlockMessage { block, witnesses: vec![] }))
+                Ok(ProtocolMessage::Block(BlockMessage { block, witnesses }))
             },
             "getdata" => {
                 // Use proper Bitcoin wire format deserialization  

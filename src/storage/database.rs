@@ -8,6 +8,7 @@
 
 use anyhow::Result;
 use std::path::Path;
+use std::sync::Arc;
 
 /// All known tree names (excluding dynamic module_* which use shared "modules").
 /// Used by RocksDB for open_cf_descriptors and for backend parity validation.
@@ -65,6 +66,16 @@ pub trait Tree: Send + Sync {
 
     /// Get a value by key
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// Batch get: fetch multiple keys in one call. Default impl does sequential get.
+    /// RocksDB overrides with multi_get_cf for much faster bulk reads (avoids per-key overhead).
+    fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            results.push(self.get(key)?);
+        }
+        Ok(results)
+    }
 
     /// Remove a key-value pair
     fn remove(&self, key: &[u8]) -> Result<()>;
@@ -134,6 +145,113 @@ pub trait BatchWriter {
     /// Check if the batch is empty
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// Shared namespace tree for module_* isolation. Wraps any Tree with a key prefix.
+/// All backends use this for module storage (shared "modules" tree + prefix).
+fn open_module_tree(inner: Arc<dyn Tree>, module_id: &str, tree_name: &str) -> Box<dyn Tree> {
+    Box::new(NamespaceTree {
+        inner,
+        key_prefix: format!("module_{}_{}_", module_id, tree_name).into_bytes(),
+    })
+}
+
+struct NamespaceTree {
+    inner: Arc<dyn Tree>,
+    key_prefix: Vec<u8>,
+}
+
+impl NamespaceTree {
+    fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
+        let mut k = self.key_prefix.clone();
+        k.extend_from_slice(key);
+        k
+    }
+}
+
+impl Tree for NamespaceTree {
+    fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.inner.insert(&self.namespace_key(key), value)
+    }
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.inner.get(&self.namespace_key(key))
+    }
+    fn remove(&self, key: &[u8]) -> Result<()> {
+        self.inner.remove(&self.namespace_key(key))
+    }
+    fn contains_key(&self, key: &[u8]) -> Result<bool> {
+        self.inner.contains_key(&self.namespace_key(key))
+    }
+    fn clear(&self) -> Result<()> {
+        let prefix = &self.key_prefix;
+        let keys: Vec<Vec<u8>> = self
+            .inner
+            .iter()
+            .filter_map(|r| match r {
+                Ok((k, _)) if k.starts_with(prefix) => Some(Ok(k)),
+                Ok(_) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<Result<_>>()?;
+        for k in keys {
+            self.inner.remove(&k)?;
+        }
+        Ok(())
+    }
+    fn len(&self) -> Result<usize> {
+        let prefix = &self.key_prefix;
+        let mut count = 0;
+        for item in self.inner.iter() {
+            match item {
+                Ok((k, _)) if k.starts_with(prefix) => count += 1,
+                Ok(_) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(count)
+    }
+    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
+        let prefix = self.key_prefix.clone();
+        Box::new(
+            self.inner
+                .iter()
+                .filter_map(move |item| match item {
+                    Ok((k, v)) if k.starts_with(&prefix) => Some(Ok((k[prefix.len()..].to_vec(), v))),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                }),
+        )
+    }
+    fn batch(&self) -> Box<dyn BatchWriter + '_> {
+        Box::new(NamespaceBatchWriter {
+            inner: self.inner.batch(),
+            key_prefix: self.key_prefix.clone(),
+        })
+    }
+}
+
+struct NamespaceBatchWriter<'a> {
+    inner: Box<dyn BatchWriter + 'a>,
+    key_prefix: Vec<u8>,
+}
+
+impl<'a> BatchWriter for NamespaceBatchWriter<'a> {
+    fn put(&mut self, key: &[u8], value: &[u8]) {
+        let mut k = self.key_prefix.clone();
+        k.extend_from_slice(key);
+        self.inner.put(&k, value);
+    }
+    fn delete(&mut self, key: &[u8]) {
+        let mut k = self.key_prefix.clone();
+        k.extend_from_slice(key);
+        self.inner.delete(&k);
+    }
+    fn commit(self: Box<Self>) -> Result<()> {
+        self.inner.commit()
+    }
+    fn len(&self) -> usize {
+        self.inner.len()
     }
 }
 
@@ -231,6 +349,10 @@ pub fn create_database<P: AsRef<Path>>(
 ///
 /// Returns the preferred backend: TidesDB (if available) > Redb > Sled.
 pub fn default_backend() -> DatabaseBackend {
+    #[cfg(feature = "rocksdb")]
+    {
+        return DatabaseBackend::RocksDB;
+    }
     #[cfg(feature = "tidesdb")]
     {
         return DatabaseBackend::TidesDB;
@@ -243,11 +365,7 @@ pub fn default_backend() -> DatabaseBackend {
     {
         return DatabaseBackend::Sled;
     }
-    #[cfg(feature = "rocksdb")]
-    {
-        return DatabaseBackend::RocksDB;
-    }
-    DatabaseBackend::Redb // fallback (redb usually always enabled)
+    DatabaseBackend::Redb // fallback
 }
 
 /// Get fallback database backend
@@ -342,7 +460,7 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
 // Sled implementation
 #[cfg(feature = "sled")]
 mod sled_impl {
-    use super::{BatchWriter, Database, Tree};
+    use super::{open_module_tree, BatchWriter, Database, Tree};
     use anyhow::Result;
     use sled::Db;
     use std::path::Path;
@@ -361,21 +479,14 @@ mod sled_impl {
 
     impl Database for SledDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            // Module trees use shared "modules" tree with key prefix (same as redb)
             if name.starts_with("module_") {
                 let parts: Vec<&str> = name.splitn(3, '_').collect();
                 if parts.len() == 3 && parts[0] == "module" {
-                    let module_id = parts[1].to_string();
-                    let tree_name = parts[2].to_string();
                     let modules_tree = self.db.open_tree("modules")?;
-                    let inner = SledTree {
+                    let inner = Arc::new(SledTree {
                         tree: Arc::new(modules_tree),
-                    };
-                    return Ok(Box::new(SledModuleTree {
-                        inner: Arc::new(inner),
-                        module_id,
-                        tree_name,
-                    }));
+                    });
+                    return Ok(open_module_tree(inner, parts[1], parts[2]));
                 }
             }
 
@@ -439,111 +550,6 @@ mod sled_impl {
         }
     }
 
-    /// Module tree wrapper - uses shared "modules" tree with key prefix (parity with redb)
-    struct SledModuleTree {
-        inner: Arc<SledTree>,
-        module_id: String,
-        tree_name: String,
-    }
-
-    impl SledModuleTree {
-        fn key_prefix(&self) -> Vec<u8> {
-            format!("module_{}_{}_", self.module_id, self.tree_name).into_bytes()
-        }
-        fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
-            let mut n = self.key_prefix();
-            n.extend_from_slice(key);
-            n
-        }
-    }
-
-    impl Tree for SledModuleTree {
-        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.inner.insert(&self.namespace_key(key), value)
-        }
-        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            self.inner.get(&self.namespace_key(key))
-        }
-        fn remove(&self, key: &[u8]) -> Result<()> {
-            self.inner.remove(&self.namespace_key(key))
-        }
-        fn contains_key(&self, key: &[u8]) -> Result<bool> {
-            self.inner.contains_key(&self.namespace_key(key))
-        }
-        fn clear(&self) -> Result<()> {
-            let prefix = self.key_prefix();
-            let keys: Vec<Vec<u8>> = self
-                .inner
-                .iter()
-                .filter_map(|r| match r {
-                    Ok((k, _)) if k.starts_with(&prefix) => Some(Ok(k)),
-                    Ok(_) => None,
-                    Err(e) => Some(Err(e)),
-                })
-                .collect::<Result<_>>()?;
-            for k in keys {
-                self.inner.remove(&k)?;
-            }
-            Ok(())
-        }
-        fn len(&self) -> Result<usize> {
-            let prefix = self.key_prefix();
-            let mut count = 0;
-            for item in self.inner.iter() {
-                match item {
-                    Ok((k, _)) if k.starts_with(&prefix) => count += 1,
-                    Ok(_) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(count)
-        }
-        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-            let prefix = self.key_prefix();
-            Box::new(
-                self.inner
-                    .iter()
-                    .filter_map(move |item| match item {
-                        Ok((k, v)) if k.starts_with(&prefix) => {
-                            Some(Ok((k[prefix.len()..].to_vec(), v)))
-                        }
-                        Ok(_) => None,
-                        Err(e) => Some(Err(e)),
-                    }),
-            )
-        }
-        fn batch(&self) -> Box<dyn BatchWriter + '_> {
-            Box::new(SledModuleBatchWriter {
-                inner: self.inner.batch(),
-                key_prefix: self.key_prefix(),
-            })
-        }
-    }
-
-    struct SledModuleBatchWriter<'a> {
-        inner: Box<dyn BatchWriter + 'a>,
-        key_prefix: Vec<u8>,
-    }
-
-    impl<'a> BatchWriter for SledModuleBatchWriter<'a> {
-        fn put(&mut self, key: &[u8], value: &[u8]) {
-            let mut k = self.key_prefix.clone();
-            k.extend_from_slice(key);
-            self.inner.put(&k, value);
-        }
-        fn delete(&mut self, key: &[u8]) {
-            let mut k = self.key_prefix.clone();
-            k.extend_from_slice(key);
-            self.inner.delete(&k);
-        }
-        fn commit(self: Box<Self>) -> Result<()> {
-            self.inner.commit()
-        }
-        fn len(&self) -> usize {
-            self.inner.len()
-        }
-    }
-
     /// Sled batch writer using native sled::Batch
     struct SledBatchWriter {
         tree: Arc<sled::Tree>,
@@ -576,7 +582,7 @@ mod sled_impl {
 // Redb implementation
 #[cfg(feature = "redb")]
 mod redb_impl {
-    use super::{BatchWriter, Database, Tree};
+    use super::{open_module_tree, BatchWriter, Database, Tree};
     use anyhow::Result;
     use redb::{Database as RedbDb, ReadableTable, TableDefinition};
     use std::path::Path;
@@ -833,32 +839,18 @@ mod redb_impl {
 
     impl Database for RedbDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            // Handle module trees specially
             if name.starts_with("module_") {
-                // Parse module_id and tree_name from format: module_{module_id}_{tree_name}
                 let parts: Vec<&str> = name.splitn(3, '_').collect();
                 if parts.len() == 3 && parts[0] == "module" {
-                    let module_id = parts[1].to_string();
-                    let tree_name = parts[2].to_string();
-
-                    // Get MODULES_TABLE directly (avoid recursion)
                     let table_def = self
                         .get_table_def("modules")
                         .ok_or_else(|| anyhow::anyhow!("MODULES_TABLE not defined"))?;
-
-                    // Create a RedbTree for the MODULES_TABLE (bypass open_tree to avoid recursion)
-                    let inner_tree = RedbTree {
+                    let inner_tree = Arc::new(RedbTree {
                         db: Arc::clone(&self.db),
                         table_def,
                         name: "modules".to_string(),
-                    };
-
-                    // Return wrapped tree with namespacing
-                    return Ok(Box::new(ModuleTree {
-                        inner: Arc::new(inner_tree),
-                        module_id,
-                        tree_name,
-                    }));
+                    });
+                    return Ok(open_module_tree(inner_tree, parts[1], parts[2]));
                 }
             }
 
@@ -883,143 +875,6 @@ mod redb_impl {
             let write_txn = self.db.begin_write()?;
             write_txn.commit()?;
             Ok(())
-        }
-    }
-
-    /// ModuleTree wrapper that provides namespaced keys for module storage
-    /// All module trees share the MODULES_TABLE but use key prefixes for isolation
-    struct ModuleTree {
-        inner: Arc<dyn Tree>,
-        module_id: String,
-        tree_name: String,
-    }
-
-    impl ModuleTree {
-        fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
-            let mut namespaced = self.key_prefix();
-            namespaced.extend_from_slice(key);
-            namespaced
-        }
-
-        fn key_prefix(&self) -> Vec<u8> {
-            format!("module_{}_{}_", self.module_id, self.tree_name).into_bytes()
-        }
-    }
-
-    impl Tree for ModuleTree {
-        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            let namespaced_key = self.namespace_key(key);
-            self.inner.insert(&namespaced_key, value)
-        }
-
-        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            let namespaced_key = self.namespace_key(key);
-            self.inner.get(&namespaced_key)
-        }
-
-        fn remove(&self, key: &[u8]) -> Result<()> {
-            let namespaced_key = self.namespace_key(key);
-            self.inner.remove(&namespaced_key)
-        }
-
-        fn contains_key(&self, key: &[u8]) -> Result<bool> {
-            // Direct lookup with namespaced key - efficient
-            let namespaced_key = self.namespace_key(key);
-            self.inner.contains_key(&namespaced_key)
-        }
-
-        fn clear(&self) -> Result<()> {
-            // Remove only keys with this module/tree prefix
-            let prefix = self.key_prefix();
-            let keys: Vec<Vec<u8>> = {
-                let mut collected = Vec::new();
-                for item in self.inner.iter() {
-                    match item {
-                        Ok((k, _)) => {
-                            if k.starts_with(&prefix) {
-                                collected.push(k);
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                collected
-            };
-
-            for key in keys {
-                self.inner.remove(&key)?;
-            }
-            Ok(())
-        }
-
-        fn len(&self) -> Result<usize> {
-            // Count only keys with this module/tree prefix
-            let prefix = self.key_prefix();
-            let mut count = 0;
-            for item in self.inner.iter() {
-                match item {
-                    Ok((k, _)) if k.starts_with(&prefix) => count += 1,
-                    Ok(_) => {} // Skip keys from other modules
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(count)
-        }
-
-        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-            // Filter iterator to only return keys for this module/tree
-            let prefix = self.key_prefix();
-            Box::new(
-                self.inner
-                    .iter()
-                    .filter_map(move |item| {
-                        match item {
-                            Ok((k, v)) if k.starts_with(&prefix) => {
-                                // Remove prefix from key
-                                let unprefixed_key = k[prefix.len()..].to_vec();
-                                Some(Ok((unprefixed_key, v)))
-                            }
-                            Ok(_) => None, // Skip keys from other modules
-                            Err(e) => Some(Err(e)),
-                        }
-                    }),
-            )
-        }
-
-        fn batch(&self) -> Box<dyn BatchWriter + '_> {
-            // Create a namespacing wrapper around the inner batch
-            Box::new(ModuleBatchWriter {
-                inner: self.inner.batch(),
-                key_prefix: self.key_prefix(),
-            })
-        }
-    }
-
-    /// Batch writer wrapper that adds namespace prefix to all keys
-    struct ModuleBatchWriter<'a> {
-        inner: Box<dyn BatchWriter + 'a>,
-        key_prefix: Vec<u8>,
-    }
-
-    impl<'a> BatchWriter for ModuleBatchWriter<'a> {
-        fn put(&mut self, key: &[u8], value: &[u8]) {
-            let mut namespaced_key = self.key_prefix.clone();
-            namespaced_key.extend_from_slice(key);
-            self.inner.put(&namespaced_key, value);
-        }
-
-        fn delete(&mut self, key: &[u8]) {
-            let mut namespaced_key = self.key_prefix.clone();
-            namespaced_key.extend_from_slice(key);
-            self.inner.delete(&namespaced_key);
-        }
-
-        fn commit(self: Box<Self>) -> Result<()> {
-            self.inner.commit()
-        }
-
-        fn len(&self) -> usize {
-            self.inner.len()
         }
     }
 
@@ -1226,13 +1081,15 @@ mod redb_impl {
 // RocksDB implementation
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb_impl {
-    use super::{BatchWriter, Database, Tree};
+    use super::{open_module_tree, BatchWriter, Database, Tree};
     use anyhow::Result;
-    use rocksdb::{DB, Options, ColumnFamilyDescriptor, ColumnFamily};
+    use rocksdb::{BlockBasedOptions, Cache, DB, Options, ColumnFamilyDescriptor, ColumnFamily};
     use std::path::Path;
     use std::sync::Arc;
 
     pub struct RocksDBDatabase {
+        #[allow(dead_code)]
+        cache: Option<Cache>,
         db: Arc<DB>,
     }
 
@@ -1244,6 +1101,42 @@ pub mod rocksdb_impl {
             opts.create_if_missing(true);
             opts.create_missing_column_families(true);
 
+            // IBD tuning: more background threads for flush/compaction (read-heavy workloads benefit)
+            let parallelism: i32 = std::env::var("BLVM_ROCKSDB_PARALLELISM")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| {
+                    std::thread::available_parallelism()
+                        .map(|p| p.get().max(4) as i32)
+                        .unwrap_or(4)
+                });
+            opts.increase_parallelism(parallelism);
+            opts.set_max_open_files(10000); // IBD: large working set, many SST files
+
+            // IBD prefetch fix: compaction stalls prefetch reads. More compaction threads = shorter stalls.
+            let max_compactions: i32 = std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+            let max_flushes: i32 = std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+            let level0_trigger: i32 = std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+            opts.set_max_background_compactions(max_compactions);
+            opts.set_max_background_flushes(max_flushes);
+            opts.set_level_zero_file_num_compaction_trigger(level0_trigger);
+            tracing::info!("[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={}", parallelism, max_compactions, max_flushes, level0_trigger);
+
+            // Block cache for read performance (multi_get, point lookups). Default 450MB matches TidesDB/Redb.
+            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(450);
+            let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
+            let cache = Cache::new_lru_cache(dbcache_bytes);
+            let mut block_opts = BlockBasedOptions::default();
+            block_opts.set_block_cache(&cache);
+            opts.set_block_based_table_factory(&block_opts);
+            tracing::info!("[ROCKSDB] block_cache={}MB (BLVM_DBCACHE_MB)", dbcache_mb);
+
             // Build CF list: default + all known trees (parity with redb)
             let mut cfs = vec![ColumnFamilyDescriptor::new("default", Options::default())];
             cfs.extend(
@@ -1254,28 +1147,30 @@ pub mod rocksdb_impl {
 
             // If existing DB may have extra CFs (e.g. old module_* per-CF), merge for reopen
             let db = if db_path.exists() {
-                let mut cf_descriptors = cfs.clone();
                 let known: std::collections::HashSet<_> = ["default"]
                     .iter()
                     .chain(super::KNOWN_TREE_NAMES)
                     .map(|s| (*s).to_string())
                     .collect();
-                if let Ok(existing) = rocksdb::DB::list_cf(&opts, &db_path) {
-                    for name in existing {
-                        if !known.contains(&name) {
-                            cf_descriptors.push(ColumnFamilyDescriptor::new(
-                                name,
-                                Options::default(),
-                            ));
-                        }
-                    }
-                }
+                let mut cf_descriptors: Vec<ColumnFamilyDescriptor> = cfs
+                    .into_iter()
+                    .chain(
+                        rocksdb::DB::list_cf(&opts, &db_path)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|name| !known.contains(name))
+                            .map(|name| ColumnFamilyDescriptor::new(name, Options::default())),
+                    )
+                    .collect();
                 DB::open_cf_descriptors(&opts, &db_path, cf_descriptors)?
             } else {
                 DB::open_cf_descriptors(&opts, &db_path, cfs)?
             };
 
-            Ok(Self { db: Arc::new(db) })
+            Ok(Self {
+                cache: Some(cache),
+                db: Arc::new(db),
+            })
         }
 
         /// Open RocksDB with LevelDB format
@@ -1298,55 +1193,39 @@ pub mod rocksdb_impl {
 
             let db = DB::open_cf_descriptors(&opts, &chainstate_path, cfs)?;
 
-            Ok(Self { db: Arc::new(db) })
+            Ok(Self {
+                cache: None,
+                db: Arc::new(db),
+            })
         }
     }
 
     impl Database for RocksDBDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            // Module trees use shared "modules" CF with key prefix (same as redb)
             if name.starts_with("module_") {
                 let parts: Vec<&str> = name.splitn(3, '_').collect();
                 if parts.len() == 3 && parts[0] == "module" {
-                    let module_id = parts[1].to_string();
-                    let tree_name = parts[2].to_string();
-                    let modules_cf = self
-                        .db
-                        .cf_handle("modules")
+                    let _ = self.db.cf_handle("modules")
                         .ok_or_else(|| anyhow::anyhow!("modules column family not found"))?;
-                    let inner = RocksDBTree {
+                    let inner = Arc::new(RocksDBTree {
                         db: Arc::clone(&self.db),
-                        cf: Arc::new(modules_cf),
-                        name: "modules".to_string(),
-                    };
-                    return Ok(Box::new(RocksDBModuleTree {
-                        inner: Arc::new(inner),
-                        module_id,
-                        tree_name,
-                    }));
+                        cf_name: "modules".to_string(),
+                    });
+                    return Ok(open_module_tree(inner, parts[1], parts[2]));
                 }
             }
 
-            // Known trees use pre-created CF. Others create on demand (e.g. WAL, tests).
-            let cf = if let Some(handle) = self.db.cf_handle(name) {
-                handle
-            } else if super::KNOWN_TREE_NAMES.contains(&name) {
-                return Err(anyhow::anyhow!(
-                    "Column family {} should exist but was not found",
+            // Known trees use pre-created CF. Arc<DB> can't provide &mut for create_cf.
+            let _ = self.db.cf_handle(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family {} not found; RocksDB requires pre-creation at open time",
                     name
-                ));
-            } else {
-                let opts = Options::default();
-                self.db.create_cf(name, &opts)?;
-                self.db
-                    .cf_handle(name)
-                    .ok_or_else(|| anyhow::anyhow!("Failed to create column family: {}", name))?
-            };
+                )
+            })?;
 
             Ok(Box::new(RocksDBTree {
                 db: Arc::clone(&self.db),
-                cf: Arc::new(cf),
-                name: name.to_string(),
+                cf_name: name.to_string(),
             }))
         }
 
@@ -1358,47 +1237,65 @@ pub mod rocksdb_impl {
 
     struct RocksDBTree {
         db: Arc<DB>,
-        cf: Arc<ColumnFamily>,
-        name: String,
+        cf_name: String,
+    }
+
+    impl RocksDBTree {
+        fn cf(&self) -> Result<&ColumnFamily> {
+            self.db
+                .cf_handle(&self.cf_name)
+                .ok_or_else(|| anyhow::anyhow!("Column family {} not found", self.cf_name))
+        }
     }
 
     impl Tree for RocksDBTree {
         fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.db.put_cf(&self.cf, key, value)?;
+            self.db.put_cf(self.cf()?, key, value)?;
             Ok(())
         }
 
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            Ok(self.db.get_cf(&self.cf, key)?.map(|v| v.to_vec()))
+            Ok(self.db.get_cf(self.cf()?, key)?.map(|v| v.to_vec()))
+        }
+
+        fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
+            if keys.is_empty() {
+                return Ok(Vec::new());
+            }
+            let cf = self.cf()?;
+            let pairs: Vec<_> = keys.iter().map(|k| (cf, *k)).collect();
+            let raw = self.db.multi_get_cf(pairs);
+            let mut results = Vec::with_capacity(raw.len());
+            for r in raw {
+                results.push(r.map_err(|e| anyhow::anyhow!("RocksDB multi_get: {}", e))?);
+            }
+            Ok(results)
         }
 
         fn remove(&self, key: &[u8]) -> Result<()> {
-            self.db.delete_cf(&self.cf, key)?;
+            self.db.delete_cf(self.cf()?, key)?;
             Ok(())
         }
 
         fn contains_key(&self, key: &[u8]) -> Result<bool> {
-            Ok(self.db.get_cf(&self.cf, key)?.is_some())
+            Ok(self.db.get_cf(self.cf()?, key)?.is_some())
         }
 
         fn clear(&self) -> Result<()> {
-            // Delete all keys in this column family
-            let mut iter = self.db.iterator_cf(&self.cf, rocksdb::IteratorMode::Start);
+            let cf = self.cf()?;
+            let mut iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
             let mut batch = rocksdb::WriteBatch::default();
-
             while let Some(item) = iter.next() {
                 let (key, _) = item?;
-                batch.delete_cf(&self.cf, &key);
+                batch.delete_cf(cf, &key);
             }
-
             self.db.write(batch)?;
             Ok(())
         }
 
         fn len(&self) -> Result<usize> {
-            // Count keys in column family
             let mut count = 0;
-            let iter = self.db.iterator_cf(&self.cf, rocksdb::IteratorMode::Start);
+            let iter = self.db.iterator_cf(self.cf()?, rocksdb::IteratorMode::Start);
             for item in iter {
                 let _ = item?;
                 count += 1;
@@ -1407,131 +1304,27 @@ pub mod rocksdb_impl {
         }
 
         fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-            // Use RocksDB iterator for efficient iteration
-            // Note: We need to collect into Vec because the iterator borrows from self
-            let iter = self.db.iterator_cf(&self.cf, rocksdb::IteratorMode::Start);
+            let cf = match self.cf() {
+                Ok(c) => c,
+                Err(e) => return Box::new(std::iter::once(Err(e))),
+            };
+            let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
             let items: Vec<_> = iter
                 .map(|item| {
                     item.map(|(k, v)| (k.to_vec(), v.to_vec()))
                         .map_err(|e| anyhow::anyhow!("RocksDB iteration error: {}", e))
                 })
                 .collect();
-
             Box::new(items.into_iter())
         }
 
         fn batch(&self) -> Box<dyn BatchWriter + '_> {
             Box::new(RocksDBBatchWriter {
                 db: Arc::clone(&self.db),
-                cf: Arc::clone(&self.cf),
+                cf_name: self.cf_name.clone(),
                 batch: rocksdb::WriteBatch::default(),
                 op_count: 0,
             })
-        }
-    }
-
-    /// Module tree wrapper - uses shared "modules" CF with key prefix (parity with redb)
-    struct RocksDBModuleTree {
-        inner: Arc<RocksDBTree>,
-        module_id: String,
-        tree_name: String,
-    }
-
-    impl RocksDBModuleTree {
-        fn key_prefix(&self) -> Vec<u8> {
-            format!("module_{}_{}_", self.module_id, self.tree_name).into_bytes()
-        }
-        fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
-            let mut n = self.key_prefix();
-            n.extend_from_slice(key);
-            n
-        }
-    }
-
-    impl Tree for RocksDBModuleTree {
-        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.inner.insert(&self.namespace_key(key), value)
-        }
-        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            self.inner.get(&self.namespace_key(key))
-        }
-        fn remove(&self, key: &[u8]) -> Result<()> {
-            self.inner.remove(&self.namespace_key(key))
-        }
-        fn contains_key(&self, key: &[u8]) -> Result<bool> {
-            self.inner.contains_key(&self.namespace_key(key))
-        }
-        fn clear(&self) -> Result<()> {
-            let prefix = self.key_prefix();
-            let keys: Vec<Vec<u8>> = self
-                .inner
-                .iter()
-                .filter_map(|r| match r {
-                    Ok((k, _)) if k.starts_with(&prefix) => Some(Ok(k)),
-                    Ok(_) => None,
-                    Err(e) => Some(Err(e)),
-                })
-                .collect::<Result<_>>()?;
-            for k in keys {
-                self.inner.remove(&k)?;
-            }
-            Ok(())
-        }
-        fn len(&self) -> Result<usize> {
-            let prefix = self.key_prefix();
-            let mut count = 0;
-            for item in self.inner.iter() {
-                match item {
-                    Ok((k, _)) if k.starts_with(&prefix) => count += 1,
-                    Ok(_) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(count)
-        }
-        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-            let prefix = self.key_prefix();
-            Box::new(
-                self.inner
-                    .iter()
-                    .filter_map(move |item| match item {
-                        Ok((k, v)) if k.starts_with(&prefix) => {
-                            Some(Ok((k[prefix.len()..].to_vec(), v)))
-                        }
-                        Ok(_) => None,
-                        Err(e) => Some(Err(e)),
-                    }),
-            )
-        }
-        fn batch(&self) -> Box<dyn BatchWriter + '_> {
-            Box::new(RocksDBModuleBatchWriter {
-                inner: self.inner.batch(),
-                key_prefix: self.key_prefix(),
-            })
-        }
-    }
-
-    struct RocksDBModuleBatchWriter<'a> {
-        inner: Box<dyn BatchWriter + 'a>,
-        key_prefix: Vec<u8>,
-    }
-
-    impl<'a> BatchWriter for RocksDBModuleBatchWriter<'a> {
-        fn put(&mut self, key: &[u8], value: &[u8]) {
-            let mut k = self.key_prefix.clone();
-            k.extend_from_slice(key);
-            self.inner.put(&k, value);
-        }
-        fn delete(&mut self, key: &[u8]) {
-            let mut k = self.key_prefix.clone();
-            k.extend_from_slice(key);
-            self.inner.delete(&k);
-        }
-        fn commit(self: Box<Self>) -> Result<()> {
-            self.inner.commit()
-        }
-        fn len(&self) -> usize {
-            self.inner.len()
         }
     }
 
@@ -1540,19 +1333,21 @@ pub mod rocksdb_impl {
     /// RocksDB's WriteBatch is highly optimized for bulk operations.
     struct RocksDBBatchWriter {
         db: Arc<DB>,
-        cf: Arc<ColumnFamily>,
+        cf_name: String,
         batch: rocksdb::WriteBatch,
         op_count: usize,
     }
 
     impl BatchWriter for RocksDBBatchWriter {
         fn put(&mut self, key: &[u8], value: &[u8]) {
-            self.batch.put_cf(&self.cf, key, value);
+            let cf = self.db.cf_handle(&self.cf_name).expect("column family must exist");
+            self.batch.put_cf(cf, key, value);
             self.op_count += 1;
         }
 
         fn delete(&mut self, key: &[u8]) {
-            self.batch.delete_cf(&self.cf, key);
+            let cf = self.db.cf_handle(&self.cf_name).expect("column family must exist");
+            self.batch.delete_cf(cf, key);
             self.op_count += 1;
         }
 
@@ -1570,7 +1365,7 @@ pub mod rocksdb_impl {
 // TidesDB implementation
 #[cfg(feature = "tidesdb")]
 mod tidesdb_impl {
-    use super::{BatchWriter, Database, Tree};
+    use super::{open_module_tree, BatchWriter, Database, Tree};
     use anyhow::Result;
     use std::path::Path;
     use std::sync::Arc;
@@ -1668,19 +1463,13 @@ mod tidesdb_impl {
             if name.starts_with("module_") {
                 let parts: Vec<&str> = name.splitn(3, '_').collect();
                 if parts.len() == 3 && parts[0] == "module" {
-                    let module_id = parts[1].to_string();
-                    let tree_name = parts[2].to_string();
                     let modules_cf = self.get_or_create_cf("modules")?;
-                    let inner = TidesDBTree {
+                    let inner = Arc::new(TidesDBTree {
                         db: Arc::clone(&self.db),
                         cf: Arc::new(modules_cf),
                         name: "modules".to_string(),
-                    };
-                    return Ok(Box::new(TidesDBModuleTree {
-                        inner: Arc::new(inner),
-                        module_id,
-                        tree_name,
-                    }));
+                    });
+                    return Ok(open_module_tree(inner, parts[1], parts[2]));
                 }
             }
 

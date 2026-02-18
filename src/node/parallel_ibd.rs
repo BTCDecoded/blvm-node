@@ -18,11 +18,14 @@ use crate::network::NetworkManager;
 use crate::network::protocol::{GetHeadersMessage, HeadersMessage, ProtocolMessage, ProtocolParser};
 use crate::network::inventory::MSG_BLOCK;
 use crate::storage::blockstore::BlockStore;
+use crate::storage::database::Tree;
 use crate::storage::disk_utxo::{
-    block_input_keys, block_input_keys_batch, load_keys_from_disk, DiskBackedUtxoSet, OutPointKey,
+    block_input_keys, block_input_keys_batch, load_keys_from_disk, sync_block_to_batch,
+    DiskBackedUtxoSet, OutPointKey, SyncBatch,
 };
 use crate::storage::Storage;
 use anyhow::{Context, Result};
+use blvm_consensus::bip_validation::Bip30Index;
 use blvm_protocol::{
     BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult,
     segwit::Witness,
@@ -34,6 +37,10 @@ use hex;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::RwLock;
+use crossbeam_channel;
+use std::thread;
+use tokio::sync::oneshot;
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
@@ -44,6 +51,12 @@ use tracing::{debug, error, info, warn};
 
 /// Number of blocks to prefetch ahead
 const PREFETCH_LOOKAHEAD: usize = 10;
+
+/// Ready-queue item: block + pre-loaded UTXOs. Validation only receives these; never blocks on disk.
+type ReadyItem = (u64, Block, Vec<Vec<Witness>>, rustc_hash::FxHashMap<OutPointKey, UTXO>);
+
+/// Prefetch work item: coordinator sends (disk, keys, height, block, witnesses); workers load and push ReadyItem.
+type PrefetchWorkItem = (Arc<dyn Tree + Send>, Vec<OutPointKey>, u64, Block, Vec<Vec<Witness>>);
 
 /// Maximum entries in prefetch cache (bounded to prevent memory bloat)
 /// This is a fallback; actual limit is calculated dynamically based on available memory
@@ -106,6 +119,38 @@ fn calculate_dynamic_buffer_limit(_current_height: u64) -> usize {
     // Conservative default for unknown systems
     warn!("sysinfo not available, using conservative buffer limit of 20,000 blocks");
     20_000
+}
+
+/// Diagnostic: process RSS (MB) + system available (MB). For crash debugging (profile feature).
+#[cfg(all(feature = "profile", target_os = "linux"))]
+fn get_memory_diag() -> Option<(u64, u64)> {
+    let rss_kb = std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find(|l| l.starts_with("VmRSS:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?;
+    let rss_mb = rss_kb / 1024;
+    let avail_mb = {
+        #[cfg(feature = "sysinfo")]
+        {
+            use sysinfo::System;
+            let mut sys = System::new_all();
+            sys.refresh_memory();
+            sys.available_memory() / (1024 * 1024)
+        }
+        #[cfg(not(feature = "sysinfo"))]
+        {
+            0u64
+        }
+    };
+    Some((rss_mb, avail_mb))
+}
+#[cfg(not(all(feature = "profile", target_os = "linux")))]
+fn get_memory_diag() -> Option<(u64, u64)> {
+    None
 }
 
 /// Storage flush interval: 1000 when RAM>=24GB (reduces flush frequency ~2% IBD gain), else 500.
@@ -627,14 +672,14 @@ async fn download_header_range(
                         }
                     }
                     
-                    // Calculate hash
-                    let mut header_data = Vec::with_capacity(80);
-                    header_data.extend_from_slice(&(header.version as i32).to_le_bytes());
-                    header_data.extend_from_slice(&header.prev_block_hash);
-                    header_data.extend_from_slice(&header.merkle_root);
-                    header_data.extend_from_slice(&(header.timestamp as u32).to_le_bytes());
-                    header_data.extend_from_slice(&(header.bits as u32).to_le_bytes());
-                    header_data.extend_from_slice(&(header.nonce as u32).to_le_bytes());
+                    // Calculate hash (#53: stack array avoids heap alloc)
+                    let mut header_data = [0u8; 80];
+                    header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+                    header_data[4..36].copy_from_slice(&header.prev_block_hash);
+                    header_data[36..68].copy_from_slice(&header.merkle_root);
+                    header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+                    header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+                    header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
                     let header_hash = double_sha256(&header_data);
                     
                     all_headers.push(header);
@@ -825,6 +870,82 @@ impl ParallelIBD {
         const MAX_AHEAD_BLOCKS: u64 = 5_000;
         let validation_height = Arc::new(AtomicU64::new(start_height));
         
+        // PREFETCH-ON-DOWNLOAD: Create disk_utxo and prefetch before download workers so they can
+        // spawn prefetch when blocks arrive (runway = thousands of blocks).
+        let max_utxo_cache_entries: usize = std::env::var("BLVM_UTXO_CACHE_ENTRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20_000_000);
+        let utxo_flush_threshold: usize = std::env::var("BLVM_UTXO_FLUSH_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(calculate_utxo_flush_threshold)
+            .min(TIDESDB_MAX_TXN_OPS);
+        let mut disk_utxo_for_prefetch: Option<DiskBackedUtxoSet> = if let Some(storage_ref) = storage {
+            match storage_ref.open_tree("ibd_utxos") {
+                Ok(tree) => {
+                    let mut du = DiskBackedUtxoSet::new(tree, max_utxo_cache_entries, utxo_flush_threshold);
+                    if start_height <= 1 {
+                        info!("Fresh IBD: unified path (incremental flush from block 1)");
+                    } else {
+                        if let Err(e) = du.initialize_count() {
+                            warn!("Failed to initialize disk UTXO count: {}", e);
+                        }
+                    }
+                    info!("DiskBackedUtxoSet initialized for prefetch-on-download: max_cache={}, flush_threshold={}", 
+                        max_utxo_cache_entries, utxo_flush_threshold);
+                    Some(du)
+                }
+                Err(e) => {
+                    warn!("Failed to create disk UTXO tree: {}. Prefetch-on-download disabled.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // Ready-queue: ALWAYS created. Validation ONLY receives from ready_rx — fully isolated.
+        // Prefetch workers (when disk_utxo) load UTXOs; coordinator feeds them. No disk_utxo = coordinator pushes empty.
+        let max_prefetches_in_flight: usize = std::env::var("BLVM_PREFETCH_QUEUE_SIZE")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(48);
+        let prefetch_workers: usize = std::env::var("BLVM_PREFETCH_WORKERS")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+        let (prefetch_input_tx, ready_tx, ready_rx) = if disk_utxo_for_prefetch.is_some() {
+            let (in_tx, in_rx) = crossbeam_channel::bounded::<PrefetchWorkItem>(max_prefetches_in_flight);
+            let (out_tx, out_rx) = crossbeam_channel::bounded::<ReadyItem>(max_prefetches_in_flight);
+            for _ in 0..prefetch_workers {
+                let rx_clone = in_rx.clone();
+                let tx_clone = out_tx.clone();
+                thread::spawn(move || {
+                    while let Ok((disk, keys, height, block, witnesses)) = rx_clone.recv() {
+                        let n_keys = keys.len();
+                        let start = std::time::Instant::now();
+                        let utxos = match load_keys_from_disk(disk, keys) {
+                            Ok(u) => u,
+                            Err(e) => {
+                                warn!("Prefetch for block {} failed: {}", height, e);
+                                rustc_hash::FxHashMap::default()
+                            }
+                        };
+                        let duration_ms = start.elapsed().as_millis() as u64;
+                        #[cfg(feature = "profile")]
+                        if duration_ms >= 5 {
+                            blvm_consensus::profile_log!(
+                                "[PREFETCH_DISK] keys={} duration_ms={}",
+                                n_keys, duration_ms
+                            );
+                        }
+                        let _ = tx_clone.send((height, block, witnesses, utxos));
+                    }
+                });
+            }
+            info!("Prefetch ready-queue: {} workers, queue_size={}", prefetch_workers, max_prefetches_in_flight);
+            (Some(in_tx), out_tx, out_rx)
+        } else {
+            let (out_tx, out_rx) = crossbeam_channel::bounded::<ReadyItem>(max_prefetches_in_flight);
+            (None, out_tx, out_rx)
+        };
+        
         // Identify LAN vs WAN peers by score
         let scored_peers: Vec<(String, f64)> = filtered_peers.iter()
             .map(|p| {
@@ -927,7 +1048,16 @@ impl ParallelIBD {
                         Ok(blocks) => {
                             consecutive_failures = 0;
                             let block_count = blocks.len();
+                            #[cfg(feature = "profile")]
+                            if block_count > 0 && (chunks_completed == 0 || chunks_completed % 10 == 0 || block_count > 400) {
+                                let queue_rem = work_queue_clone.lock().await.len();
+                                blvm_consensus::profile_log!(
+                                    "[IBD_DOWNLOAD] peer={} chunk={}-{} blocks={} queue_remaining={} lan={}",
+                                    peer_id, start, end, block_count, queue_rem, is_lan_worker
+                                );
+                            }
                             for (height, block, witnesses) in blocks {
+                                // Blocks go to block_tx → reorder_buffer → prefetch coordinator sends to workers
                                 if tx.send((height, block, witnesses)).await.is_err() {
                                     return Ok::<(), anyhow::Error>(());
                                 }
@@ -971,7 +1101,99 @@ impl ParallelIBD {
         // Drop the original sender so the channel closes when all workers complete
         drop(block_tx);
         
-        // Step 4: Streaming validation with reorder buffer and DEFERRED STORAGE
+        // disk_utxo: shared via Arc<RwLock>. Coordinator reads (filter_keys, disk_clone); validation writes.
+        let disk_utxo: Option<Arc<RwLock<DiskBackedUtxoSet>>> =
+            disk_utxo_for_prefetch.take().map(|du| Arc::new(RwLock::new(du)));
+        let disk_utxo_for_coord = disk_utxo.as_ref().map(Arc::clone);
+        
+        // COORDINATOR: Runs on a separate task. Drains block_rx, reorders by height, sends
+        // contiguous blocks to prefetch (or ready_tx when no prefetch). Validation is isolated—
+        // it only receives from ready_rx. Coordinator owns ready_tx and drops it when done.
+        //
+        // THROTTLE: Prefetch loads from disk. UTXOs for block h come from blocks 0..h-1.
+        // We must wait for validation to apply h-1 before prefetching h (else disk load returns empty).
+        let validation_height_for_coord = Arc::clone(&validation_height);
+        let dynamic_buffer_limit = calculate_dynamic_buffer_limit(start_height);
+        tokio::spawn(async move {
+            let mut reorder_buffer: std::collections::BTreeMap<u64, (Block, Vec<Vec<Witness>>)> =
+                std::collections::BTreeMap::new();
+            let mut next_prefetch_height = start_height;
+            let mut total_received = 0u64;
+            loop {
+                match block_rx.recv().await {
+                    Some((height, block, witnesses)) => {
+                        if total_received == 0 {
+                            info!("Coordinator: first block received, height {}", height);
+                        }
+                        total_received += 1;
+                        reorder_buffer.insert(height, (block, witnesses));
+                        // Send contiguous blocks to prefetch / ready
+                        while reorder_buffer.contains_key(&next_prefetch_height) {
+                            let (block, witnesses) = reorder_buffer.remove(&next_prefetch_height).expect("contains_key");
+                            let keys_raw = block_input_keys(&block);
+                            let h = next_prefetch_height;
+                            next_prefetch_height += 1;
+                            if let (Some(ref du), Some(ref ptx)) = (disk_utxo_for_coord.as_ref(), prefetch_input_tx.as_ref()) {
+                                let keys = du.read().unwrap().filter_keys_to_fetch(&keys_raw);
+                                // Always wait for validation to apply h-1 before sending h — ensures
+                                // pending_writes has h-1's outputs (even when keys empty / direct path)
+                                while validation_height_for_coord.load(Ordering::Relaxed) < h.saturating_sub(1) {
+                                    tokio::time::sleep(Duration::from_millis(1)).await;
+                                }
+                                if keys.is_empty() {
+                                    let _ = ready_tx.try_send((h, block, witnesses, rustc_hash::FxHashMap::default()));
+                                } else {
+                                    // Prefetch loads from disk
+                                    let disk = du.read().unwrap().disk_clone_for_prefetch();
+                                    if let Err(crossbeam_channel::TrySendError::Full(back)) = ptx.try_send((disk, keys, h, block, witnesses)) {
+                                        let (_, _, _h, b, w) = back;
+                                        reorder_buffer.insert(h, (b, w));
+                                        next_prefetch_height -= 1;
+                                        break;
+                                    }
+                                }
+                            } else if prefetch_input_tx.is_some() {
+                                // disk_utxo missing but prefetch expected - send empty (fallback)
+                                let _ = ready_tx.try_send((h, block, witnesses, rustc_hash::FxHashMap::default()));
+                            } else {
+                                let _ = ready_tx.try_send((h, block, witnesses, rustc_hash::FxHashMap::default()));
+                            }
+                            if reorder_buffer.len() >= dynamic_buffer_limit {
+                                break;
+                            }
+                        }
+                    }
+                    None => {
+                        while reorder_buffer.contains_key(&next_prefetch_height) {
+                            let (block, witnesses) = reorder_buffer.remove(&next_prefetch_height).expect("contains_key");
+                            let keys_raw = block_input_keys(&block);
+                            let h = next_prefetch_height;
+                            next_prefetch_height += 1;
+                            if let (Some(ref du), Some(ref ptx)) = (disk_utxo_for_coord.as_ref(), prefetch_input_tx.as_ref()) {
+                                let keys = du.read().unwrap().filter_keys_to_fetch(&keys_raw);
+                                // Always wait for validation to apply h-1 before sending h
+                                while validation_height_for_coord.load(Ordering::Relaxed) < h.saturating_sub(1) {
+                                    tokio::time::sleep(Duration::from_millis(1)).await;
+                                }
+                                if keys.is_empty() {
+                                    let _ = ready_tx.send((h, block, witnesses, rustc_hash::FxHashMap::default()));
+                                } else {
+                                    let disk = du.read().unwrap().disk_clone_for_prefetch();
+                                    let _ = ptx.send((disk, keys, h, block, witnesses));
+                                }
+                            } else {
+                                let _ = ready_tx.send((h, block, witnesses, rustc_hash::FxHashMap::default()));
+                            }
+                        }
+                        drop(ready_tx);
+                        info!("Coordinator: done, sent {} blocks", total_received);
+                        break;
+                    }
+                }
+            }
+        });
+        
+        // Step 4: VALIDATION — isolated. Only receives from ready_rx; never touches block_rx or coordinator.
         //
         // Blocks may arrive out of order. We maintain a small reorder buffer
         // and flush in-order blocks immediately to minimize memory usage.
@@ -980,30 +1202,34 @@ impl ParallelIBD {
         // per-block database writes. Validated blocks are stored in a pending
         // buffer and flushed in batches of 1000 blocks. This improves IBD
         // performance from ~2 blocks/sec to ~50+ blocks/sec.
-        use std::collections::BTreeMap;
-        let mut reorder_buffer: BTreeMap<u64, (Block, Vec<Vec<Witness>>)> = BTreeMap::new();
-        let mut next_height = start_height;
         let mut blocks_synced = 0;
-        let mut total_received = 0;
         let validation_start = std::time::Instant::now();
         let mut last_rate_log_time = validation_start;
         let mut last_rate_log_blocks = 0u64;
         
-        // IBD Profiling (when profile feature enabled): BLVM_IBD_PROFILE=1 logs every block, =100 every 100th. BLVM_IBD_PROFILE_SLOW_MS=50 logs when any phase > 50ms.
-        // Disk I/O breakdown: prefetch, validation, sync, evict, flush (ms each). Use BLVM_IBD_DISK_PROFILE=1 for disk-focused logging.
+        // IBD Profiling (profile feature): BLVM_IBD_PROFILE=1 every block, =100 every 100th. BLVM_IBD_PROFILE_SLOW_MS=50 when phase>50ms.
+        // BLVM_IBD_BLOCKED_LOG=1: extensive logging of every phase that BLOCKS the validation thread (prefetch_await, gap_fill, utxo_flush_await, block_flush_await, recv_block).
         #[cfg(feature = "profile")]
-        let (ibd_profile_sample, ibd_profile_slow_ms, ibd_profile, ibd_disk_profile) = {
+        let (ibd_profile_sample, ibd_profile_slow_ms, ibd_profile, ibd_disk_profile, ibd_blocked_log) = {
             let sample: u64 = std::env::var("BLVM_IBD_PROFILE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
             let slow: u64 = std::env::var("BLVM_IBD_PROFILE_SLOW_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
             let disk: bool = std::env::var("BLVM_IBD_DISK_PROFILE").ok().map(|s| s == "1" || s == "true").unwrap_or(false);
+            // Default blocked_log=ON when profile sampling is on (ensure validation thread blocking is visible)
+            let blocked_log: bool = std::env::var("BLVM_IBD_BLOCKED_LOG")
+                .ok()
+                .map(|s| s != "0" && s != "false")
+                .unwrap_or(sample > 0);
             let on = sample > 0 || disk;
             if on {
-                info!("IBD profiling ENABLED: sample_interval={}, slow_threshold_ms={}, disk_io={}", sample, slow, disk);
+                info!("IBD profiling ENABLED: sample_interval={}, slow_threshold_ms={}, disk_io={}, blocked_log={}", sample, slow, disk, blocked_log);
             }
-            (sample, slow, on, disk)
+            if blocked_log {
+                info!("IBD_BLOCKED_LOG ENABLED: every validation-blocking phase will be logged");
+            }
+            (sample, slow, on, disk, blocked_log)
         };
         #[cfg(not(feature = "profile"))]
-        let (ibd_profile_sample, ibd_profile_slow_ms, ibd_profile, ibd_disk_profile) = (0u64, 0u64, false, false);
+        let (ibd_profile_sample, ibd_profile_slow_ms, ibd_profile, ibd_disk_profile, ibd_blocked_log) = (0u64, 0u64, false, false, false);
         
         // Track last 11 block headers for BIP113 median-time-past calculation
         // Vec + drain keeps contiguity; avoids VecDeque::make_contiguous() per-block alloc
@@ -1019,53 +1245,14 @@ impl ParallelIBD {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| calculate_storage_flush_interval());
-        let mut pending_blocks: Vec<(Block, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)> = Vec::with_capacity(storage_flush_interval);
+        let mut pending_blocks: Vec<(Arc<Block>, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)> = Vec::with_capacity(storage_flush_interval);
         let skip_storage = false;
         
         // DYNAMIC MEMORY MANAGEMENT: Calculate buffer limits based on available system memory
         // This adapts to the system's capabilities instead of using fixed limits
         let dynamic_buffer_limit = calculate_dynamic_buffer_limit(start_height);
         
-        // DISK-BACKED UTXO SET: Keeps memory bounded by spilling cold UTXOs to disk.
-        // Only a bounded cache lives in RAM; the rest is on redb.
-        // Before each block, needed UTXOs are prefetched from disk.
-        // After each block, changes are synced to disk and cold entries evicted.
-        //
-        // Configurable via env: BLVM_UTXO_CACHE_ENTRIES, BLVM_UTXO_FLUSH_THRESHOLD
-        let max_utxo_cache_entries: usize = std::env::var("BLVM_UTXO_CACHE_ENTRIES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(20_000_000);
-        let utxo_flush_threshold: usize = std::env::var("BLVM_UTXO_FLUSH_THRESHOLD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(calculate_utxo_flush_threshold)
-            .min(TIDESDB_MAX_TXN_OPS);
-        
-        let mut disk_utxo: Option<DiskBackedUtxoSet> = if let Some(storage_ref) = storage {
-            match storage_ref.open_tree("ibd_utxos") {
-                Ok(tree) => {
-                    let mut du = DiskBackedUtxoSet::new(tree, max_utxo_cache_entries, utxo_flush_threshold);
-                    if start_height <= 1 {
-                        info!("Fresh IBD: unified path (incremental flush from block 1)");
-                    } else {
-                        if let Err(e) = du.initialize_count() {
-                            warn!("Failed to initialize disk UTXO count: {}", e);
-                        }
-                    }
-                    info!("DiskBackedUtxoSet initialized: max_cache={}, flush_threshold={}", 
-                        max_utxo_cache_entries, utxo_flush_threshold);
-                    Some(du)
-                }
-                Err(e) => {
-                    warn!("Failed to create disk UTXO tree: {}. Falling back to in-memory only.", e);
-                    None
-                }
-            }
-        } else {
-            warn!("No storage available for disk-backed UTXO set. Using in-memory only (may OOM).");
-            None
-        };
+        // disk_utxo shared with coordinator (Arc<RwLock<>>) for filter_keys; validation holds write lock only during process
 
         // Batched lookahead prefetch: load UTXOs for N+1..N+K in one TidesDB round-trip.
         // Reduces spawn_blocking overhead and amortizes disk access across multiple blocks.
@@ -1078,125 +1265,150 @@ impl ParallelIBD {
         
         info!("Validation loop starting (deferred storage enabled, flush every {} blocks, buffer limit: {}, disk_utxo: {}, utxo_prefetch_lookahead: {})...", 
             storage_flush_interval, dynamic_buffer_limit, disk_utxo.is_some(), utxo_prefetch_lookahead);
-        let mut prefetch_queue: std::collections::VecDeque<(u64, tokio::task::JoinHandle<Result<HashMap<OutPointKey, UTXO>>>)> =
-            std::collections::VecDeque::new();
-        const MAX_PREFETCHES_IN_FLIGHT: usize = 2; // Pipeline N+1 and N+2 prefetches (Phase 2)
+
+        let mut gap_fill_count = 0u64;
+        let mut next_validation_height = start_height;
+        // Cache network_time for block header validation (reject future blocks). Refresh every 1000
+        // blocks to avoid 800k+ SystemTime::now() syscalls during IBD while staying correct near tip.
+        let mut cached_network_time = crate::utils::time::current_timestamp();
+
+        // REORDER BUFFER: Prefetch workers complete out-of-order. We must process blocks by height
+        // since each block's inputs reference UTXOs created by prior blocks.
+        let mut ready_buffer: std::collections::BTreeMap<u64, (Block, Vec<Vec<Witness>>, rustc_hash::FxHashMap<OutPointKey, UTXO>)> =
+            std::collections::BTreeMap::new();
 
         // Async flush: run storage flush on background thread. Fully overlapped: do NOT await
         // previous flush before spawning next. Cap 8 in flight to reduce validation stalls (Phase A).
         let mut flush_handles: std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>> =
             std::collections::VecDeque::new();
-        const MAX_FLUSHES_IN_FLIGHT: usize = 8;
+        const MAX_FLUSHES_IN_FLIGHT: usize = 16; // Higher cap = fewer validation-blocking awaits
 
         // Async UTXO flush: same pattern as block storage. Cap 8 in flight to reduce stalls (Phase A).
         let mut utxo_flush_handles: std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>> =
             std::collections::VecDeque::new();
-        const MAX_UTXO_FLUSHES_IN_FLIGHT: usize = 8;
+        const MAX_UTXO_FLUSHES_IN_FLIGHT: usize = 24; // Higher cap = fewer validation-blocking awaits (was 16)
+
+        // Pipelined sync: sync N runs in parallel with validation N+1.
+        // First block uses inline sync (no previous sync to overlap with).
+        let mut sync_handle: Option<tokio::task::JoinHandle<Result<SyncBatch>>> = None;
+        let mut is_first_block = true;
         
-        // Memory monitoring: log RSS and available memory every N blocks
-        let mut last_memory_log_height: u64 = 0;
-        const MEMORY_LOG_INTERVAL: u64 = 5_000; // Log every 5k blocks
+        // Cache BLVM_IBD_SNAPSHOT_DIR once at loop init (was std::env::var per block)
+        let snapshot_dir_base: Option<String> = std::env::var("BLVM_IBD_SNAPSHOT_DIR").ok();
+        // #48: Tunable yield interval (default 100 blocks)
+        let yield_interval: u64 = std::env::var("BLVM_IBD_YIELD_INTERVAL").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
+
+        // BIP30 O(1) index: for non-disk path, maintain locally. For disk path, DiskBackedUtxoSet owns it.
+        let mut bip30_index = Bip30Index::default();
         
-        loop {
-            // CRITICAL: Always try to validate consecutive blocks first
-            // This ensures we process blocks even when paused for gaps
-            while let Some((mut block, witnesses)) = reorder_buffer.remove(&next_height) {
-                // PREFETCH OVERLAP: Find and merge any pending prefetch for this block.
-                let mut prefetch_await_ms: u64 = 0;
-                let prefetch_idx = prefetch_queue.iter().position(|(h, _)| *h == next_height);
-                if let Some(idx) = prefetch_idx {
-                    let (prefetch_height, handle) = prefetch_queue.remove(idx).expect("idx valid");
-                    let wait_start = std::time::Instant::now();
-                    debug!(
-                        "[IBD_DEBUG] Block {}: awaiting UTXO prefetch from disk",
-                        next_height
-                    );
-                    match handle.await {
-                        Ok(Ok(buffer)) if !buffer.is_empty() => {
-                            if let Some(ref mut du) = disk_utxo {
-                                du.merge_prefetch_buffer(buffer);
+        // VALIDATION: Isolated. Recv from ready_rx, reorder by height, process sequentially.
+        // Prefetch workers complete out-of-order; blocks MUST be validated in height order.
+        let mut channel_open = true;
+        while channel_open || ready_buffer.contains_key(&next_validation_height) {
+            // Drain channel into buffer (non-blocking)
+            while channel_open {
+                match tokio::task::block_in_place(|| ready_rx.try_recv()) {
+                    Ok((h, b, w, u)) => {
+                        ready_buffer.insert(h, (b, w, u));
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => break,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        channel_open = false;
+                        break;
+                    }
+                }
+            }
+            // Take next block in order, or block on recv if channel still open.
+            // Wrap in Arc immediately so sync spawn can share ownership without cloning the block (hot path).
+            let (next_height, block_arc, witnesses, prefetched_utxos) = match ready_buffer.remove_entry(&next_validation_height) {
+                Some((h, (b, w, u))) => (h, Arc::new(b), w, u),
+                None => {
+                    if !channel_open {
+                        break;
+                    }
+                    match tokio::task::block_in_place(|| ready_rx.recv()) {
+                        Ok((h, b, w, u)) => {
+                            if h == next_validation_height {
+                                (h, Arc::new(b), w, u)
+                            } else {
+                                ready_buffer.insert(h, (b, w, u));
+                                continue;
                             }
-                            prefetch_await_ms = wait_start.elapsed().as_millis() as u64;
-                            debug!(
-                                "[IBD_DEBUG] Block {}: UTXO prefetch completed (waited {}ms)",
-                                next_height,
-                                prefetch_await_ms
-                            );
                         }
-                        Ok(Err(e)) => {
-                            prefetch_await_ms = wait_start.elapsed().as_millis() as u64;
-                            warn!("Prefetch for block {} failed: {}", next_height, e);
-                        }
-                        Err(e) => {
-                            prefetch_await_ms = wait_start.elapsed().as_millis() as u64;
-                            warn!("Prefetch task for block {} panicked: {}", next_height, e);
-                        }
-                        _ => {
-                            prefetch_await_ms = wait_start.elapsed().as_millis() as u64;
-                            debug!(
-                                "[IBD_DEBUG] Block {}: UTXO prefetch completed empty (waited {}ms)",
-                                next_height,
-                                prefetch_await_ms
-                            );
+                        Err(_) => {
+                            channel_open = false;
+                            break;
                         }
                     }
                 }
-                // Discard any prefetches for blocks we've skipped (gaps)
-                prefetch_queue.retain(|(h, _)| *h >= next_height);
+            };
+            next_validation_height = next_height + 1;
 
-                // EARLY PREFETCH: Spawn prefetch for N+1..N+K *before* gap-fill + validation.
-                // Gives prefetch max overlap (gap-fill + validate + sync + evict) so it often
-                // completes before we need it, reducing await time on next iteration.
-                if let Some(ref du) = disk_utxo {
-                    if prefetch_queue.len() < MAX_PREFETCHES_IN_FLIGHT {
-                        let blocks: Vec<&Block> = (1..=utxo_prefetch_lookahead)
-                            .filter_map(|off| {
-                                let h = next_height + off as u64;
-                                reorder_buffer.get(&h).map(|(b, _)| b)
-                            })
-                            .collect();
-                        if !blocks.is_empty() {
-                            let keys = block_input_keys_batch(&blocks);
-                            if !keys.is_empty() {
-                                let disk = du.disk_clone_for_prefetch();
-                                let first_height = next_height + 1;
-                                let handle =
-                                    tokio::task::spawn_blocking(move || load_keys_from_disk(disk, keys));
-                                prefetch_queue.push_back((first_height, handle));
-                            }
-                        }
-                    }
-                }
+            // #21: Compute tx_ids once — shared by collect_gaps and connect_block_ibd (saves 2–4k hashes/block).
+            let tx_ids_precomputed = blvm_consensus::block::compute_block_tx_ids(block_arc.as_ref());
 
-                // GAP-FILL: Load cache misses from disk OFF the critical path (spawn_blocking).
-                // Replaces disk I/O that was inside prefetch_block / block_in_place.
-                // Must not hold &disk_utxo across await (Rust borrow rules).
+            // Merge prefetched UTXOs + collect gaps under one lock (minimize lock round-trips).
+                // GAP-FILL (rare backup): keys not in cache and not in pending — needs disk load.
                 #[cfg(feature = "profile")]
                 let gap_fill_start = std::time::Instant::now();
-                let keys = disk_utxo
-                    .as_ref()
-                    .map(|du| du.collect_gaps(&block))
-                    .unwrap_or_default();
+                let keys = if let Some(ref arc) = disk_utxo {
+                    let mut du = arc.write().unwrap();
+                    if !prefetched_utxos.is_empty() {
+                        du.merge_prefetch_buffer(prefetched_utxos);
+                    }
+                    du.collect_gaps_with_tx_ids(block_arc.as_ref(), &tx_ids_precomputed)
+                } else {
+                    Vec::new()
+                };
+                let keys_len = keys.len();
+                #[cfg(feature = "profile")]
+                if ibd_profile && keys_len == 0 && (ibd_profile_sample == 1 || (ibd_profile_sample > 0 && next_height % ibd_profile_sample == 0)) {
+                    blvm_consensus::profile_log!(
+                        "[IBD_GAP_FILL_SKIP] height={} keys=0 (prefetch covered all inputs)",
+                        next_height
+                    );
+                }
                 if !keys.is_empty() {
-                    let disk = disk_utxo
-                        .as_ref()
-                        .map(|du| du.disk_clone_for_prefetch())
-                        .expect("disk_utxo.is_some when keys non-empty");
-                    let handle =
-                        tokio::task::spawn_blocking(move || load_keys_from_disk(disk, keys));
-                    match handle.await {
-                        Ok(Ok(buffer)) => {
-                            if let Some(ref mut du) = disk_utxo {
-                                du.merge_prefetch_buffer(buffer);
+                    #[cfg(feature = "profile")]
+                    if ibd_profile && (ibd_profile_sample == 1 || next_height % ibd_profile_sample == 0) {
+                        blvm_consensus::profile_log!(
+                            "[IBD_GAP_FILL] height={} keys={} (backup - prefetch missed)",
+                            next_height, keys_len
+                        );
+                    }
+                    gap_fill_count += 1;
+                    let disk = disk_utxo.as_ref().map(|arc| arc.read().unwrap().disk_clone_for_prefetch()).expect("disk_utxo when keys non-empty");
+                    let gap_fill_result = tokio::task::spawn_blocking(move || load_keys_from_disk(disk, keys))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("gap_fill join: {}", e))
+                        .and_then(|r| r.map_err(Into::into));
+                    match gap_fill_result {
+                        Ok(buffer) => {
+                            let gap_merged = disk_utxo.as_ref()
+                                .map(|arc| arc.write().unwrap().merge_prefetch_buffer(buffer))
+                                .unwrap_or(0);
+                            #[cfg(feature = "profile")]
+                            if ibd_profile && (ibd_profile_sample == 1 || next_height % ibd_profile_sample == 0) && keys_len > 0 {
+                                let gf_ms = gap_fill_start.elapsed().as_millis() as u64;
+                                blvm_consensus::profile_log!(
+                                    "[IBD_GAP_FILL] height={} keys_requested={} keys_merged={} duration_ms={} (cache miss - backup)",
+                                    next_height, keys_len, gap_merged, gf_ms
+                                );
+                            }
+                            #[cfg(feature = "profile")]
+                            {
+                                let gf_ms = gap_fill_start.elapsed().as_millis() as u64;
+                                if ibd_blocked_log && gf_ms > 0 {
+                                    blvm_consensus::profile_log!(
+                                        "[IBD_BLOCKED] phase=gap_fill height={} duration_ms={} keys={} (backup - prefetch missed)",
+                                        next_height, gf_ms, keys_len
+                                    );
+                                }
                             }
                         }
-                        Ok(Err(e)) => {
+                        Err(e) => {
                             error!("Gap-fill disk load failed for block {}: {}", next_height, e);
                             return Err(anyhow::anyhow!("Gap-fill failed: {}", e));
-                        }
-                        Err(e) => {
-                            error!("Gap-fill task panicked for block {}: {}", next_height, e);
-                            return Err(anyhow::anyhow!("Gap-fill task panicked: {}", e));
                         }
                     }
                 }
@@ -1206,93 +1418,202 @@ impl ParallelIBD {
                 #[allow(dead_code)]
                 let gap_fill_ms = 0u64;
 
-                // OPTIMIZATION: Reduce logging frequency - log first 20 blocks, then every 500
-                // info! has overhead even when message is constructed
-                if next_height < 20 || next_height % 500 == 0 {
-                    info!("Validating block at height {} (buffer size: {}, pending: {})", 
-                        next_height, reorder_buffer.len(), pending_blocks.len());
-                }
-                
                 // Build recent headers slice for BIP113 median-time-past (Vec is always contiguous)
                 let recent_headers_opt: Option<&[Arc<BlockHeader>]> = if recent_headers_buf.is_empty() {
                     None
                 } else {
                     Some(recent_headers_buf.as_slice())
                 };
-                
-                // Run validate + sync + evict off tokio worker (block_in_place).
-                // Gap-fill (disk I/O) runs above before block_in_place to keep it off critical path.
-                let (prefetch_ms, validation_result, sync_ms, evict_ms, validation_time, utxo_flush_batch) =
-                    tokio::task::block_in_place(|| {
-                        // Apply pending/flushing hits only (in-memory); disk loads done via gap-fill above
-                        let prefetch_ms = 0u64; // Gap-fill runs outside block_in_place
-                        if let Some(ref mut du) = disk_utxo {
-                            du.apply_pending_hits(&block);
-                        }
 
-                        let utxo_ref: &mut UtxoSet = if let Some(ref mut du) = disk_utxo {
-                            du.cache_mut()
-                        } else {
-                            utxo_set
+                // Run validate (+ optionally sync/evict) off tokio worker (block_in_place).
+                // Pipelined: sync N runs in parallel with validation N+1. First block uses inline sync.
+                #[cfg(feature = "profile")]
+                if ibd_blocked_log {
+                    blvm_consensus::profile_log!("[IBD_VALIDATION] height={} phase=start (entering block_in_place: validate+suggested sync)", next_height);
+                }
+                let (prefetch_ms, apply_pending_ms, validation_result, sync_ms, evict_ms, validation_time, utxo_flush_batch, pipelined_sync_spawned) =
+                    tokio::task::block_in_place(|| {
+                        let prefetch_ms = 0u64;
+                        #[cfg(feature = "profile")]
+                        let apply_pending_start = std::time::Instant::now();
+                        let mut du_guard = disk_utxo.as_ref().map(|a| a.write().unwrap());
+                        if let Some(ref mut du) = du_guard.as_deref_mut() {
+                            du.apply_pending_hits(block_arc.as_ref());
+                        }
+                        #[cfg(feature = "profile")]
+                        let apply_pending_ms = apply_pending_start.elapsed().as_millis() as u64;
+                        #[cfg(not(feature = "profile"))]
+                        let apply_pending_ms = 0u64;
+
+                        let (validation_result, validation_time) = match du_guard.as_deref_mut() {
+                            Some(du) => du.with_cache_and_bip30_mut(|utxo_ref, bip30_ref| {
+                                if let Some(ref base) = snapshot_dir_base {
+                                    const SNAPSHOT_HEIGHTS: &[u64] = &[
+                                        50_000, 90_000, 125_000, 133_000, 145_000,
+                                        175_000, 181_000, 190_000, 200_000,
+                                    ];
+                                    if SNAPSHOT_HEIGHTS.contains(&next_height) {
+                                        Self::dump_ibd_snapshot(next_height, block_arc.as_ref(), &witnesses, utxo_ref, base);
+                                    }
+                                }
+                                let validation_start = std::time::Instant::now();
+                                let r = self.validate_block_only(
+                                    &blockstore,
+                                    protocol,
+                                    utxo_ref,
+                                    Some(bip30_ref),
+                                    block_arc.as_ref(),
+                                    &witnesses,
+                                    next_height,
+                                    recent_headers_opt,
+                                    cached_network_time,
+                                    Some(&tx_ids_precomputed),
+                                );
+                                (r, validation_start.elapsed())
+                            }),
+                            None => {
+                                if let Some(ref base) = snapshot_dir_base {
+                                    const SNAPSHOT_HEIGHTS: &[u64] = &[
+                                        50_000, 90_000, 125_000, 133_000, 145_000,
+                                        175_000, 181_000, 190_000, 200_000,
+                                    ];
+                                    if SNAPSHOT_HEIGHTS.contains(&next_height) {
+                                        Self::dump_ibd_snapshot(next_height, block_arc.as_ref(), &witnesses, utxo_set, base);
+                                    }
+                                }
+                                let validation_start = std::time::Instant::now();
+                                let r = self.validate_block_only(
+                                    &blockstore,
+                                    protocol,
+                                    utxo_set,
+                                    Some(&mut bip30_index),
+                                    block_arc.as_ref(),
+                                    &witnesses,
+                                    next_height,
+                                    recent_headers_opt,
+                                    cached_network_time,
+                                    Some(&tx_ids_precomputed),
+                                );
+                                (r, validation_start.elapsed())
+                            }
                         };
 
-                        let validation_start = std::time::Instant::now();
-                        let validation_result = self.validate_block_only(
-                            &blockstore,
-                            protocol,
-                            utxo_ref,
-                            &block,
-                            &witnesses,
-                            next_height,
-                            recent_headers_opt,
-                        );
-                        let validation_time = validation_start.elapsed();
-
-                        let (sync_ms, evict_ms, utxo_flush_batch) = match &validation_result {
+                        let (sync_ms, evict_ms, utxo_flush_batch, pipelined_sync_spawned) = match &validation_result {
                             Ok(tx_ids) => {
-                                if let Some(ref mut du) = disk_utxo {
-                                    // Prefetch for N+1 spawned early (before gap-fill) for max overlap
+                                if let Some(ref mut du) = du_guard.as_deref_mut() {
                                     let t_sync = std::time::Instant::now();
-                                    let sync_res = du.sync_block_with_txids(&block, next_height, tx_ids);
-                                    if let Err(e) = sync_res {
-                                        return (prefetch_ms, Err(anyhow::anyhow!("{}", e)), 0, 0, validation_time, None);
+                                    if is_first_block {
+                                        // First block: inline sync (no previous sync to overlap with)
+                                        let sync_res = du.sync_block_with_txids(block_arc.as_ref(), next_height, tx_ids);
+                                        if let Err(e) = sync_res {
+                                            return (prefetch_ms, apply_pending_ms, Err(anyhow::anyhow!("{}", e)), 0, 0, validation_time, None, None);
+                                        }
+                                        let sync_ms = t_sync.elapsed().as_millis() as u64;
+                                        let blocks: Vec<&Block> = (1..=utxo_prefetch_lookahead)
+                                            .filter_map(|off| {
+                                                let h = next_height + off as u64;
+                                                ready_buffer.get(&h).map(|(b, _, _)| b)
+                                            })
+                                            .collect();
+                                        let block_input_keys_upcoming = block_input_keys_batch(&blocks);
+                                        du.protect_keys_for_next_blocks(&block_input_keys_upcoming);
+                                        let t_evict = std::time::Instant::now();
+                                        du.evict_if_needed();
+                                        let evict_ms = t_evict.elapsed().as_millis() as u64;
+                                        let batch = du.maybe_take_flush_batch();
+                                        (sync_ms, evict_ms, batch, None)
+                                    } else {
+                                        // Pipelined: spawn sync to run in parallel with next block's validation.
+                                        // Arc::clone is cheap; avoids full block clone (~500KB–1.5MB per block).
+                                        let block_for_sync = Arc::clone(&block_arc);
+                                        let tx_ids_owned = tx_ids.to_vec();
+                                        let h = next_height;
+                                        let handle = tokio::task::spawn_blocking(move || sync_block_to_batch(block_for_sync.as_ref(), h, &tx_ids_owned));
+                                        let sync_ms = t_sync.elapsed().as_millis() as u64;
+                                        (sync_ms, 0, None, Some(handle))
                                     }
-                                    let sync_ms = t_sync.elapsed().as_millis() as u64;
-                                    let t_evict = std::time::Instant::now();
-                                    du.evict_if_needed();
-                                    let evict_ms = t_evict.elapsed().as_millis() as u64;
-                                    let batch = du.maybe_take_flush_batch();
-                                    (sync_ms, evict_ms, batch)
                                 } else {
-                                    (0u64, 0u64, None)
+                                    (0u64, 0u64, None, None)
                                 }
                             }
-                            Err(_) => (0u64, 0u64, None),
+                            Err(_) => (0u64, 0u64, None, None),
                         };
 
-                        (prefetch_ms, validation_result, sync_ms, evict_ms, validation_time, utxo_flush_batch)
+                        (prefetch_ms, apply_pending_ms, validation_result, sync_ms, evict_ms, validation_time, utxo_flush_batch, pipelined_sync_spawned)
                     });
-                
+
+                // Pipelined path: await previous sync, apply, protect, evict, take_flush_batch
+                let (sync_ms, evict_ms, utxo_flush_batch) = if let Some(handle) = sync_handle.take() {
+                    let sync_await_start = std::time::Instant::now();
+                    let prev_batch = match handle.await {
+                        Ok(Ok(b)) => b,
+                        Ok(Err(e)) => return Err(anyhow::anyhow!("Sync task failed: {}", e)),
+                        Err(e) => return Err(anyhow::anyhow!("Sync task panicked: {}", e)),
+                    };
+                    let (s_ms, e_ms, batch) = tokio::task::block_in_place(|| {
+                        let t_evict = std::time::Instant::now();
+                        if let Some(ref arc) = disk_utxo {
+                            let mut du = arc.write().unwrap();
+                            du.apply_sync_batch(prev_batch);
+                            let blocks: Vec<&Block> = (1..=utxo_prefetch_lookahead)
+                                .filter_map(|off| {
+                                    let h = next_height + off as u64;
+                                    ready_buffer.get(&h).map(|(b, _, _)| b)
+                                })
+                                .collect();
+                            let block_input_keys_upcoming = block_input_keys_batch(&blocks);
+                            du.protect_keys_for_next_blocks(&block_input_keys_upcoming);
+                            du.evict_if_needed();
+                            let b = du.maybe_take_flush_batch();
+                            (sync_await_start.elapsed().as_millis() as u64, t_evict.elapsed().as_millis() as u64, b)
+                        } else {
+                            (sync_await_start.elapsed().as_millis() as u64, 0u64, None)
+                        }
+                    });
+                    (s_ms, e_ms, batch)
+                } else {
+                    (sync_ms, evict_ms, utxo_flush_batch)
+                };
+
+                // Store new sync handle for next iteration (pipelined path only)
+                if let Some(handle) = pipelined_sync_spawned {
+                    sync_handle = Some(handle);
+                }
+                is_first_block = false;
+                #[cfg(feature = "profile")]
+                if ibd_blocked_log {
+                    blvm_consensus::profile_log!(
+                        "[IBD_VALIDATION] height={} phase=end apply_pending_ms={} validation_ms={} sync_ms={} evict_ms={}",
+                        next_height, apply_pending_ms, validation_time.as_millis(), sync_ms, evict_ms
+                    );
+                    if apply_pending_ms > 2 {
+                        blvm_consensus::profile_log!(
+                            "[IBD_BLOCKED] phase=apply_pending height={} duration_ms={} (pending_writes/flushing scan for cache hits)",
+                            next_height, apply_pending_ms
+                        );
+                    }
+                    if sync_ms > 5 {
+                        blvm_consensus::profile_log!(
+                            "[IBD_BLOCKED] phase=sync_await height={} duration_ms={} (validation waited for previous block sync+evict)",
+                            next_height, sync_ms
+                        );
+                    }
+                }
                 if let Err(ref e) = validation_result {
                     error!("Failed to prefetch/validate block at height {}: {}", next_height, e);
                     return Err(anyhow::anyhow!("{}", e));
                 }
-                if next_height < 1000 {
-                    info!("Block {} validation took {:?} ({} txs, {} inputs total)", 
-                        next_height, validation_time, block.transactions.len(),
-                        block.transactions.iter().map(|tx| tx.inputs.len()).sum::<usize>());
-                }
-                
+
                 match validation_result {
                     Ok(_tx_ids) => {
                         // Sync/evict already done in block_in_place
                         blocks_synced += 1;
-                        let n_txs = block.transactions.len();
-                        let n_inputs: usize = block.transactions.iter().map(|tx| tx.inputs.len()).sum();
+                        let n_txs = block_arc.transactions.len();
+                        let n_inputs: usize = block_arc.transactions.iter().map(|tx| tx.inputs.len()).sum();
 
                         // Async UTXO flush: spawn batch without blocking validation
                         if let Some(batch) = utxo_flush_batch {
-                            if let Some(ref mut du) = disk_utxo {
+                            if let Some(ref arc) = disk_utxo {
                                 while utxo_flush_handles.len() >= MAX_UTXO_FLUSHES_IN_FLIGHT {
                                     let in_flight = utxo_flush_handles.len();
                                     let wait_start = std::time::Instant::now();
@@ -1305,22 +1626,37 @@ impl ParallelIBD {
                                     let handle = utxo_flush_handles.pop_front().expect("non-empty");
                                     match handle.await {
                                         Ok(Ok(())) => {
-                                            du.mark_flush_complete();
+                                            arc.write().unwrap().mark_flush_complete();
+                                            let waited_ms = wait_start.elapsed().as_millis() as u64;
                                             debug!(
                                                 "[IBD_DEBUG] Block {}: UTXO flush slot free (waited {}ms)",
                                                 next_height,
-                                                wait_start.elapsed().as_millis()
+                                                waited_ms
                                             );
+                                            #[cfg(feature = "profile")]
+                                            if ibd_blocked_log && waited_ms > 0 {
+                                                blvm_consensus::profile_log!(
+                                                    "[IBD_BLOCKED]                                                 phase=utxo_flush_await height={} duration_ms={} in_flight={} block_flush={} (validation waited for UTXO disk)",
+                                                    next_height, waited_ms, in_flight, flush_handles.len()
+                                                );
+                                            }
                                         }
                                         Ok(Err(e)) => return Err(e),
                                         Err(e) => return Err(anyhow::anyhow!("UTXO flush task panicked: {}", e)),
                                     }
                                 }
-                                let disk = du.disk_clone_for_prefetch();
+                                let disk = arc.read().unwrap().disk_clone_for_prefetch();
                                 let batch_size = batch.len();
                                 utxo_flush_handles.push_back(tokio::task::spawn_blocking(move || {
                                     DiskBackedUtxoSet::flush_batch_to_disk(&batch, disk.as_ref()).map(|_| ())
                                 }));
+                                #[cfg(feature = "profile")]
+                                if ibd_profile && (ibd_profile_sample == 1 || next_height % ibd_profile_sample == 0) {
+                                    blvm_consensus::profile_log!(
+                                        "[IBD_UTXO_FLUSH_SPAWN] height={} batch={} in_flight={} block_flush={}",
+                                        next_height, batch_size, utxo_flush_handles.len(), flush_handles.len()
+                                    );
+                                }
                                 debug!(
                                     "[IBD_DEBUG] Block {}: spawned UTXO flush (batch_size={}, in_flight={})",
                                     next_height,
@@ -1331,22 +1667,17 @@ impl ParallelIBD {
                         }
 
                         // Track recent headers for BIP113 MTP (keep last 11)
-                        // Extract header with mem::take to avoid clone; share via Rc between buf and pending
-                        let header_rc = Arc::new(std::mem::take(&mut block.header));
+                        let header_rc = Arc::new(block_arc.header.clone());
                         if !skip_storage {
-                            pending_blocks.push((block, Arc::clone(&header_rc), witnesses, next_height - 1));
+                            pending_blocks.push((Arc::clone(&block_arc), Arc::clone(&header_rc), witnesses, next_height - 1));
                         }
                         recent_headers_buf.push(header_rc);
                         if recent_headers_buf.len() > 11 {
                             recent_headers_buf.remove(0);
                         }
                         
-                        next_height += 1;
-                        
                         // Update shared validation height (allows download workers to track progress)
                         validation_height.store(next_height, Ordering::Relaxed);
-                        
-                        // Prefetch(N+1) is now spawned before sync (inside block_in_place) to overlap with sync+evict
                         
                         let flush_ms = if !skip_storage && pending_blocks.len() >= storage_flush_interval {
                             let flush_start = std::time::Instant::now();
@@ -1363,11 +1694,19 @@ impl ParallelIBD {
                                 let handle = flush_handles.pop_front().expect("non-empty");
                                 match handle.await {
                                     Ok(Ok(())) => {
+                                        let waited_ms = wait_start.elapsed().as_millis() as u64;
                                         debug!(
                                             "[IBD_DEBUG] Block {}: block storage flush slot free (waited {}ms)",
                                             next_height,
-                                            wait_start.elapsed().as_millis()
+                                            waited_ms
                                         );
+                                        #[cfg(feature = "profile")]
+                                        if ibd_blocked_log && waited_ms > 0 {
+                                            blvm_consensus::profile_log!(
+                                                "[IBD_BLOCKED]                                                 phase=block_flush_await height={} duration_ms={} in_flight={} utxo_flush={} (validation waited for block storage write)",
+                                                next_height, waited_ms, in_flight, utxo_flush_handles.len()
+                                            );
+                                        }
                                     }
                                     Ok(Err(e)) => return Err(e),
                                     Err(e) => return Err(anyhow::anyhow!("Flush task panicked: {}", e)),
@@ -1377,6 +1716,13 @@ impl ParallelIBD {
                             let blockstore_clone = Arc::clone(&blockstore);
                             let storage_clone = storage.map(|s| Arc::clone(s));
                             let to_flush_count = to_flush.len();
+                            #[cfg(feature = "profile")]
+                            if ibd_profile && (ibd_profile_sample == 1 || next_height % ibd_profile_sample == 0) {
+                                blvm_consensus::profile_log!(
+                                    "[IBD_BLOCK_FLUSH_SPAWN] height={} blocks={} in_flight={} utxo_flush={}",
+                                    next_height, to_flush_count, flush_handles.len(), utxo_flush_handles.len()
+                                );
+                            }
                             flush_handles.push_back(tokio::task::spawn_blocking(move || {
                                 Self::do_flush_to_storage(
                                     blockstore_clone.as_ref(),
@@ -1401,9 +1747,10 @@ impl ParallelIBD {
                         }
                         
                         // IBD Profiling: log per-block breakdown when enabled (profile feature)
-                        // [IBD_PROFILE] prefetch_await, gap_fill, validation, sync, evict, flush (ms). disk_total = I/O phases.
+                        // Ready-queue: prefetch_await=0 by design (validation never awaits prefetch).
                         #[cfg(feature = "profile")]
                         if ibd_profile {
+                            let prefetch_await_ms = 0u64; // Ready-queue: no prefetch_await
                             let val_ms = validation_time.as_millis() as u64;
                             let total_ms = prefetch_await_ms + gap_fill_ms + prefetch_ms + val_ms + sync_ms + evict_ms + flush_ms;
                             let disk_total = prefetch_await_ms + gap_fill_ms + prefetch_ms + sync_ms + evict_ms + flush_ms;
@@ -1415,14 +1762,23 @@ impl ParallelIBD {
                                     "[IBD_PROFILE] height={} total_ms={} prefetch_await={} gap_fill={} prefetch={} validation={} sync={} evict={} flush={} disk_total={} txs={} inputs={}",
                                     next_height, total_ms, prefetch_await_ms, gap_fill_ms, prefetch_ms, val_ms, sync_ms, evict_ms, flush_ms, disk_total, n_txs, n_inputs
                                 );
+                                let utxo_stats = disk_utxo.as_ref().map(|arc| {
+                                    let du = arc.read().unwrap();
+                                    (du.cache_len(), du.stats_disk_loads, du.stats_cache_hits, du.stats_evictions)
+                                }).unwrap_or((0, 0, 0, 0));
+                                blvm_consensus::profile_log!(
+                                    "[IBD_PIPELINE] height={} utxo_flush={} block_flush={} pending={} utxo_cache={} disk_loads={} cache_hits={} evictions={}",
+                                    next_height, utxo_flush_handles.len(), flush_handles.len(), pending_blocks.len(),
+                                    utxo_stats.0, utxo_stats.1, utxo_stats.2, utxo_stats.3
+                                );
                             }
                         }
                     }
                     Err(e) => {
                         for handle in utxo_flush_handles.drain(..) {
                             if let Ok(Ok(())) = handle.await {
-                                if let Some(ref mut du) = disk_utxo {
-                                    du.mark_flush_complete();
+                                if let Some(ref arc) = disk_utxo {
+                                    arc.write().unwrap().mark_flush_complete();
                                 }
                             }
                         }
@@ -1433,20 +1789,29 @@ impl ParallelIBD {
                             let _ = self.flush_pending_blocks(&blockstore, storage, &mut pending_blocks);
                         }
                         error!("Failed to validate block at height {}: {}", next_height, e);
-                        let utxo_for_dump = if let Some(ref mut du) = disk_utxo { du.cache_mut() } else { utxo_set };
-                        Self::dump_failed_block(next_height, &block, &witnesses, utxo_for_dump, &e);
+                        let mut du_guard = disk_utxo.as_ref().map(|a| a.write().unwrap());
+                        let utxo_for_dump = du_guard.as_deref_mut().map(|du| du.cache_mut()).unwrap_or(utxo_set);
+                        Self::dump_failed_block(next_height, block_arc.as_ref(), &witnesses, utxo_for_dump, &e);
                         return Err(e);
                     }
                 }
                 
-                // CRITICAL: Yield to the runtime every 50 blocks (Phase C: was 10)
-                // Allows download workers to make progress while reducing context-switch overhead
-                if blocks_synced % 50 == 0 {
+                // CRITICAL: Yield to the runtime (BLVM_IBD_YIELD_INTERVAL, default 100)
+                // Allows download workers to progress; fewer yields = less validation interruption
+                if yield_interval > 0 && blocks_synced % yield_interval == 0 {
+                    #[cfg(feature = "profile")]
+                    if ibd_profile && (ibd_profile_sample == 1 || next_height % ibd_profile_sample == 0) {
+                        blvm_consensus::profile_log!(
+                            "[IBD_YIELD] blocks_synced={} utxo_flush={} block_flush={} (yielding to runtime)",
+                            blocks_synced, utxo_flush_handles.len(), flush_handles.len()
+                        );
+                    }
                     tokio::task::yield_now().await;
                 }
 
                 // Progress logging every 1000 blocks
                 if blocks_synced % 1000 == 0 {
+                    cached_network_time = crate::utils::time::current_timestamp();
                     // Calculate incremental rate (blocks in last 1000 blocks / time since last log)
                     let time_since_last_log = last_rate_log_time.elapsed().as_secs_f64();
                     let blocks_since_last_log = blocks_synced - last_rate_log_blocks;
@@ -1461,7 +1826,7 @@ impl ParallelIBD {
                     let average_rate = blocks_synced as f64 / total_elapsed;
                     let remaining = effective_end_height.saturating_sub(next_height);
                     let eta = if average_rate > 0.0 { remaining as f64 / average_rate } else { f64::INFINITY };
-                    let buffer_size = reorder_buffer.len();
+                    let buffer_size = 0usize; // Isolated validation: no reorder buffer
                     
                     // Update for next calculation
                     last_rate_log_time = std::time::Instant::now();
@@ -1473,132 +1838,30 @@ impl ParallelIBD {
                         (next_height as f64 / effective_end_height as f64) * 100.0,
                         incremental_rate, average_rate, buffer_size, eta
                     );
-                }
-                
-                // Memory monitoring: log RSS and system memory every MEMORY_LOG_INTERVAL blocks (Phase B: file I/O off critical path)
-                if next_height >= last_memory_log_height + MEMORY_LOG_INTERVAL {
-                    last_memory_log_height = next_height;
-                    let (rss_mb, available_mb) = tokio::task::spawn_blocking(|| {
-                        let rss = std::fs::read_to_string("/proc/self/statm")
-                            .ok()
-                            .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
-                            .map(|pages| pages * 4 / 1024)
-                            .unwrap_or(0);
-                        let avail = std::fs::read_to_string("/proc/meminfo")
-                            .ok()
-                            .and_then(|s| {
-                                s.lines()
-                                    .find(|l| l.starts_with("MemAvailable:"))
-                                    .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-                                    .map(|kb| kb / 1024)
-                            })
-                            .unwrap_or(0);
-                        (rss, avail)
-                    })
-                    .await
-                    .unwrap_or((0, 0));
-                    let (cache_entries, total_utxos) = if let Some(ref du) = disk_utxo {
-                        (du.cache_len(), du.total_len())
-                    } else {
-                        (utxo_set.len(), utxo_set.len())
-                    };
-                    info!(
-                        "MEMORY at height {}: RSS={}MB, available={}MB, UTXO cache={}, total_utxos={}, reorder_buf={}, pending={}",
-                        next_height, rss_mb, available_mb, cache_entries, total_utxos, reorder_buffer.len(), pending_blocks.len()
-                    );
-                    if let Some(ref du) = disk_utxo {
-                        du.log_stats(next_height);
-                    }
-                    if available_mb > 0 && available_mb < 2048 {
-                        warn!("LOW MEMORY: only {}MB available! UTXO cache has {} entries", available_mb, cache_entries);
-                    }
-                }
-            }
-            
-            // Log when exiting inner loop (no consecutive block in buffer) - helps debug validation stalls
-            if next_height < 100 || next_height % 5000 == 0 || reorder_buffer.len() < 10 {
-                debug!(
-                    "[IBD_DEBUG] Block {}: waiting for block from channel (buffer_size={})",
-                    next_height,
-                    reorder_buffer.len()
-                );
-            }
-            
-            // BACKPRESSURE: If buffer is too large, still drain but with longer timeout
-            // This allows gap blocks to arrive while slowing overall download rate
-            // Limit is calculated dynamically based on available system memory
-            
-            let recv_timeout = if reorder_buffer.len() > dynamic_buffer_limit {
-                // Buffer is at dynamic limit - use very long timeout to nearly stop downloads
-                // We still drain to receive gap blocks, but very slowly
-                if reorder_buffer.len() % 5000 == 0 {
-                    warn!("Buffer overflow protection: {} blocks (limit {}), pausing downloads until block {} arrives", 
-                        reorder_buffer.len(), dynamic_buffer_limit, next_height);
-                }
-                Duration::from_secs(10) // Nearly stop - 0.1 blocks/sec
-            } else if reorder_buffer.len() > MAX_REORDER_BUFFER {
-                // Buffer is large but not critical
-                if reorder_buffer.len() % 10000 == 0 {
-                    warn!("Large reorder buffer: {} blocks (waiting for block {} to arrive)", 
-                        reorder_buffer.len(), next_height);
-                }
-                Duration::from_millis(500)
-            } else {
-                Duration::from_millis(100)
-            };
-            
-            // Accept blocks from channel - gap blocks might be waiting
-            let block_result = timeout(recv_timeout, block_rx.recv()).await;
-            match block_result {
-                Ok(Some((height, block, witnesses))) => {
-                    if total_received == 0 {
-                        info!("Received first block from channel: height {}", height);
-                    }
-                    total_received += 1;
-                    
-                    // Add to reorder buffer
-                    reorder_buffer.insert(height, (block, witnesses));
-                    // Prefetch cache disabled - was consuming memory but never used for lookups
-                }
-                Ok(None) => {
-                    // Channel closed - check if we have more consecutive blocks to validate
-                    if reorder_buffer.contains_key(&next_height) {
-                        // More blocks to validate, continue
-                        continue;
-                    }
-                    // Channel closed but we haven't reached end_height yet
-                    // This means download workers finished prematurely or there's a gap
-                    if next_height < effective_end_height {
-                        warn!("Channel closed at height {} but end_height is {} - waiting for missing blocks", 
-                            next_height, effective_end_height);
-                        // Wait a bit longer for gap blocks to arrive
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        // Check again if we have the next block
-                        if reorder_buffer.contains_key(&next_height) {
-                            continue;
+                    #[cfg(feature = "profile")]
+                    if ibd_profile && disk_utxo.is_some() {
+                        blvm_consensus::profile_log!(
+                            "[IBD_PREFETCH_STATS] height={} gap_fill={} utxo_flush={} block_flush={}",
+                            next_height, gap_fill_count,
+                            utxo_flush_handles.len(), flush_handles.len()
+                        );
+                        if let Some((rss_mb, avail_mb)) = get_memory_diag() {
+                            blvm_consensus::profile_log!(
+                                "[IBD_DIAG] height={} rss_mb={} avail_mb={} utxo_flush={} block_flush={}",
+                                next_height, rss_mb, avail_mb,
+                                utxo_flush_handles.len(), flush_handles.len()
+                            );
                         }
-                        // Still no block - this is a real gap, error out
-                        return Err(anyhow::anyhow!(
-                            "IBD stopped at height {} (expected {}) - missing block {} (channel closed, buffer empty)",
-                            next_height, effective_end_height, next_height
-                        ));
                     }
-                    // We've reached the end, we're done
-                    break;
-                }
-                Err(_) => {
-                    // Timeout - no new block in 100ms, loop back to try validation
-                    // This short timeout ensures we keep validating consecutive blocks
                 }
             }
-        }
         
         // Await all in-flight UTXO flushes, then block storage flushes
         for handle in utxo_flush_handles.drain(..) {
             match handle.await {
                 Ok(Ok(())) => {
-                    if let Some(ref mut du) = disk_utxo {
-                        du.mark_flush_complete();
+                    if let Some(ref arc) = disk_utxo {
+                        arc.write().unwrap().mark_flush_complete();
                     }
                 }
                 Ok(Err(e)) => return Err(e),
@@ -1618,26 +1881,15 @@ impl ParallelIBD {
         }
         
         // Flush disk-backed UTXO set
-        if let Some(ref mut du) = disk_utxo {
+        if let Some(ref arc) = disk_utxo {
             info!("Flushing disk-backed UTXO set...");
-            match du.flush() {
+            match arc.write().unwrap().flush() {
                 Ok(count) => info!("Flushed {} pending UTXO operations to disk", count),
                 Err(e) => warn!("Failed to flush UTXO operations: {}", e),
             }
-            du.log_stats(next_height);
         }
         
-        // Check for any remaining blocks in reorder buffer (indicates gaps)
-        if !reorder_buffer.is_empty() {
-            let missing_heights: Vec<u64> = (next_height..effective_end_height)
-                .filter(|h| !reorder_buffer.contains_key(h))
-                .take(10)
-                .collect();
-            warn!(
-                "IBD incomplete: {} blocks in buffer, next expected height: {}, first missing: {:?}",
-                reorder_buffer.len(), next_height, missing_heights
-            );
-        }
+        // Isolated validation: coordinator drained all blocks; no local reorder buffer to check.
         
         // Wait for all download tasks to complete (they should have already finished)
         for (chunk_start, handle) in download_handles {
@@ -1784,14 +2036,14 @@ impl ParallelIBD {
                     }
                 }
                 
-                // Calculate hash
-                let mut header_data = Vec::with_capacity(80);
-                header_data.extend_from_slice(&(header.version as i32).to_le_bytes());
-                header_data.extend_from_slice(&header.prev_block_hash);
-                header_data.extend_from_slice(&header.merkle_root);
-                header_data.extend_from_slice(&(header.timestamp as u32).to_le_bytes());
-                header_data.extend_from_slice(&(header.bits as u32).to_le_bytes());
-                header_data.extend_from_slice(&(header.nonce as u32).to_le_bytes());
+                // Calculate hash (#53: stack array avoids heap alloc)
+                let mut header_data = [0u8; 80];
+                header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+                header_data[4..36].copy_from_slice(&header.prev_block_hash);
+                header_data[36..68].copy_from_slice(&header.merkle_root);
+                header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+                header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+                header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
                 let header_hash = double_sha256(&header_data);
                 
                 blockstore.store_header(&header_hash, &header)
@@ -1903,14 +2155,14 @@ impl ParallelIBD {
                 nonce: 2083236893,
             };
             
-            // Verify our genesis hash calculation
-            let mut header_data = Vec::with_capacity(80);
-            header_data.extend_from_slice(&(genesis_header.version as i32).to_le_bytes());
-            header_data.extend_from_slice(&genesis_header.prev_block_hash);
-            header_data.extend_from_slice(&genesis_header.merkle_root);
-            header_data.extend_from_slice(&(genesis_header.timestamp as u32).to_le_bytes());
-            header_data.extend_from_slice(&(genesis_header.bits as u32).to_le_bytes());
-            header_data.extend_from_slice(&(genesis_header.nonce as u32).to_le_bytes());
+            // Verify our genesis hash calculation (#53: stack array)
+            let mut header_data = [0u8; 80];
+            header_data[0..4].copy_from_slice(&(genesis_header.version as i32).to_le_bytes());
+            header_data[4..36].copy_from_slice(&genesis_header.prev_block_hash);
+            header_data[36..68].copy_from_slice(&genesis_header.merkle_root);
+            header_data[68..72].copy_from_slice(&(genesis_header.timestamp as u32).to_le_bytes());
+            header_data[72..76].copy_from_slice(&(genesis_header.bits as u32).to_le_bytes());
+            header_data[76..80].copy_from_slice(&(genesis_header.nonce as u32).to_le_bytes());
             let computed_hash = double_sha256(&header_data);
             
             if computed_hash != genesis_hash {
@@ -2009,14 +2261,14 @@ impl ParallelIBD {
                             }
                         }
                         
-                        // Calculate hash (80-byte header format)
-                        let mut header_data = Vec::with_capacity(80);
-                        header_data.extend_from_slice(&(header.version as i32).to_le_bytes());
-                        header_data.extend_from_slice(&header.prev_block_hash);
-                        header_data.extend_from_slice(&header.merkle_root);
-                        header_data.extend_from_slice(&(header.timestamp as u32).to_le_bytes());
-                        header_data.extend_from_slice(&(header.bits as u32).to_le_bytes());
-                        header_data.extend_from_slice(&(header.nonce as u32).to_le_bytes());
+                        // Calculate hash (#53: stack array avoids heap alloc)
+                        let mut header_data = [0u8; 80];
+                        header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+                        header_data[4..36].copy_from_slice(&header.prev_block_hash);
+                        header_data[36..68].copy_from_slice(&header.merkle_root);
+                        header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+                        header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+                        header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
                         let header_hash = double_sha256(&header_data);
                         
                         batch_entries.push((header_hash, header.clone(), current_height));
@@ -2316,8 +2568,7 @@ impl ParallelIBD {
                         let latency_ms = request_start.elapsed().as_secs_f64() * 1000.0;
                         let block_size = block.header.version.to_le_bytes().len() as u64 + 80;
                         peer_scorer.record_block(peer_addr, block_size, latency_ms);
-                        
-                        info!("Received block at height {} from {} (latency: {:.0}ms)", height, peer_addr, latency_ms);
+
                         blocks.push((height, block, block_witnesses));
                     }
                 }
@@ -2364,15 +2615,6 @@ impl ParallelIBD {
                 }
             }
         }
-        
-        let success_rate = if (end_height - start_height + 1) > 0 {
-            blocks.len() as f64 / (end_height - start_height + 1) as f64 * 100.0
-        } else {
-            0.0
-        };
-        info!("Chunk {} - {} complete: {}/{} blocks ({}% success) from {}", 
-            start_height, end_height, blocks.len(), end_height - start_height + 1, 
-            success_rate as u32, peer_id);
         
         Ok(blocks)
     }
@@ -2442,16 +2684,21 @@ impl ParallelIBD {
     ///
     /// Calls connect_block_ibd directly — bypasses protocol layer for maximum speed.
     /// Returns pre-computed tx_ids so the caller avoids redundant double-SHA256.
+    /// network_time: cached at loop init, refreshed every 1000 blocks (avoids per-block SystemTime syscall).
+    /// bip30_index: O(1) duplicate-coinbase check; when Some, updated during apply_transaction.
     #[inline]
     fn validate_block_only(
         &self,
         _blockstore: &BlockStore,
         _protocol: &BitcoinProtocolEngine,
         utxo_set: &mut UtxoSet,
+        bip30_index: Option<&mut Bip30Index>,
         block: &Block,
         witnesses: &[Vec<Witness>],
         height: u64,
         recent_headers: Option<&[Arc<BlockHeader>]>,
+        network_time: u64,
+        precomputed_tx_ids: Option<&[Hash]>,
     ) -> Result<Vec<Hash>> {
         use std::borrow::Cow;
         
@@ -2473,8 +2720,6 @@ impl ParallelIBD {
             Cow::Borrowed(witnesses)
         };
         let witnesses = witnesses_cow.as_ref();
-
-        let network_time = crate::utils::time::current_timestamp();
         
         let owned_utxo = std::mem::take(utxo_set);
         let (result, new_utxo_set, tx_ids) = blvm_consensus::block::connect_block_ibd(
@@ -2485,6 +2730,8 @@ impl ParallelIBD {
             recent_headers,
             network_time,
             blvm_consensus::types::Network::Mainnet,
+            bip30_index,
+            precomputed_tx_ids,
         )?;
 
         *utxo_set = new_utxo_set;
@@ -2555,6 +2802,53 @@ impl ParallelIBD {
         );
     }
 
+    /// Dump successful block + witnesses + pre-state UTXO at IBD milestones for snapshot tests.
+    /// Triggered when BLVM_IBD_SNAPSHOT_DIR is set; dumps at 50k, 90k, 125k, 133k, 145k, 175k, 181k, 190k, 200k.
+    /// Same format as dump_failed_block; info.txt has error=ok, pre_state=1.
+    fn dump_ibd_snapshot(
+        height: u64,
+        block: &Block,
+        witnesses: &[Vec<Witness>],
+        utxo_set: &UtxoSet,
+        base_dir: &str,
+    ) {
+        let dir = std::path::Path::new(base_dir).join(format!("height_{}", height));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            error!("IBD_SNAPSHOT: Failed to create dir {}: {}", dir.display(), e);
+            return;
+        }
+        let block_path = dir.join("block.bin");
+        let witnesses_path = dir.join("witnesses.bin");
+        let utxo_path = dir.join("utxo_set.bin");
+        let info_path = dir.join("info.txt");
+
+        if let Ok(f) = std::fs::File::create(&block_path) {
+            let _ = bincode::serialize_into(std::io::BufWriter::new(f), block);
+        }
+        if let Ok(f) = std::fs::File::create(&witnesses_path) {
+            let _ = bincode::serialize_into(std::io::BufWriter::new(f), witnesses);
+        }
+        if let Ok(f) = std::fs::File::create(&utxo_path) {
+            let _ = bincode::serialize_into(std::io::BufWriter::new(f), utxo_set);
+        }
+        let n_txs = block.transactions.len();
+        let n_inputs: usize = block.transactions.iter().map(|tx| tx.inputs.len()).sum();
+        let info = format!(
+            "height={}\nerror=ok\ntxs={}\ninputs={}\nutxo_len={}\npre_state=1\nrerun=BLVM_IBD_SNAPSHOT_DIR={} cargo test -p blvm-consensus --test block_ibd_snapshot_tests -- --ignored\n",
+            height,
+            n_txs,
+            n_inputs,
+            utxo_set.len(),
+            base_dir
+        );
+        let _ = std::fs::write(&info_path, info);
+        info!(
+            "IBD_SNAPSHOT: Block {} dumped to: {} (block.bin, witnesses.bin, utxo_set.bin, info.txt)",
+            height,
+            dir.display()
+        );
+    }
+
     /// Flush pending blocks to storage using batch writes
     ///
     /// This commits multiple blocks in a single database transaction,
@@ -2563,17 +2857,18 @@ impl ParallelIBD {
         &self,
         blockstore: &BlockStore,
         _storage: Option<&Arc<Storage>>,
-        pending: &mut Vec<(Block, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)>,
+        pending: &mut Vec<(Arc<Block>, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)>,
     ) -> Result<()> {
         let to_flush = std::mem::take(pending);
         Self::do_flush_to_storage(blockstore, _storage, to_flush)
     }
 
     /// Core flush logic. Takes ownership of pending. Used by sync flush and async spawn.
+    /// Blocks are Arc<Block>; we try_unwrap to get owned Block for serialization (sync has completed).
     fn do_flush_to_storage(
         blockstore: &BlockStore,
         _storage: Option<&Arc<Storage>>,
-        mut pending: Vec<(Block, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)>,
+        pending: Vec<(Arc<Block>, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)>,
     ) -> Result<()> {
         if pending.is_empty() {
             return Ok(());
@@ -2581,11 +2876,19 @@ impl ParallelIBD {
 
         let count = pending.len();
         let start = std::time::Instant::now();
+        #[cfg(feature = "profile")]
+        let t_serialize = std::time::Instant::now();
 
-        // Restore headers into blocks (they have Default placeholder from mem::take during validation)
-        for (block, header_rc, _, _) in pending.iter_mut() {
-            block.header = header_rc.as_ref().clone();
-        }
+        // Unwrap Arcs to get owned Block (sync has completed; refcount should be 1).
+        // Restore header from Arc (we store header_rc separately; block has original header).
+        let mut pending: Vec<(Block, Arc<BlockHeader>, Vec<Vec<Witness>>, u64)> = pending
+            .into_iter()
+            .map(|(arc_block, header_rc, w, h)| {
+                let mut block = Arc::try_unwrap(arc_block).unwrap_or_else(|a| (*a).clone());
+                block.header = header_rc.as_ref().clone();
+                (block, header_rc, w, h)
+            })
+            .collect();
 
         // Pre-compute all block hashes ONCE (avoids 4x redundant double SHA256 per block)
         // Parallelize hash computation and serialization for better CPU utilization
@@ -2648,6 +2951,11 @@ impl ParallelIBD {
                 (block_hashes, block_data, header_data)
             }
         };
+
+        #[cfg(feature = "profile")]
+        let serialize_ms = t_serialize.elapsed().as_millis() as u64;
+        #[cfg(feature = "profile")]
+        let t_disk = std::time::Instant::now();
 
         // Batch write blocks
         {
@@ -2730,6 +3038,17 @@ impl ParallelIBD {
         // Only store the last 11 headers (minimal overhead, sequential is fine)
         for (block, _, _, height) in pending.iter().rev().take(11) {
             blockstore.store_recent_header(*height, &block.header)?;
+        }
+
+        #[cfg(feature = "profile")]
+        {
+            let disk_ms = t_disk.elapsed().as_millis() as u64;
+            if serialize_ms > 2 || disk_ms > 2 {
+                blvm_consensus::profile_log!(
+                    "[FLUSH_STORAGE_PERF] blocks={} serialize_ms={} disk_ms={} total_ms={}",
+                    count, serialize_ms, disk_ms, start.elapsed().as_millis()
+                );
+            }
         }
 
         // Skip transaction indexing during IBD - it's not needed until sync is complete

@@ -188,13 +188,12 @@ mod kani_proofs {
     #[kani::unwind(unwind_bounds::UTXO_SET)]
     fn verify_roundtrip_storage() {
         use blvm_protocol::UtxoSet;
-        use std::collections::HashMap;
 
         let mock_db = Arc::new(MockDatabase::new());
         let utxo_store = UtxoStore::new(mock_db).unwrap();
 
-        // Create bounded UTXO set
-        let mut original_set: UtxoSet = HashMap::new();
+        // Create bounded UTXO set (use UtxoSet::default() for production FxHashMap compatibility)
+        let mut original_set = UtxoSet::default();
         let utxo_count = kani::any::<usize>();
         kani::assume(utxo_count <= proof_limits::MAX_UTXO_COUNT_FOR_PROOF);
 

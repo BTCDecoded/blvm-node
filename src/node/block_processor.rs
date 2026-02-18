@@ -151,7 +151,7 @@ pub fn validate_block_with_context(
     let (result, new_utxo_set) = protocol.validate_and_connect_block(
         block,
         witnesses,
-        owned_utxo,
+        &owned_utxo,
         height,
         recent_headers.as_deref(),
         &context,

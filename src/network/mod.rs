@@ -5209,7 +5209,6 @@ impl NetworkManager {
             }
             ProtocolMessage::Block(block_msg) => {
                 // Check if there's a pending Block request for this peer
-                use blvm_protocol::segwit::Witness;
                 // Calculate block hash using proper Bitcoin format:
                 // double_sha256 of 80-byte header (version + prev_hash + merkle_root + timestamp + bits + nonce)
                 // CRITICAL: Must use 4-byte types for version/timestamp/bits/nonce (Bitcoin wire format)
@@ -5223,74 +5222,8 @@ impl NetworkManager {
                 header_bytes.extend_from_slice(&(header.bits as u32).to_le_bytes());       // 4 bytes
                 header_bytes.extend_from_slice(&(header.nonce as u32).to_le_bytes());      // 4 bytes
                 let block_hash = double_sha256(&header_bytes);
-                // Convert Vec<Vec<Vec<u8>>> to Vec<Vec<Witness>>
-                // BlockMessage.witnesses is Vec<Vec<Vec<u8>>> where:
-                // - Outer Vec: one per transaction
-                // - Middle Vec: one per input in that transaction
-                // - Inner Vec<u8>: the serialized witness stack for that input (Bitcoin wire format)
-                // Witness = Vec<ByteString> = Vec<Vec<u8>> (stack of witness elements)
-                // We need to deserialize each Vec<u8> (wire format) into a Witness (stack)
-                // Wire format: VarInt(stack_count) + for each element: VarInt(len) + bytes
-                use blvm_consensus::serialization::varint::decode_varint;
-                
-                let witnesses: Vec<Vec<Witness>> = block_msg.witnesses.iter()
-                    .map(|tx_witnesses| {
-                        // tx_witnesses is Vec<Vec<u8>> (one Vec<u8> per input)
-                        // Each Vec<u8> is the serialized witness stack in Bitcoin wire format
-                        tx_witnesses.iter()
-                            .map(|w_bytes| {
-                                // Deserialize witness stack from wire format
-                                // Format: VarInt(stack_count) + for each: VarInt(len) + bytes
-                                let mut offset = 0;
-                                let mut witness_stack = Vec::new();
-                                
-                                if w_bytes.is_empty() {
-                                    return witness_stack; // Empty witness
-                                }
-                                
-                                // Decode stack count (VarInt)
-                                match decode_varint(&w_bytes[offset..]) {
-                                    Ok((stack_count, varint_len)) => {
-                                        offset += varint_len;
-                                        
-                                        // Decode each witness element
-                                        for _ in 0..stack_count {
-                                            if offset >= w_bytes.len() {
-                                                break; // Incomplete witness data
-                                            }
-                                            
-                                            // Decode element length (VarInt)
-                                            match decode_varint(&w_bytes[offset..]) {
-                                                Ok((element_len, varint_len)) => {
-                                                    offset += varint_len;
-                                                    
-                                                    if offset + element_len as usize > w_bytes.len() {
-                                                        break; // Incomplete element
-                                                    }
-                                                    
-                                                    // Extract element bytes
-                                                    let element = w_bytes[offset..offset + element_len as usize].to_vec();
-                                                    witness_stack.push(element);
-                                                    offset += element_len as usize;
-                                                }
-                                                Err(_) => {
-                                                    warn!("Failed to decode witness element length");
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(_) => {
-                                        warn!("Failed to decode witness stack count, treating as empty");
-                                    }
-                                }
-                                
-                                witness_stack // Return Witness (Vec<Vec<u8>>)
-                            })
-                            .collect()
-                    })
-                    .collect();
-                if self.complete_block_request(peer_addr, block_hash, block_msg.block.clone(), witnesses) {
+                // block_msg.witnesses is Vec<Vec<Witness>> from deserialize_block_with_witnesses
+                if self.complete_block_request(peer_addr, block_hash, block_msg.block.clone(), block_msg.witnesses.clone()) {
                     debug!("Routed Block response to pending request from {}", peer_addr);
                     return Ok(()); // Message handled, return early
                 }

@@ -2,7 +2,6 @@
 
 use blvm_node::node::mempool::MempoolManager;
 use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
-use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_mempool_stores_full_transactions() {
@@ -41,7 +40,7 @@ async fn test_mempool_stores_full_transactions() {
 #[tokio::test]
 async fn test_mempool_get_prioritized_transactions() {
     let mut mempool = MempoolManager::new();
-    let mut utxo_set: UtxoSet = HashMap::new();
+    let mut utxo_set = UtxoSet::default();
 
     // Create UTXO for input
     let outpoint = OutPoint {

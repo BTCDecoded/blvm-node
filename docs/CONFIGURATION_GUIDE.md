@@ -67,17 +67,17 @@ external_address = "your.external.ip:8333"
 ```toml
 [storage]
 data_dir = "data"
-database_backend = "tidesdb"  # or "redb", "rocksdb", "sled", "auto"
+database_backend = "rocksdb"  # or "redb", "tidesdb", "sled", "auto"
 enable_pruning = false
 enable_indexing = false
 ```
 
 Database backend options:
-- **tidesdb** (default): LSM-tree store, strong IBD performance; requires TidesDB C library
+- **rocksdb** (default): High-performance, Bitcoin Core format compatible; strong IBD performance
 - **redb**: Embedded ACID database
-- **rocksdb**: High-performance, Bitcoin Core format compatible
+- **tidesdb**: LSM-tree store; requires TidesDB C library
 - **sled**: Embedded key-value store
-- **auto**: Use default (tidesdb if available, else redb)
+- **auto**: Use default (rocksdb if available, else redb)
 
 ### Advanced Indexing
 

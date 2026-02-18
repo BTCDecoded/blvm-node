@@ -84,6 +84,26 @@ impl BlockStore {
         )
     }
 
+    /// Create a new block store with optional Bitcoin Core block file reader (rocksdb only)
+    #[cfg(feature = "rocksdb")]
+    pub fn new_with_bitcoin_core_reader(
+        db: Arc<dyn Database>,
+        block_reader: Option<Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>>,
+    ) -> Result<Self> {
+        Self::new_with_compression_and_reader(
+            db,
+            #[cfg(feature = "block-compression")]
+            false,
+            #[cfg(feature = "block-compression")]
+            3,
+            #[cfg(feature = "witness-compression")]
+            false,
+            #[cfg(feature = "witness-compression")]
+            2,
+            block_reader,
+        )
+    }
+
     /// Create a new block store with compression settings
     pub fn new_with_compression(
         db: Arc<dyn Database>,
