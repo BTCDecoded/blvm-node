@@ -331,7 +331,7 @@ async fn test_mempool_manager_operations() {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 25_0000_0000, // Different value
-            script_pubkey: p2pkh_script(random_hash20()),
+            script_pubkey: p2pkh_script(random_hash20()).into(),
         }],
         lock_time: 1, // Different lock time
     };

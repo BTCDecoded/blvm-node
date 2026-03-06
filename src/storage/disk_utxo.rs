@@ -27,12 +27,22 @@
 //! - **O(1) pending_writes lookup**: HashMap instead of Vec linear scan
 //! - **Fixed-size keys**: `[u8; 40]` avoids heap allocation per outpoint
 //! - **Batch eviction**: Only evict when 10% over limit, clear 15% headroom
+//! - **Optional byte limit**: `BLVM_UTXO_CACHE_MAX_MB` caps cache memory (MiB). When set, effective
+//!   max_entries = min(entries, bytes/120). Use on memory-constrained systems to avoid OOM.
 
 use crate::storage::database::Tree;
 use anyhow::Result;
 
 /// TidesDB max ops per transaction (TDB_MAX_TXN_OPS=100000). Batch splitting safety limit.
-const MAX_BATCH_OPS: usize = 50_000;
+pub(crate) const MAX_BATCH_OPS: usize = 50_000;
+
+/// Don't evict outputs created in the last N blocks (likely to be spent soon).
+const EVICT_MIN_AGE_BLOCKS: u64 = 100;
+/// Prefer evicting outputs older than this (creation height < current - N).
+const EVICT_VERY_OLD_BLOCKS: u64 = 10_000;
+/// Dust threshold (satoshis) — eviction sort prefers lowest value first (dust).
+#[allow(dead_code)]
+const EVICT_DUST_THRESHOLD: i64 = 546;
 use blvm_consensus::bip_validation::Bip30Index;
 use blvm_consensus::transaction::is_coinbase;
 use blvm_consensus::types::{Block, Hash, OutPoint, UTXO, UtxoSet};
@@ -44,16 +54,17 @@ use tracing::{debug, info, warn};
 /// Fixed-size outpoint key: 32 bytes txid + 8 bytes index (big-endian)
 pub(crate) type OutPointKey = [u8; 40];
 
-/// Pending/flushing value: Arc avoids per-input Vec clone in apply_pending_hits.
-type PendingValue = Option<Arc<Vec<u8>>>;
+/// Pending/flushing value: UTXO kept in memory; serialized only when flushing to disk.
+/// Some(arc)=insert (Arc avoids clone on get_pending), None=delete. Serialize deferred to flush.
+type PendingValue = Option<Arc<UTXO>>;
 
 /// Serialize an OutPoint to a fixed-size storage key.
 /// Zero-allocation: returns a stack-allocated array instead of Vec.
 #[inline]
-fn outpoint_to_key(outpoint: &OutPoint) -> OutPointKey {
+pub(crate) fn outpoint_to_key(outpoint: &OutPoint) -> OutPointKey {
     let mut key = [0u8; 40];
     key[..32].copy_from_slice(&outpoint.hash);
-    key[32..40].copy_from_slice(&outpoint.index.to_be_bytes());
+    key[32..40].copy_from_slice(&(outpoint.index as u64).to_be_bytes());
     key
 }
 
@@ -68,12 +79,16 @@ fn outpoint_key_from_parts(hash: &[u8; 32], index: u64) -> OutPointKey {
 
 /// Convert storage key back to OutPoint for cache removal.
 #[inline]
-fn key_to_outpoint(key: &OutPointKey) -> OutPoint {
+pub(crate) fn key_to_outpoint(key: &OutPointKey) -> OutPoint {
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&key[..32]);
-    let index = u64::from_be_bytes(key[32..40].try_into().unwrap());
+    let index = u64::from_be_bytes(key[32..40].try_into().unwrap()) as u32;
     OutPoint { hash, index }
 }
+
+/// Threshold below which we use per-key get (inline) instead of batch get_many.
+/// Avoids spawn+join overhead for small gap-fill; keeps validation from blocking on thread setup.
+pub(crate) const INLINE_GAP_THRESHOLD: usize = 32;
 
 /// Load UTXOs for given keys from disk. Used by prefetch overlap (spawn_blocking).
 ///
@@ -99,24 +114,49 @@ pub(crate) fn load_keys_from_disk(
     Ok(result)
 }
 
+/// Load UTXOs for few keys using per-key disk.get() inline.
+/// Avoids spawn+join overhead when gap-fill has \<INLINE_GAP_THRESHOLD keys.
+pub(crate) fn load_keys_from_disk_inline(
+    disk: &dyn Tree,
+    keys: &[OutPointKey],
+) -> Result<FxHashMap<OutPointKey, UTXO>> {
+    let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
+    for key in keys {
+        if let Some(data) = disk.get(key)? {
+            if let Ok(utxo) = bincode::deserialize::<UTXO>(&data) {
+                result.insert(key.clone(), utxo);
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Collect all input outpoint keys from a block (for prefetch overlap).
 pub(crate) fn block_input_keys(block: &Block) -> Vec<OutPointKey> {
+    let mut keys = Vec::new();
+    block_input_keys_into(block, &mut keys);
+    keys
+}
+
+/// Same as `block_input_keys` but reuses buffer. Avoids per-block alloc in IBD v2 validation hot path.
+#[inline]
+pub(crate) fn block_input_keys_into(block: &Block, keys_out: &mut Vec<OutPointKey>) {
     let est: usize = block
         .transactions
         .iter()
         .filter(|tx| !is_coinbase(tx))
         .map(|tx| tx.inputs.len())
         .sum();
-    let mut keys = Vec::with_capacity(est);
+    keys_out.clear();
+    keys_out.reserve(est);
     for tx in block.transactions.iter() {
         if is_coinbase(tx) {
             continue;
         }
         for input in tx.inputs.iter() {
-            keys.push(outpoint_to_key(&input.prevout));
+            keys_out.push(outpoint_to_key(&input.prevout));
         }
     }
-    keys
 }
 
 /// Collect and deduplicate outpoint keys from multiple blocks (for batched lookahead prefetch).
@@ -150,13 +190,119 @@ pub(crate) fn block_input_keys_batch(blocks: &[&Block]) -> Vec<OutPointKey> {
     keys
 }
 
+/// Same as `block_input_keys_batch` but reuses buffers. Avoids per-block allocations in hot path.
+/// Caller provides cleared buffers; this clears and refills keys_out, reuses seen for dedup.
+pub(crate) fn block_input_keys_batch_into(
+    blocks: &[&Block],
+    keys_out: &mut Vec<OutPointKey>,
+    seen: &mut FxHashSet<OutPointKey>,
+) {
+    let est: usize = blocks
+        .iter()
+        .map(|b| {
+            b.transactions
+                .iter()
+                .filter(|tx| !is_coinbase(tx))
+                .map(|tx| tx.inputs.len())
+                .sum::<usize>()
+        })
+        .sum();
+    keys_out.clear();
+    keys_out.reserve(est);
+    seen.clear();
+    for block in blocks {
+        for tx in block.transactions.iter() {
+            if is_coinbase(tx) {
+                continue;
+            }
+            for input in tx.inputs.iter() {
+                let key = outpoint_to_key(&input.prevout);
+                if seen.insert(key) {
+                    keys_out.push(key);
+                }
+            }
+        }
+    }
+}
+
+/// Same as `block_input_keys_batch_into` but takes `Arc<Block>`. Avoids holding refs into
+/// ready_buffer (fixes borrow conflicts with insert/remove_entry in validation loop).
+pub(crate) fn block_input_keys_batch_into_arc(
+    blocks: &[Arc<Block>],
+    keys_out: &mut Vec<OutPointKey>,
+    seen: &mut FxHashSet<OutPointKey>,
+) {
+    let est: usize = blocks
+        .iter()
+        .map(|b| {
+            b.transactions
+                .iter()
+                .filter(|tx| !is_coinbase(tx))
+                .map(|tx| tx.inputs.len())
+                .sum::<usize>()
+        })
+        .sum();
+    keys_out.clear();
+    keys_out.reserve(est);
+    seen.clear();
+    for block in blocks {
+        for tx in block.transactions.iter() {
+            if is_coinbase(tx) {
+                continue;
+            }
+            for input in tx.inputs.iter() {
+                let key = outpoint_to_key(&input.prevout);
+                if seen.insert(key) {
+                    keys_out.push(key);
+                }
+            }
+        }
+    }
+}
+
 /// Pre-computed sync batch for disk persistence. Produced by `sync_block_to_batch` (pure),
 /// applied by `DiskBackedUtxoSet::apply_sync_batch`. Enables pipelining: sync N runs in
 /// parallel with validation N+1.
+/// Inserts hold Arc<UTXO> to avoid clone in IBD v2 apply_sync_batch hot path.
 pub struct SyncBatch {
     pub deletes: Vec<OutPointKey>,
-    pub serialized_inserts: Vec<(OutPointKey, Vec<u8>)>,
+    pub inserts: Vec<(OutPointKey, Arc<UTXO>)>,
     pub total_delta: isize,
+}
+
+/// Flush a SyncBatch directly to disk. Used by memory-first IBD (no DiskBackedUtxoSet).
+pub fn flush_sync_batch_to_disk(batch: &SyncBatch, disk: &dyn Tree) -> Result<usize> {
+    if batch.deletes.is_empty() && batch.inserts.is_empty() {
+        return Ok(0);
+    }
+    let mut map = FxHashMap::with_capacity_and_hasher(
+        batch.deletes.len() + batch.inserts.len(),
+        Default::default(),
+    );
+    for key in &batch.deletes {
+        map.insert(*key, None);
+    }
+    for (key, arc) in &batch.inserts {
+        map.insert(*key, Some(Arc::clone(arc)));
+    }
+    DiskBackedUtxoSet::flush_batch_to_disk(&map, disk)
+}
+
+/// Build SyncBatch from overlay delta (when BLVM_USE_OVERLAY_DELTA=1).
+/// Avoids sync_block_to_batch block walk; uses Arc::clone (no UTXO clone).
+pub fn sync_batch_from_overlay_delta(delta: &blvm_consensus::block::UtxoDelta) -> SyncBatch {
+    let deletes: Vec<OutPointKey> = delta.deletions.iter().map(outpoint_to_key).collect();
+    let inserts: Vec<(OutPointKey, Arc<UTXO>)> = delta
+        .additions
+        .iter()
+        .map(|(op, arc)| (outpoint_to_key(op), Arc::clone(arc)))
+        .collect();
+    let total_delta = inserts.len() as isize - deletes.len() as isize;
+    SyncBatch {
+        deletes,
+        inserts,
+        total_delta,
+    }
 }
 
 /// Pure function: compute UTXO changes for a block without mutating any state.
@@ -186,15 +332,13 @@ pub fn sync_block_to_batch(block: &Block, height: u64, tx_ids: &[Hash]) -> Resul
                     let mut key = [0u8; 40];
                     key[..32].copy_from_slice(tx_id);
                     key[32..].copy_from_slice(&(vout as u64).to_be_bytes());
-                    local_inserts.push((
-                        key,
-                        UTXO {
-                            value: output.value,
-                            script_pubkey: output.script_pubkey.clone(),
-                            height,
-                            is_coinbase: is_cb,
-                        },
-                    ));
+                    let utxo = UTXO {
+                        value: output.value,
+                        script_pubkey: output.script_pubkey.as_slice().into(),
+                        height,
+                        is_coinbase: is_cb,
+                    };
+                    local_inserts.push((key, Arc::new(utxo)));
                 }
                 (local_deletes, local_inserts)
             })
@@ -220,7 +364,7 @@ pub fn sync_block_to_batch(block: &Block, height: u64, tx_ids: &[Hash]) -> Resul
             .sum();
         let est_outputs: usize = block.transactions.iter().map(|tx| tx.outputs.len()).sum();
         let mut deletes: Vec<OutPointKey> = Vec::with_capacity(est_inputs);
-        let mut inserts: Vec<(OutPointKey, UTXO)> = Vec::with_capacity(est_outputs);
+        let mut inserts: Vec<(OutPointKey, Arc<UTXO>)> = Vec::with_capacity(est_outputs);
         for (tx_idx, tx) in block.transactions.iter().enumerate() {
             let tx_id = tx_ids[tx_idx];
             let is_cb = is_coinbase(tx);
@@ -235,12 +379,12 @@ pub fn sync_block_to_batch(block: &Block, height: u64, tx_ids: &[Hash]) -> Resul
                 key[32..].copy_from_slice(&(vout as u64).to_be_bytes());
                 inserts.push((
                     key,
-                    UTXO {
+                    Arc::new(UTXO {
                         value: output.value,
-                        script_pubkey: output.script_pubkey.clone(),
+                        script_pubkey: output.script_pubkey.as_slice().into(),
                         height,
                         is_coinbase: is_cb,
-                    },
+                    }),
                 ));
             }
         }
@@ -250,48 +394,18 @@ pub fn sync_block_to_batch(block: &Block, height: u64, tx_ids: &[Hash]) -> Resul
 
     #[cfg(feature = "profile")]
     let iter_ms = t_start.elapsed().as_millis() as u64;
-
-    // Serialize inserts (CPU-heavy, runs off main validation thread when pipelined)
-    #[cfg(feature = "rayon")]
-    let (serialized_inserts, serialize_ms): (Vec<(OutPointKey, Vec<u8>)>, u64) = {
-        use rayon::prelude::*;
-        let t0 = std::time::Instant::now();
-        let out = inserts
-            .par_iter()
-            .map(|(key, utxo)| {
-                let value = bincode::serialize(utxo)
-                    .map_err(|e| anyhow::anyhow!("Failed to serialize UTXO: {}", e))?;
-                Ok((*key, value))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        (out, t0.elapsed().as_millis() as u64)
-    };
-
-    #[cfg(not(feature = "rayon"))]
-    let (serialized_inserts, serialize_ms): (Vec<(OutPointKey, Vec<u8>)>, u64) = {
-        let t0 = std::time::Instant::now();
-        let out = inserts
-            .iter()
-            .map(|(key, utxo)| {
-                let value = bincode::serialize(utxo)
-                    .map_err(|e| anyhow::anyhow!("Failed to serialize UTXO: {}", e))?;
-                Ok((*key, value))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        (out, t0.elapsed().as_millis() as u64)
-    };
-
     #[cfg(feature = "profile")]
-    if iter_ms > 0 || serialize_ms > 0 || serialized_inserts.len() > 20 {
+    if iter_ms > 0 || inserts.len() > 20 {
         blvm_consensus::profile_log!(
-            "[SYNC_BATCH_PERF] height={} iter_ms={} serialize_ms={} n_inserts={} n_deletes={}",
-            height, iter_ms, serialize_ms, serialized_inserts.len(), deletes.len()
+            "[SYNC_BATCH_PERF] height={} iter_ms={} n_inserts={} n_deletes={}",
+            height, iter_ms, inserts.len(), deletes.len()
         );
     }
 
+    // No serialize here — UTXOs stay in memory; serialized only in flush_batch_to_disk
     Ok(SyncBatch {
         deletes,
-        serialized_inserts,
+        inserts,
         total_delta,
     })
 }
@@ -322,7 +436,7 @@ pub struct DiskBackedUtxoSet {
 
     /// Pending disk writes (batched for performance).
     /// HashMap for O(1) lookup during prefetch instead of O(n) linear scan.
-    /// Value: Some(Arc<serialized_utxo>) for inserts, None for deletes. Arc avoids clone in apply_pending_hits.
+    /// Value: Some(UTXO) for inserts, None for deletes. Kept in memory; serialized only at flush.
     pending_writes: FxHashMap<OutPointKey, PendingValue>,
 
     /// Batches swapped out for async flush; still readable until flush completes.
@@ -441,20 +555,18 @@ impl DiskBackedUtxoSet {
                 if self.cache.contains_key(&key_to_outpoint(&key)) {
                     continue;
                 }
-                if let Some(Some(data)) = self.get_pending_or_flushing(&key) {
-                    if let Ok(utxo) = bincode::deserialize::<UTXO>(data.as_slice()) {
-                        self.cache.insert(key_to_outpoint(&key), utxo);
-                        self.recently_accessed.insert(key);
-                        self.push_eviction_key(key);
-                        self.stats_pending_hits += 1;
-                    }
+                if let Some(Some(arc)) = self.get_pending_or_flushing(&key) {
+                    self.cache.insert(key_to_outpoint(&key), Arc::clone(&arc));
+                    self.recently_accessed.insert(key);
+                    self.push_eviction_key(key);
+                    self.stats_pending_hits += 1;
                 }
             }
         }
     }
 
-    /// Check pending_writes and flushing_batches for a key. Returns Some(Some(arc)) for insert,
-    /// Some(None) for delete, None if not found. Arc::clone avoids Vec byte-copy.
+    /// Check pending_writes and flushing_batches for a key. Returns Some(Some(utxo)) for insert,
+    /// Some(None) for delete, None if not found.
     #[inline]
     fn get_pending_or_flushing(&self, key: &OutPointKey) -> Option<PendingValue> {
         if let Some(entry) = self.pending_writes.get(key) {
@@ -488,11 +600,11 @@ impl DiskBackedUtxoSet {
     fn load_from_disk(&mut self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
         let key = outpoint_to_key(outpoint);
 
-        // Check pending writes and flushing batches first
+        // Check pending writes and flushing batches first (UTXO stored directly, no deserialize)
         if let Some(entry) = self.get_pending_or_flushing(&key) {
             self.stats_pending_hits += 1;
             return match entry {
-                Some(data) => Ok(Some(bincode::deserialize(data.as_slice())?)),
+                Some(arc) => Ok(Some(arc.as_ref().clone())),
                 None => Ok(None), // Was deleted
             };
         }
@@ -561,9 +673,29 @@ impl DiskBackedUtxoSet {
             if self.cache.contains_key(&op) {
                 continue;
             }
-            self.cache.insert(op, utxo);
+            self.cache.insert(op, Arc::new(utxo));
             self.recently_accessed.insert(key);
             self.push_eviction_key(key);
+            self.stats_disk_loads += 1;
+            merged += 1;
+        }
+        merged
+    }
+
+    /// Same as merge_prefetch_buffer but takes Arc map (ReadyItem). No clone.
+    pub fn merge_prefetch_buffer_arc(&mut self, buffer: &FxHashMap<OutPointKey, Arc<UTXO>>) -> usize {
+        let mut merged = 0;
+        for (key, arc) in buffer {
+            if self.has_key_in_pending_or_flushing(key) == Some(false) {
+                continue;
+            }
+            let op = key_to_outpoint(key);
+            if self.cache.contains_key(&op) {
+                continue;
+            }
+            self.cache.insert(op, Arc::clone(arc));
+            self.recently_accessed.insert(*key);
+            self.push_eviction_key(*key);
             self.stats_disk_loads += 1;
             merged += 1;
         }
@@ -580,7 +712,17 @@ impl DiskBackedUtxoSet {
     }
 
     /// Protect keys needed by upcoming blocks from eviction. Call before evict_if_needed.
+    /// BLVM_UTXO_PROTECT_MAX_KEYS: cap keys processed (default: no cap). Use to limit cost on slow systems.
     pub fn protect_keys_for_next_blocks(&mut self, keys: &[OutPointKey]) {
+        let max_keys = std::env::var("BLVM_UTXO_PROTECT_MAX_KEYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(usize::MAX);
+        let keys = if keys.len() <= max_keys {
+            keys
+        } else {
+            &keys[..max_keys]
+        };
         for key in keys {
             if self.cache.contains_key(&key_to_outpoint(key)) {
                 self.recently_accessed.insert(*key);
@@ -631,10 +773,14 @@ impl DiskBackedUtxoSet {
             .saturating_add_signed(batch.total_delta);
         for key in batch.deletes {
             self.pending_writes.insert(key, None);
+            // Spent outputs are dead — remove from cache to free space immediately.
+            // We will never look them up again; eviction can keep unspent entries.
+            let outpoint = key_to_outpoint(&key);
+            self.cache.remove(&outpoint);
         }
-        for (key, value) in batch.serialized_inserts {
+        for (key, arc) in batch.inserts {
             self.push_eviction_key(key);
-            self.pending_writes.insert(key, Some(Arc::new(value)));
+            self.pending_writes.insert(key, Some(Arc::clone(&arc)));
             // Protect new outputs from eviction until next block can use them.
             // connect_block already added to cache; we add to recently_accessed so evict_if_needed
             // won't remove them before the next block (N+1) is validated.
@@ -684,7 +830,11 @@ impl DiskBackedUtxoSet {
             let mut b = disk.batch();
             for (key, value_opt) in chunk {
                 match value_opt {
-                    Some(value) => b.put(*key, value.as_slice()),
+                    Some(arc) => {
+                        let bytes = bincode::serialize(arc.as_ref())
+                            .map_err(|e| anyhow::anyhow!("UTXO serialize: {}", e))?;
+                        b.put(*key, bytes.as_slice());
+                    }
                     None => b.delete(*key),
                 }
             }
@@ -708,7 +858,11 @@ impl DiskBackedUtxoSet {
             let mut batch = self.disk.batch();
             for (key, value_opt) in chunk {
                 match value_opt {
-                    Some(value) => batch.put(key, value.as_slice()),
+                    Some(arc) => {
+                        let bytes = bincode::serialize(arc.as_ref())
+                            .map_err(|e| anyhow::anyhow!("UTXO serialize: {}", e))?;
+                        batch.put(key, bytes.as_slice());
+                    }
                     None => batch.delete(key),
                 }
             }
@@ -722,7 +876,9 @@ impl DiskBackedUtxoSet {
     /// Evict entries from the in-memory cache to stay under the memory limit.
     /// Uses FIFO eviction queue for O(to_evict) when queue has candidates; falls back to
     /// O(cache) scan only when queue is exhausted (rare).
-    pub fn evict_if_needed(&mut self) -> usize {
+    /// Prefers evicting: dust first, then old outputs (height &lt; current_height - 100).
+    /// Never evicts outputs from the last EVICT_MIN_AGE_BLOCKS (100) blocks.
+    pub fn evict_if_needed(&mut self, current_height: u64) -> usize {
         let trigger_threshold = self.max_cache_entries + self.max_cache_entries / 10;
         if self.cache.len() <= trigger_threshold {
             return 0;
@@ -735,45 +891,96 @@ impl DiskBackedUtxoSet {
             return 0;
         }
 
+        let min_evictable_height = current_height.saturating_sub(EVICT_MIN_AGE_BLOCKS);
+        let very_old_threshold = current_height.saturating_sub(EVICT_VERY_OLD_BLOCKS);
         let mut evicted = 0;
+        let mut skipped_recent = 0;
+        let queue_len = self.eviction_queue.len();
 
-        // Fast path: pop from FIFO queue (O(to_evict)) — avoids O(cache) scan
-        while evicted < to_evict {
+        // Fast path: collect evictable candidates from queue, sort by (very_old, dust, age), evict best
+        let max_candidates = (to_evict * 4).min(queue_len);
+        let mut candidates: Vec<(OutPointKey, i64, u64)> = Vec::with_capacity(max_candidates);
+        while candidates.len() < max_candidates && skipped_recent <= queue_len {
             let key = match self.eviction_queue.pop_front() {
                 Some(k) => k,
                 None => break,
             };
             if self.recently_accessed.contains(&key) {
-                continue; // Skip recently accessed
+                continue;
             }
             let outpoint = key_to_outpoint(&key);
-            if self.cache.remove(&outpoint).is_some() {
+            if let Some(utxo) = self.cache.get(&outpoint) {
+                if utxo.height > min_evictable_height {
+                    self.eviction_queue.push_back(key);
+                    skipped_recent += 1;
+                    continue;
+                }
+                candidates.push((key, utxo.value, utxo.height));
+            }
+        }
+        // Sort: very old first, then dust (low value), then by height
+        candidates.sort_by(|a, b| {
+            let very_old_a = a.2 < very_old_threshold;
+            let very_old_b = b.2 < very_old_threshold;
+            match (very_old_a, very_old_b) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => (a.1, a.2).cmp(&(b.1, b.2)),
+            }
+        });
+        for (key, _, _) in candidates.drain(..to_evict.min(candidates.len())) {
+            let op = key_to_outpoint(&key);
+            if self.cache.remove(&op).is_some() {
                 evicted += 1;
             }
-            // If remove returned None, key was stale (already spent by connect_block)
+        }
+        // Push back unevicted candidates
+        for (key, _, _) in candidates {
+            self.eviction_queue.push_back(key);
         }
 
-        // Fallback: if queue exhausted before evicting enough, scan cache (O(cache))
+        // Fallback: scan cache, prefer very old > dust > old (O(cache))
         let remaining = to_evict.saturating_sub(evicted);
         if remaining > 0 {
-            let mut keys_to_evict: Vec<OutPoint> = self.cache.keys()
-                .filter(|k| !self.recently_accessed.contains(&outpoint_to_key(k)))
-                .take(remaining)
-                .cloned()
+            let very_old_threshold = current_height.saturating_sub(EVICT_VERY_OLD_BLOCKS);
+            // Collect (OutPoint, value, height) for non-protected, evictable entries
+            let mut candidates: Vec<(OutPoint, i64, u64)> = self
+                .cache
+                .iter()
+                .filter(|(op, _)| !self.recently_accessed.contains(&outpoint_to_key(op)))
+                .filter(|(_, utxo)| utxo.height <= min_evictable_height)
+                .map(|(op, utxo)| (op.clone(), utxo.value, utxo.height))
                 .collect();
-            let rem2 = remaining.saturating_sub(keys_to_evict.len());
+            // Prefer: very old first (height < current - 10k), then dust (low value), then by height
+            candidates.sort_by(|a, b| {
+                let very_old_a = a.2 < very_old_threshold;
+                let very_old_b = b.2 < very_old_threshold;
+                match (very_old_a, very_old_b) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => (a.1, a.2).cmp(&(b.1, b.2)),
+                }
+            });
+            for (op, _, _) in candidates.into_iter().take(remaining) {
+                if self.cache.remove(&op).is_some() {
+                    evicted += 1;
+                }
+            }
+            let rem2 = to_evict.saturating_sub(evicted);
             if rem2 > 0 {
-                keys_to_evict.extend(
-                    self.cache.keys()
-                        .filter(|k| self.recently_accessed.contains(&outpoint_to_key(k)))
-                        .take(rem2)
-                        .cloned(),
-                );
+                // Last resort: evict from recently_accessed (protected) if still over limit
+                let mut extra: Vec<OutPoint> = self
+                    .cache
+                    .keys()
+                    .filter(|k| self.recently_accessed.contains(&outpoint_to_key(k)))
+                    .take(rem2)
+                    .cloned()
+                    .collect();
+                for k in &extra {
+                    self.cache.remove(k);
+                }
+                evicted += extra.len();
             }
-            for k in &keys_to_evict {
-                self.cache.remove(k);
-            }
-            evicted += keys_to_evict.len();
         }
 
         self.recently_accessed.clear();

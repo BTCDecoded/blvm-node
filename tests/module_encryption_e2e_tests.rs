@@ -192,7 +192,7 @@ async fn test_full_encrypted_module_purchase_flow() {
         let tx_hash = [0x01u8; 32];
         let block_hash = [0x02u8; 32];
         state_machine
-            .mark_settled(&payment_id, tx_hash, block_hash, 1)
+            .mark_settled(&payment_id, tx_hash, block_hash, 1, None)
             .await
             .unwrap();
 
@@ -356,7 +356,7 @@ async fn test_payment_state_transitions() {
     // 3. Settled (payment confirmed - can decrypt)
     let block_hash = [0x02u8; 32];
     state_machine
-        .mark_settled(&created_payment_id, tx_hash, block_hash, 1)
+        .mark_settled(&created_payment_id, tx_hash, block_hash, 1, None)
         .await
         .unwrap();
 

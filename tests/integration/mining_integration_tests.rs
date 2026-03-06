@@ -78,7 +78,7 @@ async fn test_getblocktemplate_with_utxo_set() {
     };
     let utxo1 = UTXO {
         value: 1000000000, // 10 BTC
-        script_pubkey: p2pkh_script(random_hash20()),
+        script_pubkey: p2pkh_script(random_hash20()).into(),
         height: 0,
     
             is_coinbase: false,};
@@ -90,7 +90,7 @@ async fn test_getblocktemplate_with_utxo_set() {
     };
     let utxo2 = UTXO {
         value: 500000000, // 5 BTC
-        script_pubkey: p2pkh_script(random_hash20()),
+        script_pubkey: p2pkh_script(random_hash20()).into(),
         height: 0,
     
             is_coinbase: false,};
@@ -189,7 +189,7 @@ async fn test_template_creation_with_real_data() {
         };
         let utxo = UTXO {
             value: 100000000 * (i + 1), // Varying amounts
-            script_pubkey: p2pkh_script(random_hash20()),
+            script_pubkey: p2pkh_script(random_hash20()).into(),
             height: 100,
         
             is_coinbase: false,};

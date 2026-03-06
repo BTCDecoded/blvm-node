@@ -8,7 +8,7 @@ use blvm_node::storage::bitcoin_core_detection::{BitcoinCoreDetection, BitcoinCo
 use blvm_node::storage::bitcoin_core_format::{parse_coin, parse_block_index, convert_key, get_key_prefix};
 use blvm_node::storage::bitcoin_core_storage::BitcoinCoreStorage;
 use blvm_node::storage::database::{create_database, DatabaseBackend};
-use blvm_protocol::Hash;
+use blvm_protocol::{Hash, UTXO};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -225,7 +225,7 @@ impl Migrator {
                         // Note: This is a simplified conversion - may need adjustment
                         let blvm_utxo = bincode::serialize(&UTXO {
                             value: coin.amount as i64,
-                            script_pubkey: coin.script,
+                            script_pubkey: coin.script.into(),
                             height: coin.height as u64,
                             is_coinbase: coin.is_coinbase,
                         })?;
@@ -235,7 +235,7 @@ impl Migrator {
                         if batch.len() >= BATCH_SIZE {
                             self.flush_batch(&dest_tree, &mut batch)?;
                             count += BATCH_SIZE;
-                            self.progress.coins_migrated.store(count, Ordering::Relaxed);
+                            self.progress.coins_migrated.store(count as u64, Ordering::Relaxed);
                             
                             if count % 10000 == 0 {
                                 info!("Migrated {} UTXOs...", count);

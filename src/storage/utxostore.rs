@@ -117,7 +117,7 @@ impl UtxoStore {
                             serialized.clone() // Clone cached result
                         } else {
                             // Cache miss - serialize and cache
-                            let serialized = bincode::serialize(utxo)
+                            let serialized = bincode::serialize(utxo.as_ref())
                                 .map_err(|e| anyhow::anyhow!("Serialization failed: {}", e))?;
 
                             // Store in cache
@@ -129,7 +129,7 @@ impl UtxoStore {
                         }
                     } else {
                         // Cache lock failed - serialize without caching
-                        bincode::serialize(utxo)
+                        bincode::serialize(utxo.as_ref())
                             .map_err(|e| anyhow::anyhow!("Serialization failed: {}", e))?
                     };
 
@@ -173,7 +173,7 @@ impl UtxoStore {
                             serialized.clone() // Clone cached result
                         } else {
                             // Cache miss - serialize and cache
-                            let serialized = bincode::serialize(utxo)?;
+                            let serialized = bincode::serialize(utxo.as_ref())?;
 
                             // Store in cache
                             if let Ok(mut cache) = cache.write() {
@@ -184,7 +184,7 @@ impl UtxoStore {
                         }
                     } else {
                         // Cache lock failed - serialize without caching
-                        bincode::serialize(utxo)?
+                        bincode::serialize(utxo.as_ref())?
                     }
                 };
 
@@ -231,7 +231,7 @@ impl UtxoStore {
             let utxo_data = value;
 
             let utxo: UTXO = bincode::deserialize(&utxo_data)?;
-            utxo_set.insert(outpoint, utxo);
+            utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
         }
 
         Ok(utxo_set)
@@ -398,7 +398,7 @@ impl UtxoStore {
         hash.copy_from_slice(&key[0..32]);
         let index = u64::from_be_bytes([
             key[32], key[33], key[34], key[35], key[36], key[37], key[38], key[39],
-        ]);
+        ]) as u32;
 
         Ok(OutPoint { hash, index })
     }

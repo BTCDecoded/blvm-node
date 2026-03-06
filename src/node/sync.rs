@@ -188,11 +188,17 @@ impl SyncCoordinator {
     ) -> Result<bool> {
         use crate::node::parallel_ibd::{ParallelIBD, ParallelIBDConfig};
 
-        // Check if we have enough peers for parallel IBD (need at least 2)
-        if peer_addresses.len() < 2 {
+        // Check if we have enough peers for parallel IBD.
+        // Allow 1 peer when BLVM_IBD_PREFERRED_PEERS is set (e.g. LAN-only IBD).
+        let min_peers = if std::env::var("BLVM_IBD_PREFERRED_PEERS").map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            1
+        } else {
+            2
+        };
+        if peer_addresses.len() < min_peers {
             debug!(
-                "Not enough peers for parallel IBD (have {}, need 2). Sequential sync is not supported.",
-                peer_addresses.len()
+                "Not enough peers for parallel IBD (have {}, need {}). Sequential sync is not supported.",
+                peer_addresses.len(), min_peers
             );
             return Ok(false);
         }
@@ -210,10 +216,11 @@ impl SyncCoordinator {
             peer_addresses.len()
         );
 
-        // Create parallel IBD coordinator
+        // Create parallel IBD coordinator (Arc allows dedicated validation thread to call validate_block_only)
         let config = ParallelIBDConfig::default();
         let mut parallel_ibd = ParallelIBD::new(config);
         parallel_ibd.initialize_peers(&peer_addresses);
+        let parallel_ibd = std::sync::Arc::new(parallel_ibd);
 
         // Attempt parallel sync
         match parallel_ibd.sync_parallel(
@@ -222,7 +229,7 @@ impl SyncCoordinator {
             &peer_addresses,
             blockstore,
             storage.as_ref(),
-            &protocol,
+            std::sync::Arc::clone(&protocol),
             utxo_set,
             network,
         ).await {

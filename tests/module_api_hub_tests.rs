@@ -48,7 +48,7 @@ impl NodeAPI for MockNodeAPI {
         use blvm_protocol::{ByteString, Integer, Natural};
         Ok(Some(UTXO {
             value: Integer::from(1000i64),
-            script_pubkey: vec![], // ByteString is a type alias for Vec<u8>
+            script_pubkey: vec![].into(), // SharedByteString for UTXO
             height: Natural::from(100u64),
             is_coinbase: false,
         }))

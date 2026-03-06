@@ -521,7 +521,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         let peer_id = peer_id.to_string();
 
         Box::pin(async move {
-            use crate::network::protocol::{GetDataMessage, InventoryItem, ProtocolMessage, ProtocolParser};
+            use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage, ProtocolParser};
             use blvm_protocol::utxo_commitments::network_integration::FullBlock;
             use blvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
 
@@ -556,7 +556,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
 
             // Create GetData message for block (MSG_BLOCK = 2)
             let get_data_msg = GetDataMessage {
-                inventory: vec![InventoryItem {
+                inventory: vec![InventoryVector {
                     inv_type: 2, // MSG_BLOCK
                     hash: block_hash,
                 }],
@@ -631,13 +631,16 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             handle.block_on(async {
                 let network = self.network_manager.read().await;
                 // Extract connected peer addresses - collect to avoid holding lock across await
-                let peer_addrs: Vec<String> = network
+                let mut peer_addrs: Vec<String> = network
                     .peer_states
                     .read()
                     .await
                     .keys()
                     .map(|addr| format!("tcp:{}", addr))
                     .collect();
+                // Shuffle to prevent predictable peer selection (eclipse resistance)
+                use rand::seq::SliceRandom;
+                peer_addrs.shuffle(&mut rand::thread_rng());
                 peer_addrs
             })
         } else {
@@ -747,7 +750,7 @@ impl UtxoCommitmentsClient {
                             // Reconstruct UTXO; proof bytes passed through for caller to deserialize
                             let utxo = blvm_consensus::types::UTXO {
                                 value: proof_msg.value,
-                                script_pubkey: proof_msg.script_pubkey,
+                                script_pubkey: proof_msg.script_pubkey.into(),
                                 height: proof_msg.height,
                                 is_coinbase: proof_msg.is_coinbase,
                             };

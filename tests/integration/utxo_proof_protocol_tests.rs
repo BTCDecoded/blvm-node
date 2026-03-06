@@ -136,7 +136,7 @@ mod tests {
         };
         let utxo = UTXO {
             value: 1000,
-            script_pubkey: vec![0x51],
+            script_pubkey: vec![0x51].into(),
             height: 0,
             is_coinbase: false,
         };
@@ -168,7 +168,7 @@ mod tests {
         // Extract data from protocol message
         let utxo_from_msg = UTXO {
             value: proof_msg.value,
-            script_pubkey: proof_msg.script_pubkey,
+            script_pubkey: proof_msg.script_pubkey.into(),
             height: proof_msg.height,
             is_coinbase: proof_msg.is_coinbase,
         };

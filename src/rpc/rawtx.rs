@@ -1017,7 +1017,7 @@ impl RawTxRpc {
         use blvm_protocol::OutPoint;
         let outpoint = OutPoint {
             hash: txid_array,
-            index: n,
+            index: n as u32,
         };
 
         if let Some(ref storage) = self.storage {
@@ -1643,7 +1643,7 @@ impl RawTxRpc {
             tx_inputs.push(TransactionInput {
                 prevout: OutPoint {
                     hash: txid,
-                    index: vout,
+                    index: vout as u32,
                 },
                 script_sig: Vec::new(),
                 sequence: sequence as u64,

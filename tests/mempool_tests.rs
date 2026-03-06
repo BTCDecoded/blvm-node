@@ -51,7 +51,7 @@ async fn test_mempool_get_prioritized_transactions() {
         outpoint.clone(),
         UTXO {
             value: 10000,
-            script_pubkey: vec![0x51],
+            script_pubkey: vec![0x51].into(),
             height: 0,
             is_coinbase: false,
         },

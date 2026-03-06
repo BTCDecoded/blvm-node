@@ -54,8 +54,6 @@ toml = "=0.8.2"
 
 # Cryptography - use local fork (same as blvm-consensus/blvm-protocol)
 secp256k1 = { path = "../secp256k1-fork" }
-# BIP70 payment protocol uses crates.io secp256k1 - convert fork key when calling
-secp256k1-bip70 = { version = "=0.28.2", package = "secp256k1" }
 sha2 = "=0.10.9"
 ripemd = "=0.1.3"
 hex = "=0.4.3"
@@ -105,16 +103,20 @@ bitflags = "^2.6"
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 mimalloc = { version = "=0.1", default-features = false }
+libmimalloc-sys = { version = "=0.1", features = ["extended"] }
 
 # System calls for process sandboxing (Unix)
 nix = { version = "0.28", features = ["process", "resource"], optional = true }
 libc = { version = "0.2", optional = true }
 
-# Parallel processing for block validation (Phase 4.2)
+# Parallel processing for block validation
 rayon = { version = "1.8", optional = true }
 
 # LRU cache for production optimizations
 lru = { version = "0.12", optional = true }
+
+# Concurrent HashMap for IBD v2 (zero lock contention)
+dashmap = { version = "6.0", optional = true }
 
 # System information for memory stats (optional feature)
 sysinfo = { version = "0.30", optional = true }
@@ -195,7 +197,7 @@ tidesdb = ["dep:tidesdb"]
 nix = ["dep:nix", "dep:libc"]
 libc = ["dep:libc"]
 # Production optimizations (parallel block validation, etc.)
-production = ["blvm-protocol/production", "dep:rayon", "dep:lru", "dep:blvm-consensus", "dep:smallvec"]
+production = ["blvm-protocol/production", "dep:rayon", "dep:lru", "dep:blvm-consensus", "dep:smallvec", "dep:dashmap", "mimalloc", "libc"]
 # Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
 profile = ["blvm-protocol/profile", "dep:blvm-consensus"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF
@@ -250,13 +252,21 @@ serial_test = "3.0"  # Sequential test execution for database isolation
 [profile.release]
 # Production optimizations (mirrors bllvm-consensus)
 opt-level = 3
-lto = "fat"  # Fat LTO for maximum optimization
-codegen-units = 1  # Single codegen unit maximizes LTO benefits
+lto = false        # off: fastest iteration; use thin/fat for production/CI
+codegen-units = 256  # max parallelism
 strip = true  # Remove symbols for smaller binaries
 panic = "abort"  # Smaller binaries, no unwinding overhead
 
 [profile.release.package."*"]
 opt-level = 3
+
+# Fast release: opt-level 2 for iteration (~2-3x faster compile)
+[profile.release-fast]
+inherits = "release"
+opt-level = 2
+
+[profile.release-fast.package."*"]
+opt-level = 2
 
 # Benchmark profile
 [profile.bench]

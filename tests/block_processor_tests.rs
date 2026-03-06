@@ -169,7 +169,7 @@ fn test_validate_block_with_context() {
     let (_temp_dir, storage) = create_test_storage();
     let protocol = BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap();
     let block = create_test_block();
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     let witnesses = create_empty_witnesses();
 
     // Store block first

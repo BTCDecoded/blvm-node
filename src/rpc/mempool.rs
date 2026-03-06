@@ -334,7 +334,7 @@ impl MempoolRpc {
                 for (idx, _output) in tx.outputs.iter().enumerate() {
                     output_outpoints.push(blvm_protocol::OutPoint {
                         hash,
-                        index: idx as u64,
+                        index: idx as u32,
                     });
                 }
 
@@ -510,7 +510,7 @@ impl MempoolRpc {
                     let ancestor_hash = calculate_tx_id(&ancestor_tx);
                     for (idx, _output) in ancestor_tx.outputs.iter().enumerate() {
                         if input.prevout.hash == ancestor_hash
-                            && input.prevout.index == idx as u64
+                            && input.prevout.index == idx as u32
                             && !ancestors.contains(&ancestor_hash)
                         {
                             ancestors.push(ancestor_hash);
@@ -533,7 +533,7 @@ impl MempoolRpc {
             for (idx, _output) in tx.outputs.iter().enumerate() {
                 output_outpoints.push(blvm_protocol::OutPoint {
                     hash: *tx_hash,
-                    index: idx as u64,
+                    index: idx as u32,
                 });
             }
 

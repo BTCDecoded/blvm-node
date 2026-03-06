@@ -7,7 +7,7 @@ use blvm_protocol::Hash;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 
-use super::protocol::{GetDataMessage, InventoryItem};
+use super::protocol::{GetDataMessage, InventoryVector};
 
 /// Inventory types
 pub const MSG_TX: u32 = 1;
@@ -51,7 +51,7 @@ impl InventoryManager {
     }
 
     /// Add inventory items from a peer
-    pub fn add_inventory(&mut self, peer: &str, inventory: &[InventoryItem]) -> Result<()> {
+    pub fn add_inventory(&mut self, peer: &str, inventory: &[InventoryVector]) -> Result<()> {
         let peer_inv = self.peer_inventories.entry(peer.to_string()).or_default();
 
         for item in inventory {
@@ -88,7 +88,7 @@ impl InventoryManager {
 
         self.pending_requests.insert(hash, request.clone());
 
-        let inventory = vec![InventoryItem { inv_type, hash }];
+        let inventory = vec![InventoryVector { inv_type, hash }];
 
         Ok(GetDataMessage { inventory })
     }

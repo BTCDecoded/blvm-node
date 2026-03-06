@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 mod common;
 use blvm_node::network::inventory::{InventoryRequest, MSG_BLOCK, MSG_TX};
-use blvm_node::network::protocol::InventoryItem as NetworkInventoryItem;
+use blvm_node::network::protocol::InventoryVector;
 use common::*;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -67,7 +67,7 @@ async fn test_inventory_manager() {
 
     // Test adding inventory
     let hash = [1u8; 32];
-    let items = [blvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = [blvm_node::network::protocol::InventoryVector { inv_type: 1, hash }];
 
     inventory.add_inventory("peer1", &items[..]).unwrap();
     assert_eq!(inventory.inventory_count(), 1);
@@ -339,12 +339,12 @@ async fn test_inventory_manager_operations() {
     let hash1 = random_hash();
     let hash2 = random_hash();
 
-    let items1 = [blvm_node::network::protocol::InventoryItem {
+    let items1 = [blvm_node::network::protocol::InventoryVector {
         inv_type: 1, // MSG_TX
         hash: hash1,
     }];
 
-    let items2 = [blvm_node::network::protocol::InventoryItem {
+    let items2 = [blvm_node::network::protocol::InventoryVector {
         inv_type: 2, // MSG_BLOCK
         hash: hash2,
     }];
@@ -362,7 +362,7 @@ async fn test_inventory_peer_tracking() {
     let mut inventory = InventoryManager::new();
 
     let hash = random_hash();
-    let items = [blvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = [blvm_node::network::protocol::InventoryVector { inv_type: 1, hash }];
 
     // Add inventory from multiple peers
     inventory.add_inventory("peer1", &items[..]).unwrap();
@@ -381,7 +381,7 @@ async fn test_inventory_request_handling() {
     let mut inventory = InventoryManager::new();
 
     let hash = random_hash();
-    let items = [blvm_node::network::protocol::InventoryItem { inv_type: 1, hash }];
+    let items = [blvm_node::network::protocol::InventoryVector { inv_type: 1, hash }];
 
     inventory.add_inventory("peer1", &items[..]).unwrap();
 
@@ -539,11 +539,11 @@ async fn test_inventory_get_peer_inventory() {
     let hash2 = random_hash();
 
     let items = vec![
-        NetworkInventoryItem {
+        InventoryVector {
             inv_type: MSG_BLOCK,
             hash: hash1,
         },
-        NetworkInventoryItem {
+        InventoryVector {
             inv_type: MSG_TX,
             hash: hash2,
         },
@@ -566,7 +566,7 @@ async fn test_inventory_remove_peer() {
     let peer = "peer1";
     let hash = random_hash();
 
-    let items = vec![NetworkInventoryItem {
+    let items = vec![InventoryVector {
         inv_type: MSG_BLOCK,
         hash,
     }];
@@ -613,16 +613,16 @@ async fn test_inventory_integration_workflow() {
     let hash3 = random_hash();
 
     // Add inventory from multiple peers
-    let items1 = vec![NetworkInventoryItem {
+    let items1 = vec![InventoryVector {
         inv_type: MSG_BLOCK,
         hash: hash1,
     }];
     let items2 = vec![
-        NetworkInventoryItem {
+        InventoryVector {
             inv_type: MSG_TX,
             hash: hash2,
         },
-        NetworkInventoryItem {
+        InventoryVector {
             inv_type: MSG_BLOCK,
             hash: hash3,
         },
@@ -805,11 +805,11 @@ async fn test_inv_message() {
     let hash2 = random_hash();
 
     let inv_items = vec![
-        NetworkInventoryItem {
+        InventoryVector {
             inv_type: MSG_BLOCK,
             hash: hash1,
         },
-        NetworkInventoryItem {
+        InventoryVector {
             inv_type: MSG_TX,
             hash: hash2,
         },
@@ -844,11 +844,11 @@ async fn test_getdata_message() {
     let hash2 = random_hash();
 
     let getdata_items = vec![
-        NetworkInventoryItem {
+        InventoryVector {
             inv_type: MSG_BLOCK,
             hash: hash1,
         },
-        NetworkInventoryItem {
+        InventoryVector {
             inv_type: MSG_TX,
             hash: hash2,
         },

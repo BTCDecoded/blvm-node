@@ -1,4 +1,4 @@
-//! Parallel block validation (Phase 4.2)
+//! Parallel block validation
 //!
 //! Validates multiple blocks in parallel when safe to do so (not on chain tip).
 //! Provides 2-3x sync speed improvement for historical block replay.
@@ -73,7 +73,7 @@ impl ParallelBlockValidator {
         Ok((result, new_utxo_set))
     }
 
-    /// Validate multiple blocks in parallel (Phase 4.2)
+    /// Validate multiple blocks in parallel
     ///
     /// Only validates blocks in parallel if:
     /// 1. They're not on the chain tip (depth > max_parallel_depth)

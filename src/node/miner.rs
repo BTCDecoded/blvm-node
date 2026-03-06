@@ -869,7 +869,7 @@ mod tests {
         mempool.add_transaction(tx2);
         mempool.add_transaction(tx3);
 
-        let empty_utxo_set = blvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::default();
         let selected = selector.select_transactions(&mempool, &empty_utxo_set);
         assert!(!selected.is_empty());
         assert!(selected.len() <= 3);
@@ -887,19 +887,19 @@ mod tests {
         assert!(weight > 0);
 
         // Test fee rate calculation with UTXO set
-        let mut utxo_set = blvm_protocol::UtxoSet::new();
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
         let outpoint = blvm_protocol::OutPoint {
             hash: [0u8; 32],
             index: 0,
         };
         utxo_set.insert(
             outpoint,
-            blvm_protocol::UTXO {
+            std::sync::Arc::new(blvm_protocol::UTXO {
                 value: 10000,
-                script_pubkey: vec![0x51],
+                script_pubkey: vec![0x51].into(),
                 height: 0,
                 is_coinbase: false,
-            },
+            }),
         );
         let fee_rate = selector.calculate_fee_rate_with_utxo(&tx, &utxo_set);
         assert!(fee_rate > 0);
@@ -1069,7 +1069,7 @@ mod tests {
         let mempool = MockMempoolProvider::new();
         assert_eq!(mempool.get_mempool_size(), 0);
         assert!(mempool.get_transactions().is_empty());
-        let empty_utxo_set = blvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::default();
         assert!(mempool
             .get_prioritized_transactions(10, &empty_utxo_set)
             .is_empty());
@@ -1088,7 +1088,7 @@ mod tests {
         assert_eq!(mempool.get_mempool_size(), 2);
         assert_eq!(mempool.get_transactions().len(), 2);
 
-        let empty_utxo_set = blvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::default();
         let prioritized = mempool.get_prioritized_transactions(10, &empty_utxo_set);
         assert_eq!(prioritized.len(), 2);
 
@@ -1115,7 +1115,7 @@ mod tests {
         mempool.add_transaction(tx_high_fee);
         mempool.add_transaction(tx_medium_fee);
 
-        let empty_utxo_set = blvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::default();
         let prioritized = mempool.get_prioritized_transactions(10, &empty_utxo_set);
         assert_eq!(prioritized.len(), 3);
 
@@ -1242,7 +1242,7 @@ mod tests {
         // Create mempool and add transaction before wrapping in Arc
         let mut mempool_manager = crate::node::mempool::MempoolManager::new();
         let tx = create_test_transaction(1, 1000);
-        let _ = mempool_manager.add_transaction(tx).await;
+        let _ = mempool_manager.add_transaction(tx);
         let mempool = Arc::new(mempool_manager);
         let coordinator = MiningCoordinator::new(mempool, None);
 
@@ -1255,7 +1255,7 @@ mod tests {
         // Create mempool and add transaction before wrapping in Arc
         let mut mempool_manager = crate::node::mempool::MempoolManager::new();
         let tx = create_test_transaction(1, 1000);
-        let _ = mempool_manager.add_transaction(tx).await;
+        let _ = mempool_manager.add_transaction(tx);
         let mempool = Arc::new(mempool_manager);
 
         let mut coordinator = MiningCoordinator::new(mempool, None);
@@ -1275,7 +1275,7 @@ mod tests {
         let coordinator = MiningCoordinator::new(mempool, None);
 
         // Test coinbase creation with no transactions (subsidy only)
-        let empty_utxo_set = blvm_protocol::UtxoSet::new();
+        let empty_utxo_set = blvm_protocol::UtxoSet::default();
         let coinbase = coordinator
             .create_coinbase_transaction(0, &[], &empty_utxo_set)
             .await;

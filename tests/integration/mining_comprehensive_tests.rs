@@ -50,7 +50,7 @@ async fn test_complete_mining_workflow() {
         };
         let utxo = UTXO {
             value: 100000000 * (i + 1), // 1-5 BTC
-            script_pubkey: p2pkh_script(random_hash20()),
+            script_pubkey: p2pkh_script(random_hash20()).into(),
             height: 100,
         
             is_coinbase: false,};
@@ -144,7 +144,7 @@ async fn test_template_large_utxo_set() {
         };
         let utxo = UTXO {
             value: 1000000 + (i as i64) * 1000, // Varying amounts
-            script_pubkey: p2pkh_script(random_hash20()),
+            script_pubkey: p2pkh_script(random_hash20()).into(),
             height: 0,
         
             is_coinbase: false,};

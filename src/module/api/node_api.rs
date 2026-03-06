@@ -984,6 +984,17 @@ impl NodeAPI for NodeApiImpl {
                         tx_hash: Some(tx_hash),
                         confirmations: Some(confirmation_count),
                     })),
+                    crate::payment::state_machine::PaymentState::ReorgPending {
+                        request_id,
+                        tx_hash,
+                        ..
+                    } => Ok(Some(PaymentState {
+                        payment_id: request_id,
+                        status: "reorg_pending".to_string(),
+                        amount_sats: 0,
+                        tx_hash: Some(tx_hash),
+                        confirmations: Some(0),
+                    })),
                     crate::payment::state_machine::PaymentState::Failed {
                         request_id,
                         reason: _,

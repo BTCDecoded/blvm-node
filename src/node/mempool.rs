@@ -9,7 +9,7 @@ use blvm_protocol::mempool::{has_conflict_with_tx, replacement_checks, signals_r
 use blvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
@@ -24,17 +24,22 @@ struct RbfTracking {
     original_tx_hash: Hash,
 }
 
+/// Core mempool state (transactions + spent outputs)
+/// Wrapped in Mutex for add_transaction from Arc context (re-broadcast, sendrawtransaction)
+struct MempoolPool {
+    transactions: HashMap<Hash, Transaction>,
+    spent_outputs: HashSet<OutPoint>,
+}
+
 /// Mempool manager
 pub struct MempoolManager {
-    /// Transaction mempool - stores full transactions by hash
-    pub(crate) transactions: HashMap<Hash, Transaction>,
+    /// Transaction mempool + spent outputs (interior mutability for Arc<MempoolManager>)
+    pool: Mutex<MempoolPool>,
     /// Legacy mempool (HashSet of hashes) for compatibility
     #[allow(dead_code)]
-    mempool: Mempool,
+    mempool: RwLock<Mempool>,
     #[allow(dead_code)]
     utxo_set: UtxoSet,
-    /// Track spent outputs to detect conflicts
-    pub(crate) spent_outputs: HashSet<OutPoint>,
     /// Event callback for mempool events (optional)
     /// Called when transactions are added/removed from mempool
     #[allow(dead_code)]
@@ -78,10 +83,12 @@ impl MempoolManager {
     /// Create a new mempool manager
     pub fn new() -> Self {
         Self {
-            transactions: HashMap::new(),
-            mempool: Mempool::new(),
+            pool: Mutex::new(MempoolPool {
+                transactions: HashMap::new(),
+                spent_outputs: HashSet::new(),
+            }),
+            mempool: RwLock::new(Mempool::new()),
             utxo_set: UtxoSet::default(),
-            spent_outputs: HashSet::new(),
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
@@ -99,10 +106,12 @@ impl MempoolManager {
     /// Create a new mempool manager with RBF configuration
     pub fn with_rbf_config(rbf_config: Option<RbfConfig>) -> Self {
         Self {
-            transactions: HashMap::new(),
-            mempool: Mempool::new(),
+            pool: Mutex::new(MempoolPool {
+                transactions: HashMap::new(),
+                spent_outputs: HashSet::new(),
+            }),
+            mempool: RwLock::new(Mempool::new()),
             utxo_set: UtxoSet::default(),
-            spent_outputs: HashSet::new(),
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
@@ -133,6 +142,11 @@ impl MempoolManager {
     /// Uses interior mutability so it can be called even when MempoolManager is in an Arc
     pub fn set_policy_config(&self, policy_config: Option<MempoolPolicyConfig>) {
         *self.policy_config.write().unwrap() = policy_config;
+    }
+
+    /// Lock pool for access (transactions + spent_outputs)
+    fn pool_lock(&self) -> std::sync::MutexGuard<'_, MempoolPool> {
+        self.pool.lock().unwrap()
     }
 
     /// Get current timestamp (Unix seconds)
@@ -217,7 +231,7 @@ impl MempoolManager {
 
         let current_time = Self::current_timestamp();
         // Optimization: Pre-allocate with estimated capacity
-        let estimated_removals = self.transactions.len() / 100; // Estimate ~1% will expire
+        let estimated_removals = self.pool_lock().transactions.len() / 100; // Estimate ~1% will expire
         let mut to_remove = Vec::with_capacity(estimated_removals);
 
         {
@@ -249,7 +263,7 @@ impl MempoolManager {
 
         // Calculate current mempool size
         let current_size_mb = self.calculate_mempool_size_mb();
-        let current_tx_count = self.transactions.len();
+        let current_tx_count = self.pool_lock().transactions.len();
 
         // Check if we need to evict
         let needs_eviction =
@@ -303,6 +317,7 @@ impl MempoolManager {
         use blvm_protocol::serialization::transaction::serialize_transaction;
 
         let total_bytes: usize = self
+            .pool_lock()
             .transactions
             .values()
             .map(|tx| serialize_transaction(tx).len())
@@ -322,6 +337,7 @@ impl MempoolManager {
 
         // Get all transactions sorted by fee rate (ascending - lowest first)
         let mut tx_fee_rates: Vec<(Hash, u64, usize)> = self
+            .pool_lock()
             .transactions
             .iter()
             .map(|(hash, tx)| {
@@ -342,7 +358,7 @@ impl MempoolManager {
 
         // Evict until we're under limits
         let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.transactions.len();
+        let mut current_tx_count = self.pool_lock().transactions.len();
 
         for (hash, _fee_rate, size) in tx_fee_rates {
             if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
@@ -380,7 +396,7 @@ impl MempoolManager {
         // Get all transactions with timestamps, sorted by age (oldest first)
         let mut tx_ages: Vec<(Hash, u64, usize)> = {
             let timestamps = self.tx_timestamps.read().unwrap();
-            self.transactions
+            self.pool_lock().transactions
                 .iter()
                 .filter_map(|(hash, tx)| {
                     timestamps.get(hash).map(|&timestamp| {
@@ -396,7 +412,7 @@ impl MempoolManager {
 
         // Evict until we're under limits
         let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.transactions.len();
+        let mut current_tx_count = self.pool_lock().transactions.len();
 
         for (hash, _timestamp, size) in tx_ages {
             if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
@@ -433,6 +449,7 @@ impl MempoolManager {
 
         // Get all transactions sorted by size (descending - largest first)
         let mut tx_sizes: Vec<(Hash, usize)> = self
+            .pool_lock()
             .transactions
             .iter()
             .map(|(hash, tx)| {
@@ -446,7 +463,7 @@ impl MempoolManager {
 
         // Evict until we're under limits
         let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.transactions.len();
+        let mut current_tx_count = self.pool_lock().transactions.len();
 
         for (hash, size) in tx_sizes {
             if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
@@ -490,7 +507,7 @@ impl MempoolManager {
             let descendants = self.tx_descendants.read().unwrap();
             let fee_cache = self.fee_cache.read().unwrap();
 
-            self.transactions
+            self.pool_lock().transactions
                 .iter()
                 .filter_map(|(hash, tx)| {
                     let has_descendants = descendants
@@ -514,7 +531,7 @@ impl MempoolManager {
 
         // Evict until we're under limits
         let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.transactions.len();
+        let mut current_tx_count = self.pool_lock().transactions.len();
 
         for (hash, _fee_rate, size) in tx_no_descendants {
             if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
@@ -543,7 +560,7 @@ impl MempoolManager {
             let timestamps = self.tx_timestamps.read().unwrap();
             let fee_cache = self.fee_cache.read().unwrap();
 
-            self.transactions
+            self.pool_lock().transactions
                 .iter()
                 .map(|(hash, tx)| {
                     let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
@@ -578,7 +595,7 @@ impl MempoolManager {
 
         // Evict until we're under limits
         let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.transactions.len();
+        let mut current_tx_count = self.pool_lock().transactions.len();
 
         for (hash, _score, size) in tx_scores {
             if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
@@ -623,7 +640,7 @@ impl MempoolManager {
         let mut non_spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
 
         let fee_cache = self.fee_cache.read().unwrap();
-        for (hash, tx) in &self.transactions {
+        for (hash, tx) in &self.pool_lock().transactions {
             let size = serialize_transaction(tx).len();
             let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
 
@@ -645,7 +662,7 @@ impl MempoolManager {
 
         // Evict spam transactions first, then non-spam if needed
         let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.transactions.len();
+        let mut current_tx_count = self.pool_lock().transactions.len();
 
         // First, evict spam transactions
         for (hash, _fee_rate, size) in spam_txs {
@@ -714,7 +731,7 @@ impl MempoolManager {
             Some(config) => config.clone(),
             None => {
                 // No RBF config - use default BIP125 behavior
-                return replacement_checks(new_tx, existing_tx, utxo_set, &self.mempool)
+                return replacement_checks(new_tx, existing_tx, utxo_set, &*self.mempool.read().unwrap())
                     .map_err(|e| anyhow::anyhow!("RBF check failed: {}", e));
             }
         };
@@ -867,7 +884,7 @@ impl MempoolManager {
         // Note: replacement_checks will re-check fee rate, but we've already validated with our multiplier
         // So we call it to verify the other BIP125 rules (dependencies, etc.)
         // However, since we've already done stricter checks, if replacement_checks passes, we're good
-        let bip125_result = replacement_checks(new_tx, existing_tx, utxo_set, &self.mempool)?;
+        let bip125_result = replacement_checks(new_tx, existing_tx, utxo_set, &*self.mempool.read().unwrap())?;
         if !bip125_result {
             // BIP125 check failed (likely new dependencies issue)
             return Ok(false);
@@ -902,10 +919,10 @@ impl MempoolManager {
             }
             processed.insert(current_hash);
 
-            if let Some(current_tx) = self.transactions.get(&current_hash) {
+            if let Some(current_tx) = self.pool_lock().transactions.get(&current_hash) {
                 for input in &current_tx.inputs {
                     // Find parent transaction that created this output
-                    for parent_hash in self.transactions.keys() {
+                    for parent_hash in self.pool_lock().transactions.keys() {
                         if parent_hash == &input.prevout.hash {
                             if !ancestors.contains(parent_hash) {
                                 ancestors.insert(*parent_hash);
@@ -920,11 +937,14 @@ impl MempoolManager {
 
         // Calculate ancestor count and size
         let ancestor_count = ancestors.len() as u32;
-        let ancestor_size: u64 = ancestors
-            .iter()
-            .filter_map(|h| self.transactions.get(h))
-            .map(|t| serialize_transaction(t).len() as u64)
-            .sum();
+        let ancestor_size: u64 = {
+            let pool = self.pool_lock();
+            ancestors
+                .iter()
+                .filter_map(|h| pool.transactions.get(h))
+                .map(|t| serialize_transaction(t).len() as u64)
+                .sum()
+        };
 
         // Check ancestor limits
         if ancestor_count + 1 > policy.max_ancestor_count {
@@ -960,17 +980,17 @@ impl MempoolManager {
             }
             processed.insert(current_hash);
 
-            if let Some(current_tx) = self.transactions.get(&current_hash) {
+            if let Some(current_tx) = self.pool_lock().transactions.get(&current_hash) {
                 // Find all outputs of current tx
                 let output_outpoints: Vec<_> = (0..current_tx.outputs.len())
                     .map(|idx| OutPoint {
                         hash: current_hash,
-                        index: idx as u64,
+                        index: idx as u32,
                     })
                     .collect();
 
                 // Find transactions that spend these outputs
-                for (child_hash, child_tx) in &self.transactions {
+                for (child_hash, child_tx) in &self.pool_lock().transactions {
                     for input in &child_tx.inputs {
                         if output_outpoints.contains(&input.prevout) {
                             if !descendants.contains(child_hash) {
@@ -986,11 +1006,14 @@ impl MempoolManager {
 
         // Calculate descendant count and size
         let descendant_count = descendants.len() as u32;
-        let descendant_size: u64 = descendants
-            .iter()
-            .filter_map(|h| self.transactions.get(h))
-            .map(|t| serialize_transaction(t).len() as u64)
-            .sum();
+        let descendant_size: u64 = {
+            let pool = self.pool_lock();
+            descendants
+                .iter()
+                .filter_map(|h| pool.transactions.get(h))
+                .map(|t| serialize_transaction(t).len() as u64)
+                .sum()
+        };
 
         // Check descendant limits
         if descendant_count + 1 > policy.max_descendant_count {
@@ -1028,7 +1051,7 @@ impl MempoolManager {
         // Find parent transactions (ancestors) - transactions that created inputs
         for input in &tx.inputs {
             // Find transaction that created this output
-            for parent_hash in self.transactions.keys() {
+            for parent_hash in self.pool_lock().transactions.keys() {
                 if parent_hash == &input.prevout.hash {
                     // This transaction depends on parent
                     dependencies
@@ -1049,7 +1072,8 @@ impl MempoolManager {
     }
 
     /// Add transaction to mempool
-    pub async fn add_transaction(&mut self, tx: Transaction) -> Result<bool> {
+    /// Uses interior mutability so it can be called with Arc<MempoolManager> (re-broadcast, sendrawtransaction)
+    pub fn add_transaction(&self, tx: Transaction) -> Result<bool> {
         debug!("Adding transaction to mempool");
 
         use blvm_protocol::block::calculate_tx_id;
@@ -1060,6 +1084,7 @@ impl MempoolManager {
         let mut conflicting_tx_hash: Option<Hash> = None;
         for input in &tx.inputs {
             if let Some(existing_tx) = self
+                .pool_lock()
                 .transactions
                 .values()
                 .find(|t| t.inputs.iter().any(|i| i.prevout == input.prevout))
@@ -1072,7 +1097,7 @@ impl MempoolManager {
 
         // If there's a conflict, try RBF replacement
         if let Some(existing_hash) = conflicting_tx_hash {
-            if let Some(existing_tx) = self.transactions.get(&existing_hash) {
+            if let Some(existing_tx) = self.pool_lock().transactions.get(&existing_hash) {
                 // Check if RBF replacement is allowed
                 // Note: Storage is not available in MempoolManager context
                 // Conservative mode confirmation checks will be skipped if storage is None
@@ -1122,7 +1147,7 @@ impl MempoolManager {
         } else {
             // No conflict - check if inputs are already spent
             for input in &tx.inputs {
-                if self.spent_outputs.contains(&input.prevout) {
+                if self.pool_lock().spent_outputs.contains(&input.prevout) {
                     debug!("Transaction conflicts with existing mempool transaction");
                     return Ok(false);
                 }
@@ -1141,12 +1166,12 @@ impl MempoolManager {
         }
 
         // Add transaction to mempool (store full transaction)
-        self.transactions.insert(tx_hash, tx.clone());
-        self.mempool.insert(tx_hash);
+        self.pool_lock().transactions.insert(tx_hash, tx.clone());
+        self.mempool.write().unwrap().insert(tx_hash);
 
         // Track spent outputs
         for input in &tx.inputs {
-            self.spent_outputs.insert(input.prevout.clone());
+            self.pool_lock().spent_outputs.insert(input.prevout.clone());
         }
 
         // Update dependency graph
@@ -1171,7 +1196,7 @@ impl MempoolManager {
 
         // Publish mempool transaction added event
         if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
-            let mempool_size = self.transactions.len();
+            let mempool_size = self.pool_lock().transactions.len();
             // Convert fee_rate from u64 to f64 (satoshis per vbyte)
             // Note: fee_rate is currently 0, will be updated later when UTXO set is available
             let fee_rate_f64 = fee_rate as f64;
@@ -1189,22 +1214,22 @@ impl MempoolManager {
 
     /// Get mempool size
     pub fn size(&self) -> usize {
-        self.transactions.len()
+        self.pool_lock().transactions.len()
     }
 
     /// Get mempool transaction hashes
     pub fn transaction_hashes(&self) -> Vec<Hash> {
-        self.transactions.keys().cloned().collect()
+        self.pool_lock().transactions.keys().cloned().collect()
     }
 
     /// Get transaction by hash
     pub fn get_transaction(&self, hash: &Hash) -> Option<Transaction> {
-        self.transactions.get(hash).cloned()
+        self.pool_lock().transactions.get(hash).cloned()
     }
 
     /// Get all transactions
     pub fn get_transactions(&self) -> Vec<Transaction> {
-        self.transactions.values().cloned().collect()
+        self.pool_lock().transactions.values().cloned().collect()
     }
 
     /// Get prioritized transactions by fee rate
@@ -1228,7 +1253,7 @@ impl MempoolManager {
         let fee_index = self.fee_index.read().unwrap();
         for (Reverse(_fee_rate), tx_hashes) in fee_index.iter() {
             for tx_hash in tx_hashes {
-                if let Some(tx) = self.transactions.get(tx_hash) {
+                if let Some(tx) = self.pool_lock().transactions.get(tx_hash) {
                     result.push(tx.clone());
                     if result.len() >= limit {
                         return result;
@@ -1294,10 +1319,15 @@ impl MempoolManager {
         fee_cache.clear();
 
         // Optimization: Pre-collect all prevouts from all transactions for batch UTXO lookup
-        let all_prevouts: Vec<(&Hash, &OutPoint)> = self
+        let all_prevouts: Vec<(Hash, OutPoint)> = self
+            .pool_lock()
             .transactions
             .iter()
-            .flat_map(|(tx_hash, tx)| tx.inputs.iter().map(move |input| (tx_hash, &input.prevout)))
+            .flat_map(|(tx_hash, tx)| {
+                tx.inputs
+                    .iter()
+                    .map(move |input| (*tx_hash, input.prevout.clone()))
+            })
             .collect();
 
         // Batch UTXO lookup for all transactions (single pass through HashMap)
@@ -1309,7 +1339,7 @@ impl MempoolManager {
         }
 
         // Recalculate fee rates for all transactions using cached UTXOs
-        for (tx_hash, tx) in &self.transactions {
+        for (tx_hash, tx) in &self.pool_lock().transactions {
             // Calculate fee using cached UTXOs
             let mut input_total = 0u64;
             for input in &tx.inputs {
@@ -1396,13 +1426,13 @@ impl MempoolManager {
     }
 
     /// Remove transaction from mempool
-    pub fn remove_transaction(&mut self, hash: &Hash) -> bool {
-        if let Some(tx) = self.transactions.remove(hash) {
-            self.mempool.remove(hash);
+    pub fn remove_transaction(&self, hash: &Hash) -> bool {
+        if let Some(tx) = self.pool_lock().transactions.remove(hash) {
+            self.mempool.write().unwrap().remove(hash);
 
             // Remove spent outputs tracking
             for input in &tx.inputs {
-                self.spent_outputs.remove(&input.prevout);
+                self.pool_lock().spent_outputs.remove(&input.prevout);
             }
 
             // Remove from fee index
@@ -1448,7 +1478,7 @@ impl MempoolManager {
 
             // Publish mempool transaction removed event
             if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
-                let mempool_size = self.transactions.len();
+                let mempool_size = self.pool_lock().transactions.len();
                 let hash_clone = *hash;
                 let reason = "removed".to_string(); // Could be more specific: "confirmed", "expired", "replaced", "rejected"
                 let event_pub_clone = Arc::clone(event_pub);
@@ -1466,11 +1496,15 @@ impl MempoolManager {
     }
 
     /// Clear mempool
-    pub fn clear(&mut self) {
-        let cleared_count = self.transactions.len();
-        self.transactions.clear();
-        self.mempool.clear();
-        self.spent_outputs.clear();
+    pub fn clear(&self) {
+        let (cleared_count,) = {
+            let mut pool = self.pool.lock().unwrap();
+            let n = pool.transactions.len();
+            pool.transactions.clear();
+            pool.spent_outputs.clear();
+            (n,)
+        };
+        self.mempool.write().unwrap().clear();
         self.fee_index.write().unwrap().clear();
         self.fee_cache.write().unwrap().clear();
         self.rbf_tracking.write().unwrap().clear();
@@ -1549,7 +1583,7 @@ impl crate::node::miner::MempoolProvider for MempoolManager {
     fn remove_transaction(&mut self, hash: &[u8; 32]) -> bool {
         use blvm_protocol::Hash;
         let hash_array: Hash = *hash;
-        self.remove_transaction(&hash_array)
+        MempoolManager::remove_transaction(self, &hash_array)
     }
 }
 

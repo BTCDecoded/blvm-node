@@ -8,7 +8,7 @@ fn test_calculate_transaction_fee() {
     let mempool = MempoolManager::new();
 
     // Create a simple transaction
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
 
     // Add a UTXO
     let outpoint = OutPoint {
@@ -17,7 +17,7 @@ fn test_calculate_transaction_fee() {
     };
     let utxo = UTXO {
         value: 100_000_000,                    // 1 BTC
-        script_pubkey: vec![0x76, 0xa9, 0x14], // P2PKH script
+        script_pubkey: vec![0x76, 0xa9, 0x14].into(), // P2PKH script
         height: 0,
 
         is_coinbase: false,
@@ -49,14 +49,14 @@ fn test_calculate_transaction_fee() {
 fn test_calculate_transaction_fee_zero_fee() {
     let mempool = MempoolManager::new();
 
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     let outpoint = OutPoint {
         hash: [0u8; 32],
         index: 0,
     };
     let utxo = UTXO {
         value: 100_000_000,
-        script_pubkey: vec![],
+        script_pubkey: vec![].into(),
         height: 0,
 
         is_coinbase: false,
@@ -73,7 +73,7 @@ fn test_calculate_transaction_fee_zero_fee() {
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
             value: 100_000_000,
-            script_pubkey: vec![],
+            script_pubkey: vec![].into(),
         }],
         lock_time: 0,
     };
@@ -86,7 +86,7 @@ fn test_calculate_transaction_fee_zero_fee() {
 fn test_calculate_transaction_fee_missing_utxo() {
     let mempool = MempoolManager::new();
 
-    let utxo_set = UtxoSet::new(); // Empty UTXO set
+    let utxo_set = UtxoSet::default(); // Empty UTXO set
 
     let outpoint = OutPoint {
         hash: [0u8; 32],
@@ -102,7 +102,7 @@ fn test_calculate_transaction_fee_missing_utxo() {
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
             value: 50_000_000,
-            script_pubkey: vec![],
+            script_pubkey: vec![].into(),
         }],
         lock_time: 0,
     };

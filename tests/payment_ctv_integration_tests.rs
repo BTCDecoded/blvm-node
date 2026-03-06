@@ -166,7 +166,7 @@ async fn test_payment_state_transitions() {
     // Mark as settled
     let block_hash = [0x43u8; 32];
     state_machine
-        .mark_settled(&payment_id, tx_hash, block_hash, 1)
+        .mark_settled(&payment_id, tx_hash, block_hash, 1, None)
         .await
         .expect("Failed to mark settled");
 
@@ -180,6 +180,7 @@ async fn test_payment_state_transitions() {
             tx_hash: tx,
             block_hash: block,
             confirmation_count,
+            ..
         } => {
             assert_eq!(request_id, payment_id);
             assert_eq!(tx, tx_hash);

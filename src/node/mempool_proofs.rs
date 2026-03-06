@@ -50,7 +50,7 @@ mod kani_proofs {
             kani::assume(value >= 0);
             outputs.push(TransactionOutput {
                 value,
-                script_pubkey: vec![0u8; 25],
+                script_pubkey: vec![0u8; 25].into(),
             });
         }
 
@@ -243,7 +243,7 @@ mod kani_proofs {
                 input.prevout.clone(),
                 blvm_protocol::UTXO {
                     value: input_value,
-                    script_pubkey: vec![0u8; 25],
+                    script_pubkey: vec![0u8; 25].into(),
                     height: 0,
                 },
             );
@@ -287,7 +287,7 @@ mod kani_proofs {
                     input.prevout.clone(),
                     blvm_protocol::UTXO {
                         value: 10000, // Fixed input value
-                        script_pubkey: vec![0u8; 25],
+                        script_pubkey: vec![0u8; 25].into(),
                         height: 0,
                     },
                 );
@@ -365,7 +365,7 @@ mod kani_proofs {
                 input.prevout.clone(),
                 blvm_protocol::UTXO {
                     value: input_value,
-                    script_pubkey: vec![0u8; 25],
+                    script_pubkey: vec![0u8; 25].into(),
                     height: 0,
                 },
             );

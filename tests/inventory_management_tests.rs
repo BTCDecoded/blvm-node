@@ -1,7 +1,7 @@
 //! Tests for inventory management
 
 use blvm_node::network::inventory::{InventoryManager, MSG_BLOCK, MSG_TX};
-use blvm_node::network::protocol::InventoryItem;
+use blvm_node::network::protocol::InventoryVector;
 use blvm_node::Hash;
 
 fn create_test_hash(byte: u8) -> Hash {
@@ -27,7 +27,7 @@ fn test_inventory_manager_default() {
 fn test_add_inventory() {
     let mut manager = InventoryManager::new();
     let hash = create_test_hash(1);
-    let inventory = vec![InventoryItem {
+    let inventory = vec![InventoryVector {
         inv_type: MSG_BLOCK,
         hash,
     }];
@@ -44,11 +44,11 @@ fn test_add_multiple_inventory_items() {
     let hash1 = create_test_hash(1);
     let hash2 = create_test_hash(2);
     let inventory = vec![
-        InventoryItem {
+        InventoryVector {
             inv_type: MSG_BLOCK,
             hash: hash1,
         },
-        InventoryItem {
+        InventoryVector {
             inv_type: MSG_TX,
             hash: hash2,
         },
@@ -69,7 +69,7 @@ fn test_add_inventory_from_multiple_peers() {
     manager
         .add_inventory(
             "peer1",
-            &[InventoryItem {
+            &[InventoryVector {
                 inv_type: MSG_BLOCK,
                 hash: hash1,
             }],
@@ -79,7 +79,7 @@ fn test_add_inventory_from_multiple_peers() {
     manager
         .add_inventory(
             "peer2",
-            &[InventoryItem {
+            &[InventoryVector {
                 inv_type: MSG_BLOCK,
                 hash: hash2,
             }],
@@ -101,7 +101,7 @@ fn test_has_inventory() {
     manager
         .add_inventory(
             "peer1",
-            &[InventoryItem {
+            &[InventoryVector {
                 inv_type: MSG_BLOCK,
                 hash,
             }],
@@ -171,7 +171,7 @@ fn test_get_peer_inventory() {
     manager
         .add_inventory(
             "peer1",
-            &[InventoryItem {
+            &[InventoryVector {
                 inv_type: MSG_BLOCK,
                 hash: hash1,
             }],
@@ -181,7 +181,7 @@ fn test_get_peer_inventory() {
     manager
         .add_inventory(
             "peer2",
-            &[InventoryItem {
+            &[InventoryVector {
                 inv_type: MSG_TX,
                 hash: hash2,
             }],
@@ -207,7 +207,7 @@ fn test_remove_peer() {
     manager
         .add_inventory(
             "peer1",
-            &[InventoryItem {
+            &[InventoryVector {
                 inv_type: MSG_BLOCK,
                 hash,
             }],
@@ -230,7 +230,7 @@ fn test_inventory_count() {
         manager
             .add_inventory(
                 "peer1",
-                &[InventoryItem {
+                &[InventoryVector {
                     inv_type: MSG_BLOCK,
                     hash,
                 }],
@@ -250,7 +250,7 @@ fn test_duplicate_inventory() {
     manager
         .add_inventory(
             "peer1",
-            &[InventoryItem {
+            &[InventoryVector {
                 inv_type: MSG_BLOCK,
                 hash,
             }],
@@ -260,7 +260,7 @@ fn test_duplicate_inventory() {
     manager
         .add_inventory(
             "peer1",
-            &[InventoryItem {
+            &[InventoryVector {
                 inv_type: MSG_BLOCK,
                 hash,
             }],

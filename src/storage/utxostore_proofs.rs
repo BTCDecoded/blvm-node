@@ -133,7 +133,7 @@ mod kani_proofs {
 
             let utxo = UTXO {
                 value,
-                script_pubkey: vec![0u8; 25], // Standard P2PKH script
+                script_pubkey: vec![0u8; 25].into(), // Standard P2PKH script
                 height: 0,
             };
 
@@ -166,7 +166,7 @@ mod kani_proofs {
             };
             let utxo = UTXO {
                 value: 1000,
-                script_pubkey: vec![0u8; 25],
+                script_pubkey: vec![0u8; 25].into(),
                 height: 0,
             };
 
@@ -204,7 +204,7 @@ mod kani_proofs {
             };
             let utxo = UTXO {
                 value: 1000 + i as u64,
-                script_pubkey: vec![i as u8; 25],
+                script_pubkey: vec![i as u8; 25].into(),
                 height: 0,
             };
             original_set.insert(outpoint, utxo);

@@ -63,7 +63,7 @@ fn test_utxo_store() {
 
     let utxo = UTXO {
         value: 5000000000,                     // 50 BTC in satoshis
-        script_pubkey: vec![0x76, 0xa9, 0x14], // P2PKH script
+        script_pubkey: vec![0x76, 0xa9, 0x14].into(), // P2PKH script
         height: 0,
 
         is_coinbase: false,
@@ -315,7 +315,7 @@ fn test_utxo_store_addition_and_retrieval() {
 
     let utxo = UTXO {
         value: 50_0000_0000,
-        script_pubkey: p2pkh_script(random_hash20()),
+        script_pubkey: p2pkh_script(random_hash20()).into(),
         height: 100,
 
         is_coinbase: false,
@@ -345,7 +345,7 @@ fn test_utxo_store_removal() {
 
     let utxo = UTXO {
         value: 25_0000_0000,
-        script_pubkey: p2pkh_script(random_hash20()),
+        script_pubkey: p2pkh_script(random_hash20()).into(),
         height: 50,
 
         is_coinbase: false,
@@ -372,7 +372,7 @@ fn test_utxo_store_spent_tracking() {
 
     let utxo = UTXO {
         value: 10_0000_0000,
-        script_pubkey: p2pkh_script(random_hash20()),
+        script_pubkey: p2pkh_script(random_hash20()).into(),
         height: 25,
 
         is_coinbase: false,
@@ -402,7 +402,7 @@ fn test_utxo_store_size_queries() {
 
         let utxo = UTXO {
             value: (1_0000_0000 * (i + 1)) as i64,
-            script_pubkey: p2pkh_script(random_hash20()),
+            script_pubkey: p2pkh_script(random_hash20()).into(),
             height: i,
         };
 
@@ -450,7 +450,7 @@ fn test_utxo_store_concurrent_operations() {
 
         let utxo = UTXO {
             value: 5_0000_0000,
-            script_pubkey: p2pkh_script(random_hash20()),
+            script_pubkey: p2pkh_script(random_hash20()).into(),
             height: 10,
 
             is_coinbase: false,
@@ -883,7 +883,7 @@ async fn test_storage_integration_workflow() {
     };
     let utxo = UTXO {
         value: 1000,
-        script_pubkey: p2pkh_script(random_hash20()),
+        script_pubkey: p2pkh_script(random_hash20()).into(),
         height: block_height,
     };
     utxostore.add_utxo(&outpoint, &utxo).unwrap();
@@ -1226,7 +1226,7 @@ fn test_utxo_compression_roundtrip() {
 
     let utxo = UTXO {
         value: 5000000000,
-        script_pubkey: p2pkh_script(random_hash20()),
+        script_pubkey: p2pkh_script(random_hash20()).into(),
         height: 0,
         is_coinbase: false,
     };
@@ -1264,7 +1264,7 @@ fn test_utxo_compression_auto_detection() {
     .unwrap();
 
     // Store UTXO set
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     for i in 0..10 {
         let outpoint = OutPoint {
             hash: random_hash(),
@@ -1272,7 +1272,7 @@ fn test_utxo_compression_auto_detection() {
         };
         let utxo = UTXO {
             value: 1000000 * (i + 1),
-            script_pubkey: p2pkh_script(random_hash20()),
+            script_pubkey: p2pkh_script(random_hash20()).into(),
             height: 0,
             is_coinbase: false,
         };

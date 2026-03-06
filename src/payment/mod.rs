@@ -21,10 +21,14 @@ pub mod pool;
 #[cfg(feature = "ctv")]
 pub mod congestion;
 
+pub mod reorg_handler;
 pub mod settlement;
 pub mod state_machine;
+#[cfg(feature = "ctv")]
+pub mod tx_cache;
 
 pub use processor::PaymentProcessor;
+pub use reorg_handler::PaymentReorgHandler;
 
 #[cfg(feature = "bip70-http")]
 pub use http::handle_payment_routes;
@@ -46,3 +50,5 @@ pub use congestion::{
 
 pub use settlement::SettlementMonitor;
 pub use state_machine::{PaymentState, PaymentStateMachine};
+#[cfg(feature = "ctv")]
+pub use tx_cache::PaymentTxCache;

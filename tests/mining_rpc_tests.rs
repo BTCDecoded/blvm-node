@@ -268,7 +268,7 @@ async fn test_get_utxo_set_populated() {
     };
     let utxo = UTXO {
         value: 5000000000,
-        script_pubkey: vec![0x76, 0xa9, 0x14],
+        script_pubkey: vec![0x76, 0xa9, 0x14].into(),
         height: 0,
 
         is_coinbase: false,

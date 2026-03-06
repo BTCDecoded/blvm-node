@@ -70,7 +70,7 @@ async fn test_parallel_ibd_chunk_creation() {
         "127.0.0.1:8335".to_string(),
     ];
     
-    let chunks = parallel_ibd.create_chunks(0, 299, &peer_ids);
+    let chunks = parallel_ibd.create_chunks(0, 299, &peer_ids, None);
     
     // Should create 3 chunks (0-99, 100-199, 200-299)
     assert_eq!(chunks.len(), 3);
@@ -99,7 +99,7 @@ async fn test_parallel_ibd_chunk_assignment() {
         "127.0.0.1:8334".to_string(),
     ];
     
-    let chunks = parallel_ibd.create_chunks(0, 149, &peer_ids);
+    let chunks = parallel_ibd.create_chunks(0, 149, &peer_ids, None);
     
     // Should assign chunks to peers in round-robin
     assert_eq!(chunks.len(), 3);
@@ -113,7 +113,7 @@ async fn test_parallel_ibd_empty_peer_list() {
     let (_temp_dir, storage) = create_test_storage();
     let blockstore = storage.blocks();
     let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::BitcoinV1).unwrap());
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     
     let config = ParallelIBDConfig {
         num_workers: 2,
@@ -146,7 +146,7 @@ async fn test_parallel_ibd_invalid_height_range() {
     let (_temp_dir, storage) = create_test_storage();
     let blockstore = storage.blocks();
     let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::BitcoinV1).unwrap());
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     
     let config = ParallelIBDConfig {
         num_workers: 2,

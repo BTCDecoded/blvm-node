@@ -13,7 +13,7 @@
 mod kani_proofs {
     use crate::network::kani_helpers::{proof_limits, unwind_bounds};
     use crate::network::protocol::{
-        BlockMessage, GetDataMessage, HeadersMessage, InvMessage, InventoryItem, NetworkAddress,
+        BlockMessage, GetDataMessage, HeadersMessage, InvMessage, InventoryVector, NetworkAddress,
         PingMessage, PongMessage, ProtocolMessage, ProtocolParser, TxMessage, VersionMessage,
         BITCOIN_MAGIC_MAINNET, MAX_PROTOCOL_MESSAGE_LENGTH,
     };
@@ -412,7 +412,7 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(unwind_bounds::SIMPLE_MESSAGE)]
     fn verify_inventory_item_roundtrip() {
-        let inv_item = kani::any::<InventoryItem>();
+        let inv_item = kani::any::<InventoryVector>();
 
         // Serialize via Inv message
         let inv_msg = InvMessage {
@@ -448,7 +448,7 @@ mod kani_proofs {
         kani::assume(inv_count <= proof_limits::MAX_INV_COUNT_FOR_PROOF);
 
         for _ in 0..inv_count {
-            inventory.push(InventoryItem {
+            inventory.push(InventoryVector {
                 inv_type: kani::any(),
                 hash: kani::any(),
             });

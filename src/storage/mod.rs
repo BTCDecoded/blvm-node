@@ -19,6 +19,8 @@ pub mod commitment_store;
 pub mod cryptographic_proofs;
 pub mod database;
 pub mod disk_utxo;
+#[cfg(feature = "production")]
+pub mod ibd_utxo_store;
 pub mod serialization_cache;
 pub mod hashing;
 #[cfg(kani)]

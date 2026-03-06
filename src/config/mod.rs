@@ -2227,6 +2227,15 @@ pub struct PaymentConfig {
     /// Enable module payment integration (default: true)
     #[serde(default = "default_true")]
     pub module_payments_enabled: bool,
+
+    /// Minimum confirmations before payment is "safe for release" (default: 6)
+    /// Merchants should wait for this many confirmations before releasing high-value goods.
+    #[serde(default = "default_safe_confirmation_depth")]
+    pub safe_confirmation_depth: u32,
+}
+
+fn default_safe_confirmation_depth() -> u32 {
+    6
 }
 
 fn default_payment_store_path() -> String {
@@ -2247,6 +2256,7 @@ impl Default for PaymentConfig {
             node_payment_address: None,
             payment_store_path: "data/payments".to_string(),
             module_payments_enabled: true,
+            safe_confirmation_depth: default_safe_confirmation_depth(),
         }
     }
 }

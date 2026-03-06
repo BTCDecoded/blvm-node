@@ -9,6 +9,7 @@ use crate::payment::covenant::{CovenantEngine, CovenantProof};
 type CovenantProof = (); // Stub type when CTV feature is disabled
 use crate::payment::processor::{PaymentError, PaymentProcessor};
 use crate::Hash;
+use blvm_protocol::payment::PaymentOutput;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,16 @@ pub enum PaymentState {
         tx_hash: Hash,
         block_hash: Hash,
         confirmation_count: u32,
+        /// Stored for reorg restart (SettlementMonitor restart when downgraded to InMempool)
+        expected_outputs: Option<Vec<PaymentOutput>>,
+    },
+    /// Block reorged out; re-verifying or waiting for re-broadcast
+    ReorgPending {
+        request_id: String,
+        tx_hash: Hash,
+        reason: String,
+        /// Stored for restart when periodic recheck finds tx in mempool
+        expected_outputs: Option<Vec<PaymentOutput>>,
     },
     /// Payment failed or rejected
     Failed { request_id: String, reason: String },
@@ -465,13 +476,14 @@ impl PaymentStateMachine {
     /// Update payment state to Settled
     ///
     /// Called when payment transaction is confirmed on-chain.
-    /// Automatically triggers module decryption if this is a module payment.
+    /// `expected_outputs` are stored for reorg restart (SettlementMonitor can be restarted when downgraded to InMempool).
     pub async fn mark_settled(
         &self,
         payment_request_id: &str,
         tx_hash: Hash,
         block_hash: Hash,
         confirmation_count: u32,
+        expected_outputs: Option<Vec<PaymentOutput>>,
     ) -> Result<(), PaymentError> {
         let mut states = self.states.lock().unwrap();
         states.insert(
@@ -481,6 +493,7 @@ impl PaymentStateMachine {
                 tx_hash,
                 block_hash,
                 confirmation_count,
+                expected_outputs,
             },
         );
 
@@ -515,6 +528,35 @@ impl PaymentStateMachine {
         );
 
         warn!("Payment failed: {} - {}", payment_request_id, reason);
+
+        Ok(())
+    }
+
+    /// Mark payment as reorg-pending (block disconnected, tx not in mempool)
+    pub async fn mark_reorg_pending(
+        &self,
+        payment_request_id: &str,
+        tx_hash: Hash,
+        reason: String,
+        expected_outputs: Option<Vec<PaymentOutput>>,
+    ) -> Result<(), PaymentError> {
+        let mut states = self.states.lock().unwrap();
+        states.insert(
+            payment_request_id.to_string(),
+            PaymentState::ReorgPending {
+                request_id: payment_request_id.to_string(),
+                tx_hash,
+                reason: reason.clone(),
+                expected_outputs,
+            },
+        );
+
+        warn!(
+            "Payment reorg-pending: {} (tx: {}) - {}",
+            payment_request_id,
+            hex::encode(tx_hash),
+            reason
+        );
 
         Ok(())
     }

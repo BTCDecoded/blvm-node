@@ -289,7 +289,7 @@ async fn test_handle_get_module_payment_confirmed_serves_decrypted() {
     let tx_hash = [0u8; 32];
     let block_hash = [0u8; 32];
     state_machine
-        .mark_settled(payment_id, tx_hash, block_hash, 1)
+        .mark_settled(payment_id, tx_hash, block_hash, 1, None)
         .await
         .unwrap();
 

@@ -269,7 +269,7 @@ impl AssumeUtxoManager {
         hash.copy_from_slice(&data[pos..pos + 32]);
         pos += 32;
         
-        let index = u32::from_le_bytes(data[pos..pos + 4].try_into()?) as u64;
+        let index = u32::from_le_bytes(data[pos..pos + 4].try_into()?);
         pos += 4;
         
         let outpoint = OutPoint { hash, index };
@@ -285,7 +285,7 @@ impl AssumeUtxoManager {
             return Err(anyhow::anyhow!("UTXO entry truncated at script"));
         }
         
-        let script_pubkey = data[pos..pos + script_len].to_vec();
+        let script_pubkey = blvm_consensus::types::SharedByteString::from(&data[pos..pos + script_len]);
         pos += script_len;
         
         let is_coinbase = data[pos] != 0;
@@ -365,7 +365,7 @@ impl AssumeUtxoManager {
             reader.read_exact(&mut entry)?;
             
             let (outpoint, utxo) = Self::deserialize_utxo_entry(&entry)?;
-            utxo_set.insert(outpoint, utxo);
+            utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
             
             if i > 0 && i % 1_000_000 == 0 {
                 debug!("Loaded {} / {} UTXOs ({:.1}%)", i, utxo_count, (i as f64 / utxo_count as f64) * 100.0);
@@ -447,7 +447,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn create_test_utxo_set() -> UtxoSet {
-        let mut utxo_set = HashMap::new();
+        let mut utxo_set = UtxoSet::default();
         
         // Add some test UTXOs
         for i in 0..100u32 {
@@ -457,12 +457,12 @@ mod tests {
             let outpoint = OutPoint { hash, index: 0 };
             let utxo = UTXO {
                 value: 50_000_000 * (i as i64 + 1), // 0.5 BTC * (i+1)
-                script_pubkey: vec![0x76, 0xa9, 0x14, 0x00, 0x88, 0xac], // P2PKH placeholder
+                script_pubkey: vec![0x76, 0xa9, 0x14, 0x00, 0x88, 0xac].into(), // P2PKH placeholder
                 is_coinbase: i == 0,
                 height: 100 + i as u64,
             };
             
-            utxo_set.insert(outpoint, utxo);
+            utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
         }
         
         utxo_set

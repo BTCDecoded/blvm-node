@@ -218,6 +218,14 @@ impl RpcManager {
         self
     }
 
+    /// Set event publisher after construction (e.g. when created during startup)
+    pub fn set_event_publisher(
+        &mut self,
+        event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
+    ) {
+        self.event_publisher = event_publisher;
+    }
+
     /// Set network manager dependency
     pub fn with_network_manager(
         mut self,
@@ -317,9 +325,10 @@ impl RpcManager {
         let server = if let (Some(storage), Some(mempool)) =
             (self.storage.as_ref(), self.mempool.as_ref())
         {
-            let blockchain = Arc::new(blockchain::BlockchainRpc::with_dependencies(Arc::clone(
-                storage,
-            )));
+            let blockchain = Arc::new(
+                blockchain::BlockchainRpc::with_dependencies(Arc::clone(storage))
+                    .with_event_publisher(self.event_publisher.clone()),
+            );
             let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(
                 Arc::clone(mempool),
                 Arc::clone(storage),
@@ -439,9 +448,10 @@ impl RpcManager {
                 let (rest_api_shutdown_tx, mut rest_api_shutdown_rx) = mpsc::unbounded_channel();
                 self.rest_api_shutdown_tx = Some(rest_api_shutdown_tx);
 
-                let blockchain = Arc::new(blockchain::BlockchainRpc::with_dependencies(
-                    Arc::clone(storage),
-                ));
+                let blockchain = Arc::new(
+                    blockchain::BlockchainRpc::with_dependencies(Arc::clone(storage))
+                        .with_event_publisher(self.event_publisher.clone()),
+                );
                 let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(
                     Arc::clone(mempool),
                     Arc::clone(storage),

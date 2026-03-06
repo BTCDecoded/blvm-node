@@ -46,6 +46,10 @@ pub struct Node {
     payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
     /// Payment state machine for unified payment coordination
     payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
+    /// Payment reorg handler (subscribes to BlockDisconnected, downgrades Settled payments)
+    #[cfg(feature = "ctv")]
+    #[allow(dead_code)]
+    payment_reorg_handler: Option<crate::payment::PaymentReorgHandler>,
     rpc: RpcManager,
     #[allow(dead_code)]
     sync_coordinator: sync::SyncCoordinator,
@@ -174,6 +178,8 @@ impl Node {
             module_registry: None,
             payment_processor: None,
             payment_state_machine: None,
+            #[cfg(feature = "ctv")]
+            payment_reorg_handler: None,
             // Governance handled via module system
         })
     }
@@ -348,6 +354,15 @@ impl Node {
         // In a real implementation, each component would be started in separate tasks
         // For now, we'll just initialize them
 
+        // Create early event publisher for RPC (BlockchainRpc needs it for invalidateblock → BlockDisconnected)
+        // Must be done before rpc.start() so BlockchainRpc gets event_publisher
+        if let Some(ref module_manager) = self.module_manager {
+            let event_manager = Arc::clone(module_manager.event_manager());
+            let early_publisher = Arc::new(EventPublisher::new(event_manager));
+            self.rpc.set_event_publisher(Some(early_publisher));
+            info!("[START_COMPONENTS] Event publisher set on RPC for reorg notifications");
+        }
+
         // Start RPC server
         info!("[START_COMPONENTS] Starting RPC server...");
         if let Err(e) = self.rpc.start().await {
@@ -446,7 +461,13 @@ impl Node {
             
             info!("[START_COMPONENTS] IBD: Found {} peer addresses: {:?}", peer_addresses.len(), peer_addresses);
             
-            if peer_addresses.len() >= 2 {
+            // Allow 1 peer when BLVM_IBD_PREFERRED_PEERS is set (e.g. LAN-only IBD)
+            let min_peers = if std::env::var("BLVM_IBD_PREFERRED_PEERS").map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                1
+            } else {
+                2
+            };
+            if peer_addresses.len() >= min_peers {
                 info!("[START_COMPONENTS] Attempting parallel IBD with {} peers", peer_addresses.len());
                 
                 // Get target height from peer's start_height (best block height from Version messages)
@@ -499,7 +520,7 @@ impl Node {
                     }
                 }
             } else {
-                info!("[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need 2), waiting for more peers...", peer_addresses.len());
+                info!("[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need {}), waiting for more peers...", peer_addresses.len(), min_peers);
             }
         } else {
             info!("[START_COMPONENTS] Not in IBD (current_height={}), skipping IBD", current_height);
@@ -821,6 +842,30 @@ impl Node {
                                 // the payment state machine will be None until node_api is recreated
                                 // This is acceptable as payment features will work once modules reconnect
                                 warn!("Could not set payment state machine on NodeApiImpl (multiple references exist)");
+                            }
+
+                            // Create SettlementMonitor and PaymentTxCache for reorg resilience
+                            #[cfg(feature = "ctv")]
+                            {
+                                let tx_cache = Arc::new(crate::payment::PaymentTxCache::new());
+                                let settlement_monitor = Arc::new(
+                                    crate::payment::SettlementMonitor::new(Arc::clone(
+                                        &state_machine_arc,
+                                    ))
+                                    .with_mempool_manager(Arc::clone(&self.mempool_manager))
+                                    .with_storage(Arc::clone(&self.storage))
+                                    .with_tx_cache(Arc::clone(&tx_cache)),
+                                );
+                                self.payment_reorg_handler = Some(
+                                    crate::payment::PaymentReorgHandler::new(
+                                        Arc::clone(&state_machine_arc),
+                                        Some(Arc::clone(&self.storage)),
+                                        Some(Arc::clone(&self.mempool_manager)),
+                                        Some(tx_cache),
+                                        Some(settlement_monitor),
+                                        Arc::clone(event_manager),
+                                    ),
+                                );
                             }
 
                             info!(

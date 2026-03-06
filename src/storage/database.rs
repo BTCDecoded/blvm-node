@@ -1111,25 +1111,53 @@ pub mod rocksdb_impl {
                         .unwrap_or(4)
                 });
             opts.increase_parallelism(parallelism);
-            opts.set_max_open_files(10000); // IBD: large working set, many SST files
+            // Each open SST file has a table reader loaded in memory (~64KB+).
+            // At 10000, this is a hidden ~640MB+ RSS contributor. 256 is sufficient
+            // for IBD's sequential scan pattern; files reopen on demand.
+            opts.set_max_open_files(256);
 
-            // IBD prefetch fix: compaction stalls prefetch reads. More compaction threads = shorter stalls.
+            // Detect system RAM to scale RocksDB memory usage.
+            let total_ram_gb: u64 = {
+                #[cfg(target_os = "linux")]
+                {
+                    std::fs::read_to_string("/proc/meminfo").ok()
+                        .and_then(|s| s.lines().find(|l| l.starts_with("MemTotal:"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse::<u64>().ok()))
+                        .map(|kb| kb / (1024 * 1024))
+                        .unwrap_or(16)
+                }
+                #[cfg(not(target_os = "linux"))]
+                { 16u64 }
+            };
+
+            // Each compaction thread holds ~64MB of input/output buffers in memory.
+            // Scale by RAM: 2 threads on <=16GB, 4 on 32GB+.
+            let default_compactions = if total_ram_gb >= 32 { 4 } else { 2 };
+            let default_flushes = if total_ram_gb >= 32 { 4 } else { 2 };
             let max_compactions: i32 = std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(default_compactions);
             let max_flushes: i32 = std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(default_flushes);
             let level0_trigger: i32 = std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER")
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(8);
             opts.set_max_background_compactions(max_compactions);
             opts.set_max_background_flushes(max_flushes);
             opts.set_level_zero_file_num_compaction_trigger(level0_trigger);
-            tracing::info!("[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={}", parallelism, max_compactions, max_flushes, level0_trigger);
+            let default_write_buffer = if total_ram_gb >= 32 { 256 } else if total_ram_gb >= 24 { 192 } else { 128 };
+            let default_block_cache = if total_ram_gb >= 32 { 450 } else if total_ram_gb >= 24 { 300 } else { 200 };
 
-            // Block cache for read performance (multi_get, point lookups). Default 450MB matches TidesDB/Redb.
+            let db_write_buffer_mb: usize = std::env::var("BLVM_ROCKSDB_WRITE_BUFFER_MB")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(default_write_buffer);
+            opts.set_db_write_buffer_size(db_write_buffer_mb * 1024 * 1024);
+
+            tracing::info!("[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={} write_buffer={}MB (ram={}GB)",
+                parallelism, max_compactions, max_flushes, level0_trigger, db_write_buffer_mb, total_ram_gb);
+
             let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(450);
+                .unwrap_or(default_block_cache);
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let cache = Cache::new_lru_cache(dbcache_bytes);
             let mut block_opts = BlockBasedOptions::default();

@@ -195,13 +195,29 @@ impl PaymentRpc {
                 tx_hash,
                 block_hash,
                 confirmation_count,
+                ..
             } => {
+                const DEFAULT_SAFE_DEPTH: u32 = 6;
                 json!({
                     "state": "settled",
                     "request_id": request_id,
                     "tx_hash": hex::encode(tx_hash),
                     "block_hash": hex::encode(block_hash),
                     "confirmation_count": confirmation_count,
+                    "safe_for_release": confirmation_count >= DEFAULT_SAFE_DEPTH,
+                })
+            }
+            PaymentState::ReorgPending {
+                request_id,
+                tx_hash,
+                reason,
+                ..
+            } => {
+                json!({
+                    "state": "reorg_pending",
+                    "request_id": request_id,
+                    "tx_hash": hex::encode(tx_hash),
+                    "reason": reason,
                 })
             }
             PaymentState::Failed { request_id, reason } => {
@@ -248,6 +264,7 @@ impl PaymentRpc {
                     }
                     PaymentState::InMempool { .. } => "in_mempool",
                     PaymentState::Settled { .. } => "settled",
+                    PaymentState::ReorgPending { .. } => "reorg_pending",
                     PaymentState::Failed { .. } => "failed",
                 };
 

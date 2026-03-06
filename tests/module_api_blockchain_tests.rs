@@ -258,7 +258,7 @@ async fn test_get_transaction_with_data() {
         }],
         outputs: tx_outputs![TransactionOutput {
             value: 1000,
-            script_pubkey: vec![0x51], // OP_1
+            script_pubkey: vec![0x51].into(), // OP_1
         }],
         lock_time: 0,
     };
@@ -289,7 +289,7 @@ async fn test_has_transaction_with_data() {
         inputs: tx_inputs![],
         outputs: tx_outputs![TransactionOutput {
             value: 1000,
-            script_pubkey: vec![0x51],
+            script_pubkey: vec![0x51].into(),
         }],
         lock_time: 0,
     };

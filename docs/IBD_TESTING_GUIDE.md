@@ -2,6 +2,28 @@
 
 Complete guide for testing Initial Blockchain Download (IBD) functionality.
 
+## IBD Stall Diagnosis (Root-Cause Analysis)
+
+When IBD stalls (no progress for 5+ seconds), the stall detector logs `IBD_STALL` with the exact state:
+
+```
+IBD_STALL: height N stuck Xs. validation=V (state), coordinator=C (state). Next: N+1.
+```
+
+**Interpretation:**
+
+| validation | coordinator | Meaning |
+|------------|-------------|---------|
+| `recv_block` | `wait_block_rx` | Validation waiting for block; coordinator waiting for workers. **Workers slow or missing block.** Check peer connectivity, block request routing. |
+| `recv_block` | `prefetch_full` | Validation waiting for block; coordinator blocked sending to prefetch. **Prefetch disk load bottleneck** — prefetch workers can't keep up. Try `BLVM_PREFETCH_QUEUE_SIZE=64` or more prefetch workers. |
+| `recv_block` | `idle` | Validation waiting; coordinator has blocks but may be in drain loop. Rare. |
+| `utxo_flush_await` | * | **Disk I/O bottleneck** — validation blocked on UTXO flush. Slow disk or too many concurrent flushes. |
+| `block_flush_await` | * | **Disk I/O bottleneck** — validation blocked on block storage flush. |
+| `gap_fill` | * | Prefetch missed inputs; validation loading from disk. High gap_fill rate = prefetch undersized. |
+| `sync_await` | * | Validation waiting for previous block sync to disk. |
+
+**Tuning:** `BLVM_IBD_STALL_CHECK_SECS=5` (default) — reduce for faster feedback, increase to reduce log noise.
+
 ## Quick Start
 
 ### 1. Run Existing Unit Tests

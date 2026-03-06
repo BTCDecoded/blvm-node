@@ -224,7 +224,7 @@ pub async fn handle_get_filtered_block(
             use blvm_protocol::UTXO;
             let utxo = UTXO {
                 value: output.value,
-                script_pubkey: output.script_pubkey.clone(),
+                script_pubkey: output.script_pubkey.as_slice().into(),
                 height: block_height, // Use the block height from the message
                 is_coinbase: is_coinbase_tx,
             };
@@ -352,7 +352,7 @@ pub async fn handle_get_utxo_proof(
         tx_hash: message.tx_hash,
         output_index: message.output_index,
         value: utxo.value,
-        script_pubkey: utxo.script_pubkey.clone(),
+        script_pubkey: utxo.script_pubkey.as_ref().into(),
         height: utxo.height,
         is_coinbase: utxo.is_coinbase,
         proof: proof_bytes,

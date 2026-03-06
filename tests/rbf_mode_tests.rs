@@ -25,7 +25,7 @@ fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: output_value as i64,
-            script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20), // P2PKH
+            script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20).into(), // P2PKH
         }],
         lock_time: 0,
     }
@@ -41,7 +41,7 @@ fn create_test_utxo_set() -> UtxoSet {
         },
         UTXO {
             value: 100_000,
-            script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20),
+            script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20).into(),
             height: 0,
 
             is_coinbase: false,

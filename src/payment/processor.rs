@@ -187,11 +187,9 @@ impl PaymentProcessor {
             payment_request.payment_details.merchant_data = Some(data);
         }
 
-        // Sign if merchant key provided (convert fork SecretKey to BIP70 secp256k1)
+        // Sign if merchant key provided (uses fork secp256k1 directly)
         if let Some(key) = merchant_key {
-            let key_bip70 = secp256k1_bip70::SecretKey::from_slice(&key.secret_bytes())
-                .map_err(|e| PaymentError::ProcessingError(format!("Invalid key: {}", e)))?;
-            payment_request.sign(&key_bip70).map_err(|e| {
+            payment_request.sign(key).map_err(|e| {
                 PaymentError::ProcessingError(format!("Failed to sign payment request: {}", e))
             })?;
         }
@@ -230,16 +228,8 @@ impl PaymentProcessor {
         // Look up original request
         let request = self.get_payment_request(&payment_id).await?;
 
-        // Convert fork SecretKey to BIP70 secp256k1 (crates.io) for PaymentProtocolServer
-        let merchant_key_bip70 = merchant_key
-            .map(|k| {
-                secp256k1_bip70::SecretKey::from_slice(&k.secret_bytes())
-                    .map_err(|e| PaymentError::ProcessingError(format!("Invalid key: {}", e)))
-            })
-            .transpose()?;
-
-        // Reuse existing process_payment from BIP70
-        let ack = PaymentProtocolServer::process_payment(&payment, &request, merchant_key_bip70.as_ref())
+        // PaymentProtocolServer uses fork secp256k1 directly
+        let ack = PaymentProtocolServer::process_payment(&payment, &request, merchant_key)
             .map_err(|e| PaymentError::ValidationFailed(format!("{:?}", e)))?;
 
         info!("Processed payment: {}", payment_id);

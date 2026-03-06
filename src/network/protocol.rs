@@ -6,7 +6,10 @@ use crate::network::transport::TransportType;
 use anyhow::Result;
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use blvm_protocol::segwit::Witness;
-use blvm_protocol::wire::{serialize_getheaders, deserialize_headers};
+use blvm_protocol::wire::{
+    deserialize_getdata, deserialize_headers, deserialize_inv, deserialize_notfound,
+    serialize_getdata, serialize_getheaders, serialize_inv, serialize_notfound,
+};
 use serde::{Deserialize, Serialize};
 
 /// Bitcoin protocol constants
@@ -131,6 +134,8 @@ pub enum ProtocolMessage {
     Inv(InvMessage),
     NotFound(NotFoundMessage),
     Tx(TxMessage),
+    /// BIP133 FeeFilter - peer's minimum fee rate for tx relay (we accept, no response)
+    FeeFilter(FeeFilterMessage),
     // Compact Block Relay (BIP152)
     SendCmpct(SendCmpctMessage),
     CmpctBlock(CompactBlockMessage),
@@ -286,35 +291,19 @@ pub struct BlockMessage {
     pub witnesses: Vec<Vec<Witness>>,
 }
 
-/// Get data message
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GetDataMessage {
-    pub inventory: Vec<InventoryItem>,
-}
-
-/// Inventory item
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InventoryItem {
-    pub inv_type: u32,
-    pub hash: Hash,
-}
-
-/// Inventory message
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InvMessage {
-    pub inventory: Vec<InventoryItem>,
-}
-
-/// Not found message (response to GetData when items are not available)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NotFoundMessage {
-    pub inventory: Vec<InventoryItem>,
-}
+// Re-export inventory types from blvm-protocol (single source of truth)
+pub use blvm_protocol::network::{GetDataMessage, InvMessage, InventoryVector, NotFoundMessage};
 
 /// Transaction message
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxMessage {
     pub transaction: Transaction,
+}
+
+/// FeeFilter message (BIP133) - peer advertises minimum feerate for tx relay
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeFilterMessage {
+    pub feerate: u64,
 }
 
 // Compact Block Relay (BIP152) messages
@@ -1007,25 +996,29 @@ impl ProtocolParser {
                 Ok(ProtocolMessage::Block(BlockMessage { block, witnesses }))
             },
             "getdata" => {
-                // Use proper Bitcoin wire format deserialization  
-                let wire_msg = blvm_protocol::wire::deserialize_getdata(payload)
+                let msg = deserialize_getdata(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize getdata: {}", e))?;
-                let inventory = wire_msg.inventory.into_iter()
-                    .map(|v| InventoryItem { inv_type: v.inv_type, hash: v.hash })
-                    .collect();
-                Ok(ProtocolMessage::GetData(GetDataMessage { inventory }))
+                Ok(ProtocolMessage::GetData(msg))
             },
             "inv" => {
-                // Use proper Bitcoin wire format (count varint + items)
-                let wire_msg = blvm_protocol::wire::deserialize_inv(payload)
+                let msg = deserialize_inv(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize inv: {}", e))?;
-                let inventory = wire_msg.inventory.into_iter()
-                    .map(|v| InventoryItem { inv_type: v.inv_type, hash: v.hash })
-                    .collect();
-                Ok(ProtocolMessage::Inv(InvMessage { inventory }))
+                Ok(ProtocolMessage::Inv(msg))
             },
-            "notfound" => Ok(ProtocolMessage::NotFound(bincode::deserialize(payload)?)),
+            "notfound" => {
+                let msg = deserialize_notfound(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize notfound: {}", e))?;
+                Ok(ProtocolMessage::NotFound(msg))
+            },
             "tx" => Ok(ProtocolMessage::Tx(bincode::deserialize(payload)?)),
+            "feefilter" => {
+                // BIP133: 8-byte feerate (satoshis per KB) in little-endian
+                if payload.len() < 8 {
+                    return Err(anyhow::anyhow!("FeeFilter message too short"));
+                }
+                let feerate = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+                Ok(ProtocolMessage::FeeFilter(FeeFilterMessage { feerate }))
+            }
             // Compact Block Relay (BIP152)
             "sendcmpct" => Ok(ProtocolMessage::SendCmpct(bincode::deserialize(payload)?)),
             "cmpctblock" => Ok(ProtocolMessage::CmpctBlock(bincode::deserialize(payload)?)),
@@ -1171,18 +1164,12 @@ impl ProtocolParser {
             ProtocolMessage::GetBlocks(msg) => ("getblocks", bincode::serialize(msg)?),
             ProtocolMessage::Block(msg) => ("block", bincode::serialize(msg)?),
             ProtocolMessage::GetData(msg) => {
-                // Use proper Bitcoin wire format for getdata
-                let wire_msg = blvm_protocol::network::GetDataMessage {
-                    inventory: msg.inventory.iter().map(|i| blvm_protocol::network::InventoryVector {
-                        inv_type: i.inv_type,
-                        hash: i.hash,
-                    }).collect(),
-                };
-                ("getdata", blvm_protocol::wire::serialize_getdata(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?)
+                ("getdata", serialize_getdata(msg).map_err(|e| anyhow::anyhow!("{}", e))?)
             },
-            ProtocolMessage::Inv(msg) => ("inv", bincode::serialize(msg)?),
-            ProtocolMessage::NotFound(msg) => ("notfound", bincode::serialize(msg)?),
+            ProtocolMessage::Inv(msg) => ("inv", serialize_inv(msg).map_err(|e| anyhow::anyhow!("{}", e))?),
+            ProtocolMessage::NotFound(msg) => ("notfound", serialize_notfound(msg).map_err(|e| anyhow::anyhow!("{}", e))?),
             ProtocolMessage::Tx(msg) => ("tx", bincode::serialize(msg)?),
+            ProtocolMessage::FeeFilter(msg) => ("feefilter", msg.feerate.to_le_bytes().to_vec()),
             // Compact Block Relay (BIP152)
             ProtocolMessage::SendCmpct(msg) => ("sendcmpct", bincode::serialize(msg)?),
             ProtocolMessage::CmpctBlock(msg) => ("cmpctblock", bincode::serialize(msg)?),

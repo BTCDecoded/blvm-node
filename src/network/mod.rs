@@ -37,7 +37,7 @@ pub mod iroh_transport;
 #[cfg(feature = "utxo-commitments")]
 pub mod utxo_commitments_client;
 
-// Phase 3.3: Compact Block Relay (BIP152)
+// Compact Block Relay (BIP152)
 pub mod compact_blocks;
 
 // Block Filter Service (BIP157/158)
@@ -480,8 +480,8 @@ pub struct NetworkManager {
     /// Key: peer_addr, Value: queue of sender channels (FIFO order)
     pending_headers_requests: Arc<Mutex<HashMap<SocketAddr, std::collections::VecDeque<tokio::sync::oneshot::Sender<Vec<blvm_protocol::BlockHeader>>>>>>,
     /// Pending Block requests (for IBD)
-    /// Key: (peer_addr, block_hash), Value: sender channel
-    pending_block_requests: Arc<Mutex<HashMap<(SocketAddr, blvm_protocol::Hash), tokio::sync::oneshot::Sender<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>>>>,
+    /// Key: (peer_ip, block_hash) - uses IpAddr to match regardless of port (inbound vs outbound)
+    pending_block_requests: Arc<Mutex<HashMap<(IpAddr, blvm_protocol::Hash), tokio::sync::oneshot::Sender<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>>>>,
     /// DoS protection manager
     dos_protection: Arc<dos_protection::DosProtectionManager>,
     /// IBD bandwidth protection manager
@@ -2559,6 +2559,17 @@ impl NetworkManager {
         })
     }
 
+    /// Key for block request matching: IpAddr so inbound (diff port) matches outbound
+    fn block_request_key(addr: SocketAddr) -> IpAddr {
+        let ip = addr.ip();
+        if let std::net::IpAddr::V6(v6) = ip {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return std::net::IpAddr::V4(v4);
+            }
+        }
+        ip
+    }
+
     /// Register a pending Block request
     /// Returns a receiver that will receive the Block response
     pub fn register_block_request(
@@ -2566,13 +2577,14 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         block_hash: blvm_protocol::Hash,
     ) -> tokio::sync::oneshot::Receiver<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)> {
+        let key = (Self::block_request_key(peer_addr), block_hash);
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 self.pending_block_requests
                     .lock()
                     .await
-                    .insert((peer_addr, block_hash), tx);
+                    .insert(key, tx);
             })
         });
         rx
@@ -2586,10 +2598,11 @@ impl NetworkManager {
         block: blvm_protocol::Block,
         witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
     ) -> bool {
+        let key = (Self::block_request_key(peer_addr), block_hash);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut pending = self.pending_block_requests.lock().await;
-                if let Some(sender) = pending.remove(&(peer_addr, block_hash)) {
+                if let Some(sender) = pending.remove(&key) {
                     let _ = sender.send((block, witnesses));
                     true
                 } else {
@@ -4501,6 +4514,7 @@ impl NetworkManager {
                                                     *tx_hash,
                                                     *block_hash,
                                                     msg.confirmation_count,
+                                                    None, // expected_outputs not available from settlement notification
                                                 )
                                                 .await
                                             {
@@ -4936,6 +4950,10 @@ impl NetworkManager {
                 }
                 // Continue normal processing (pong is just acknowledgment)
             }
+            // BIP133 FeeFilter: peer advertises min feerate for tx relay; we accept, no response
+            ProtocolMessage::FeeFilter(_) => {
+                return Ok(());
+            }
             // IBD Protection: Check GetHeaders requests (full chain sync)
             ProtocolMessage::GetHeaders(getheaders) => {
                 // Detect if this is a full chain request (empty locator = IBD)
@@ -5208,6 +5226,7 @@ impl NetworkManager {
                 // No pending request - process normally through protocol layer
             }
             ProtocolMessage::Block(block_msg) => {
+                info!("Block message received from {} ({} bytes)", peer_addr, data.len());
                 // Check if there's a pending Block request for this peer
                 // Calculate block hash using proper Bitcoin format:
                 // double_sha256 of 80-byte header (version + prev_hash + merkle_root + timestamp + bits + nonce)
@@ -5224,9 +5243,21 @@ impl NetworkManager {
                 let block_hash = double_sha256(&header_bytes);
                 // block_msg.witnesses is Vec<Vec<Witness>> from deserialize_block_with_witnesses
                 if self.complete_block_request(peer_addr, block_hash, block_msg.block.clone(), block_msg.witnesses.clone()) {
-                    debug!("Routed Block response to pending request from {}", peer_addr);
+                    info!("Block routed to pending request from {} (hash {})", peer_addr, hex::encode(block_hash));
                     return Ok(()); // Message handled, return early
                 }
+                // No pending request - log at INFO to diagnose IBD stalls (blocks arriving but not matching any request)
+                let pending_count = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        self.pending_block_requests.lock().await.len()
+                    })
+                });
+                info!(
+                    "Block from {} (hash {}) had no pending request ({} pending for other peers/hashes)",
+                    peer_addr,
+                    hex::encode(block_hash),
+                    pending_count
+                );
                 // No pending request - process normally through protocol layer
             }
             // Compact Block Relay (BIP152) - Add error handling and disconnection
@@ -6858,6 +6889,59 @@ mod tests {
             manager.transport_preference(),
             TransportPreference::TCP_ONLY
         );
+    }
+
+    /// Block request/response connection test (IBD first-block path).
+    /// Tests register_block_request + complete_block_request matching without full wire parsing,
+    /// since handle_incoming_wire_tcp can block in test environments.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_block_request_completion_direct() {
+        use blvm_protocol::genesis;
+        use crate::storage::hashing::double_sha256;
+
+        let genesis = genesis::mainnet_genesis();
+        let mut header_bytes = Vec::with_capacity(80);
+        header_bytes.extend_from_slice(&(genesis.header.version as i32).to_le_bytes());
+        header_bytes.extend_from_slice(&genesis.header.prev_block_hash);
+        header_bytes.extend_from_slice(&genesis.header.merkle_root);
+        header_bytes.extend_from_slice(&(genesis.header.timestamp as u32).to_le_bytes());
+        header_bytes.extend_from_slice(&(genesis.header.bits as u32).to_le_bytes());
+        header_bytes.extend_from_slice(&(genesis.header.nonce as u32).to_le_bytes());
+        let block_hash = double_sha256(&header_bytes);
+        let mut hash_array = [0u8; 32];
+        hash_array.copy_from_slice(&block_hash);
+
+        let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let network = NetworkManager::with_config(
+            addr,
+            5,
+            TransportPreference::TCP_ONLY,
+            None,
+        );
+
+        let peer_addr: std::net::SocketAddr = "127.0.0.1:18444".parse().unwrap();
+        let block_rx = network.register_block_request(peer_addr, hash_array);
+
+        let empty_witnesses: Vec<Vec<blvm_protocol::segwit::Witness>> =
+            (0..genesis.transactions.len()).map(|_| vec![]).collect();
+        let ok = network.complete_block_request(
+            peer_addr,
+            hash_array,
+            genesis.clone(),
+            empty_witnesses.clone(),
+        );
+        assert!(ok, "complete_block_request should find matching pending request");
+
+        let (received, witnesses) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            block_rx,
+        )
+        .await
+        .expect("block rx should complete within 1s")
+        .expect("block channel should not be closed");
+
+        assert_eq!(received.header.merkle_root, genesis.header.merkle_root);
+        assert_eq!(witnesses.len(), genesis.transactions.len());
     }
 }
 

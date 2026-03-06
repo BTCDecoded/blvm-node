@@ -107,28 +107,34 @@ impl PeerStats {
     /// - Latency penalty: -0.001 * avg_latency_ms (faster = better)
     /// - LAN bonus: 3x max multiplier for local network peers (reduced from 10x for security)
     pub fn calculate_score(&mut self) {
-        // Base score from bandwidth
+        // Before any blocks are downloaded, bandwidth is meaningless (only header
+        // latency samples exist). Use the default initial score so that peers
+        // registered during header sync aren't penalized vs unregistered peers.
+        if self.blocks_received == 0 {
+            self.score = if self.is_lan {
+                1.0 * LAN_PEER_SCORE_MULTIPLIER
+            } else {
+                // Use latency hint: lower latency = better starting position
+                let latency_bonus = if self.avg_block_latency_ms > 0.0 {
+                    (1000.0 / self.avg_block_latency_ms.max(1.0)).min(2.0)
+                } else {
+                    1.0
+                };
+                latency_bonus
+            };
+            return;
+        }
+
         let bandwidth_score = self.bandwidth_bytes_per_sec / 100_000.0;
-        
-        // Failure penalty
         let failure_penalty = self.failures as f64 * 0.1;
-        
-        // Recent activity bonus
         let activity_bonus = match self.last_block_time {
             Some(t) if t.elapsed() < Duration::from_secs(30) => 0.2,
             Some(t) if t.elapsed() < Duration::from_secs(60) => 0.1,
             _ => 0.0,
         };
-        
-        // Latency penalty (lower is better)
         let latency_penalty = (self.avg_block_latency_ms / 1000.0) * 0.1;
-        
-        // Compute base score (minimum 0.1 to always have a chance)
         let base_score = (bandwidth_score - failure_penalty + activity_bonus - latency_penalty).max(0.1);
-        
-        // Apply LAN bonus: sibling/local peers get 3x priority (max)
-        // SECURITY: Reduced from 10x to prevent attack domination
-        // See lan_security.rs for progressive trust (1.5x -> 2x -> 3x)
+
         self.score = if self.is_lan {
             base_score * LAN_PEER_SCORE_MULTIPLIER
         } else {
@@ -187,6 +193,19 @@ impl PeerScorer {
         entry.avg_block_latency_ms = entry.avg_block_latency_ms * (1.0 - alpha) + latency_ms * alpha;
         
         entry.update_bandwidth();
+        entry.calculate_score();
+    }
+
+    /// Record a latency sample (e.g. from header sync) — seeds peer ordering before block downloads.
+    pub fn record_latency_sample(&self, peer: SocketAddr, latency_ms: f64) {
+        let mut stats = self.stats.write().unwrap();
+        let entry = stats.entry(peer).or_insert_with(|| {
+            let mut s = PeerStats::default();
+            s.is_lan = is_lan_peer(&peer);
+            s
+        });
+        let alpha = 0.3;
+        entry.avg_block_latency_ms = entry.avg_block_latency_ms * (1.0 - alpha) + latency_ms * alpha;
         entry.calculate_score();
     }
 

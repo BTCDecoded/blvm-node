@@ -48,7 +48,7 @@ fn test_protocol_validation_applied() {
     };
 
     // Validate block - this should use protocol validation
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     let result = validate_block_with_context(
         &blocks,
         &protocol,
@@ -114,7 +114,7 @@ fn test_validate_and_connect_block_uses_protocol_validation() {
         transactions: vec![].into(),
     };
 
-    let utxos = UtxoSet::new();
+    let utxos = UtxoSet::default();
     let witnesses = vec![];
 
     // This should use protocol validation internally

@@ -51,7 +51,7 @@ async fn test_concurrent_block_processing() {
         let height = i as u64;
 
         handles.push(tokio::spawn(async move {
-            let mut utxo_set = UtxoSet::new();
+            let mut utxo_set = UtxoSet::default();
             let witnesses = vec![];
 
             // Store block
@@ -91,7 +91,7 @@ async fn test_block_processing_with_invalid_sequence() {
     let block1 = create_test_block(1);
     let block0 = create_test_block(0);
 
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     let witnesses = vec![];
 
     // Try to process block 1 before block 0
@@ -137,7 +137,7 @@ async fn test_block_processing_reorganization_scenario() {
     let mut block2_alt = create_test_block(2);
     block2_alt.header.prev_block_hash = blockstore.get_block_hash(&block1_alt);
 
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     let witnesses = vec![];
 
     // Process first chain
@@ -165,7 +165,7 @@ async fn test_block_processing_large_block() {
     // Note: In real scenario, this would have many transactions
     // For now, we just test that large blocks are handled
 
-    let mut utxo_set = UtxoSet::new();
+    let mut utxo_set = UtxoSet::default();
     let witnesses = vec![];
 
     // Store and validate large block

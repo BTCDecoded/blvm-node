@@ -2,6 +2,7 @@
 //!
 //! Implements blockchain-related JSON-RPC methods for querying blockchain state.
 
+use crate::node::event_publisher::EventPublisher;
 use crate::rpc::errors::RpcError;
 use crate::storage::Storage;
 use anyhow::Result;
@@ -38,6 +39,8 @@ pub struct BlockchainRpc {
     storage: Option<Arc<Storage>>,
     /// Protocol engine for network/chain information
     protocol: Option<Arc<blvm_protocol::BitcoinProtocolEngine>>,
+    /// Event publisher for BlockDisconnected/ChainReorg (reorg resolution)
+    event_publisher: Option<Arc<EventPublisher>>,
 }
 
 impl Default for BlockchainRpc {
@@ -52,6 +55,7 @@ impl BlockchainRpc {
         Self {
             storage: None,
             protocol: None,
+            event_publisher: None,
         }
     }
 
@@ -60,7 +64,17 @@ impl BlockchainRpc {
         Self {
             storage: Some(storage),
             protocol: None,
+            event_publisher: None,
         }
+    }
+
+    /// Set event publisher for BlockDisconnected/ChainReorg notifications
+    pub fn with_event_publisher(
+        mut self,
+        event_publisher: Option<Arc<EventPublisher>>,
+    ) -> Self {
+        self.event_publisher = event_publisher;
+        self
     }
 
     /// Create with dependencies including protocol engine
@@ -71,6 +85,7 @@ impl BlockchainRpc {
         Self {
             storage: Some(storage),
             protocol: Some(protocol),
+            event_publisher: None,
         }
     }
 
@@ -1423,8 +1438,18 @@ impl BlockchainRpc {
             // Mark block as invalid
             storage.chain().mark_invalid(&hash)?;
 
+            // Publish BlockDisconnected for payment reorg handling
+            let height = storage
+                .blocks()
+                .get_height_by_hash(&hash)
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            if let Some(ref ep) = self.event_publisher {
+                ep.publish_block_disconnected(&hash, height).await;
+            }
+
             // Check if this is the current tip - if so, we'd need to trigger a reorg
-            // For now, we just mark it as invalid and let the node handle it on next block
             if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
                 if hash == tip_hash {
                     warn!("Invalidated current chain tip - reorg may be needed");
@@ -1637,7 +1662,9 @@ impl BlockchainRpc {
                     }
                 }
 
-                match build_block_filter(&block.transactions, &previous_scripts) {
+                let previous_scripts_bytes: Vec<Vec<u8>> =
+                    previous_scripts.iter().map(|s| s.as_ref().to_vec()).collect();
+                match build_block_filter(&block.transactions, &previous_scripts_bytes) {
                     Ok(filter) => {
                         Ok(json!({
                             "filter": hex::encode(&filter.filter_data),
@@ -1956,7 +1983,7 @@ impl BlockchainRpc {
                         // Check if UTXO is spent
                         let outpoint = blvm_protocol::OutPoint {
                             hash: txid,
-                            index: idx as u64,
+                            index: idx as u32,
                         };
                         if storage.utxos().get_utxo(&outpoint).ok().flatten().is_some() {
                             // UTXO is unspent

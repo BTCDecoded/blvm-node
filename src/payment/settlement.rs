@@ -24,6 +24,9 @@ pub struct SettlementMonitor {
     mempool_manager: Option<Arc<MempoolManager>>,
     /// Storage for blockchain access
     storage: Option<Arc<Storage>>,
+    /// Tx cache for re-broadcast on reorg (optional)
+    #[cfg(feature = "ctv")]
+    tx_cache: Option<Arc<crate::payment::PaymentTxCache>>,
     /// Track payment outputs we're monitoring (payment_id -> outputs)
     monitored_payments: Arc<tokio::sync::RwLock<HashMap<String, Vec<PaymentOutput>>>>,
     /// Track expected transaction hashes (payment_id -> tx_hash)
@@ -37,6 +40,8 @@ impl SettlementMonitor {
             state_machine,
             mempool_manager: None,
             storage: None,
+            #[cfg(feature = "ctv")]
+            tx_cache: None,
             monitored_payments: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             expected_transactions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
@@ -51,6 +56,13 @@ impl SettlementMonitor {
     /// Set storage for blockchain access
     pub fn with_storage(mut self, storage: Arc<Storage>) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Set tx cache for re-broadcast on reorg
+    #[cfg(feature = "ctv")]
+    pub fn with_tx_cache(mut self, tx_cache: Arc<crate::payment::PaymentTxCache>) -> Self {
+        self.tx_cache = Some(tx_cache);
         self
     }
 
@@ -167,7 +179,13 @@ impl SettlementMonitor {
                     // Transaction confirmed
                     let _ = self
                         .state_machine
-                        .mark_settled(payment_id, tx_hash, block_hash, confirmations)
+                        .mark_settled(
+                            payment_id,
+                            tx_hash,
+                            block_hash,
+                            confirmations,
+                            Some(expected_outputs.to_vec()),
+                        )
                         .await;
                     break; // Stop monitoring once settled
                 }
@@ -191,7 +209,11 @@ impl SettlementMonitor {
     ) -> Result<Hash, PaymentError> {
         // If we have an expected transaction hash, check for it directly
         if let Some(expected_hash) = expected_tx_hash {
-            if let Some(_tx) = mempool_manager.get_transaction(&expected_hash) {
+            if let Some(tx) = mempool_manager.get_transaction(&expected_hash) {
+                #[cfg(feature = "ctv")]
+                if let Some(ref cache) = self.tx_cache {
+                    cache.store(expected_hash, tx.clone());
+                }
                 return Ok(expected_hash);
             }
         }
@@ -201,6 +223,10 @@ impl SettlementMonitor {
         for tx in transactions {
             if self.transaction_matches_outputs(&tx, expected_outputs) {
                 let tx_hash = crate::network::txhash::calculate_txid(&tx);
+                #[cfg(feature = "ctv")]
+                if let Some(ref cache) = self.tx_cache {
+                    cache.store(tx_hash, tx.clone());
+                }
                 debug!(
                     "Found matching transaction in mempool for payment {}: {}",
                     payment_id,
@@ -225,7 +251,11 @@ impl SettlementMonitor {
     ) -> Result<Option<(Hash, Hash, u32)>, PaymentError> {
         // If we have an expected transaction hash, check for it directly
         if let Some(expected_hash) = expected_tx_hash {
-            if let Ok(Some(_tx)) = storage.transactions().get_transaction(&expected_hash) {
+            if let Ok(Some(tx)) = storage.transactions().get_transaction(&expected_hash) {
+                #[cfg(feature = "ctv")]
+                if let Some(ref cache) = self.tx_cache {
+                    cache.store(expected_hash, tx.clone());
+                }
                 // Get transaction metadata
                 if let Ok(Some(metadata)) = storage.transactions().get_metadata(&expected_hash) {
                     let block_hash = metadata.block_hash;
@@ -328,6 +358,8 @@ impl SettlementMonitor {
             state_machine: Arc::clone(&self.state_machine),
             mempool_manager: self.mempool_manager.as_ref().map(Arc::clone),
             storage: self.storage.as_ref().map(Arc::clone),
+            #[cfg(feature = "ctv")]
+            tx_cache: self.tx_cache.as_ref().map(Arc::clone),
             monitored_payments: Arc::clone(&self.monitored_payments),
             expected_transactions: Arc::clone(&self.expected_transactions),
         }

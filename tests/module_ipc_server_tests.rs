@@ -79,7 +79,7 @@ mod tests {
         async fn get_utxo(&self, _outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
             Ok(Some(UTXO {
                 value: 1000,
-                script_pubkey: vec![0x51], // OP_1
+                script_pubkey: vec![0x51].into(), // OP_1
                 height: 0,
 
                 is_coinbase: false,

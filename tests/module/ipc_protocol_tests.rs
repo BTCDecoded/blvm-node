@@ -145,14 +145,11 @@ fn test_handshake_request() {
 #[test]
 fn test_response_payload_types() {
     let hash: Hash = [0x12; 32];
-    let outpoint = OutPoint {
-        txid: hash,
-        vout: 1,
-    };
     let utxo = UTXO {
-        outpoint,
         value: 1000,
-        script_pubkey: vec![0x51], // OP_1
+        script_pubkey: vec![0x51].into(), // OP_1
+        height: 0,
+        is_coinbase: false,
     };
 
     let responses = vec![
