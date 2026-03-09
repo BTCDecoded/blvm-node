@@ -4,6 +4,7 @@
 
 use blvm_node::node::parallel_ibd::{ParallelIBD, ParallelIBDConfig};
 use blvm_node::storage::{BlockStore, Storage};
+use blvm_node::config::PruningConfig;
 use blvm_node::network::NetworkManager;
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use blvm_consensus::UtxoSet;
@@ -175,5 +176,39 @@ async fn test_parallel_ibd_invalid_height_range() {
     // Should either fail or handle gracefully (implementation dependent)
     // For now, we just verify it doesn't panic
     let _ = result;
+}
+
+/// Integration test: IBD + utxo-commitments
+///
+/// Verifies that when storage is created with aggressive pruning and UTXO commitments,
+/// the pruning manager provides a commitment_store. This ensures the incremental commitment
+/// path in parallel_ibd has the required components when IBD runs with
+/// utxo-commitments enabled.
+#[cfg(all(feature = "utxo-commitments", feature = "production"))]
+#[tokio::test]
+async fn test_ibd_utxo_commitments_storage_wiring() {
+    use blvm_node::storage::database::default_backend;
+
+    let temp_dir = TempDir::new().unwrap();
+    // Default PruningConfig uses Aggressive mode with keep_commitments: true
+    let pruning_config = PruningConfig::default();
+
+    let storage = Storage::with_backend_and_pruning(
+        temp_dir.path(),
+        default_backend(),
+        Some(pruning_config),
+    )
+    .expect("storage with aggressive pruning + commitments");
+
+    let pm = storage.pruning().expect("pruning manager");
+    let commitment_store = pm.commitment_store();
+    assert!(
+        commitment_store.is_some(),
+        "IBD incremental commitment requires commitment_store when utxo-commitments enabled"
+    );
+
+    // Verify UtxoMerkleTree can be created (used in parallel_ibd validation loop)
+    let tree = blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree::new();
+    assert!(tree.is_ok(), "UtxoMerkleTree must be creatable for IBD commitments");
 }
 

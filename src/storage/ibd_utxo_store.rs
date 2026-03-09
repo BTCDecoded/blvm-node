@@ -2,8 +2,6 @@
 //!
 //! Replaces RwLock<DiskBackedUtxoSet> for IBD. Prefetch reads via .get();
 //! validation writes via .insert/.remove. Flush task drains to disk.
-//!
-//! Enabled when BLVM_IBD_V2=1.
 
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::{key_to_outpoint, load_keys_from_disk, outpoint_to_key, SyncBatch, MAX_BATCH_OPS};
@@ -12,9 +10,9 @@ use blvm_consensus::block::compute_block_tx_ids;
 use blvm_consensus::transaction::is_coinbase;
 use blvm_consensus::types::{OutPoint, UTXO, UtxoSet};
 use dashmap::DashMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
@@ -22,6 +20,38 @@ type OutPointKey = [u8; 40];
 
 /// Pending value: Some = UTXO, None = spent (delete on flush).
 type PendingValue = Option<Arc<UTXO>>;
+
+/// Eviction strategy. BLVM_IBD_EVICTION: "dynamic" | "fifo" | "lifo" (default: fifo).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "production")]
+pub enum EvictionStrategy {
+    /// Age/dust heuristics: prefer dust, very old (height < current - 10k), then old (height < current - 100).
+    Dynamic,
+    /// Oldest first (pop from front of queue).
+    Fifo,
+    /// Newest first (pop from back of queue).
+    Lifo,
+}
+
+#[cfg(feature = "production")]
+impl EvictionStrategy {
+    fn from_env() -> Self {
+        let s = std::env::var("BLVM_IBD_EVICTION").unwrap_or_default();
+        let s = s.trim().to_lowercase();
+        match s.as_str() {
+            "dynamic" => Self::Dynamic,
+            "lifo" => Self::Lifo,
+            _ => Self::Fifo,
+        }
+    }
+}
+
+/// Don't evict outputs created in the last N blocks (likely to be spent soon).
+const EVICT_MIN_AGE_BLOCKS: u64 = 100;
+/// Prefer evicting outputs older than this (creation height < current - N).
+const EVICT_VERY_OLD_BLOCKS: u64 = 10_000;
+/// Dust threshold (satoshis) — eviction sort prefers lowest value first.
+const EVICT_DUST_THRESHOLD: i64 = 546;
 
 /// IBD v2 concurrent UTXO store. No RwLock.
 #[cfg(feature = "production")]
@@ -37,14 +67,53 @@ pub struct IbdUtxoStore {
     memory_only: bool,
     /// Max cache entries. Evict when over to avoid OOM. usize::MAX = no limit.
     max_entries: usize,
-    /// FIFO queue for eviction order. Keys not in pending_writes are safe to evict.
+    /// FIFO/LIFO queue for eviction order. Keys not in pending_writes are safe to evict.
     eviction_queue: Mutex<VecDeque<OutPointKey>>,
+    /// Eviction strategy: dynamic (age/dust), fifo, lifo.
+    eviction_strategy: EvictionStrategy,
+    /// For dynamic: keys accessed in last block — avoid evicting. Cleared after evict_if_needed.
+    recently_accessed: Mutex<FxHashSet<OutPointKey>>,
+    /// Stats: disk loads (cache miss → load from disk).
+    stats_disk_loads: AtomicU64,
+    /// Stats: cache hits (found in cache).
+    stats_cache_hits: AtomicU64,
+    /// Stats: evictions.
+    stats_evictions: AtomicU64,
+    /// Stats: pending hits (found in pending_writes before flush).
+    stats_pending_hits: AtomicU64,
 }
 
 #[cfg(feature = "production")]
 impl IbdUtxoStore {
     pub fn new(disk: Arc<dyn Tree>, flush_threshold: usize) -> Self {
         Self::new_with_options(disk, flush_threshold, false, usize::MAX)
+    }
+
+    /// Memory-only store for benchmarks and tests. No disk backing.
+    pub fn new_memory_only() -> Self {
+        struct NullTree;
+        impl Tree for NullTree {
+            fn insert(&self, _: &[u8], _: &[u8]) -> Result<()> { Ok(()) }
+            fn get(&self, _: &[u8]) -> Result<Option<Vec<u8>>> { Ok(None) }
+            fn remove(&self, _: &[u8]) -> Result<()> { Ok(()) }
+            fn contains_key(&self, _: &[u8]) -> Result<bool> { Ok(false) }
+            fn clear(&self) -> Result<()> { Ok(()) }
+            fn len(&self) -> Result<usize> { Ok(0) }
+            fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
+                Box::new(std::iter::empty())
+            }
+            fn batch(&self) -> Box<dyn crate::storage::database::BatchWriter + '_> {
+                struct NullBatch;
+                impl crate::storage::database::BatchWriter for NullBatch {
+                    fn put(&mut self, _: &[u8], _: &[u8]) {}
+                    fn delete(&mut self, _: &[u8]) {}
+                    fn commit(self: Box<Self>) -> Result<()> { Ok(()) }
+                    fn len(&self) -> usize { 0 }
+                }
+                Box::new(NullBatch)
+            }
+        }
+        Self::new_with_options(Arc::new(NullTree), usize::MAX, true, usize::MAX)
     }
 
     #[inline]
@@ -58,6 +127,7 @@ impl IbdUtxoStore {
         memory_only: bool,
         max_entries: usize,
     ) -> Self {
+        let eviction_strategy = EvictionStrategy::from_env();
         // Par-4: 128 shards reduce contention with 8–24 prefetch workers hitting cache concurrently.
         Self {
             cache: DashMap::with_shard_amount(128),
@@ -70,7 +140,19 @@ impl IbdUtxoStore {
             eviction_queue: Mutex::new(VecDeque::with_capacity(
                 if max_entries == usize::MAX { 100_000 } else { max_entries.min(100_000) },
             )),
+            eviction_strategy,
+            recently_accessed: Mutex::new(FxHashSet::default()),
+            stats_disk_loads: AtomicU64::new(0),
+            stats_cache_hits: AtomicU64::new(0),
+            stats_evictions: AtomicU64::new(0),
+            stats_pending_hits: AtomicU64::new(0),
         }
+    }
+
+    /// True when eviction strategy is dynamic (needs protect_keys + evict_if_needed with height).
+    #[inline]
+    pub fn is_dynamic_eviction(&self) -> bool {
+        self.eviction_strategy == EvictionStrategy::Dynamic
     }
 
     /// Push key to eviction queue. Call after inserting into cache.
@@ -91,12 +173,25 @@ impl IbdUtxoStore {
         self.pending_writes.lock().map(|p| p.len()).unwrap_or(0)
     }
 
+    /// Pop next key for eviction based on strategy. Fifo=front, Lifo=back.
+    fn pop_eviction_candidate(&self, q: &mut VecDeque<OutPointKey>) -> Option<OutPointKey> {
+        match self.eviction_strategy {
+            EvictionStrategy::Fifo => q.pop_front(),
+            EvictionStrategy::Lifo => q.pop_back(),
+            EvictionStrategy::Dynamic => q.pop_front(), // fallback when no height
+        }
+    }
+
     /// Evict entries over the cache limit. Entries in pending_writes are skipped
     /// (not yet on disk). When pending_writes blocks eviction, the MemoryGuard in
     /// the validation loop detects rising RSS and forces a flush.
-    /// Call after take_flush_batch_force() to evict now-flushed entries.
+    /// Dynamic strategy: use evict_if_needed(height) from validation loop instead.
     pub(crate) fn maybe_evict(&self) {
         if self.max_entries == usize::MAX {
+            return;
+        }
+        if self.eviction_strategy == EvictionStrategy::Dynamic {
+            // Dynamic eviction needs height; validation loop calls evict_if_needed.
             return;
         }
         let len = self.cache.len();
@@ -112,7 +207,7 @@ impl IbdUtxoStore {
             if evicted >= to_evict {
                 break;
             }
-            let Some(key) = q.pop_front() else {
+            let Some(key) = self.pop_eviction_candidate(&mut q) else {
                 break;
             };
             if pending.contains_key(&key) {
@@ -121,6 +216,7 @@ impl IbdUtxoStore {
             }
             if self.cache.remove(&key).is_some() {
                 evicted += 1;
+                self.stats_evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
         if evicted > 0 {
@@ -128,9 +224,96 @@ impl IbdUtxoStore {
         }
     }
 
+    /// Protect keys needed by upcoming blocks from eviction. Call before evict_if_needed when dynamic.
+    pub fn protect_keys_for_next_blocks(&self, keys: &[OutPointKey]) {
+        if self.eviction_strategy != EvictionStrategy::Dynamic {
+            return;
+        }
+        if let Ok(mut recent) = self.recently_accessed.lock() {
+            for key in keys {
+                if self.cache.contains_key(key) {
+                    recent.insert(*key);
+                }
+            }
+        }
+    }
+
+    /// Evict when over limit, using age/dust heuristics. Only for Dynamic strategy.
+    /// Call from validation loop after protect_keys_for_next_blocks. For fifo/lifo, maybe_evict handles it.
+    pub fn evict_if_needed(&self, current_height: u64) -> usize {
+        if self.eviction_strategy != EvictionStrategy::Dynamic {
+            return 0;
+        }
+        if self.max_entries == usize::MAX {
+            return 0;
+        }
+        let len = self.cache.len();
+        let trigger = self.max_entries + self.max_entries / 10;
+        if len <= trigger {
+            return 0;
+        }
+        let target = self.max_entries * 9 / 10;
+        let to_evict = len.saturating_sub(target);
+        if to_evict == 0 {
+            return 0;
+        }
+        let min_evictable_height = current_height.saturating_sub(EVICT_MIN_AGE_BLOCKS);
+        let very_old_threshold = current_height.saturating_sub(EVICT_VERY_OLD_BLOCKS);
+        let mut evicted = 0;
+        let pending = self.pending_writes.lock().expect("lock");
+        let mut q = self.eviction_queue.lock().expect("lock");
+        let mut recent = self.recently_accessed.lock().expect("lock");
+        let max_candidates = (to_evict * 4).min(q.len());
+        let mut candidates: Vec<(OutPointKey, i64, u64)> = Vec::with_capacity(max_candidates);
+        for _ in 0..max_candidates {
+            let Some(key) = q.pop_front() else {
+                break;
+            };
+            if recent.contains(&key) {
+                q.push_back(key);
+                continue;
+            }
+            if pending.contains_key(&key) {
+                q.push_back(key);
+                continue;
+            }
+            if let Some(ref r) = self.cache.get(&key) {
+                if let Some(arc) = r.as_ref() {
+                    let utxo = arc.as_ref();
+                    if utxo.height > min_evictable_height {
+                        q.push_back(key);
+                        continue;
+                    }
+                    candidates.push((key, utxo.value, utxo.height));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| {
+            let very_old_a = a.2 < very_old_threshold;
+            let very_old_b = b.2 < very_old_threshold;
+            match (very_old_a, very_old_b) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => (a.1, a.2).cmp(&(b.1, b.2)),
+            }
+        });
+        for (key, _, _) in candidates.drain(..to_evict.min(candidates.len())) {
+            if self.cache.remove(&key).is_some() {
+                evicted += 1;
+                self.stats_evictions.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for (key, _, _) in candidates {
+            q.push_back(key);
+        }
+        recent.clear();
+        if evicted > 0 {
+            debug!("IbdUtxoStore: evicted {} entries (dynamic, cache was over limit)", evicted);
+        }
+        evicted
+    }
+
     /// Evict aggressively when under RSS pressure. Evict 50% of current cache to free memory.
-    /// The UTXO cache is often NOT the main memory consumer (block pipeline buffers dominate),
-    /// so we evict hard to free whatever we can. Call after flush_pending_batch() completes.
     pub(crate) fn evict_aggressive_for_rss(&self) {
         let len = self.cache.len();
         if len == 0 {
@@ -149,7 +332,7 @@ impl IbdUtxoStore {
             if evicted >= to_evict {
                 break;
             }
-            let Some(key) = q.pop_front() else {
+            let Some(key) = self.pop_eviction_candidate(&mut q) else {
                 break;
             };
             if pending.contains_key(&key) {
@@ -158,6 +341,7 @@ impl IbdUtxoStore {
             }
             if self.cache.remove(&key).is_some() {
                 evicted += 1;
+                self.stats_evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
         if evicted > 0 {
@@ -202,7 +386,13 @@ impl IbdUtxoStore {
     /// Get UTXO by key. Used by prefetch for filtering.
     #[inline]
     pub fn get(&self, key: &OutPointKey) -> Option<UTXO> {
-        self.cache.get(key).and_then(|r| r.as_ref().map(|a| (**a).clone()))
+        let r = self.cache.get(key);
+        if let Some(ref v) = r {
+            if v.is_some() {
+                self.stats_cache_hits.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        r.and_then(|r| r.as_ref().map(|a| (**a).clone()))
     }
 
     /// Insert UTXO. Validation calls on commit.
@@ -219,29 +409,17 @@ impl IbdUtxoStore {
         self.cache.remove(key);
     }
 
-    /// Filter keys to those not in store (need disk load). Used by prefetch.
+    /// Direct cache lookup for single-pass prefetch.
     #[inline]
-    pub fn filter_keys_to_load(&self, keys: &[OutPointKey]) -> Vec<OutPointKey> {
-        keys.iter()
-            .filter(|k| !self.cache.contains_key(*k))
-            .cloned()
-            .collect()
+    pub fn cache_get(&self, key: &OutPointKey) -> Option<dashmap::mapref::one::Ref<'_, OutPointKey, PendingValue>> {
+        self.cache.get(key)
     }
 
-    /// Merge loaded UTXOs into store. Prefetch calls after load. Arc map = no clone.
-    pub fn merge_loaded_arc(&self, loaded: &FxHashMap<OutPointKey, Arc<UTXO>>) -> usize {
-        let mut count = 0;
-        for (key, arc) in loaded {
-            if !self.cache.contains_key(key) {
-                self.cache.insert(*key, Some(Arc::clone(arc)));
-                self.push_eviction_key(*key);
-                count += 1;
-            }
-        }
-        if count > 0 {
-            self.maybe_evict();
-        }
-        count
+    /// Insert loaded UTXO into cache and track for eviction. Used by single-pass prefetch.
+    #[inline]
+    pub fn cache_insert_and_track(&self, key: OutPointKey, arc: Arc<UTXO>) {
+        self.cache.insert(key, Some(arc));
+        self.push_eviction_key(key);
     }
 
     /// Build UtxoSet from keys for validation. Prefetch builds this for ready_tx.
@@ -272,21 +450,6 @@ impl IbdUtxoStore {
         self.supplement_utxo_map_with_buf(map, keys, cache_misses_buf);
     }
 
-    /// Build full Arc map for ready_tx. Prefetch calls after merge; all keys in cache → 0 disk reads.
-    /// Validation receives complete map, never blocks on disk.
-    #[inline]
-    pub fn build_utxo_map_arc(&self, keys: &[OutPointKey]) -> FxHashMap<OutPointKey, Arc<UTXO>> {
-        let mut map = FxHashMap::default();
-        for key in keys {
-            if let Some(ref r) = self.cache.get(key) {
-                if let Some(arc) = r.as_ref() {
-                    map.insert(*key, Arc::clone(arc));
-                }
-            }
-        }
-        map
-    }
-
     /// Add missing keys to an existing UtxoSet. Uses Arc::clone for cache hits (no UTXO clone).
     /// Pass reusable buf to avoid per-call allocation when loading from disk.
     pub fn supplement_utxo_map_with_buf(
@@ -303,6 +466,7 @@ impl IbdUtxoStore {
             }
             if let Some(ref r) = self.cache.get(key) {
                 if let Some(arc) = r.as_ref() {
+                    self.stats_cache_hits.fetch_add(1, Ordering::Relaxed);
                     map.insert(op, Arc::clone(arc));
                     continue;
                 }
@@ -310,7 +474,10 @@ impl IbdUtxoStore {
             cache_misses_buf.push(*key);
         }
         if !cache_misses_buf.is_empty() && !self.memory_only {
-            if let Ok(loaded) = load_keys_from_disk(Arc::clone(&self.disk), std::mem::take(cache_misses_buf)) {
+            let to_load = std::mem::take(cache_misses_buf);
+            let load_count = to_load.len();
+            if let Ok(loaded) = load_keys_from_disk(Arc::clone(&self.disk), to_load) {
+                self.stats_disk_loads.fetch_add(load_count as u64, Ordering::Relaxed);
                 for (key, utxo) in loaded {
                     let arc = Arc::new(utxo);
                     map.insert(key_to_outpoint(&key), Arc::clone(&arc));
@@ -337,6 +504,37 @@ impl IbdUtxoStore {
                 self.cache.insert(*key, Some(Arc::clone(value)));
                 pending.insert(*key, Some(Arc::clone(value)));
                 self.push_eviction_key(*key);
+                if self.eviction_strategy == EvictionStrategy::Dynamic {
+                    if let Ok(mut recent) = self.recently_accessed.lock() {
+                        recent.insert(*key);
+                    }
+                }
+            }
+        }
+        self.maybe_evict();
+    }
+
+    /// Apply UtxoDelta directly — skips intermediate SyncBatch Vec allocations.
+    pub fn apply_utxo_delta(&self, delta: &blvm_consensus::block::UtxoDelta) {
+        let total_delta = delta.additions.len() as isize - delta.deletions.len() as isize;
+        self.total_utxo_count.fetch_add(total_delta, Ordering::Relaxed);
+        {
+            let mut pending = self.pending_writes.lock().expect("lock");
+            for op in &delta.deletions {
+                let key = outpoint_to_key(op);
+                self.remove(&key);
+                pending.insert(key, None);
+            }
+            for (op, arc) in &delta.additions {
+                let key = outpoint_to_key(op);
+                self.cache.insert(key, Some(Arc::clone(arc)));
+                pending.insert(key, Some(Arc::clone(arc)));
+                self.push_eviction_key(key);
+                if self.eviction_strategy == EvictionStrategy::Dynamic {
+                    if let Ok(mut recent) = self.recently_accessed.lock() {
+                        recent.insert(key);
+                    }
+                }
             }
         }
         self.maybe_evict();
@@ -417,11 +615,32 @@ impl IbdUtxoStore {
         self.cache.len()
     }
 
+    /// Build full UtxoSet for IBD snapshot dump. Used when BLVM_IBD_SNAPSHOT_DIR is set.
+    pub fn to_utxo_set_snapshot(&self) -> UtxoSet {
+        self.cache
+            .iter()
+            .filter_map(|r| {
+                let (key, val) = (r.key(), r.value());
+                val.as_ref().map(|arc| (key_to_outpoint(key), Arc::clone(arc)))
+            })
+            .collect()
+    }
+
     pub fn total_count(&self) -> isize {
         self.total_utxo_count.load(Ordering::Relaxed)
     }
 
     pub fn disk_clone(&self) -> Arc<dyn Tree> {
         Arc::clone(&self.disk)
+    }
+
+    /// Stats for logging. (disk_loads, cache_hits, evictions, pending_hits)
+    pub fn stats(&self) -> (u64, u64, u64, u64) {
+        (
+            self.stats_disk_loads.load(Ordering::Relaxed),
+            self.stats_cache_hits.load(Ordering::Relaxed),
+            self.stats_evictions.load(Ordering::Relaxed),
+            self.stats_pending_hits.load(Ordering::Relaxed),
+        )
     }
 }

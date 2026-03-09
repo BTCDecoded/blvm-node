@@ -22,10 +22,11 @@ fn create_test_spawner() -> (TempDir, ModuleProcessSpawner) {
 }
 
 fn create_test_context() -> ModuleContext {
+    let temp = std::env::temp_dir();
     ModuleContext::new(
         "test-module-1".to_string(),
-        "/tmp/test.sock".to_string(),
-        "/tmp/test-data".to_string(),
+        temp.join("blvm_test.sock").to_string_lossy().into_owned(),
+        temp.join("blvm_test-data").to_string_lossy().into_owned(),
         HashMap::new(),
     )
 }
@@ -129,10 +130,11 @@ fn test_module_context_creation() {
     config.insert("key1".to_string(), "value1".to_string());
     config.insert("key2".to_string(), "value2".to_string());
 
+    let temp = std::env::temp_dir();
     let context = ModuleContext::new(
         "test-id".to_string(),
-        "/tmp/test.sock".to_string(),
-        "/tmp/test-data".to_string(),
+        temp.join("blvm_test.sock").to_string_lossy().into_owned(),
+        temp.join("blvm_test-data").to_string_lossy().into_owned(),
         config,
     );
 
@@ -143,10 +145,11 @@ fn test_module_context_creation() {
 
 #[test]
 fn test_module_context_empty() {
+    let temp = std::env::temp_dir();
     let context = ModuleContext::new(
         "test-id".to_string(),
-        "/tmp/test.sock".to_string(),
-        "/tmp/test-data".to_string(),
+        temp.join("blvm_test.sock").to_string_lossy().into_owned(),
+        temp.join("blvm_test-data").to_string_lossy().into_owned(),
         HashMap::new(),
     );
 

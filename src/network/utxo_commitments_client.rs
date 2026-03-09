@@ -605,7 +605,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     {
                         let network = network_manager.read().await;
                         let mut pending = network.pending_block_requests.lock().await;
-                        pending.remove(&(peer_addr, block_hash));
+                        pending.remove(&(peer_addr.ip(), block_hash));
                     }
                     Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
                         format!("Block request timeout: no response received within {} seconds", timeout_seconds)

@@ -285,11 +285,41 @@ impl Default for ModuleResourceLimitsConfig {
     }
 }
 
+/// Per-network default assume-valid height (Core chainparams defaultAssumeValid)
+pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
+    match network.to_lowercase().as_str() {
+        "mainnet" | "bitcoinv1" => 912_683,   // Core mainnet default
+        "testnet" | "testnet3" => 4_550_000, // Core testnet default
+        "signet" => 267_665,                 // Core signet default
+        _ => 0,                              // Regtest and unknown: validate all
+    }
+}
+
+/// Block validation configuration (maps to blvm-consensus BlockValidationConfig)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockValidationNodeConfig {
+    /// Assume-valid height: blocks before this height skip signature verification (-assumevalid equivalent)
+    #[serde(default)]
+    pub assume_valid_height: u64,
+
+    /// Assume-valid block hash: when set, verify block at assume_valid_height matches; skip verification for ancestors.
+    /// Takes precedence over assume_valid_height when both set. Not yet implemented in consensus.
+    #[serde(default)]
+    pub assume_valid_hash: Option<[u8; 32]>,
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Network listening address
     pub listen_addr: Option<SocketAddr>,
+
+    /// Block validation configuration (assume-valid height, etc.)
+    pub block_validation: Option<BlockValidationNodeConfig>,
+
+    /// AssumeUTXO: block hash of snapshot to load for fast sync (-assumeutxo=<blockhash>)
+    #[serde(default)]
+    pub assumeutxo_blockhash: Option<[u8; 32]>,
 
     /// Transport preference
     pub transport_preference: TransportPreferenceConfig,
@@ -432,6 +462,8 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             listen_addr: Some("127.0.0.1:8333".parse().unwrap()),
+            block_validation: None,
+            assumeutxo_blockhash: None,
             transport_preference: TransportPreferenceConfig::TcpOnly,
             max_peers: Some(100),
             protocol_version: Some("BitcoinV1".to_string()),

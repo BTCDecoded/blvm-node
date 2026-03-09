@@ -65,7 +65,7 @@ pub async fn handle_get_utxo_set(
     #[cfg(feature = "utxo-commitments")]
     for (outpoint, utxo) in &utxo_set {
         utxo_tree
-            .insert(outpoint.clone(), utxo.clone())
+            .insert(outpoint.clone(), utxo.as_ref().clone())
             .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
     }
 
@@ -219,7 +219,7 @@ pub async fn handle_get_filtered_block(
             use blvm_protocol::OutPoint;
             let outpoint = OutPoint {
                 hash: txid,
-                index: output_idx as u64,
+                index: output_idx as u32,
             };
             use blvm_protocol::UTXO;
             let utxo = UTXO {
@@ -322,7 +322,7 @@ pub async fn handle_get_utxo_proof(
 
     for (outpoint, utxo) in &utxo_set {
         utxo_tree
-            .insert(outpoint.clone(), utxo.clone())
+            .insert(outpoint.clone(), utxo.as_ref().clone())
             .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
     }
 
@@ -330,7 +330,7 @@ pub async fn handle_get_utxo_proof(
     use blvm_consensus::types::OutPoint;
     let outpoint = OutPoint {
         hash: message.tx_hash,
-        index: message.output_index as u64,
+        index: message.output_index as u32,
     };
 
     // Find UTXO in set

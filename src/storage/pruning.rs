@@ -649,7 +649,7 @@ impl PruningManager {
 
         for (outpoint, utxo) in &utxo_set {
             utxo_tree
-                .insert(outpoint.clone(), utxo.clone())
+                .insert(outpoint.clone(), utxo.as_ref().clone())
                 .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
         }
 
@@ -697,7 +697,7 @@ impl PruningManager {
 
         for (outpoint, utxo) in utxo_set {
             utxo_tree
-                .insert(outpoint.clone(), utxo.clone())
+                .insert(outpoint.clone(), utxo.as_ref().clone())
                 .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
         }
 
@@ -759,7 +759,7 @@ impl PruningManager {
                     // Apply block to UTXO set using connect_block
                     // This properly handles coinbase transactions and input/output processing
                     let network_time = current_timestamp();
-                    let (validation_result, new_utxo_set, _undo_log) = connect_block(
+                    let (validation_result, new_utxo_set, _undo_log) = connect_block::<blvm_protocol::BlockHeader>(
                         &block,
                         &witnesses,
                         utxo_set,

@@ -362,6 +362,31 @@ impl Storage {
         &self.chainstate
     }
 
+    /// Load AssumeUTXO snapshot into storage.
+    /// Requires `tip_header` for chain state; when None, returns Err (header fetch not yet implemented).
+    pub fn load_assumeutxo_snapshot(
+        &self,
+        utxo_set: &blvm_protocol::UtxoSet,
+        metadata: &crate::storage::assumeutxo::SnapshotMetadata,
+        tip_header: Option<&blvm_protocol::BlockHeader>,
+    ) -> Result<()> {
+        self.utxostore.store_utxo_set(utxo_set)?;
+        let header = tip_header.ok_or_else(|| {
+            anyhow::anyhow!(
+                "AssumeUTXO chain state requires block header. Implement header fetch (getdata) or add header to snapshot format."
+            )
+        })?;
+        let chain_info = chainstate::ChainInfo {
+            tip_hash: metadata.block_hash,
+            tip_header: header.clone(),
+            height: metadata.block_height,
+            total_work: 0, // Would need chainwork from header chain
+            chain_params: chainstate::ChainParams::default(),
+        };
+        self.chainstate.store_chain_info(&chain_info)?;
+        Ok(())
+    }
+
     /// Get the transaction index (as Arc for sharing)
     pub fn transactions(&self) -> Arc<txindex::TxIndex> {
         Arc::clone(&self.txindex)

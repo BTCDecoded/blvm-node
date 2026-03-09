@@ -524,10 +524,10 @@ mod tests {
         let lan_score = scorer.get_score(&lan_peer);
         let internet_score = scorer.get_score(&internet_peer);
         
-        // LAN peer should have 10x higher score due to multiplier
+        // LAN peer should have higher score due to multiplier (3x for security)
         assert!(
-            lan_score > internet_score * 5.0, 
-            "LAN peer score {} should be significantly higher than internet peer {} (10x multiplier expected)",
+            lan_score > internet_score * 2.0, 
+            "LAN peer score {} should be significantly higher than internet peer {} (3x multiplier expected)",
             lan_score, internet_score
         );
         
@@ -542,16 +542,16 @@ mod tests {
         
         // LAN peer with moderate performance
         let lan_peer: SocketAddr = "192.168.1.50:8333".parse().unwrap();
-        scorer.record_block(lan_peer, 500_000, 100.0);  // 500KB, 100ms
+        scorer.record_block(lan_peer, 1_000_000, 80.0);  // 1MB, 80ms
         
-        // Internet peer with BETTER raw performance (but no LAN bonus)
+        // Internet peer with slightly better raw performance (but no LAN bonus)
         let internet_peer: SocketAddr = "8.8.8.8:8333".parse().unwrap();
-        scorer.record_block(internet_peer, 2_000_000, 50.0);  // 2MB, 50ms - 4x better!
+        scorer.record_block(internet_peer, 1_200_000, 70.0);  // 1.2MB, 70ms - ~1.5x better
         
         let available = vec![lan_peer, internet_peer];
         let best = scorer.get_best_peer(&available);
         
-        // LAN peer should still win due to 10x multiplier
+        // LAN peer should still win due to 3x multiplier
         assert_eq!(
             best, Some(lan_peer),
             "LAN peer should be selected as best despite worse raw performance"

@@ -12,7 +12,7 @@ use blvm_protocol::{Hash, UTXO};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::{info, warn};
 
 #[cfg(not(feature = "rocksdb"))]
@@ -98,31 +98,6 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
-}
-
-impl std::str::FromStr for BitcoinCoreNetwork {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "mainnet" => Ok(BitcoinCoreNetwork::Mainnet),
-            "testnet" => Ok(BitcoinCoreNetwork::Testnet),
-            "regtest" => Ok(BitcoinCoreNetwork::Regtest),
-            "signet" => Ok(BitcoinCoreNetwork::Signet),
-            _ => Err(format!("Unknown network: {}", s)),
-        }
-    }
-}
-
-impl std::fmt::Display for BitcoinCoreNetwork {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BitcoinCoreNetwork::Mainnet => write!(f, "mainnet"),
-            BitcoinCoreNetwork::Testnet => write!(f, "testnet"),
-            BitcoinCoreNetwork::Regtest => write!(f, "regtest"),
-            BitcoinCoreNetwork::Signet => write!(f, "signet"),
-        }
-    }
 }
 
 struct Migrator {
@@ -233,7 +208,7 @@ impl Migrator {
                         batch.push((coin_key, blvm_utxo));
 
                         if batch.len() >= BATCH_SIZE {
-                            self.flush_batch(&dest_tree, &mut batch)?;
+                            self.flush_batch(dest_tree.as_ref(), &mut batch)?;
                             count += BATCH_SIZE;
                             self.progress.coins_migrated.store(count as u64, Ordering::Relaxed);
                             
@@ -251,7 +226,7 @@ impl Migrator {
 
         // Flush remaining batch
         if !batch.is_empty() {
-            self.flush_batch(&dest_tree, &mut batch)?;
+            self.flush_batch(dest_tree.as_ref(), &mut batch)?;
             count += batch.len();
         }
 

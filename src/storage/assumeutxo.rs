@@ -53,6 +53,143 @@ pub const TESTNET_ASSUMEUTXO_SNAPSHOTS: &[(u64, &str)] = &[
     // TODO: Add testnet snapshots
 ];
 
+const CHAINSTATE_SNAPSHOT_DIR: &str = "chainstate_snapshot";
+const BASE_BLOCKHASH_FILE: &str = "base_blockhash";
+
+/// Path to chainstate_snapshot directory (for restart detection when using assumeutxo).
+pub fn chainstate_snapshot_dir(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join(CHAINSTATE_SNAPSHOT_DIR)
+}
+
+/// Write base_blockhash marker after loading assumeutxo snapshot. Enables restart detection.
+pub fn write_base_blockhash_marker(data_dir: &Path, base_blockhash: &[u8; 32]) -> Result<()> {
+    let dir = chainstate_snapshot_dir(data_dir);
+    std::fs::create_dir_all(&dir).context("Failed to create chainstate_snapshot dir")?;
+    let path = dir.join(BASE_BLOCKHASH_FILE);
+    std::fs::write(&path, hex::encode(base_blockhash)).context("Failed to write base_blockhash")?;
+    info!("Wrote assumeutxo marker: {}/{}", dir.display(), BASE_BLOCKHASH_FILE);
+    Ok(())
+}
+
+/// Read base_blockhash marker if present. Returns None if not in assumeutxo mode.
+pub fn read_base_blockhash_marker(data_dir: &Path) -> Result<Option<[u8; 32]>> {
+    let path = chainstate_snapshot_dir(data_dir).join(BASE_BLOCKHASH_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let hex_str = std::fs::read_to_string(&path).context("Failed to read base_blockhash")?;
+    let bytes = hex::decode(hex_str.trim()).context("Invalid base_blockhash hex")?;
+    if bytes.len() != 32 {
+        return Err(anyhow::anyhow!("base_blockhash must be 32 bytes, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(Some(arr))
+}
+
+/// Check if background validation has completed for the given base_blockhash.
+pub fn is_background_validated(data_dir: &Path, base_blockhash: &[u8; 32]) -> bool {
+    let path = chainstate_snapshot_dir(data_dir).join("background_validated");
+    if !path.exists() {
+        return false;
+    }
+    let Ok(hex_str) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(bytes) = hex::decode(hex_str.trim()) else {
+        return false;
+    };
+    bytes.len() == 32 && bytes.as_slice() == base_blockhash
+}
+
+/// Write background_validated marker when background chainstate hashes UTXO and matches chainparams.
+/// Used for ValidatedSnapshotCleanup on restart.
+pub fn write_background_validated_marker(data_dir: &Path, base_blockhash: &[u8; 32]) -> Result<()> {
+    let dir = chainstate_snapshot_dir(data_dir);
+    std::fs::create_dir_all(&dir).context("Failed to create chainstate_snapshot dir")?;
+    let path = dir.join("background_validated");
+    std::fs::write(path, hex::encode(base_blockhash)).context("Failed to write background_validated")?;
+    info!("Wrote assumeutxo background_validated marker");
+    Ok(())
+}
+
+/// Remove assumeutxo marker (call when background validation completes).
+pub fn clear_assumeutxo_marker(data_dir: &Path) -> Result<()> {
+    let dir = chainstate_snapshot_dir(data_dir);
+    let path = dir.join(BASE_BLOCKHASH_FILE);
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    if dir.exists() && std::fs::read_dir(&dir)?.next().is_none() {
+        std::fs::remove_dir(&dir)?;
+    }
+    Ok(())
+}
+
+/// Look up snapshot height for a block hash from chainparams.
+/// Returns None if block hash is not a known snapshot point.
+pub fn height_for_blockhash(network: &str, block_hash: &[u8; 32]) -> Option<u64> {
+    assumeutxo_data_for_network(network)
+        .iter()
+        .find(|d| d.block_hash == *block_hash)
+        .map(|d| d.height)
+}
+
+/// Look up full AssumeutxoData for a block hash. Returns None if not a known snapshot.
+pub fn assumeutxo_data_for_blockhash(network: &str, block_hash: &[u8; 32]) -> Option<AssumeutxoData> {
+    assumeutxo_data_for_network(network)
+        .iter()
+        .find(|d| d.block_hash == *block_hash)
+        .cloned()
+}
+
+/// Chainparams-style AssumeUTXO data. Matches Core's AssumeutxoData.
+#[derive(Clone, Debug)]
+pub struct AssumeutxoData {
+    /// Block height of the snapshot
+    pub height: u64,
+    /// Block hash at snapshot point (base_blockhash)
+    pub block_hash: [u8; 32],
+    /// Chain transaction count at snapshot (nChainTx). Hardcoded because block index
+    /// may not be loaded at snapshot load time.
+    pub chain_tx_count: u64,
+    /// Expected UTXO set hash for verification (optional until MuHash alignment)
+    pub hash_serialized: Option<[u8; 32]>,
+}
+
+/// Known AssumeUTXO snapshots (mainnet). Empty until snapshots are created.
+fn mainnet_assumeutxo_data() -> Vec<AssumeutxoData> {
+    vec![
+        // AssumeutxoData { height, block_hash, chain_tx_count, hash_serialized } - add when snapshots exist
+    ]
+}
+
+/// Known AssumeUTXO snapshots (regtest). Entry at height 100 for feature_assumeutxo tests.
+fn regtest_assumeutxo_data() -> Vec<AssumeutxoData> {
+    vec![AssumeutxoData {
+        height: 100,
+        block_hash: [0x01; 32],
+        chain_tx_count: 101, // Approximate for 100 blocks + coinbase
+        hash_serialized: None,
+    }]
+}
+
+/// Get assumeutxo data for network
+fn assumeutxo_data_for_network(network: &str) -> &[AssumeutxoData] {
+    static MAINNET: std::sync::OnceLock<Vec<AssumeutxoData>> = std::sync::OnceLock::new();
+    static REGTEST: std::sync::OnceLock<Vec<AssumeutxoData>> = std::sync::OnceLock::new();
+    static TESTNET: std::sync::OnceLock<Vec<AssumeutxoData>> = std::sync::OnceLock::new();
+    fn testnet_assumeutxo_data() -> Vec<AssumeutxoData> {
+        vec![]
+    }
+    match network.to_lowercase().as_str() {
+        "mainnet" | "bitcoinv1" => MAINNET.get_or_init(mainnet_assumeutxo_data).as_slice(),
+        "regtest" => REGTEST.get_or_init(regtest_assumeutxo_data).as_slice(),
+        "testnet" | "testnet3" => TESTNET.get_or_init(testnet_assumeutxo_data).as_slice(),
+        _ => &[],
+    }
+}
+
 /// AssumeUTXO snapshot metadata
 #[derive(Debug, Clone)]
 pub struct SnapshotMetadata {
@@ -130,48 +267,34 @@ impl AssumeUtxoManager {
             .copied()
     }
 
-    /// Calculate MuHash of a UTXO set
+    /// Calculate MuHash3072 of a UTXO set for snapshot verification.
     ///
-    /// MuHash is an additive hash that can be efficiently updated as UTXOs are added/removed.
-    /// For snapshots, we compute it over the entire set for verification.
+    /// Matches Bitcoin Core gettxoutsetinfo muhash / hash_serialized. Enables
+    /// cross-compatibility with Core snapshots and AssumeUTXO validation.
     pub fn calculate_utxo_hash(utxo_set: &UtxoSet) -> Result<Hash> {
-        use sha2::{Sha256, Digest};
-        
-        // Sort outpoints for deterministic ordering
+        use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
+
         let mut entries: Vec<_> = utxo_set.iter().collect();
         entries.sort_by(|a, b| {
             let key_a = Self::outpoint_sort_key(a.0);
             let key_b = Self::outpoint_sort_key(b.0);
             key_a.cmp(&key_b)
         });
-        
-        // Hash all entries
-        let mut hasher = Sha256::new();
+
+        let mut muhash = MuHash3072::new();
         for (outpoint, utxo) in entries {
-            // Hash outpoint
-            hasher.update(&outpoint.hash);
-            hasher.update(&outpoint.index.to_le_bytes());
-            
-            // Hash UTXO (value is i64, script_pubkey is Vec<u8>, height is u64)
-            hasher.update(&utxo.value.to_le_bytes());
-            hasher.update(&(utxo.script_pubkey.len() as u32).to_le_bytes());
-            hasher.update(&utxo.script_pubkey);
-            hasher.update(&(utxo.is_coinbase as u8).to_le_bytes());
-            hasher.update(&utxo.height.to_le_bytes());
+            let height_u32 = utxo.height.min(u32::MAX as u64) as u32;
+            let serialized = serialize_coin_for_muhash(
+                &outpoint.hash,
+                outpoint.index,
+                height_u32,
+                utxo.is_coinbase,
+                utxo.value,
+                utxo.script_pubkey.as_ref(),
+            );
+            muhash = muhash.insert(&serialized);
         }
-        
-        // Final hash
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        
-        // Double SHA256 for Bitcoin compatibility
-        let mut hasher2 = Sha256::new();
-        hasher2.update(&hash);
-        let result2 = hasher2.finalize();
-        hash.copy_from_slice(&result2);
-        
-        Ok(hash)
+        Ok(muhash.finalize())
     }
 
     /// Create a sort key for deterministic ordering
@@ -303,6 +426,72 @@ impl AssumeUtxoManager {
         Ok((outpoint, utxo))
     }
 
+    /// Load a UTXO snapshot from an arbitrary file path.
+    ///
+    /// Returns the UTXO set and metadata. Does not verify against known_snapshots.
+    pub fn load_snapshot_from_path(&self, path: &Path) -> Result<(UtxoSet, SnapshotMetadata)> {
+        if !path.exists() {
+            return Err(anyhow::anyhow!("Snapshot file not found: {}", path.display()));
+        }
+        let file = File::open(path).context("Failed to open snapshot file")?;
+        let mut reader = BufReader::new(file);
+        Self::read_snapshot_from_reader(&mut reader)
+    }
+
+    /// Read snapshot from a reader (shared logic for load_snapshot and load_snapshot_from_path).
+    fn read_snapshot_from_reader<R: Read>(reader: &mut R) -> Result<(UtxoSet, SnapshotMetadata)> {
+        let mut buf4 = [0u8; 4];
+        let mut buf8 = [0u8; 8];
+        let mut buf32 = [0u8; 32];
+
+        reader.read_exact(&mut buf4)?;
+        let version = u32::from_le_bytes(buf4);
+        if version != SNAPSHOT_VERSION {
+            return Err(anyhow::anyhow!(
+                "Unsupported snapshot version: {} (expected {})",
+                version,
+                SNAPSHOT_VERSION
+            ));
+        }
+
+        reader.read_exact(&mut buf32)?;
+        let block_hash = buf32;
+        reader.read_exact(&mut buf8)?;
+        let block_height = u64::from_le_bytes(buf8);
+        reader.read_exact(&mut buf32)?;
+        let utxo_hash = buf32;
+        reader.read_exact(&mut buf8)?;
+        let utxo_count = u64::from_le_bytes(buf8);
+
+        let metadata = SnapshotMetadata {
+            version,
+            block_hash,
+            block_height,
+            utxo_hash,
+            utxo_count,
+        };
+
+        let mut utxo_set =
+            UtxoSet::with_capacity_and_hasher(utxo_count as usize, Default::default());
+        for i in 0..utxo_count {
+            reader.read_exact(&mut buf4)?;
+            let entry_len = u32::from_le_bytes(buf4) as usize;
+            let mut entry = vec![0u8; entry_len];
+            reader.read_exact(&mut entry)?;
+            let (outpoint, utxo) = Self::deserialize_utxo_entry(&entry)?;
+            utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
+            if i > 0 && i % 1_000_000 == 0 {
+                debug!(
+                    "Loaded {} / {} UTXOs ({:.1}%)",
+                    i,
+                    utxo_count,
+                    (i as f64 / utxo_count as f64) * 100.0
+                );
+            }
+        }
+        Ok((utxo_set, metadata))
+    }
+
     /// Load a UTXO snapshot from disk
     ///
     /// Returns the UTXO set and metadata if the snapshot exists and is valid.
@@ -312,66 +501,13 @@ impl AssumeUtxoManager {
         if !path.exists() {
             return Err(anyhow::anyhow!("No snapshot found for height {}", height));
         }
-        
+
         info!("Loading UTXO snapshot from height {}", height);
-        
+
         let file = File::open(&path).context("Failed to open snapshot file")?;
         let mut reader = BufReader::new(file);
-        
-        // Read header
-        let mut buf4 = [0u8; 4];
-        let mut buf8 = [0u8; 8];
-        let mut buf32 = [0u8; 32];
-        
-        reader.read_exact(&mut buf4)?;
-        let version = u32::from_le_bytes(buf4);
-        
-        if version != SNAPSHOT_VERSION {
-            return Err(anyhow::anyhow!(
-                "Unsupported snapshot version: {} (expected {})",
-                version,
-                SNAPSHOT_VERSION
-            ));
-        }
-        
-        reader.read_exact(&mut buf32)?;
-        let block_hash = buf32;
-        
-        reader.read_exact(&mut buf8)?;
-        let block_height = u64::from_le_bytes(buf8);
-        
-        reader.read_exact(&mut buf32)?;
-        let utxo_hash = buf32;
-        
-        reader.read_exact(&mut buf8)?;
-        let utxo_count = u64::from_le_bytes(buf8);
-        
-        let metadata = SnapshotMetadata {
-            version,
-            block_hash,
-            block_height,
-            utxo_hash,
-            utxo_count,
-        };
-        
-        // Read UTXOs
-        let mut utxo_set = UtxoSet::with_capacity_and_hasher(utxo_count as usize, Default::default());
-        
-        for i in 0..utxo_count {
-            reader.read_exact(&mut buf4)?;
-            let entry_len = u32::from_le_bytes(buf4) as usize;
-            
-            let mut entry = vec![0u8; entry_len];
-            reader.read_exact(&mut entry)?;
-            
-            let (outpoint, utxo) = Self::deserialize_utxo_entry(&entry)?;
-            utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
-            
-            if i > 0 && i % 1_000_000 == 0 {
-                debug!("Loaded {} / {} UTXOs ({:.1}%)", i, utxo_count, (i as f64 / utxo_count as f64) * 100.0);
-            }
-        }
-        
+        let (utxo_set, metadata) = Self::read_snapshot_from_reader(&mut reader)?;
+
         // Verify hash if we have an expected value
         if let Some(expected) = self.known_snapshots.get(&height) {
             info!("Verifying snapshot hash...");
@@ -397,8 +533,8 @@ impl AssumeUtxoManager {
         info!(
             "Loaded {} UTXOs from snapshot at height {} (block: {})",
             utxo_set.len(),
-            block_height,
-            hex::encode(block_hash)
+            metadata.block_height,
+            hex::encode(metadata.block_hash)
         );
         
         Ok((utxo_set, metadata))

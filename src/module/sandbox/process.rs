@@ -286,11 +286,10 @@ impl ProcessSandbox {
 
     /// Monitor process resource usage
     pub async fn monitor_resources(&self, pid: Option<u32>) -> Result<ResourceUsage, ModuleError> {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             if let Some(pid) = pid {
                 // Read resource usage from /proc/<pid>/stat (Linux-specific)
-                // For cross-platform support, we'd need platform-specific implementations
                 let proc_stat_path = format!("/proc/{pid}/stat");
                 if let Ok(stat_content) = std::fs::read_to_string(&proc_stat_path) {
                     let fields: Vec<&str> = stat_content.split_whitespace().collect();
@@ -348,9 +347,9 @@ impl ProcessSandbox {
             }
         }
 
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "linux"))]
         {
-            // Windows implementation would use process APIs
+            // Windows/macOS: /proc doesn't exist. Return zeros; future: use sysinfo or platform APIs.
             Ok(ResourceUsage {
                 cpu_percent: 0.0,
                 memory_bytes: 0,

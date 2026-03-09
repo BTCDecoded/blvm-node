@@ -4,8 +4,10 @@
 
 use crate::node::event_publisher::EventPublisher;
 use crate::rpc::errors::RpcError;
+use crate::storage::assumeutxo::AssumeUtxoManager;
 use crate::storage::Storage;
 use anyhow::Result;
+use std::path::Path;
 use blvm_protocol::BlockHeader;
 use serde_json::{json, Number, Value};
 use std::sync::Arc;
@@ -885,6 +887,33 @@ impl BlockchainRpc {
                 "total_amount": 0.0
             }))
         }
+    }
+
+    /// Load UTXO set from snapshot file (loadtxoutset)
+    ///
+    /// Params: ["path"] or ["path", "base_blockhash"]
+    /// Validates the snapshot and returns metadata. Does not load into chainstate
+    /// (header required for that; use -assumeutxo at startup).
+    pub async fn load_txout_set(&self, params: &Value) -> Result<Value> {
+        debug!("RPC: loadtxoutset");
+
+        let path_str = params
+            .get(0)
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| RpcError::invalid_params("loadtxoutset requires path (string)"))?;
+
+        let path = Path::new(path_str);
+        let manager = AssumeUtxoManager::new(".");
+        let (_utxo_set, metadata) = manager
+            .load_snapshot_from_path(path)
+            .map_err(|e| RpcError::internal_error(e.to_string()))?;
+
+        Ok(json!({
+            "base_blockhash": hex::encode(metadata.block_hash),
+            "height": metadata.block_height,
+            "txout_count": metadata.utxo_count,
+            "utxo_hash": hex::encode(metadata.utxo_hash),
+        }))
     }
 
     /// Verify blockchain database

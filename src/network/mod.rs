@@ -6778,11 +6778,11 @@ mod tests {
         // Test manager logic without creating real peers
         assert_eq!(manager.peer_count(), 0);
 
-        // Test send to non-existent peer (should succeed but not actually send)
+        // Test send to non-existent peer (returns Err - peer not in peer manager)
         let peer_addr = "127.0.0.1:8081".parse().unwrap();
         let message = b"test message".to_vec();
         let result = manager.send_to_peer(peer_addr, message).await;
-        assert!(result.is_ok()); // Should succeed even for non-existent peer
+        assert!(result.is_err()); // Peer not found when not connected
     }
 
     #[tokio::test]
@@ -6794,7 +6794,7 @@ mod tests {
         let peer_addr = "127.0.0.1:8081".parse().unwrap();
         let message = b"test message".to_vec();
         let result = manager.send_to_peer(peer_addr, message).await;
-        assert!(result.is_ok()); // Should not error, just do nothing
+        assert!(result.is_err()); // Peer not found when not in peer manager
     }
 
     #[tokio::test]

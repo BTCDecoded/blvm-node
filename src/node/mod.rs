@@ -4,6 +4,8 @@
 //! mining coordination, and overall node state management.
 
 pub mod block_processor;
+#[cfg(feature = "production")]
+pub mod background_validation;
 pub mod event_publisher;
 pub mod health;
 pub mod mempool;
@@ -186,7 +188,7 @@ impl Node {
 
     /// Set node configuration
     pub fn with_config(mut self, config: NodeConfig) -> Result<Self> {
-        // Initialize Rayon pool for script verification (uses BLVM_CONSENSUS_PERFORMANCE_SCRIPT_VERIFICATION_THREADS)
+        // Initialize Rayon pool for script verification (uses BLVM_SCRIPT_THREADS)
         #[cfg(all(feature = "production", feature = "rayon"))]
         blvm_consensus::config::init_rayon_for_script_verification();
 
@@ -262,6 +264,18 @@ impl Node {
                 "Mempool policy configuration applied: max_mempool_mb={}, eviction_strategy={:?}",
                 mempool_policy.max_mempool_mb, mempool_policy.eviction_strategy
             );
+        }
+
+        // Wire block validation (assume-valid) to consensus config.
+        // Must call init_consensus_config before any get_consensus_config() (e.g. block validation).
+        #[cfg(feature = "production")]
+        if let Some(ref bv) = config.block_validation {
+            let mut consensus_config = blvm_consensus::config::ConsensusConfig::from_env();
+            consensus_config.block_validation.assume_valid_height = bv.assume_valid_height;
+            blvm_consensus::config::init_consensus_config(consensus_config);
+            if bv.assume_valid_height > 0 {
+                info!("Assume-valid height set to {} (blocks before this skip signature verification)", bv.assume_valid_height);
+            }
         }
 
         // Governance handled via module system - no direct webhook client needed
@@ -428,9 +442,8 @@ impl Node {
         });
         info!("[START_COMPONENTS] Background message processor spawned");
 
-        // Check if we need to do IBD and attempt parallel IBD if available
-        info!("[START_COMPONENTS] Checking if IBD is needed...");
-        let current_height = match self.storage.chain().get_height() {
+        // AssumeUTXO: if -assumeutxo=<blockhash> and empty chain, try to load snapshot
+        let mut current_height = match self.storage.chain().get_height() {
             Ok(Some(h)) => {
                 info!("[START_COMPONENTS] Storage returned height: {}", h);
                 h
@@ -444,25 +457,83 @@ impl Node {
                 0
             }
         };
-        let is_ibd = current_height == 0;
+        let mut initial_utxo_set = blvm_protocol::UtxoSet::default();
+        if current_height == 0 {
+            if let Some(block_hash) = self.config.as_ref().and_then(|c| c.assumeutxo_blockhash.as_ref()) {
+                use crate::storage::assumeutxo::{write_base_blockhash_marker, AssumeUtxoManager, height_for_blockhash};
+                let network = self.config.as_ref().and_then(|c| c.protocol_version.as_deref()).unwrap_or("regtest");
+                if let Some(snapshot_height) = height_for_blockhash(network, block_hash) {
+                    let data_dir = std::path::Path::new(&self.data_dir);
+                    let mut manager = AssumeUtxoManager::new(data_dir);
+                    if let Ok((utxo_set, metadata)) = manager.load_snapshot(snapshot_height) {
+                        if let Err(e) = self.storage.load_assumeutxo_snapshot(&utxo_set, &metadata, None) {
+                            warn!("AssumeUTXO: failed to load snapshot into storage: {}. Falling back to full IBD.", e);
+                        } else {
+                            current_height = metadata.block_height;
+                            initial_utxo_set = utxo_set;
+                            if let Err(e) = write_base_blockhash_marker(data_dir, &metadata.block_hash) {
+                                warn!("AssumeUTXO: failed to write chainstate_snapshot marker: {}", e);
+                            }
+                            info!("AssumeUTXO: loaded snapshot at height {}, continuing sync from tip", current_height);
+                        }
+                    } else {
+                        warn!("AssumeUTXO: snapshot file not found for height {}. Falling back to full IBD.", snapshot_height);
+                    }
+                } else {
+                    warn!("AssumeUTXO: block hash not in chainparams. Add to MAINNET_ASSUMEUTXO_DATA or REGTEST_ASSUMEUTXO_DATA. Falling back to full IBD.");
+                }
+            }
+        }
+        // Get target height and peer addresses for IBD decision
+        let peer_addresses: Vec<String> = self.network
+            .peer_addresses()
+            .iter()
+            .map(|addr| addr.to_string())
+            .collect();
+
+        // AssumeUTXO: spawn background validation when snapshot is active (marker present)
+        #[cfg(feature = "production")]
+        {
+            use crate::storage::assumeutxo::{
+                height_for_blockhash, is_background_validated, read_base_blockhash_marker,
+            };
+            let data_dir = std::path::Path::new(&self.data_dir);
+            if let Ok(Some(base_blockhash)) = read_base_blockhash_marker(data_dir) {
+                if !is_background_validated(data_dir, &base_blockhash) {
+                    let network = self.config.as_ref().and_then(|c| c.protocol_version.as_deref()).unwrap_or("regtest");
+                    if let Some(base_height) = height_for_blockhash(network, &base_blockhash) {
+                        crate::node::background_validation::spawn_assumeutxo_background_validation(
+                        data_dir,
+                        base_blockhash,
+                        base_height,
+                        network,
+                        Arc::clone(&self.protocol),
+                        Arc::clone(&self.network),
+                        peer_addresses.clone(),
+                    );
+                    }
+                }
+            }
+        }
+
+        let target_height = match self.network.get_highest_peer_start_height() {
+            Some(peer_height) => peer_height.max(current_height),
+            None => current_height + 1_000_000,
+        };
+        let is_ibd = current_height < target_height;
         
-        info!("[START_COMPONENTS] IBD check: current_height={}, is_ibd={}", current_height, is_ibd);
+        info!("[START_COMPONENTS] IBD check: current_height={}, target_height={}, is_ibd={}", current_height, target_height, is_ibd);
         
         if is_ibd {
-            info!("[START_COMPONENTS] Detected IBD (height: {}), checking for parallel IBD support...", current_height);
-            
-            // Get connected peers for parallel IBD
-            info!("[START_COMPONENTS] Getting peer addresses...");
-            let peer_addresses: Vec<String> = self.network
-                .peer_addresses()
-                .iter()
-                .map(|addr| addr.to_string())
-                .collect();
+            info!("[START_COMPONENTS] Need to sync (height {} < target {}), checking for parallel IBD support...", current_height, target_height);
             
             info!("[START_COMPONENTS] IBD: Found {} peer addresses: {:?}", peer_addresses.len(), peer_addresses);
             
-            // Allow 1 peer when BLVM_IBD_PREFERRED_PEERS is set (e.g. LAN-only IBD)
-            let min_peers = if std::env::var("BLVM_IBD_PREFERRED_PEERS").map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            // Allow 1 peer when BLVM_IBD_PEERS is set (e.g. LAN-only IBD)
+            let min_peers = if std::env::var("BLVM_IBD_PEERS")
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+            {
                 1
             } else {
                 2
@@ -470,29 +541,13 @@ impl Node {
             if peer_addresses.len() >= min_peers {
                 info!("[START_COMPONENTS] Attempting parallel IBD with {} peers", peer_addresses.len());
                 
-                // Get target height from peer's start_height (best block height from Version messages)
-                // Use the highest reported height from all connected peers
-                info!("[START_COMPONENTS] Getting highest peer start_height...");
-                let target_height = match self.network.get_highest_peer_start_height() {
-                    Some(peer_height) => {
-                        info!("[START_COMPONENTS] Using peer-reported chain tip height: {} (current: {})", peer_height, current_height);
-                        peer_height.max(current_height) // Ensure target is at least current height
-                    }
-                    None => {
-                        // Fallback: if no peers have reported start_height yet, use a large number
-                        // The iterative header sync will stop when it reaches the actual chain tip
-                        warn!("[START_COMPONENTS] No peer start_height available yet, using fallback target height");
-                        current_height + 1_000_000
-                    }
-                };
-                
                 info!("[START_COMPONENTS] Starting parallel IBD: current_height={}, target_height={}", current_height, target_height);
                 
-                // Attempt parallel IBD
+                // Attempt parallel IBD (initial_utxo_set is snapshot when AssumeUTXO loaded, else empty)
                 let blockstore = Arc::clone(&self.storage.blocks());
                 let storage_arc = Arc::clone(&self.storage);
                 let protocol_arc = Arc::clone(&self.protocol);
-                let mut utxo_set = blvm_protocol::UtxoSet::default();
+                let mut utxo_set = initial_utxo_set;
                 
                 info!("[START_COMPONENTS] Calling sync_coordinator.start_parallel_ibd()...");
                 match self.sync_coordinator.start_parallel_ibd(
@@ -961,6 +1016,7 @@ impl Node {
                     if config.network_timing.is_some() {
                         changed_sections.push("network_timing".to_string());
                     }
+                    #[cfg(feature = "governance")]
                     if config.governance.is_some() {
                         changed_sections.push("governance".to_string());
                     }

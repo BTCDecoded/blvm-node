@@ -26,6 +26,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 blvm-protocol = { path = "../blvm-protocol" }
 # Direct dependency on blvm-consensus for CTV feature (CTV functions not re-exported by protocol)
 blvm-consensus = { path = "../blvm-consensus", optional = true }
+# MuHash3072 for AssumeUTXO (Core-compatible gettxoutsetinfo / hash_serialized)
+blvm-muhash = { path = "../blvm-muhash" }
 
 # Storage layer - EXACT VERSIONS for security
 sled = { version = "=0.34.7", optional = true }
@@ -53,7 +55,7 @@ uuid = { version = "=1.6.0", features = ["v4"] }
 toml = "=0.8.2"
 
 # Cryptography - use local fork (same as blvm-consensus/blvm-protocol)
-secp256k1 = { path = "../secp256k1-fork" }
+secp256k1 = "0.28"
 sha2 = "=0.10.9"
 ripemd = "=0.1.3"
 hex = "=0.4.3"
@@ -172,9 +174,8 @@ rustls = { version = "0.21", optional = true }
 # iroh 0.95 uses actively maintained dependencies and fixes all known security issues.
 
 [features]
-default = ["sysinfo", "rocksdb", "redb", "nix", "libc", "production", "governance", "zmq"]
+default = ["sysinfo", "rocksdb", "redb", "nix", "libc", "production", "governance", "zmq", "utxo-commitments"]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
-# Note: utxo-commitments removed from default - it's experimental only
 iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls"]
 utxo-commitments = ["blvm-protocol/utxo-commitments"]

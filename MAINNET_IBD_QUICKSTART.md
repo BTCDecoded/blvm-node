@@ -80,7 +80,6 @@ watch -n 5 'curl -s -X POST http://localhost:8332 \
 ## 📈 Expected Timeline
 
 - **With parallel IBD (2-4 peers)**: 2-4 hours
-- **With sequential sync (1 peer)**: 8-12 hours
 - **Storage**: Will stabilize at ~13GB after 288 blocks
 
 ## ✅ Verification

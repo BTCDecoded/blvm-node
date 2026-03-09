@@ -869,8 +869,23 @@ mod tests {
         mempool.add_transaction(tx2);
         mempool.add_transaction(tx3);
 
-        let empty_utxo_set = blvm_protocol::UtxoSet::default();
-        let selected = selector.select_transactions(&mempool, &empty_utxo_set);
+        // UTXO set must contain inputs for fee calculation (create_test_transaction uses [0;32], index 0)
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        let outpoint = blvm_protocol::OutPoint {
+            hash: [0u8; 32],
+            index: 0,
+        };
+        utxo_set.insert(
+            outpoint,
+            std::sync::Arc::new(blvm_protocol::UTXO {
+                value: 100_000_000, // 1 BTC - enough for all test tx outputs
+                script_pubkey: vec![0x51].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+
+        let selected = selector.select_transactions(&mempool, &utxo_set);
         assert!(!selected.is_empty());
         assert!(selected.len() <= 3);
     }

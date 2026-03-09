@@ -32,6 +32,31 @@ impl BitcoinCoreNetwork {
     }
 }
 
+impl std::str::FromStr for BitcoinCoreNetwork {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "mainnet" => Ok(BitcoinCoreNetwork::Mainnet),
+            "testnet" => Ok(BitcoinCoreNetwork::Testnet),
+            "regtest" => Ok(BitcoinCoreNetwork::Regtest),
+            "signet" => Ok(BitcoinCoreNetwork::Signet),
+            _ => Err(format!("Unknown network: {}", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for BitcoinCoreNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BitcoinCoreNetwork::Mainnet => write!(f, "mainnet"),
+            BitcoinCoreNetwork::Testnet => write!(f, "testnet"),
+            BitcoinCoreNetwork::Regtest => write!(f, "regtest"),
+            BitcoinCoreNetwork::Signet => write!(f, "signet"),
+        }
+    }
+}
+
 /// Bitcoin Core detection utilities
 pub struct BitcoinCoreDetection;
 

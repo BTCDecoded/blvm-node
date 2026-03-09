@@ -1050,6 +1050,11 @@ impl RpcServer {
                 .get_txoutset_info()
                 .await
                 .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+            "loadtxoutset" => self
+                .blockchain
+                .load_txout_set(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
             "verifychain" => {
                 let checklevel = params.get(0).and_then(|p| p.as_u64());
                 let numblocks = params.get(1).and_then(|p| p.as_u64());
@@ -1472,6 +1477,7 @@ impl RpcServer {
             "getblockcount",
             "getdifficulty",
             "gettxoutsetinfo",
+            "loadtxoutset",
             "verifychain",
             "getchaintips",
             "getchaintxstats",

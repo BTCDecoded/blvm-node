@@ -322,13 +322,19 @@ pub fn create_database<P: AsRef<Path>>(
             "Sled backend not available (feature not enabled)"
         )),
         #[cfg(feature = "redb")]
-        DatabaseBackend::Redb => Ok(Box::new(redb_impl::RedbDatabase::new(data_dir)?)),
+        DatabaseBackend::Redb => Ok(Box::new(redb_impl::RedbDatabase::new(
+            data_dir,
+            storage_config,
+        )?)),
         #[cfg(not(feature = "redb"))]
         DatabaseBackend::Redb => Err(anyhow::anyhow!(
             "Redb backend not available (feature not enabled)"
         )),
         #[cfg(feature = "rocksdb")]
-        DatabaseBackend::RocksDB => Ok(Box::new(rocksdb_impl::RocksDBDatabase::new(data_dir)?)),
+        DatabaseBackend::RocksDB => Ok(Box::new(rocksdb_impl::RocksDBDatabase::new(
+            data_dir,
+            storage_config,
+        )?)),
         #[cfg(not(feature = "rocksdb"))]
         DatabaseBackend::RocksDB => Err(anyhow::anyhow!(
             "RocksDB backend not available (feature not enabled)"
@@ -641,7 +647,10 @@ mod redb_impl {
     }
 
     impl RedbDatabase {
-        pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+        pub fn new<P: AsRef<Path>>(
+            data_dir: P,
+            storage_config: Option<&crate::config::StorageConfig>,
+        ) -> Result<Self> {
             use std::sync::Mutex;
             // Global mutex to serialize database creation (prevents lock conflicts in tests)
             static DB_CREATE_MUTEX: Mutex<()> = Mutex::new(());
@@ -649,10 +658,14 @@ mod redb_impl {
             let _guard = DB_CREATE_MUTEX.lock().unwrap();
             tracing::info!("[REDB] DB_CREATE_MUTEX acquired");
 
-            // redb cache size: BLVM_DBCACHE_MB env (default 450, matches Core -dbcache)
-            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
-                .ok()
-                .and_then(|s| s.parse().ok())
+            // redb cache size: config > env BLVM_DBCACHE_MB > default 450 (matches Core -dbcache)
+            let dbcache_mb: usize = storage_config
+                .map(|s| s.dbcache_mb)
+                .or_else(|| {
+                    std::env::var("BLVM_DBCACHE_MB")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                })
                 .unwrap_or(450);
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let mut builder = RedbDb::builder();
@@ -1095,7 +1108,10 @@ pub mod rocksdb_impl {
 
     impl RocksDBDatabase {
         /// Create a new RocksDB database
-        pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+        pub fn new<P: AsRef<Path>>(
+            data_dir: P,
+            storage_config: Option<&crate::config::StorageConfig>,
+        ) -> Result<Self> {
             let db_path = data_dir.as_ref().join("rocksdb");
             let mut opts = Options::default();
             opts.create_if_missing(true);
@@ -1128,7 +1144,13 @@ pub mod rocksdb_impl {
                         .unwrap_or(16)
                 }
                 #[cfg(not(target_os = "linux"))]
-                { 16u64 }
+                {
+                    // Windows/macOS: no /proc. Use BLVM_RAM_GB env override or default 16GB.
+                    std::env::var("BLVM_RAM_GB")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(16)
+                }
             };
 
             // Each compaction thread holds ~64MB of input/output buffers in memory.
@@ -1154,9 +1176,13 @@ pub mod rocksdb_impl {
             tracing::info!("[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={} write_buffer={}MB (ram={}GB)",
                 parallelism, max_compactions, max_flushes, level0_trigger, db_write_buffer_mb, total_ram_gb);
 
-            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
-                .ok()
-                .and_then(|s| s.parse().ok())
+            let dbcache_mb: usize = storage_config
+                .map(|s| s.dbcache_mb)
+                .or_else(|| {
+                    std::env::var("BLVM_DBCACHE_MB")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                })
                 .unwrap_or(default_block_cache);
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let cache = Cache::new_lru_cache(dbcache_bytes);

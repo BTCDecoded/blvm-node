@@ -189,8 +189,11 @@ impl SyncCoordinator {
         use crate::node::parallel_ibd::{ParallelIBD, ParallelIBDConfig};
 
         // Check if we have enough peers for parallel IBD.
-        // Allow 1 peer when BLVM_IBD_PREFERRED_PEERS is set (e.g. LAN-only IBD).
-        let min_peers = if std::env::var("BLVM_IBD_PREFERRED_PEERS").map(|s| !s.trim().is_empty()).unwrap_or(false) {
+        // Allow 1 peer when BLVM_IBD_PEERS is set (e.g. LAN-only IBD).
+        let min_peers = if std::env::var("BLVM_IBD_PEERS")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
             1
         } else {
             2
@@ -546,12 +549,22 @@ impl MockBlockProvider {
 
 /// Run UTXO commitments initial sync
 ///
-/// Orchestrates the consensus initial sync algorithm using the node's network manager.
-/// This function wires together:
-/// - Network client (UtxoCommitmentsClient)
-/// - Peer information from network manager
-/// - Header chain from storage
-/// - Consensus initial sync algorithm
+/// Fetches the UTXO commitment from peers via consensus. Used when the node wants to
+/// verify its locally-generated commitment against network consensus, or when starting
+/// with an existing chain (non-IBD) and needs the current commitment.
+///
+/// **When to call:**
+/// - After IBD completes: spawn as background task to verify commitment matches peers
+/// - On startup with existing chain: if commitment store is empty, fetch from peers
+///
+/// **Requirements:**
+/// - `headers`: Header chain from genesis to tip (from storage blockstore/chain)
+/// - `peers`: Vec of (PeerInfo, peer_id) — build from `network.peer_socket_addresses()`
+///   with `PeerInfo { address: addr.ip(), asn: None, country: None, implementation: None,
+///   subnet: PeerInfo::extract_subnet(addr.ip()) }` and peer_id e.g. `format!("tcp:{}", addr)`
+///
+/// **Entry point:** Not yet wired. Call from `node/mod.rs` after IBD or on startup.
+/// See `docs/UTXO_COMMITMENTS_IBD_INTEGRATION.md`.
 #[cfg(feature = "utxo-commitments")]
 pub async fn run_utxo_commitments_initial_sync(
     network_manager: std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>,
