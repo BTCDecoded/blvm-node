@@ -5,7 +5,9 @@
 
 use anyhow::{Context, Result};
 use blvm_node::storage::bitcoin_core_detection::{BitcoinCoreDetection, BitcoinCoreNetwork};
-use blvm_node::storage::bitcoin_core_format::{parse_coin, parse_block_index, convert_key, get_key_prefix};
+use blvm_node::storage::bitcoin_core_format::{
+    convert_key, get_key_prefix, parse_block_index, parse_coin,
+};
 use blvm_node::storage::bitcoin_core_storage::BitcoinCoreStorage;
 use blvm_node::storage::database::{create_database, DatabaseBackend};
 use blvm_protocol::{Hash, UTXO};
@@ -48,24 +50,31 @@ fn main() -> Result<()> {
     let core_dir = if let Some(dir) = args.source {
         PathBuf::from(dir)
     } else {
-        BitcoinCoreDetection::detect_data_dir(args.network)?
-            .ok_or_else(|| anyhow::anyhow!("Bitcoin Core data directory not found. Use --source to specify path."))?
+        BitcoinCoreDetection::detect_data_dir(args.network)?.ok_or_else(|| {
+            anyhow::anyhow!("Bitcoin Core data directory not found. Use --source to specify path.")
+        })?
     };
 
     if !core_dir.exists() {
-        return Err(anyhow::anyhow!("Source directory does not exist: {:?}", core_dir));
+        return Err(anyhow::anyhow!(
+            "Source directory does not exist: {:?}",
+            core_dir
+        ));
     }
 
     // Verify Bitcoin Core database format
     let chainstate = core_dir.join("chainstate");
-    if !BitcoinCoreDetection::detect_db_format(&chainstate).is_ok() {
-        return Err(anyhow::anyhow!("Invalid Bitcoin Core database format in {:?}", chainstate));
+    if BitcoinCoreDetection::detect_db_format(&chainstate).is_err() {
+        return Err(anyhow::anyhow!(
+            "Invalid Bitcoin Core database format in {:?}",
+            chainstate
+        ));
     }
 
     // Create destination directory
     let dest_dir = PathBuf::from(args.destination);
     std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("Failed to create destination directory: {:?}", dest_dir))?;
+        .with_context(|| format!("Failed to create destination directory: {dest_dir:?}"))?;
 
     // Run migration
     let migrator = Migrator::new(&core_dir, &dest_dir, args.network)?;
@@ -102,8 +111,8 @@ struct Args {
 
 struct Migrator {
     source_dir: PathBuf,
-    dest_dir: PathBuf,
-    network: BitcoinCoreNetwork,
+    _dest_dir: PathBuf,
+    _network: BitcoinCoreNetwork,
     source_db: Arc<dyn blvm_node::storage::database::Database>,
     dest_db: Arc<dyn blvm_node::storage::database::Database>,
     progress: Arc<MigrationProgress>,
@@ -120,9 +129,9 @@ impl Migrator {
     fn new(source_dir: &Path, dest_dir: &Path, network: BitcoinCoreNetwork) -> Result<Self> {
         // Open source database (Bitcoin Core LevelDB via RocksDB)
         info!("Opening source database...");
-        let source_db = Arc::from(
-            BitcoinCoreStorage::open_bitcoin_core_database(source_dir, network)?
-        );
+        let source_db = Arc::from(BitcoinCoreStorage::open_bitcoin_core_database(
+            source_dir, network,
+        )?);
 
         // Create destination database (redb)
         info!("Creating destination database...");
@@ -137,8 +146,8 @@ impl Migrator {
 
         Ok(Self {
             source_dir: source_dir.to_path_buf(),
-            dest_dir: dest_dir.to_path_buf(),
-            network,
+            _dest_dir: dest_dir.to_path_buf(),
+            _network: network,
             source_db,
             dest_db,
             progress,
@@ -174,7 +183,7 @@ impl Migrator {
 
         // Open source chainstate tree (Bitcoin Core uses "default" column family)
         let source_tree = self.source_db.open_tree("default")?;
-        
+
         // Open destination UTXO tree
         let dest_tree = self.dest_db.open_tree("utxos")?;
 
@@ -187,38 +196,33 @@ impl Migrator {
             let (key, value) = item?;
 
             // Check key prefix
-            if let Some(prefix) = get_key_prefix(&key) {
-                match prefix {
-                    b'c' => {
-                        // Coin (UTXO) entry
-                        let coin_key = convert_key(&key)?;
-                        
-                        // Parse Bitcoin Core coin format
-                        let coin = parse_coin(&value)?;
-                        
-                        // Convert to BLVM UTXO format
-                        // Note: This is a simplified conversion - may need adjustment
-                        let blvm_utxo = bincode::serialize(&UTXO {
-                            value: coin.amount as i64,
-                            script_pubkey: coin.script.into(),
-                            height: coin.height as u64,
-                            is_coinbase: coin.is_coinbase,
-                        })?;
+            if let Some(b'c') = get_key_prefix(&key) {
+                // Coin (UTXO) entry
+                let coin_key = convert_key(&key)?;
 
-                        batch.push((coin_key, blvm_utxo));
+                // Parse Bitcoin Core coin format
+                let coin = parse_coin(&value)?;
 
-                        if batch.len() >= BATCH_SIZE {
-                            self.flush_batch(dest_tree.as_ref(), &mut batch)?;
-                            count += BATCH_SIZE;
-                            self.progress.coins_migrated.store(count as u64, Ordering::Relaxed);
-                            
-                            if count % 10000 == 0 {
-                                info!("Migrated {} UTXOs...", count);
-                            }
-                        }
-                    }
-                    _ => {
-                        // Skip other key types for now
+                // Convert to BLVM UTXO format
+                // Note: This is a simplified conversion - may need adjustment
+                let blvm_utxo = bincode::serialize(&UTXO {
+                    value: coin.amount as i64,
+                    script_pubkey: coin.script.into(),
+                    height: coin.height as u64,
+                    is_coinbase: coin.is_coinbase,
+                })?;
+
+                batch.push((coin_key, blvm_utxo));
+
+                if batch.len() >= BATCH_SIZE {
+                    self.flush_batch(dest_tree.as_ref(), &mut batch)?;
+                    count += BATCH_SIZE;
+                    self.progress
+                        .coins_migrated
+                        .store(count as u64, Ordering::Relaxed);
+
+                    if count % 10000 == 0 {
+                        info!("Migrated {} UTXOs...", count);
                     }
                 }
             }
@@ -230,7 +234,9 @@ impl Migrator {
             count += batch.len();
         }
 
-        self.progress.coins_migrated.store(count as u64, Ordering::Relaxed);
+        self.progress
+            .coins_migrated
+            .store(count as u64, Ordering::Relaxed);
         info!("Migrated {} UTXOs", count);
         Ok(())
     }
@@ -250,12 +256,13 @@ impl Migrator {
                 if prefix == b'b' {
                     // Block index entry
                     let block_index = parse_block_index(&value)?;
-                    
+
                     // Store height -> hash mapping
                     let height_key = block_index.height.to_be_bytes();
-                    let block_hash: Hash = convert_key(&key)?.try_into()
+                    let block_hash: Hash = convert_key(&key)?
+                        .try_into()
                         .map_err(|_| anyhow::anyhow!("Invalid block hash length"))?;
-                    
+
                     dest_tree.insert(&height_key, &block_hash)?;
                     count += 1;
 
@@ -266,7 +273,9 @@ impl Migrator {
             }
         }
 
-        self.progress.block_indexes_migrated.store(count, Ordering::Relaxed);
+        self.progress
+            .block_indexes_migrated
+            .store(count, Ordering::Relaxed);
         info!("Migrated {} block indexes", count);
         Ok(())
     }
@@ -315,7 +324,10 @@ impl Migrator {
             ));
         }
 
-        info!("Verification passed: {} UTXOs migrated correctly", dest_count);
+        info!(
+            "Verification passed: {} UTXOs migrated correctly",
+            dest_count
+        );
         Ok(())
     }
 
@@ -331,8 +343,10 @@ impl Migrator {
         info!("Block indexes migrated: {}", indexes);
         info!("Blocks migrated: {}", blocks);
         if elapsed.as_secs() > 0 {
-            info!("Rate: {:.2} UTXOs/second", coins as f64 / elapsed.as_secs() as f64);
+            info!(
+                "Rate: {:.2} UTXOs/second",
+                coins as f64 / elapsed.as_secs() as f64
+            );
         }
     }
 }
-

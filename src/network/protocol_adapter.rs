@@ -1,6 +1,6 @@
 //! Protocol adapter for Bitcoin message serialization
 //!
-//! Handles conversion between consensus-proof NetworkMessage types and
+//! Handles conversion between blvm-consensus NetworkMessage types and
 //! transport-specific wire formats (TCP Bitcoin P2P vs Iroh message format).
 
 use crate::network::transport::TransportType;
@@ -49,11 +49,11 @@ fn calculate_message_cache_key(msg: &ConsensusNetworkMessage, transport: Transpo
 
 /// Protocol adapter for Bitcoin messages
 ///
-/// Converts between consensus-proof message types and transport wire formats.
+/// Converts between blvm-consensus message types and transport wire formats.
 pub struct ProtocolAdapter;
 
 impl ProtocolAdapter {
-    /// Serialize a consensus-proof NetworkMessage to transport format
+    /// Serialize a blvm-consensus NetworkMessage to transport format
     ///
     /// For TCP transport, uses Bitcoin P2P wire protocol format.
     /// For Iroh transport, uses a simplified message format.
@@ -111,7 +111,7 @@ impl ProtocolAdapter {
         }
     }
 
-    /// Deserialize transport bytes to consensus-proof NetworkMessage
+    /// Deserialize transport bytes to blvm-consensus NetworkMessage
     pub fn deserialize_message(
         data: &[u8],
         transport: TransportType,
@@ -132,7 +132,7 @@ impl ProtocolAdapter {
     ///
     /// Format: [magic:4][command:12][length:4][checksum:4][payload:var]
     fn serialize_bitcoin_wire_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
-        // Convert consensus-proof message to protocol message
+        // Convert blvm-consensus message to protocol message
         let protocol_msg = Self::consensus_to_protocol_message(msg)?;
 
         // Serialize payload
@@ -229,7 +229,7 @@ impl ProtocolAdapter {
         // Parse using existing protocol parser
         let protocol_msg = ProtocolParser::parse_message(data)?;
 
-        // Convert to consensus-proof message
+        // Convert to blvm-consensus message
         Self::protocol_to_consensus_message(&protocol_msg)
     }
 
@@ -258,7 +258,7 @@ impl ProtocolAdapter {
         Self::protocol_to_consensus_message(&protocol_msg)
     }
 
-    /// Convert consensus-proof message to protocol message
+    /// Convert blvm-consensus message to protocol message
     fn consensus_to_protocol_message(
         msg: &ConsensusNetworkMessage,
     ) -> Result<crate::network::protocol::ProtocolMessage> {
@@ -303,7 +303,7 @@ impl ProtocolAdapter {
         }
     }
 
-    /// Convert protocol message to consensus-proof message
+    /// Convert protocol message to blvm-consensus message
     pub fn protocol_to_consensus_message(
         msg: &crate::network::protocol::ProtocolMessage,
     ) -> Result<ConsensusNetworkMessage> {

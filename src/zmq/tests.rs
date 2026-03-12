@@ -1,7 +1,7 @@
 //! Tests for ZMQ notification publisher
 
 #[cfg(all(test, feature = "zmq"))]
-mod tests {
+mod zmq_tests {
     use crate::zmq::{ZmqConfig, ZmqPublisher};
     use blvm_protocol::{Block, Hash, Transaction};
     use std::time::Duration;

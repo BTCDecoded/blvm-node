@@ -107,14 +107,10 @@ impl BlockStore {
     /// Create a new block store with compression settings
     pub fn new_with_compression(
         db: Arc<dyn Database>,
-        #[cfg(feature = "block-compression")]
-        block_compression_enabled: bool,
-        #[cfg(feature = "block-compression")]
-        block_compression_level: u32,
-        #[cfg(feature = "witness-compression")]
-        witness_compression_enabled: bool,
-        #[cfg(feature = "witness-compression")]
-        witness_compression_level: u32,
+        #[cfg(feature = "block-compression")] block_compression_enabled: bool,
+        #[cfg(feature = "block-compression")] block_compression_level: u32,
+        #[cfg(feature = "witness-compression")] witness_compression_enabled: bool,
+        #[cfg(feature = "witness-compression")] witness_compression_level: u32,
     ) -> Result<Self> {
         Self::new_with_compression_and_reader(
             db,
@@ -134,16 +130,13 @@ impl BlockStore {
     /// Create a new block store with compression settings and optional block file reader
     fn new_with_compression_and_reader(
         db: Arc<dyn Database>,
-        #[cfg(feature = "block-compression")]
-        block_compression_enabled: bool,
-        #[cfg(feature = "block-compression")]
-        block_compression_level: u32,
-        #[cfg(feature = "witness-compression")]
-        witness_compression_enabled: bool,
-        #[cfg(feature = "witness-compression")]
-        witness_compression_level: u32,
-        #[cfg(feature = "rocksdb")]
-        bitcoin_core_reader: Option<Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>>,
+        #[cfg(feature = "block-compression")] block_compression_enabled: bool,
+        #[cfg(feature = "block-compression")] block_compression_level: u32,
+        #[cfg(feature = "witness-compression")] witness_compression_enabled: bool,
+        #[cfg(feature = "witness-compression")] witness_compression_level: u32,
+        #[cfg(feature = "rocksdb")] bitcoin_core_reader: Option<
+            Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>,
+        >,
     ) -> Result<Self> {
         let blocks = Arc::from(db.open_tree("blocks")?);
         let headers = Arc::from(db.open_tree("headers")?);
@@ -193,7 +186,7 @@ impl BlockStore {
         let data_to_store = block_data;
 
         self.blocks.insert(block_hash.as_slice(), &data_to_store)?;
-        
+
         // Store header (never compressed - small and frequently accessed)
         let header_data = bincode::serialize(&block.header)?;
         self.headers.insert(block_hash.as_slice(), &header_data)?;
@@ -410,27 +403,27 @@ impl BlockStore {
         if entries.is_empty() {
             return Ok(());
         }
-        
+
         // Create batch writers for each tree
         let mut headers_batch = self.headers.batch();
         let mut heights_batch = self.height_index.batch();
         let mut hash_to_height_batch = self.hash_to_height.batch();
-        
+
         // Pre-serialize and add to batches
         for (hash, header, height) in entries {
             let header_data = bincode::serialize(header)?;
             let height_bytes = height.to_be_bytes();
-            
+
             headers_batch.put(hash.as_slice(), &header_data);
             heights_batch.put(&height_bytes, hash.as_slice());
             hash_to_height_batch.put(hash.as_slice(), &height_bytes);
         }
-        
+
         // Commit all batches atomically
         headers_batch.commit()?;
         heights_batch.commit()?;
         hash_to_height_batch.commit()?;
-        
+
         Ok(())
     }
 
@@ -507,12 +500,12 @@ impl BlockStore {
         // Serialize block header for hashing (80 bytes total)
         // CRITICAL: Must use 4-byte types for version/timestamp/bits/nonce (Bitcoin wire format)
         let mut header_data = [0u8; 80];
-        header_data[0..4].copy_from_slice(&(block.header.version as i32).to_le_bytes());    // 4 bytes
-        header_data[4..36].copy_from_slice(&block.header.prev_block_hash);                   // 32 bytes
-        header_data[36..68].copy_from_slice(&block.header.merkle_root);                      // 32 bytes
+        header_data[0..4].copy_from_slice(&(block.header.version as i32).to_le_bytes()); // 4 bytes
+        header_data[4..36].copy_from_slice(&block.header.prev_block_hash); // 32 bytes
+        header_data[36..68].copy_from_slice(&block.header.merkle_root); // 32 bytes
         header_data[68..72].copy_from_slice(&(block.header.timestamp as u32).to_le_bytes()); // 4 bytes
-        header_data[72..76].copy_from_slice(&(block.header.bits as u32).to_le_bytes());      // 4 bytes
-        header_data[76..80].copy_from_slice(&(block.header.nonce as u32).to_le_bytes());     // 4 bytes
+        header_data[72..76].copy_from_slice(&(block.header.bits as u32).to_le_bytes()); // 4 bytes
+        header_data[76..80].copy_from_slice(&(block.header.nonce as u32).to_le_bytes()); // 4 bytes
 
         // Calculate Bitcoin double SHA256 hash
         double_sha256(&header_data)

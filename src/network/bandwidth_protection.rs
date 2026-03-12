@@ -11,7 +11,7 @@
 //!
 //! Provides per-peer, per-IP, and per-subnet bandwidth limits for each service type.
 
-use crate::network::ibd_protection::{IbdProtectionManager, IbdProtectionConfig};
+use crate::network::ibd_protection::{IbdProtectionConfig, IbdProtectionManager};
 use crate::utils::current_timestamp;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -68,11 +68,11 @@ impl Default for ServiceLimits {
     fn default() -> Self {
         Self {
             max_bandwidth_per_peer_per_day: 10 * 1024 * 1024 * 1024, // 10 GB/day
-            max_bandwidth_per_peer_per_hour: 2 * 1024 * 1024 * 1024,  // 2 GB/hour
-            max_bandwidth_per_ip_per_day: 20 * 1024 * 1024 * 1024,    // 20 GB/day
-            max_bandwidth_per_ip_per_hour: 4 * 1024 * 1024 * 1024,     // 4 GB/hour
+            max_bandwidth_per_peer_per_hour: 2 * 1024 * 1024 * 1024, // 2 GB/hour
+            max_bandwidth_per_ip_per_day: 20 * 1024 * 1024 * 1024,   // 20 GB/day
+            max_bandwidth_per_ip_per_hour: 4 * 1024 * 1024 * 1024,   // 4 GB/hour
             max_bandwidth_per_subnet_per_day: 100 * 1024 * 1024 * 1024, // 100 GB/day
-            max_bandwidth_per_subnet_per_hour: 20 * 1024 * 1024 * 1024,  // 20 GB/hour
+            max_bandwidth_per_subnet_per_hour: 20 * 1024 * 1024 * 1024, // 20 GB/hour
             max_requests_per_hour: None,
             cpu_time_limit_ms: None,
         }
@@ -169,9 +169,11 @@ pub struct BandwidthProtectionManager {
     /// Per-IP service bandwidth tracking
     ip_service_bandwidth: Arc<Mutex<HashMap<(IpAddr, ServiceType), ServiceBandwidthTracker>>>,
     /// Per-subnet service bandwidth tracking (IPv4 /24)
-    ipv4_subnet_service_bandwidth: Arc<Mutex<HashMap<([u8; 3], ServiceType), ServiceBandwidthTracker>>>,
+    ipv4_subnet_service_bandwidth:
+        Arc<Mutex<HashMap<([u8; 3], ServiceType), ServiceBandwidthTracker>>>,
     /// Per-subnet service bandwidth tracking (IPv6 /64)
-    ipv6_subnet_service_bandwidth: Arc<Mutex<HashMap<([u8; 8], ServiceType), ServiceBandwidthTracker>>>,
+    ipv6_subnet_service_bandwidth:
+        Arc<Mutex<HashMap<([u8; 8], ServiceType), ServiceBandwidthTracker>>>,
 }
 
 impl BandwidthProtectionManager {
@@ -180,71 +182,89 @@ impl BandwidthProtectionManager {
         let mut service_limits = HashMap::new();
 
         // Set default limits for each service
-        service_limits.insert(ServiceType::Filters, ServiceLimits {
-            max_bandwidth_per_peer_per_day: 5 * 1024 * 1024 * 1024,  // 5 GB/day
-            max_bandwidth_per_peer_per_hour: 1 * 1024 * 1024 * 1024,  // 1 GB/hour
-            max_bandwidth_per_ip_per_day: 10 * 1024 * 1024 * 1024,   // 10 GB/day
-            max_bandwidth_per_ip_per_hour: 2 * 1024 * 1024 * 1024,   // 2 GB/hour
-            max_bandwidth_per_subnet_per_day: 50 * 1024 * 1024 * 1024, // 50 GB/day
-            max_bandwidth_per_subnet_per_hour: 10 * 1024 * 1024 * 1024, // 10 GB/hour
-            max_requests_per_hour: Some(50),
-            cpu_time_limit_ms: Some(100), // 100ms CPU time limit for filter generation
-        });
+        service_limits.insert(
+            ServiceType::Filters,
+            ServiceLimits {
+                max_bandwidth_per_peer_per_day: 5 * 1024 * 1024 * 1024, // 5 GB/day
+                max_bandwidth_per_peer_per_hour: 1024 * 1024 * 1024,    // 1 GB/hour
+                max_bandwidth_per_ip_per_day: 10 * 1024 * 1024 * 1024,  // 10 GB/day
+                max_bandwidth_per_ip_per_hour: 2 * 1024 * 1024 * 1024,  // 2 GB/hour
+                max_bandwidth_per_subnet_per_day: 50 * 1024 * 1024 * 1024, // 50 GB/day
+                max_bandwidth_per_subnet_per_hour: 10 * 1024 * 1024 * 1024, // 10 GB/hour
+                max_requests_per_hour: Some(50),
+                cpu_time_limit_ms: Some(100), // 100ms CPU time limit for filter generation
+            },
+        );
 
-        service_limits.insert(ServiceType::PackageRelay, ServiceLimits {
-            max_bandwidth_per_peer_per_day: 10 * 1024 * 1024 * 1024,  // 10 GB/day
-            max_bandwidth_per_peer_per_hour: 2 * 1024 * 1024 * 1024,  // 2 GB/hour
-            max_bandwidth_per_ip_per_day: 20 * 1024 * 1024 * 1024,    // 20 GB/day
-            max_bandwidth_per_ip_per_hour: 4 * 1024 * 1024 * 1024,    // 4 GB/hour
-            max_bandwidth_per_subnet_per_day: 100 * 1024 * 1024 * 1024, // 100 GB/day
-            max_bandwidth_per_subnet_per_hour: 20 * 1024 * 1024 * 1024, // 20 GB/hour
-            max_requests_per_hour: Some(100),
-            cpu_time_limit_ms: None,
-        });
+        service_limits.insert(
+            ServiceType::PackageRelay,
+            ServiceLimits {
+                max_bandwidth_per_peer_per_day: 10 * 1024 * 1024 * 1024, // 10 GB/day
+                max_bandwidth_per_peer_per_hour: 2 * 1024 * 1024 * 1024, // 2 GB/hour
+                max_bandwidth_per_ip_per_day: 20 * 1024 * 1024 * 1024,   // 20 GB/day
+                max_bandwidth_per_ip_per_hour: 4 * 1024 * 1024 * 1024,   // 4 GB/hour
+                max_bandwidth_per_subnet_per_day: 100 * 1024 * 1024 * 1024, // 100 GB/day
+                max_bandwidth_per_subnet_per_hour: 20 * 1024 * 1024 * 1024, // 20 GB/hour
+                max_requests_per_hour: Some(100),
+                cpu_time_limit_ms: None,
+            },
+        );
 
-        service_limits.insert(ServiceType::UtxoSet, ServiceLimits {
-            max_bandwidth_per_peer_per_day: 50 * 1024 * 1024 * 1024,  // 50 GB/day (full UTXO set is huge)
-            max_bandwidth_per_peer_per_hour: 10 * 1024 * 1024 * 1024, // 10 GB/hour
-            max_bandwidth_per_ip_per_day: 100 * 1024 * 1024 * 1024,  // 100 GB/day
-            max_bandwidth_per_ip_per_hour: 20 * 1024 * 1024 * 1024,  // 20 GB/hour
-            max_bandwidth_per_subnet_per_day: 500 * 1024 * 1024 * 1024, // 500 GB/day
-            max_bandwidth_per_subnet_per_hour: 100 * 1024 * 1024 * 1024, // 100 GB/hour
-            max_requests_per_hour: Some(1), // Very restrictive - full UTXO set is expensive
-            cpu_time_limit_ms: None,
-        });
+        service_limits.insert(
+            ServiceType::UtxoSet,
+            ServiceLimits {
+                max_bandwidth_per_peer_per_day: 50 * 1024 * 1024 * 1024, // 50 GB/day (full UTXO set is huge)
+                max_bandwidth_per_peer_per_hour: 10 * 1024 * 1024 * 1024, // 10 GB/hour
+                max_bandwidth_per_ip_per_day: 100 * 1024 * 1024 * 1024,  // 100 GB/day
+                max_bandwidth_per_ip_per_hour: 20 * 1024 * 1024 * 1024,  // 20 GB/hour
+                max_bandwidth_per_subnet_per_day: 500 * 1024 * 1024 * 1024, // 500 GB/day
+                max_bandwidth_per_subnet_per_hour: 100 * 1024 * 1024 * 1024, // 100 GB/hour
+                max_requests_per_hour: Some(1), // Very restrictive - full UTXO set is expensive
+                cpu_time_limit_ms: None,
+            },
+        );
 
-        service_limits.insert(ServiceType::FilteredBlocks, ServiceLimits {
-            max_bandwidth_per_peer_per_day: 20 * 1024 * 1024 * 1024,  // 20 GB/day
-            max_bandwidth_per_peer_per_hour: 5 * 1024 * 1024 * 1024,  // 5 GB/hour
-            max_bandwidth_per_ip_per_day: 40 * 1024 * 1024 * 1024,    // 40 GB/day
-            max_bandwidth_per_ip_per_hour: 10 * 1024 * 1024 * 1024,   // 10 GB/hour
-            max_bandwidth_per_subnet_per_day: 200 * 1024 * 1024 * 1024, // 200 GB/day
-            max_bandwidth_per_subnet_per_hour: 50 * 1024 * 1024 * 1024, // 50 GB/hour
-            max_requests_per_hour: Some(200),
-            cpu_time_limit_ms: None,
-        });
+        service_limits.insert(
+            ServiceType::FilteredBlocks,
+            ServiceLimits {
+                max_bandwidth_per_peer_per_day: 20 * 1024 * 1024 * 1024, // 20 GB/day
+                max_bandwidth_per_peer_per_hour: 5 * 1024 * 1024 * 1024, // 5 GB/hour
+                max_bandwidth_per_ip_per_day: 40 * 1024 * 1024 * 1024,   // 40 GB/day
+                max_bandwidth_per_ip_per_hour: 10 * 1024 * 1024 * 1024,  // 10 GB/hour
+                max_bandwidth_per_subnet_per_day: 200 * 1024 * 1024 * 1024, // 200 GB/day
+                max_bandwidth_per_subnet_per_hour: 50 * 1024 * 1024 * 1024, // 50 GB/hour
+                max_requests_per_hour: Some(200),
+                cpu_time_limit_ms: None,
+            },
+        );
 
-        service_limits.insert(ServiceType::ModuleServing, ServiceLimits {
-            max_bandwidth_per_peer_per_day: 100 * 1024 * 1024 * 1024, // 100 GB/day (modules can be large)
-            max_bandwidth_per_peer_per_hour: 20 * 1024 * 1024 * 1024, // 20 GB/hour
-            max_bandwidth_per_ip_per_day: 200 * 1024 * 1024 * 1024,  // 200 GB/day
-            max_bandwidth_per_ip_per_hour: 40 * 1024 * 1024 * 1024,   // 40 GB/hour
-            max_bandwidth_per_subnet_per_day: 1000 * 1024 * 1024 * 1024, // 1000 GB/day
-            max_bandwidth_per_subnet_per_hour: 200 * 1024 * 1024 * 1024, // 200 GB/hour
-            max_requests_per_hour: Some(50),
-            cpu_time_limit_ms: None,
-        });
+        service_limits.insert(
+            ServiceType::ModuleServing,
+            ServiceLimits {
+                max_bandwidth_per_peer_per_day: 100 * 1024 * 1024 * 1024, // 100 GB/day (modules can be large)
+                max_bandwidth_per_peer_per_hour: 20 * 1024 * 1024 * 1024, // 20 GB/hour
+                max_bandwidth_per_ip_per_day: 200 * 1024 * 1024 * 1024,   // 200 GB/day
+                max_bandwidth_per_ip_per_hour: 40 * 1024 * 1024 * 1024,   // 40 GB/hour
+                max_bandwidth_per_subnet_per_day: 1000 * 1024 * 1024 * 1024, // 1000 GB/day
+                max_bandwidth_per_subnet_per_hour: 200 * 1024 * 1024 * 1024, // 200 GB/hour
+                max_requests_per_hour: Some(50),
+                cpu_time_limit_ms: None,
+            },
+        );
 
-        service_limits.insert(ServiceType::TransactionRelay, ServiceLimits {
-            max_bandwidth_per_peer_per_day: 50 * 1024 * 1024 * 1024,  // 50 GB/day
-            max_bandwidth_per_peer_per_hour: 10 * 1024 * 1024 * 1024, // 10 GB/hour
-            max_bandwidth_per_ip_per_day: 50 * 1024 * 1024 * 1024,   // 50 GB/day
-            max_bandwidth_per_ip_per_hour: 10 * 1024 * 1024 * 1024,  // 10 GB/hour
-            max_bandwidth_per_subnet_per_day: 200 * 1024 * 1024 * 1024, // 200 GB/day
-            max_bandwidth_per_subnet_per_hour: 40 * 1024 * 1024 * 1024,  // 40 GB/hour
-            max_requests_per_hour: None, // Transaction relay uses different rate limiting
-            cpu_time_limit_ms: None,
-        });
+        service_limits.insert(
+            ServiceType::TransactionRelay,
+            ServiceLimits {
+                max_bandwidth_per_peer_per_day: 50 * 1024 * 1024 * 1024, // 50 GB/day
+                max_bandwidth_per_peer_per_hour: 10 * 1024 * 1024 * 1024, // 10 GB/hour
+                max_bandwidth_per_ip_per_day: 50 * 1024 * 1024 * 1024,   // 50 GB/day
+                max_bandwidth_per_ip_per_hour: 10 * 1024 * 1024 * 1024,  // 10 GB/hour
+                max_bandwidth_per_subnet_per_day: 200 * 1024 * 1024 * 1024, // 200 GB/day
+                max_bandwidth_per_subnet_per_hour: 40 * 1024 * 1024 * 1024, // 40 GB/hour
+                max_requests_per_hour: None, // Transaction relay uses different rate limiting
+                cpu_time_limit_ms: None,
+            },
+        );
 
         Self {
             ibd_protection,
@@ -265,7 +285,10 @@ impl BandwidthProtectionManager {
         let limits = match self.service_limits.get(&service_type) {
             Some(l) => l,
             None => {
-                warn!("No limits configured for service type {:?}, allowing request", service_type);
+                warn!(
+                    "No limits configured for service type {:?}, allowing request",
+                    service_type
+                );
                 return Ok(true); // No limits = allow
             }
         };
@@ -276,13 +299,17 @@ impl BandwidthProtectionManager {
         {
             let mut peer_bw = self.peer_service_bandwidth.lock().await;
             let key = (peer_addr, service_type);
-            let tracker = peer_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+            let tracker = peer_bw
+                .entry(key)
+                .or_insert_with(ServiceBandwidthTracker::new);
 
             // Check daily limit
             if tracker.get_daily_bytes() >= limits.max_bandwidth_per_peer_per_day {
                 warn!(
                     "Peer {} exceeded daily bandwidth limit for {:?} ({} bytes)",
-                    peer_addr, service_type, tracker.get_daily_bytes()
+                    peer_addr,
+                    service_type,
+                    tracker.get_daily_bytes()
                 );
                 return Ok(false);
             }
@@ -291,7 +318,9 @@ impl BandwidthProtectionManager {
             if tracker.get_hourly_bytes() >= limits.max_bandwidth_per_peer_per_hour {
                 warn!(
                     "Peer {} exceeded hourly bandwidth limit for {:?} ({} bytes)",
-                    peer_addr, service_type, tracker.get_hourly_bytes()
+                    peer_addr,
+                    service_type,
+                    tracker.get_hourly_bytes()
                 );
                 return Ok(false);
             }
@@ -301,7 +330,9 @@ impl BandwidthProtectionManager {
                 if tracker.get_request_count() >= max_requests {
                     warn!(
                         "Peer {} exceeded rate limit for {:?} ({} requests/hour)",
-                        peer_addr, service_type, tracker.get_request_count()
+                        peer_addr,
+                        service_type,
+                        tracker.get_request_count()
                     );
                     return Ok(false);
                 }
@@ -312,12 +343,16 @@ impl BandwidthProtectionManager {
         {
             let mut ip_bw = self.ip_service_bandwidth.lock().await;
             let key = (ip, service_type);
-            let tracker = ip_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+            let tracker = ip_bw
+                .entry(key)
+                .or_insert_with(ServiceBandwidthTracker::new);
 
             if tracker.get_daily_bytes() >= limits.max_bandwidth_per_ip_per_day {
                 warn!(
                     "IP {} exceeded daily bandwidth limit for {:?} ({} bytes)",
-                    ip, service_type, tracker.get_daily_bytes()
+                    ip,
+                    service_type,
+                    tracker.get_daily_bytes()
                 );
                 return Ok(false);
             }
@@ -325,7 +360,9 @@ impl BandwidthProtectionManager {
             if tracker.get_hourly_bytes() >= limits.max_bandwidth_per_ip_per_hour {
                 warn!(
                     "IP {} exceeded hourly bandwidth limit for {:?} ({} bytes)",
-                    ip, service_type, tracker.get_hourly_bytes()
+                    ip,
+                    service_type,
+                    tracker.get_hourly_bytes()
                 );
                 return Ok(false);
             }
@@ -337,12 +374,16 @@ impl BandwidthProtectionManager {
                 let subnet = get_ipv4_subnet(ipv4);
                 let mut subnet_bw = self.ipv4_subnet_service_bandwidth.lock().await;
                 let key = (subnet, service_type);
-                let tracker = subnet_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+                let tracker = subnet_bw
+                    .entry(key)
+                    .or_insert_with(ServiceBandwidthTracker::new);
 
                 if tracker.get_daily_bytes() >= limits.max_bandwidth_per_subnet_per_day {
                     warn!(
                         "Subnet {:?} exceeded daily bandwidth limit for {:?} ({} bytes)",
-                        subnet, service_type, tracker.get_daily_bytes()
+                        subnet,
+                        service_type,
+                        tracker.get_daily_bytes()
                     );
                     return Ok(false);
                 }
@@ -350,7 +391,9 @@ impl BandwidthProtectionManager {
                 if tracker.get_hourly_bytes() >= limits.max_bandwidth_per_subnet_per_hour {
                     warn!(
                         "Subnet {:?} exceeded hourly bandwidth limit for {:?} ({} bytes)",
-                        subnet, service_type, tracker.get_hourly_bytes()
+                        subnet,
+                        service_type,
+                        tracker.get_hourly_bytes()
                     );
                     return Ok(false);
                 }
@@ -359,12 +402,16 @@ impl BandwidthProtectionManager {
                 let subnet = get_ipv6_subnet(ipv6);
                 let mut subnet_bw = self.ipv6_subnet_service_bandwidth.lock().await;
                 let key = (subnet, service_type);
-                let tracker = subnet_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+                let tracker = subnet_bw
+                    .entry(key)
+                    .or_insert_with(ServiceBandwidthTracker::new);
 
                 if tracker.get_daily_bytes() >= limits.max_bandwidth_per_subnet_per_day {
                     warn!(
                         "Subnet {:?} exceeded daily bandwidth limit for {:?} ({} bytes)",
-                        subnet, service_type, tracker.get_daily_bytes()
+                        subnet,
+                        service_type,
+                        tracker.get_daily_bytes()
                     );
                     return Ok(false);
                 }
@@ -372,7 +419,9 @@ impl BandwidthProtectionManager {
                 if tracker.get_hourly_bytes() >= limits.max_bandwidth_per_subnet_per_hour {
                     warn!(
                         "Subnet {:?} exceeded hourly bandwidth limit for {:?} ({} bytes)",
-                        subnet, service_type, tracker.get_hourly_bytes()
+                        subnet,
+                        service_type,
+                        tracker.get_hourly_bytes()
                     );
                     return Ok(false);
                 }
@@ -395,7 +444,9 @@ impl BandwidthProtectionManager {
         {
             let mut peer_bw = self.peer_service_bandwidth.lock().await;
             let key = (peer_addr, service_type);
-            let tracker = peer_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+            let tracker = peer_bw
+                .entry(key)
+                .or_insert_with(ServiceBandwidthTracker::new);
             tracker.record_bandwidth(bytes);
         }
 
@@ -403,7 +454,9 @@ impl BandwidthProtectionManager {
         {
             let mut ip_bw = self.ip_service_bandwidth.lock().await;
             let key = (ip, service_type);
-            let tracker = ip_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+            let tracker = ip_bw
+                .entry(key)
+                .or_insert_with(ServiceBandwidthTracker::new);
             tracker.record_bandwidth(bytes);
         }
 
@@ -413,32 +466,34 @@ impl BandwidthProtectionManager {
                 let subnet = get_ipv4_subnet(ipv4);
                 let mut subnet_bw = self.ipv4_subnet_service_bandwidth.lock().await;
                 let key = (subnet, service_type);
-                let tracker = subnet_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+                let tracker = subnet_bw
+                    .entry(key)
+                    .or_insert_with(ServiceBandwidthTracker::new);
                 tracker.record_bandwidth(bytes);
             }
             IpAddr::V6(ipv6) => {
                 let subnet = get_ipv6_subnet(ipv6);
                 let mut subnet_bw = self.ipv6_subnet_service_bandwidth.lock().await;
                 let key = (subnet, service_type);
-                let tracker = subnet_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+                let tracker = subnet_bw
+                    .entry(key)
+                    .or_insert_with(ServiceBandwidthTracker::new);
                 tracker.record_bandwidth(bytes);
             }
         }
     }
 
     /// Record a service request (for rate limiting)
-    pub async fn record_service_request(
-        &self,
-        service_type: ServiceType,
-        peer_addr: SocketAddr,
-    ) {
+    pub async fn record_service_request(&self, service_type: ServiceType, peer_addr: SocketAddr) {
         let ip = peer_addr.ip();
 
         // Record per-peer request
         {
             let mut peer_bw = self.peer_service_bandwidth.lock().await;
             let key = (peer_addr, service_type);
-            let tracker = peer_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+            let tracker = peer_bw
+                .entry(key)
+                .or_insert_with(ServiceBandwidthTracker::new);
             tracker.record_request();
         }
 
@@ -446,17 +501,15 @@ impl BandwidthProtectionManager {
         {
             let mut ip_bw = self.ip_service_bandwidth.lock().await;
             let key = (ip, service_type);
-            let tracker = ip_bw.entry(key).or_insert_with(ServiceBandwidthTracker::new);
+            let tracker = ip_bw
+                .entry(key)
+                .or_insert_with(ServiceBandwidthTracker::new);
             tracker.record_request();
         }
     }
 
     /// Check CPU time limit (for CPU-intensive services like filter generation)
-    pub fn check_cpu_time_limit(
-        &self,
-        service_type: ServiceType,
-        cpu_time_ms: u64,
-    ) -> bool {
+    pub fn check_cpu_time_limit(&self, service_type: ServiceType, cpu_time_ms: u64) -> bool {
         let limits = match self.service_limits.get(&service_type) {
             Some(l) => l,
             None => return true, // No limit = allow
@@ -506,16 +559,3 @@ fn get_ipv6_subnet(ip: std::net::Ipv6Addr) -> [u8; 8] {
         segments[3] as u8,
     ]
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

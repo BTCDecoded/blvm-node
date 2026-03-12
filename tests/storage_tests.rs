@@ -62,7 +62,7 @@ fn test_utxo_store() {
     };
 
     let utxo = UTXO {
-        value: 5000000000,                     // 50 BTC in satoshis
+        value: 5000000000,                            // 50 BTC in satoshis
         script_pubkey: vec![0x76, 0xa9, 0x14].into(), // P2PKH script
         height: 0,
 
@@ -646,7 +646,8 @@ async fn test_chainstate_persistence() {
     // Create first chainstate
     {
         use blvm_node::storage::database::{create_database, default_backend};
-        let db_arc = std::sync::Arc::from(create_database(db_path, default_backend(), None).unwrap());
+        let db_arc =
+            std::sync::Arc::from(create_database(db_path, default_backend(), None).unwrap());
         let chainstate = ChainState::new(db_arc).unwrap();
 
         let header = TestBlockBuilder::new()
@@ -665,7 +666,8 @@ async fn test_chainstate_persistence() {
     // Reopen and verify persistence
     {
         use blvm_node::storage::database::{create_database, default_backend};
-        let db_arc = std::sync::Arc::from(create_database(db_path, default_backend(), None).unwrap());
+        let db_arc =
+            std::sync::Arc::from(create_database(db_path, default_backend(), None).unwrap());
         let chainstate = ChainState::new(db_arc).unwrap();
 
         let chain_info = chainstate.load_chain_info().unwrap();
@@ -911,17 +913,18 @@ async fn test_storage_integration_workflow() {
 #[test]
 fn test_block_compression_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Arc::from(blvm_node::storage::database::create_database(
-        temp_dir.path(),
-        blvm_node::storage::database::DatabaseBackend::Sled,
-        None,
-    )
-    .unwrap());
-    
+    let db = Arc::from(
+        blvm_node::storage::database::create_database(
+            temp_dir.path(),
+            blvm_node::storage::database::DatabaseBackend::Sled,
+            None,
+        )
+        .unwrap(),
+    );
+
     // Create blockstore with compression enabled
     let blockstore = BlockStore::new_with_compression(
-        db,
-        true,  // block_compression_enabled
+        db, true,  // block_compression_enabled
         3,     // block_compression_level
         false, // witness_compression_enabled
         2,     // witness_compression_level
@@ -961,7 +964,7 @@ fn test_block_compression_roundtrip() {
 #[test]
 fn test_module_tree_isolation_redb() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
     let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     // Create two module trees with different module IDs
@@ -985,7 +988,7 @@ fn test_module_tree_isolation_redb() {
 #[test]
 fn test_module_tree_operations_redb() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
     let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     let tree = db.open_tree("module_test123_cache").unwrap();
@@ -1018,7 +1021,7 @@ fn test_module_tree_operations_redb() {
 #[test]
 fn test_module_tree_iter_redb() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
     let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     let tree = db.open_tree("module_test456_data").unwrap();
@@ -1029,10 +1032,7 @@ fn test_module_tree_iter_redb() {
     tree.insert(b"key3", b"value3").unwrap();
 
     // Test iteration
-    let mut items: Vec<(Vec<u8>, Vec<u8>)> = tree
-        .iter()
-        .map(|r| r.unwrap())
-        .collect();
+    let mut items: Vec<(Vec<u8>, Vec<u8>)> = tree.iter().map(|r| r.unwrap()).collect();
     items.sort_by(|a, b| a.0.cmp(&b.0));
 
     assert_eq!(items.len(), 3);
@@ -1045,7 +1045,7 @@ fn test_module_tree_iter_redb() {
 #[test]
 fn test_module_tree_multiple_trees_same_module_redb() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
     let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     // Create multiple trees for the same module
@@ -1057,8 +1057,14 @@ fn test_module_tree_multiple_trees_same_module_redb() {
     cache_tree.insert(b"key", b"cache_value").unwrap();
 
     // Verify isolation between trees
-    assert_eq!(state_tree.get(b"key").unwrap(), Some(b"state_value".to_vec()));
-    assert_eq!(cache_tree.get(b"key").unwrap(), Some(b"cache_value".to_vec()));
+    assert_eq!(
+        state_tree.get(b"key").unwrap(),
+        Some(b"state_value".to_vec())
+    );
+    assert_eq!(
+        cache_tree.get(b"key").unwrap(),
+        Some(b"cache_value".to_vec())
+    );
 
     // Each tree should have its own count
     assert_eq!(state_tree.len().unwrap(), 1);
@@ -1069,7 +1075,7 @@ fn test_module_tree_multiple_trees_same_module_redb() {
 #[test]
 fn test_module_tree_isolation_sled() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
     let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled, None).unwrap());
 
     // Create two module trees with different module IDs
@@ -1095,17 +1101,19 @@ fn test_module_tree_backend_compatibility() {
     // Test that module trees work with both backends
     let temp_dir1 = TempDir::new().unwrap();
     let temp_dir2 = TempDir::new().unwrap();
-    
-    use blvm_node::storage::database::{create_database, DatabaseBackend, Database};
-    
+
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+
     // Test with redb
-    let db_redb = Arc::from(create_database(temp_dir1.path(), DatabaseBackend::Redb, None).unwrap());
+    let db_redb =
+        Arc::from(create_database(temp_dir1.path(), DatabaseBackend::Redb, None).unwrap());
     let tree_redb = db_redb.open_tree("module_test_state").unwrap();
     tree_redb.insert(b"key", b"value").unwrap();
     assert_eq!(tree_redb.get(b"key").unwrap(), Some(b"value".to_vec()));
 
     // Test with sled
-    let db_sled = Arc::from(create_database(temp_dir2.path(), DatabaseBackend::Sled, None).unwrap());
+    let db_sled =
+        Arc::from(create_database(temp_dir2.path(), DatabaseBackend::Sled, None).unwrap());
     let tree_sled = db_sled.open_tree("module_test_state").unwrap();
     tree_sled.insert(b"key", b"value").unwrap();
     assert_eq!(tree_sled.get(b"key").unwrap(), Some(b"value".to_vec()));
@@ -1115,13 +1123,15 @@ fn test_module_tree_backend_compatibility() {
 #[test]
 fn test_block_compression_ratio() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Arc::from(blvm_node::storage::database::create_database(
-        temp_dir.path(),
-        blvm_node::storage::database::DatabaseBackend::Sled,
-        None,
-    )
-    .unwrap());
-    
+    let db = Arc::from(
+        blvm_node::storage::database::create_database(
+            temp_dir.path(),
+            blvm_node::storage::database::DatabaseBackend::Sled,
+            None,
+        )
+        .unwrap(),
+    );
+
     // Create blockstore with compression enabled
     let blockstore = BlockStore::new_with_compression(
         db.clone(),
@@ -1133,9 +1143,9 @@ fn test_block_compression_ratio() {
     .unwrap();
 
     // Create a large block with many transactions
-    let mut block_builder = TestBlockBuilder::new()
-        .add_coinbase_transaction(p2pkh_script(random_hash20()));
-    
+    let mut block_builder =
+        TestBlockBuilder::new().add_coinbase_transaction(p2pkh_script(random_hash20()));
+
     for _ in 0..100 {
         block_builder = block_builder.add_transaction(
             TestTransactionBuilder::new()
@@ -1148,7 +1158,7 @@ fn test_block_compression_ratio() {
                 .build(),
         );
     }
-    
+
     let block = block_builder.build();
 
     // Store block
@@ -1164,17 +1174,18 @@ fn test_block_compression_ratio() {
 #[test]
 fn test_witness_compression_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Arc::from(blvm_node::storage::database::create_database(
-        temp_dir.path(),
-        blvm_node::storage::database::DatabaseBackend::Sled,
-        None,
-    )
-    .unwrap());
-    
+    let db = Arc::from(
+        blvm_node::storage::database::create_database(
+            temp_dir.path(),
+            blvm_node::storage::database::DatabaseBackend::Sled,
+            None,
+        )
+        .unwrap(),
+    );
+
     // Create blockstore with witness compression enabled
     let blockstore = BlockStore::new_with_compression(
-        db,
-        false, // block_compression_enabled
+        db, false, // block_compression_enabled
         3,     // block_compression_level
         true,  // witness_compression_enabled
         2,     // witness_compression_level
@@ -1203,17 +1214,18 @@ fn test_witness_compression_roundtrip() {
 #[test]
 fn test_utxo_compression_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Arc::from(blvm_node::storage::database::create_database(
-        temp_dir.path(),
-        blvm_node::storage::database::DatabaseBackend::Sled,
-        None,
-    )
-    .unwrap());
-    
+    let db = Arc::from(
+        blvm_node::storage::database::create_database(
+            temp_dir.path(),
+            blvm_node::storage::database::DatabaseBackend::Sled,
+            None,
+        )
+        .unwrap(),
+    );
+
     // Create UTXO store with compression enabled
     let utxostore = UtxoStore::new_with_compression(
-        db,
-        true, // compression_enabled
+        db, true, // compression_enabled
         1,    // compression_level
     )
     .unwrap();
@@ -1248,17 +1260,18 @@ fn test_utxo_compression_roundtrip() {
 #[test]
 fn test_utxo_compression_auto_detection() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Arc::from(blvm_node::storage::database::create_database(
-        temp_dir.path(),
-        blvm_node::storage::database::DatabaseBackend::Sled,
-        None,
-    )
-    .unwrap());
-    
+    let db = Arc::from(
+        blvm_node::storage::database::create_database(
+            temp_dir.path(),
+            blvm_node::storage::database::DatabaseBackend::Sled,
+            None,
+        )
+        .unwrap(),
+    );
+
     // Create UTXO store with compression enabled
     let utxostore = UtxoStore::new_with_compression(
-        db,
-        true, // compression_enabled
+        db, true, // compression_enabled
         1,    // compression_level
     )
     .unwrap();

@@ -1,8 +1,8 @@
-# bllvm-node Configuration Guide
+# blvm-node Configuration Guide
 
 ## Overview
 
-Covers all configuration options for bllvm-node, including RBF modes, mempool policies, and other node settings.
+Covers all configuration options for blvm-node, including RBF modes, mempool policies, and other node settings.
 
 ## Table of Contents
 

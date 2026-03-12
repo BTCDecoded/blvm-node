@@ -282,9 +282,9 @@ impl PaymentStateMachine {
     ) -> Result<CovenantProof, PaymentError> {
         #[cfg(not(feature = "ctv"))]
         {
-            return Err(PaymentError::FeatureNotEnabled(
+            Err(PaymentError::FeatureNotEnabled(
                 "CTV covenant requires --features ctv".to_string(),
-            ));
+            ))
         }
 
         #[cfg(feature = "ctv")]
@@ -337,9 +337,9 @@ impl PaymentStateMachine {
     ) -> Result<usize, PaymentError> {
         #[cfg(not(feature = "ctv"))]
         {
-            return Err(PaymentError::FeatureNotEnabled(
+            Err(PaymentError::FeatureNotEnabled(
                 "CTV covenant requires --features ctv".to_string(),
-            ));
+            ))
         }
 
         #[cfg(feature = "ctv")]

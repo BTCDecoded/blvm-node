@@ -22,4 +22,3 @@ fn main() {
     // Users must ensure erlay feature is not enabled when using rocksdb.
     // The build will fail at dependency resolution if both are present.
 }
-

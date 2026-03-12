@@ -3,7 +3,6 @@
 //! Tests for signal handling functions.
 
 use blvm_node::utils::signal::create_shutdown_receiver;
-use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn test_create_shutdown_receiver() {

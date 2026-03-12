@@ -72,9 +72,9 @@ impl PaymentReorgHandler {
             let mempool_for_periodic = mempool_manager.clone();
             let settlement_for_periodic = settlement_monitor.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(
-                    tokio::time::Duration::from_secs(REORG_PENDING_CHECK_INTERVAL_SECS),
-                );
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                    REORG_PENDING_CHECK_INTERVAL_SECS,
+                ));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
@@ -156,7 +156,12 @@ impl PaymentReorgHandler {
             // 0. Chain re-verification: tx might still be in best chain (different block)
             if let Some(storage) = storage {
                 if let Ok(Some(metadata)) = storage.transactions().get_metadata(&tx_hash) {
-                    if storage.chain().is_invalid(&metadata.block_hash).unwrap_or(true) == false {
+                    if storage
+                        .chain()
+                        .is_invalid(&metadata.block_hash)
+                        .unwrap_or(true)
+                        == false
+                    {
                         debug!(
                             "Reorg: payment {} tx {} still in valid chain (block {:?}), keeping Settled",
                             payment_id,
@@ -191,13 +196,9 @@ impl PaymentReorgHandler {
             }
 
             // 2. Try to get tx from cache or storage for re-broadcast
-            let tx_opt = tx_cache
-                .and_then(|c| c.get(&tx_hash))
-                .or_else(|| {
-                    storage.and_then(|s| {
-                        s.transactions().get_transaction(&tx_hash).ok().flatten()
-                    })
-                });
+            let tx_opt = tx_cache.and_then(|c| c.get(&tx_hash)).or_else(|| {
+                storage.and_then(|s| s.transactions().get_transaction(&tx_hash).ok().flatten())
+            });
 
             if let Some(tx) = tx_opt {
                 // 3. Attempt re-broadcast to mempool
@@ -276,11 +277,7 @@ impl PaymentReorgHandler {
         if let (Some(monitor), Some(outputs)) = (settlement_monitor, expected_outputs) {
             if !outputs.is_empty() {
                 if let Err(e) = monitor
-                    .start_monitoring(
-                        payment_id,
-                        outputs.to_vec(),
-                        Some(tx_hash),
-                    )
+                    .start_monitoring(payment_id, outputs.to_vec(), Some(tx_hash))
                     .await
                 {
                     warn!(

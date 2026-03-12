@@ -63,7 +63,7 @@ async fn test_mempool_manager() {
         lock_time: 0,
     };
 
-    let result = mempool.add_transaction(tx).await.unwrap();
+    let result = mempool.add_transaction(tx).unwrap();
     assert!(result); // Simplified implementation always returns true
 }
 
@@ -336,8 +336,8 @@ async fn test_mempool_manager_operations() {
         lock_time: 1, // Different lock time
     };
 
-    let result1 = mempool.add_transaction(tx1).await.unwrap();
-    let result2 = mempool.add_transaction(tx2).await.unwrap();
+    let result1 = mempool.add_transaction(tx1).unwrap();
+    let result2 = mempool.add_transaction(tx2).unwrap();
 
     assert!(result1);
     assert!(result2);
@@ -362,7 +362,7 @@ async fn test_mempool_manager_eviction() {
             .add_output(1000, p2pkh_script(random_hash20()))
             .build();
 
-        mempool.add_transaction(tx).await.unwrap();
+        mempool.add_transaction(tx).unwrap();
     }
 
     // Test that mempool size is within limits
@@ -390,8 +390,8 @@ async fn test_mempool_manager_fee_prioritization() {
         .add_output(1000, p2pkh_script(random_hash20()))
         .build();
 
-    mempool.add_transaction(high_fee_tx).await.unwrap();
-    mempool.add_transaction(low_fee_tx).await.unwrap();
+    mempool.add_transaction(high_fee_tx).unwrap();
+    mempool.add_transaction(low_fee_tx).unwrap();
 
     // Test that high-fee transactions are prioritized
     // Test get_prioritized_transactions (simplified - actual method may not exist)
@@ -421,10 +421,10 @@ async fn test_mempool_manager_conflict_detection() {
         .build();
 
     // Add first transaction
-    mempool.add_transaction(tx1).await.unwrap();
+    mempool.add_transaction(tx1).unwrap();
 
     // Add conflicting transaction
-    let result = mempool.add_transaction(tx2).await.unwrap();
+    let result = mempool.add_transaction(tx2).unwrap();
     assert!(!result); // Should be rejected due to conflict
 }
 
@@ -565,7 +565,7 @@ async fn test_sync_mempool_interaction() {
 
     // When synced, mempool should accept transactions
     let tx = valid_transaction();
-    let result = mempool.add_transaction(tx).await.unwrap();
+    let result = mempool.add_transaction(tx).unwrap();
     assert!(result);
 }
 
@@ -582,7 +582,7 @@ async fn test_mining_mempool_interaction() {
 
     // Add transactions to mempool
     let tx = valid_transaction();
-    mempool.add_transaction(tx).await.unwrap();
+    mempool.add_transaction(tx).unwrap();
 
     // Mining should be able to select transactions
     // Test select_transactions (simplified - actual method may not exist)
@@ -639,7 +639,7 @@ async fn test_mempool_processing_workflow() {
 
     // Add a transaction
     let tx = valid_transaction();
-    let result = mempool.add_transaction(tx).await;
+    let result = mempool.add_transaction(tx);
     assert!(result.is_ok());
     assert_eq!(mempool.size(), 1);
 
@@ -659,8 +659,8 @@ async fn test_mempool_cleanup_workflow() {
     let tx1 = unique_transaction();
     let tx2 = unique_transaction();
 
-    mempool.add_transaction(tx1).await.unwrap();
-    mempool.add_transaction(tx2).await.unwrap();
+    mempool.add_transaction(tx1).unwrap();
+    mempool.add_transaction(tx2).unwrap();
 
     assert_eq!(mempool.size(), 2);
 

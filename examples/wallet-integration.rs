@@ -1,10 +1,10 @@
-//! Example: Basic wallet integration with bllvm-node
+//! Example: Basic wallet integration with blvm-node
 //!
-//! This example shows how to use bllvm-node RPC API for wallet operations.
+//! This example shows how to use blvm-node RPC API for wallet operations.
 //! This demonstrates the RPC calls wallets need - actual wallets handle key management separately.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node: bllvm-node --network testnet
+//!   1. Start blvm-node: blvm-node --network testnet
 //!   2. Run this example: cargo run --example wallet-integration
 //!
 //! Or use curl:
@@ -15,10 +15,10 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Wallet Integration RPC Examples");
+    println!("blvm-node Wallet Integration RPC Examples");
     println!("============================================");
     println!();
-    println!("This example shows the RPC calls wallets need to integrate with bllvm-node.");
+    println!("This example shows the RPC calls wallets need to integrate with blvm-node.");
     println!("All methods are Bitcoin Core-compatible.");
     println!();
 
@@ -105,11 +105,11 @@ fn main() -> anyhow::Result<()> {
     println!("  ✅ estimatesmartfee - Fee estimation");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet");
+    println!("  1. Start node: blvm-node --network testnet");
     println!("  2. Use curl or your HTTP client to send these requests");
-    println!("  3. Or use the bllvm-sdk for Rust integration");
+    println!("  3. Or use the blvm-sdk for Rust integration");
     println!();
-    println!("Your wallet can now integrate with bllvm-node!");
+    println!("Your wallet can now integrate with blvm-node!");
 
     Ok(())
 }

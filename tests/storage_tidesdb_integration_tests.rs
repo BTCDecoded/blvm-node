@@ -5,8 +5,8 @@
 
 #[cfg(feature = "tidesdb")]
 mod tidesdb_integration_tests {
-    use blvm_node::storage::*;
     use blvm_node::storage::database::{create_database, DatabaseBackend};
+    use blvm_node::storage::*;
     use blvm_protocol::*;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -14,11 +14,7 @@ mod tidesdb_integration_tests {
     #[test]
     fn test_storage_with_tidesdb_backend() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Storage::with_backend(
-            temp_dir.path(),
-            DatabaseBackend::TidesDB,
-        )
-        .unwrap();
+        let storage = Storage::with_backend(temp_dir.path(), DatabaseBackend::TidesDB).unwrap();
 
         // Test that storage components are accessible
         let _blocks = storage.blocks();
@@ -30,9 +26,8 @@ mod tidesdb_integration_tests {
     #[test]
     fn test_blockstore_with_tidesdb() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(
-            create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap(),
-        );
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
         let blockstore = blockstore::BlockStore::new(db).unwrap();
 
         // Create a test block
@@ -64,9 +59,8 @@ mod tidesdb_integration_tests {
     #[test]
     fn test_utxostore_with_tidesdb() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(
-            create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap(),
-        );
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
         let utxostore = utxostore::UtxoStore::new(db).unwrap();
 
         let outpoint = OutPoint {
@@ -95,9 +89,8 @@ mod tidesdb_integration_tests {
     #[test]
     fn test_chainstate_with_tidesdb() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(
-            create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap(),
-        );
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::TidesDB, None).unwrap());
         let chainstate = chainstate::ChainState::new(db).unwrap();
 
         let genesis_header = BlockHeader {
@@ -123,17 +116,9 @@ mod tidesdb_integration_tests {
         let temp_dir1 = TempDir::new().unwrap();
         let temp_dir2 = TempDir::new().unwrap();
 
-        let storage1 = Storage::with_backend(
-            temp_dir1.path(),
-            DatabaseBackend::TidesDB,
-        )
-        .unwrap();
+        let storage1 = Storage::with_backend(temp_dir1.path(), DatabaseBackend::TidesDB).unwrap();
 
-        let storage2 = Storage::with_backend(
-            temp_dir2.path(),
-            DatabaseBackend::Redb,
-        )
-        .unwrap();
+        let storage2 = Storage::with_backend(temp_dir2.path(), DatabaseBackend::Redb).unwrap();
 
         // Both should work the same way
         let block = Block {
@@ -160,8 +145,8 @@ mod tidesdb_integration_tests {
 mod tidesdb_integration_tests {
     #[test]
     fn test_tidesdb_not_available() {
-        use blvm_node::storage::Storage;
         use blvm_node::storage::database::DatabaseBackend;
+        use blvm_node::storage::Storage;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();

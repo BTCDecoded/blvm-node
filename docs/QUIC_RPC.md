@@ -2,7 +2,7 @@
 
 ## Overview
 
-The reference-node optionally supports JSON-RPC over QUIC using Quinn, providing improved performance and security compared to the standard TCP RPC server.
+blvm-node optionally supports JSON-RPC over QUIC using Quinn, providing improved performance and security compared to the standard TCP RPC server.
 
 ## Features
 
@@ -16,7 +16,7 @@ The reference-node optionally supports JSON-RPC over QUIC using Quinn, providing
 ### Basic (TCP Only - Default)
 
 ```rust
-use bllvm_node::rpc::RpcManager;
+use blvm_node::rpc::RpcManager;
 use std::net::SocketAddr;
 
 let tcp_addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
@@ -27,7 +27,7 @@ rpc_manager.start().await?;
 ### With QUIC Support
 
 ```rust
-use bllvm_node::rpc::RpcManager;
+use blvm_node::rpc::RpcManager;
 use std::net::SocketAddr;
 
 let tcp_addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
@@ -51,7 +51,7 @@ QUIC RPC requires the `quinn` feature flag:
 
 ```toml
 [dependencies]
-bllvm-node = { path = "../bllvm-node", features = ["quinn"] }
+blvm-node = { path = "../blvm-node", features = ["quinn"] }
 ```
 
 Or when building:

@@ -1,4 +1,4 @@
-//! Basic integration tests for bllvm-node
+//! Basic integration tests for blvm-node
 
 use blvm_node::*;
 use blvm_protocol::*;
@@ -6,7 +6,7 @@ use blvm_protocol::ProtocolVersion;
 
 #[test]
 fn test_protocol_integration() {
-    // Test that bllvm-protocol works in bllvm-node context
+    // Test that blvm-protocol works in blvm-node context
     let node = Node::new(Some(ProtocolVersion::Regtest)).unwrap();
     let protocol = node.protocol();
     
@@ -19,7 +19,7 @@ fn test_protocol_integration() {
 
 #[test]
 fn test_consensus_integration() {
-    // Test consensus validation through bllvm-protocol
+    // Test consensus validation through blvm-protocol
     let node = Node::new(None).unwrap(); // Uses default Regtest
     let protocol = node.protocol();
     

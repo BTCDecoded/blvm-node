@@ -11,7 +11,7 @@ pub fn redact_tokens_from_log(msg: &str, tokens: &[String]) -> String {
         // Redact full token
         redacted = redacted.replace(token, "[REDACTED]");
         // Redact Bearer token format
-        let bearer_token = format!("Bearer {}", token);
+        let bearer_token = format!("Bearer {token}");
         redacted = redacted.replace(&bearer_token, "Bearer [REDACTED]");
     }
     redacted
@@ -27,9 +27,7 @@ pub fn redact_auth_header(msg: &str) -> String {
     // Find and replace "Authorization: Bearer <anything>" patterns
     // This is a simple approach - in production, might want to use regex for more accuracy
     if let Some(start) = redacted.find("Authorization: Bearer ") {
-        if let Some(end) =
-            redacted[start..].find(|c: char| c == '\n' || c == '\r' || c == '"' || c == '\'')
-        {
+        if let Some(end) = redacted[start..].find(['\n', '\r', '"', '\'']) {
             let token_start = start + "Authorization: Bearer ".len();
             let token_end = start + end;
             if token_end > token_start {

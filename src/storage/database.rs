@@ -153,7 +153,7 @@ pub trait BatchWriter {
 fn open_module_tree(inner: Arc<dyn Tree>, module_id: &str, tree_name: &str) -> Box<dyn Tree> {
     Box::new(NamespaceTree {
         inner,
-        key_prefix: format!("module_{}_{}_", module_id, tree_name).into_bytes(),
+        key_prefix: format!("module_{module_id}_{tree_name}_").into_bytes(),
     })
 }
 
@@ -213,15 +213,11 @@ impl Tree for NamespaceTree {
     }
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
         let prefix = self.key_prefix.clone();
-        Box::new(
-            self.inner
-                .iter()
-                .filter_map(move |item| match item {
-                    Ok((k, v)) if k.starts_with(&prefix) => Some(Ok((k[prefix.len()..].to_vec(), v))),
-                    Ok(_) => None,
-                    Err(e) => Some(Err(e)),
-                }),
-        )
+        Box::new(self.inner.iter().filter_map(move |item| match item {
+            Ok((k, v)) if k.starts_with(&prefix) => Some(Ok((k[prefix.len()..].to_vec(), v))),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        }))
     }
     fn batch(&self) -> Box<dyn BatchWriter + '_> {
         Box::new(NamespaceBatchWriter {
@@ -356,22 +352,29 @@ pub fn create_database<P: AsRef<Path>>(
 /// Returns the preferred backend: TidesDB (if available) > Redb > Sled.
 pub fn default_backend() -> DatabaseBackend {
     #[cfg(feature = "rocksdb")]
-    {
-        return DatabaseBackend::RocksDB;
-    }
-    #[cfg(feature = "tidesdb")]
-    {
-        return DatabaseBackend::TidesDB;
-    }
-    #[cfg(feature = "redb")]
-    {
-        return DatabaseBackend::Redb;
-    }
-    #[cfg(feature = "sled")]
-    {
-        return DatabaseBackend::Sled;
-    }
-    DatabaseBackend::Redb // fallback
+    return DatabaseBackend::RocksDB;
+    #[cfg(all(not(feature = "rocksdb"), feature = "tidesdb"))]
+    return DatabaseBackend::TidesDB;
+    #[cfg(all(not(feature = "rocksdb"), not(feature = "tidesdb"), feature = "redb"))]
+    return DatabaseBackend::Redb;
+    #[cfg(all(
+        not(feature = "rocksdb"),
+        not(feature = "tidesdb"),
+        not(feature = "redb"),
+        feature = "sled"
+    ))]
+    return DatabaseBackend::Sled;
+    #[cfg(all(
+        not(feature = "rocksdb"),
+        not(feature = "tidesdb"),
+        not(feature = "redb"),
+        not(feature = "sled")
+    ))]
+    compile_error!(
+        "At least one storage backend must be enabled (rocksdb, redb, sled, or tidesdb)"
+    );
+    #[allow(unreachable_code)]
+    DatabaseBackend::Redb // Only for cfg exhaustiveness; one of the above returns always runs
 }
 
 /// Get fallback database backend
@@ -393,11 +396,7 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
             {
                 Some(DatabaseBackend::Sled)
             }
-            #[cfg(all(
-                not(feature = "redb"),
-                not(feature = "rocksdb"),
-                not(feature = "sled")
-            ))]
+            #[cfg(all(not(feature = "redb"), not(feature = "rocksdb"), not(feature = "sled")))]
             {
                 None
             }
@@ -451,11 +450,7 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
             {
                 Some(DatabaseBackend::Sled)
             }
-            #[cfg(all(
-                not(feature = "tidesdb"),
-                not(feature = "redb"),
-                not(feature = "sled")
-            ))]
+            #[cfg(all(not(feature = "tidesdb"), not(feature = "redb"), not(feature = "sled")))]
             {
                 None
             }
@@ -670,41 +665,54 @@ mod redb_impl {
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let mut builder = RedbDb::builder();
             builder.set_cache_size(dbcache_bytes);
-            tracing::info!("[REDB] Cache size: {} MB (set via BLVM_DBCACHE_MB or config)", dbcache_mb);
+            tracing::info!(
+                "[REDB] Cache size: {} MB (set via BLVM_DBCACHE_MB or config)",
+                dbcache_mb
+            );
 
             let db_path = data_dir.as_ref().join("redb.db");
             tracing::info!("[REDB] Database path: {:?}", db_path);
-            tracing::info!("[REDB] Database path absolute: {:?}", std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone()));
+            tracing::info!(
+                "[REDB] Database path absolute: {:?}",
+                std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone())
+            );
             let exists = db_path.exists();
             tracing::info!("[REDB] db_path.exists() = {}", exists);
             // Try to open existing database first, then create if it doesn't exist
             let db = if exists {
                 // Gather diagnostic information about the database file
-                let file_size = std::fs::metadata(&db_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let file_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
                 let file_size_mb = file_size / (1024 * 1024);
-                tracing::info!("[REDB] Database file exists, size: {} MB ({})", file_size_mb, file_size);
-                
+                tracing::info!(
+                    "[REDB] Database file exists, size: {} MB ({})",
+                    file_size_mb,
+                    file_size
+                );
+
                 // Check if database is locked by another process
                 // redb uses file locking, so if another process has it open, open() will fail immediately
                 tracing::info!("[REDB] Attempting to open database (this may take time for large databases)...");
                 tracing::info!("[REDB] Note: redb validates checksums on open, which can be slow for large databases");
-                tracing::info!("[REDB] If this hangs, redb may be performing crash recovery validation");
-                
+                tracing::info!(
+                    "[REDB] If this hangs, redb may be performing crash recovery validation"
+                );
+
                 use std::time::Instant;
                 let start_time = Instant::now();
-                
+
                 // Open the database - this may take time for large databases
                 // redb performs checksum validation during open, especially after crashes
                 let open_result = builder.open(&db_path);
-                
+
                 let elapsed = start_time.elapsed();
                 tracing::info!("[REDB] Database open completed in {:?}", elapsed);
-                
+
                 match open_result {
                     Ok(db) => {
-                        tracing::info!("[REDB] Database opened successfully in {:?}, opening tables...", elapsed);
+                        tracing::info!(
+                            "[REDB] Database opened successfully in {:?}, opening tables...",
+                            elapsed
+                        );
                         // Database exists and is openable, use it
                         let table_start = Instant::now();
                         let write_txn = db.begin_write()?;
@@ -749,7 +757,11 @@ mod redb_impl {
                         db
                     }
                     Err(e) => {
-                        tracing::warn!("[REDB] Failed to open existing database after {:?}: {}", elapsed, e);
+                        tracing::warn!(
+                            "[REDB] Failed to open existing database after {:?}: {}",
+                            elapsed,
+                            e
+                        );
                         tracing::warn!("[REDB] Error details: {:?}", e);
                         tracing::info!("[REDB] Creating new database...");
                         builder.create(&db_path)?
@@ -1096,7 +1108,7 @@ mod redb_impl {
 pub mod rocksdb_impl {
     use super::{open_module_tree, BatchWriter, Database, Tree};
     use anyhow::Result;
-    use rocksdb::{BlockBasedOptions, Cache, DB, Options, ColumnFamilyDescriptor, ColumnFamily};
+    use rocksdb::{BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, DB};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -1136,10 +1148,14 @@ pub mod rocksdb_impl {
             let total_ram_gb: u64 = {
                 #[cfg(target_os = "linux")]
                 {
-                    std::fs::read_to_string("/proc/meminfo").ok()
-                        .and_then(|s| s.lines().find(|l| l.starts_with("MemTotal:"))
-                            .and_then(|l| l.split_whitespace().nth(1))
-                            .and_then(|v| v.parse::<u64>().ok()))
+                    std::fs::read_to_string("/proc/meminfo")
+                        .ok()
+                        .and_then(|s| {
+                            s.lines()
+                                .find(|l| l.starts_with("MemTotal:"))
+                                .and_then(|l| l.split_whitespace().nth(1))
+                                .and_then(|v| v.parse::<u64>().ok())
+                        })
                         .map(|kb| kb / (1024 * 1024))
                         .unwrap_or(16)
                 }
@@ -1158,19 +1174,39 @@ pub mod rocksdb_impl {
             let default_compactions = if total_ram_gb >= 32 { 4 } else { 2 };
             let default_flushes = if total_ram_gb >= 32 { 4 } else { 2 };
             let max_compactions: i32 = std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(default_compactions);
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default_compactions);
             let max_flushes: i32 = std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(default_flushes);
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default_flushes);
             let level0_trigger: i32 = std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(8);
-            opts.set_max_background_compactions(max_compactions);
-            opts.set_max_background_flushes(max_flushes);
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8);
+            // RocksDB uses max_background_jobs; it allocates between flushes and compactions
+            opts.set_max_background_jobs(max_compactions + max_flushes);
             opts.set_level_zero_file_num_compaction_trigger(level0_trigger);
-            let default_write_buffer = if total_ram_gb >= 32 { 256 } else if total_ram_gb >= 24 { 192 } else { 128 };
-            let default_block_cache = if total_ram_gb >= 32 { 450 } else if total_ram_gb >= 24 { 300 } else { 200 };
+            let default_write_buffer = if total_ram_gb >= 32 {
+                256
+            } else if total_ram_gb >= 24 {
+                192
+            } else {
+                128
+            };
+            let default_block_cache = if total_ram_gb >= 32 {
+                450
+            } else if total_ram_gb >= 24 {
+                300
+            } else {
+                200
+            };
 
             let db_write_buffer_mb: usize = std::env::var("BLVM_ROCKSDB_WRITE_BUFFER_MB")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(default_write_buffer);
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default_write_buffer);
             opts.set_db_write_buffer_size(db_write_buffer_mb * 1024 * 1024);
 
             tracing::info!("[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={} write_buffer={}MB (ram={}GB)",
@@ -1241,9 +1277,7 @@ pub mod rocksdb_impl {
 
             // RocksDB will automatically detect LevelDB format
             // Note: LevelDB uses a single "default" column family
-            let cfs = vec![
-                ColumnFamilyDescriptor::new("default", Options::default()),
-            ];
+            let cfs = vec![ColumnFamilyDescriptor::new("default", Options::default())];
 
             let db = DB::open_cf_descriptors(&opts, &chainstate_path, cfs)?;
 
@@ -1259,7 +1293,9 @@ pub mod rocksdb_impl {
             if name.starts_with("module_") {
                 let parts: Vec<&str> = name.splitn(3, '_').collect();
                 if parts.len() == 3 && parts[0] == "module" {
-                    let _ = self.db.cf_handle("modules")
+                    let _ = self
+                        .db
+                        .cf_handle("modules")
                         .ok_or_else(|| anyhow::anyhow!("modules column family not found"))?;
                     let inner = Arc::new(RocksDBTree {
                         db: Arc::clone(&self.db),
@@ -1339,7 +1375,7 @@ pub mod rocksdb_impl {
             let cf = self.cf()?;
             let mut iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
             let mut batch = rocksdb::WriteBatch::default();
-            while let Some(item) = iter.next() {
+            for item in iter {
                 let (key, _) = item?;
                 batch.delete_cf(cf, &key);
             }
@@ -1349,7 +1385,9 @@ pub mod rocksdb_impl {
 
         fn len(&self) -> Result<usize> {
             let mut count = 0;
-            let iter = self.db.iterator_cf(self.cf()?, rocksdb::IteratorMode::Start);
+            let iter = self
+                .db
+                .iterator_cf(self.cf()?, rocksdb::IteratorMode::Start);
             for item in iter {
                 let _ = item?;
                 count += 1;
@@ -1394,13 +1432,19 @@ pub mod rocksdb_impl {
 
     impl BatchWriter for RocksDBBatchWriter {
         fn put(&mut self, key: &[u8], value: &[u8]) {
-            let cf = self.db.cf_handle(&self.cf_name).expect("column family must exist");
+            let cf = self
+                .db
+                .cf_handle(&self.cf_name)
+                .expect("column family must exist");
             self.batch.put_cf(cf, key, value);
             self.op_count += 1;
         }
 
         fn delete(&mut self, key: &[u8]) {
-            let cf = self.db.cf_handle(&self.cf_name).expect("column family must exist");
+            let cf = self
+                .db
+                .cf_handle(&self.cf_name)
+                .expect("column family must exist");
             self.batch.delete_cf(cf, key);
             self.op_count += 1;
         }
@@ -1458,8 +1502,8 @@ mod tidesdb_impl {
                 .num_compaction_threads(compact_threads)
                 .log_level(LogLevel::Warn);
 
-            let db = TidesDB::open(config)
-                .map_err(|e| anyhow::anyhow!("TidesDB open failed: {}", e))?;
+            let db =
+                TidesDB::open(config).map_err(|e| anyhow::anyhow!("TidesDB open failed: {}", e))?;
 
             Ok(Self {
                 db: Arc::new(db),
@@ -1469,7 +1513,8 @@ mod tidesdb_impl {
 
         /// Tuned config per tree for IBD/block sync performance.
         fn cf_config_for_tree(&self, name: &str) -> ColumnFamilyConfig {
-            let base = ColumnFamilyConfig::default().compression_algorithm(CompressionAlgorithm::None);
+            let base =
+                ColumnFamilyConfig::default().compression_algorithm(CompressionAlgorithm::None);
             let utxo_threshold = self
                 .tidesdb_config
                 .as_ref()
@@ -1563,7 +1608,8 @@ mod tidesdb_impl {
         fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
             let mut txn = self.db.begin_transaction()?;
             txn.put(&self.cf, key, value, -1)?;
-            txn.commit().map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
+            txn.commit()
+                .map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
         }
 
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -1574,7 +1620,8 @@ mod tidesdb_impl {
         fn remove(&self, key: &[u8]) -> Result<()> {
             let mut txn = self.db.begin_transaction()?;
             txn.delete(&self.cf, key)?;
-            txn.commit().map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
+            txn.commit()
+                .map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
         }
 
         fn contains_key(&self, key: &[u8]) -> Result<bool> {
@@ -1600,7 +1647,8 @@ mod tidesdb_impl {
             for k in keys {
                 txn.delete(&self.cf, &k)?;
             }
-            txn.commit().map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
+            txn.commit()
+                .map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
         }
 
         fn len(&self) -> Result<usize> {
@@ -1714,17 +1762,11 @@ mod tidesdb_impl {
         }
         fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
             let prefix = self.key_prefix();
-            Box::new(
-                self.inner
-                    .iter()
-                    .filter_map(move |item| match item {
-                        Ok((k, v)) if k.starts_with(&prefix) => {
-                            Some(Ok((k[prefix.len()..].to_vec(), v)))
-                        }
-                        Ok(_) => None,
-                        Err(e) => Some(Err(e)),
-                    }),
-            )
+            Box::new(self.inner.iter().filter_map(move |item| match item {
+                Ok((k, v)) if k.starts_with(&prefix) => Some(Ok((k[prefix.len()..].to_vec(), v))),
+                Ok(_) => None,
+                Err(e) => Some(Err(e)),
+            }))
         }
         fn batch(&self) -> Box<dyn BatchWriter + '_> {
             Box::new(TidesDBModuleBatchWriter {
@@ -1782,7 +1824,8 @@ mod tidesdb_impl {
                     None => txn.delete(&self.cf, &key)?,
                 }
             }
-            txn.commit().map_err(|e| anyhow::anyhow!("TidesDB batch commit failed: {}", e))
+            txn.commit()
+                .map_err(|e| anyhow::anyhow!("TidesDB batch commit failed: {}", e))
         }
         fn len(&self) -> usize {
             self.pending.len()

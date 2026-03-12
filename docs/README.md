@@ -1,6 +1,6 @@
-# bllvm-node Documentation
+# blvm-node Documentation
 
-Documentation for the bllvm-node implementation.
+Documentation for the blvm-node implementation.
 
 ## Core Documentation
 
@@ -12,10 +12,5 @@ Documentation for the bllvm-node implementation.
 
 ## Transport Documentation
 
-- **[transport/](transport/)** - Transport abstraction documentation and changelog
-
-
-## Historical Documentation
-
-- **[history/](history/)** - Historical implementation and assessment documents
+- **[transport/](transport/)** - Transport abstraction documentation
 

@@ -29,7 +29,7 @@ impl Default for ErlayConfig {
     fn default() -> Self {
         Self {
             capacity: 100_000, // Support up to 100k transactions
-            field_size: 64,   // 64-bit field size
+            field_size: 64,    // 64-bit field size
         }
     }
 }
@@ -58,7 +58,7 @@ impl ErlayReconciler {
         // Estimate remote set size (we don't have the full set, just count)
         // For now, we'll create a sketch of all local transactions
         // In a real implementation, we'd track which transactions we've sent to each peer
-        
+
         if local_txs.is_empty() {
             return Ok(vec![]);
         }
@@ -74,14 +74,14 @@ impl ErlayReconciler {
             let mut hash_u64 = [0u8; 8];
             hash_u64.copy_from_slice(&tx_hash[..8]);
             let value = u64::from_le_bytes(hash_u64);
-            
-            sketch.add(value)
+
+            sketch
+                .add(value)
                 .context("Failed to add transaction to sketch")?;
         }
 
         // Serialize sketch
-        sketch.serialize()
-            .context("Failed to serialize sketch")
+        sketch.serialize().context("Failed to serialize sketch")
     }
 
     /// Reconcile transaction sets using sketches
@@ -105,23 +105,28 @@ impl ErlayReconciler {
         if !local_sketch.is_empty() {
             let mut local = Minisketch::new(self.config.field_size, 0, self.config.capacity)
                 .context("Failed to create local minisketch")?;
-            local.deserialize(local_sketch)
+            local
+                .deserialize(local_sketch)
                 .context("Failed to deserialize local sketch")?;
-            combined.merge(&local)
+            combined
+                .merge(&local)
                 .map_err(|e| anyhow::anyhow!("Failed to merge local sketch: {:?}", e))?;
         }
 
         if !remote_sketch.is_empty() {
             let mut remote = Minisketch::new(self.config.field_size, 0, self.config.capacity)
                 .context("Failed to create remote minisketch")?;
-            remote.deserialize(remote_sketch)
+            remote
+                .deserialize(remote_sketch)
                 .context("Failed to deserialize remote sketch")?;
-            combined.merge(&remote)
+            combined
+                .merge(&remote)
                 .map_err(|e| anyhow::anyhow!("Failed to merge remote sketch: {:?}", e))?;
         }
 
         // Decode differences
-        let differences: Vec<u64> = combined.decode()
+        let differences: Vec<u64> = combined
+            .decode()
             .map_err(|e| anyhow::anyhow!("Failed to decode sketch: {:?}", e))?;
 
         // Convert u64 differences back to transaction hashes
@@ -132,7 +137,7 @@ impl ErlayReconciler {
             let mut hash = [0u8; 32];
             let diff_bytes = diff.to_le_bytes();
             hash[..8].copy_from_slice(&diff_bytes);
-            
+
             // Check if we have this transaction
             if !local_txs.contains(&hash) {
                 missing_txs.push(hash);
@@ -193,10 +198,7 @@ impl ErlayTxSet {
     /// Create reconciliation sketch for a peer
     ///
     /// Creates a sketch of transactions we have that the peer might not have.
-    pub fn create_reconciliation_sketch(
-        &self,
-        remote_tx_count: usize,
-    ) -> Result<Vec<u8>> {
+    pub fn create_reconciliation_sketch(&self, remote_tx_count: usize) -> Result<Vec<u8>> {
         self.reconciler.create_sketch(&self.txs, remote_tx_count)
     }
 
@@ -208,7 +210,8 @@ impl ErlayTxSet {
         local_sketch: &[u8],
         remote_sketch: &[u8],
     ) -> Result<Vec<Hash>> {
-        self.reconciler.reconcile_sets(&self.txs, local_sketch, remote_sketch)
+        self.reconciler
+            .reconcile_sets(&self.txs, local_sketch, remote_sketch)
     }
 
     /// Get all transaction hashes
@@ -233,30 +236,34 @@ mod tests {
     #[test]
     fn test_erlay_reconciliation() {
         let reconciler = ErlayReconciler::new(ErlayConfig::default());
-        
+
         // Create two transaction sets with some overlap
         let mut local_txs = HashSet::new();
         local_txs.insert([1u8; 32]);
         local_txs.insert([2u8; 32]);
         local_txs.insert([3u8; 32]);
-        
+
         let mut remote_txs = HashSet::new();
         remote_txs.insert([2u8; 32]);
         remote_txs.insert([3u8; 32]);
         remote_txs.insert([4u8; 32]);
-        
+
         // Create sketches
-        let local_sketch = reconciler.create_sketch(&local_txs, remote_txs.len())
+        let local_sketch = reconciler
+            .create_sketch(&local_txs, remote_txs.len())
             .expect("Failed to create local sketch");
-        let remote_sketch = reconciler.create_sketch(&remote_txs, local_txs.len())
+        let remote_sketch = reconciler
+            .create_sketch(&remote_txs, local_txs.len())
             .expect("Failed to create remote sketch");
-        
+
         // Reconcile
-        let missing_local = reconciler.reconcile_sets(&local_txs, &local_sketch, &remote_sketch)
+        let missing_local = reconciler
+            .reconcile_sets(&local_txs, &local_sketch, &remote_sketch)
             .expect("Failed to reconcile");
-        let missing_remote = reconciler.reconcile_sets(&remote_txs, &remote_sketch, &local_sketch)
+        let missing_remote = reconciler
+            .reconcile_sets(&remote_txs, &remote_sketch, &local_sketch)
             .expect("Failed to reconcile");
-        
+
         // Local should be missing [4]
         assert!(missing_local.contains(&[4u8; 32]));
         // Remote should be missing [1]
@@ -267,20 +274,19 @@ mod tests {
     #[test]
     fn test_erlay_tx_set() {
         let mut tx_set = ErlayTxSet::new();
-        
+
         let tx1 = [1u8; 32];
         let tx2 = [2u8; 32];
-        
+
         tx_set.add(tx1);
         tx_set.add(tx2);
-        
+
         assert_eq!(tx_set.size(), 2);
         assert!(tx_set.contains(&tx1));
         assert!(tx_set.contains(&tx2));
-        
+
         tx_set.remove(&tx1);
         assert_eq!(tx_set.size(), 1);
         assert!(!tx_set.contains(&tx1));
     }
 }
-

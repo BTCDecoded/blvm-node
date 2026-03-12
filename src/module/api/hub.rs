@@ -233,12 +233,6 @@ impl ModuleApiHub {
                 let tip = self.node_api.get_chain_tip().await?;
                 ResponsePayload::Hash(tip)
             }
-            _ => {
-                return Err(crate::module::traits::ModuleError::OperationError(format!(
-                    "Unimplemented request payload: {:?}",
-                    request.payload
-                )))
-            }
             RequestPayload::GetBlockHeight => {
                 let height = self.node_api.get_block_height().await?;
                 ResponsePayload::U64(height)
@@ -496,7 +490,7 @@ impl ModuleApiHub {
             } => {
                 let response = self
                     .node_api
-                    .call_module(target_module_id.as_deref(), &method, params.clone())
+                    .call_module(target_module_id.as_deref(), method, params.clone())
                     .await?;
                 ResponsePayload::ModuleApiResponse(response)
             }
@@ -515,7 +509,7 @@ impl ModuleApiHub {
             }
             // Module Health & Monitoring
             RequestPayload::GetModuleHealth { module_id } => {
-                let health = self.node_api.get_module_health(&module_id).await?;
+                let health = self.node_api.get_module_health(module_id).await?;
                 ResponsePayload::ModuleHealth(health)
             }
             RequestPayload::GetAllModuleHealth => {
@@ -544,6 +538,12 @@ impl ModuleApiHub {
                     .send_stratum_v2_message_to_peer(peer_addr.clone(), message_data.clone())
                     .await?;
                 ResponsePayload::Bool(true)
+            }
+            _ => {
+                return Err(crate::module::traits::ModuleError::OperationError(format!(
+                    "Unimplemented request payload: {:?}",
+                    request.payload
+                )))
             }
         };
 

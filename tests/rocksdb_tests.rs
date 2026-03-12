@@ -5,7 +5,7 @@
 
 #[cfg(feature = "rocksdb")]
 mod rocksdb_tests {
-    use blvm_node::storage::database::{create_database, DatabaseBackend, Database, Tree};
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend, Tree};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -19,7 +19,8 @@ mod rocksdb_tests {
     #[test]
     fn test_rocksdb_tree_operations() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
 
         let tree = db.open_tree("test_tree").unwrap();
 
@@ -54,7 +55,8 @@ mod rocksdb_tests {
     #[test]
     fn test_rocksdb_tree_isolation() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
 
         let tree1 = db.open_tree("tree1").unwrap();
         let tree2 = db.open_tree("tree2").unwrap();
@@ -71,7 +73,8 @@ mod rocksdb_tests {
     #[test]
     fn test_rocksdb_iteration() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
 
         let tree = db.open_tree("test_tree").unwrap();
 
@@ -87,10 +90,8 @@ mod rocksdb_tests {
         }
 
         // Test iteration
-        let mut collected: Vec<(Vec<u8>, Vec<u8>)> = tree
-            .iter()
-            .map(|item| item.unwrap())
-            .collect();
+        let mut collected: Vec<(Vec<u8>, Vec<u8>)> =
+            tree.iter().map(|item| item.unwrap()).collect();
 
         // Sort for comparison (RocksDB iteration order may vary)
         collected.sort_by(|a, b| a.0.cmp(&b.0));
@@ -104,7 +105,8 @@ mod rocksdb_tests {
     #[test]
     fn test_rocksdb_dynamic_tree_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
 
         // Create multiple trees dynamically
         for i in 0..10 {
@@ -124,7 +126,8 @@ mod rocksdb_tests {
     #[test]
     fn test_rocksdb_flush() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
 
         let tree = db.open_tree("test_tree").unwrap();
         tree.insert(b"key", b"value").unwrap();
@@ -136,7 +139,8 @@ mod rocksdb_tests {
     #[test]
     fn test_rocksdb_large_data() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
 
         let tree = db.open_tree("test_tree").unwrap();
 
@@ -162,4 +166,3 @@ mod rocksdb_tests {
         assert!(result.is_err());
     }
 }
-

@@ -7,9 +7,9 @@ use crate::rpc::errors::RpcError;
 use crate::storage::assumeutxo::AssumeUtxoManager;
 use crate::storage::Storage;
 use anyhow::Result;
-use std::path::Path;
 use blvm_protocol::BlockHeader;
 use serde_json::{json, Number, Value};
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -71,10 +71,7 @@ impl BlockchainRpc {
     }
 
     /// Set event publisher for BlockDisconnected/ChainReorg notifications
-    pub fn with_event_publisher(
-        mut self,
-        event_publisher: Option<Arc<EventPublisher>>,
-    ) -> Self {
+    pub fn with_event_publisher(mut self, event_publisher: Option<Arc<EventPublisher>>) -> Self {
         self.event_publisher = event_publisher;
         self
     }
@@ -109,7 +106,7 @@ impl BlockchainRpc {
         // MAX_TARGET for Bitcoin mainnet is 0x00000000FFFF0000000000000000000000000000000000000000000000000000
         // But we use a simpler calculation: difficulty = 2^256 / (target + 1)
         // For display purposes, we normalize to genesis difficulty = 1.0
-        // MAX_TARGET is 256 bits, use U256 from bllvm-consensus
+        // MAX_TARGET is 256 bits, use U256 from blvm-consensus
         // 0x00000000FFFF0000000000000000000000000000000000000000000000000000
         // For now, use a placeholder - this should be calculated from difficulty bits
         const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
@@ -206,7 +203,7 @@ impl BlockchainRpc {
 
     /// Get blockchain information
     ///
-    /// Includes softfork information based on feature flags from protocol-engine
+    /// Includes softfork information based on feature flags from blvm-protocol
     pub async fn get_blockchain_info(&self) -> Result<Value> {
         #[cfg(debug_assertions)]
         debug!("RPC: getblockchaininfo");
@@ -276,10 +273,7 @@ impl BlockchainRpc {
                 0
             };
 
-            let chainwork = storage
-                .chain()
-                .get_chainwork(&best_hash)?
-                .unwrap_or(0u128);
+            let chainwork = storage.chain().get_chainwork(&best_hash)?.unwrap_or(0u128);
             // CRITICAL FIX: Removed calculate_total_work() fallback - it iterates over ALL blocks
             // (357k+ iterations) causing 3+ minute RPC delays. If chainwork isn't cached,
             // return 0 instead of doing expensive calculation.
@@ -1691,8 +1685,10 @@ impl BlockchainRpc {
                     }
                 }
 
-                let previous_scripts_bytes: Vec<Vec<u8>> =
-                    previous_scripts.iter().map(|s| s.as_ref().to_vec()).collect();
+                let previous_scripts_bytes: Vec<Vec<u8>> = previous_scripts
+                    .iter()
+                    .map(|s| s.as_ref().to_vec())
+                    .collect();
                 match build_block_filter(&block.transactions, &previous_scripts_bytes) {
                     Ok(filter) => {
                         Ok(json!({

@@ -66,10 +66,8 @@ impl UtxoStore {
     /// Create a new UTXO store with compression settings
     pub fn new_with_compression(
         db: Arc<dyn Database>,
-        #[cfg(feature = "utxo-compression")]
-        compression_enabled: bool,
-        #[cfg(feature = "utxo-compression")]
-        compression_level: u32,
+        #[cfg(feature = "utxo-compression")] compression_enabled: bool,
+        #[cfg(feature = "utxo-compression")] compression_level: u32,
     ) -> Result<Self> {
         let utxos = Arc::from(db.open_tree("utxos")?);
         let spent_outputs = Arc::from(db.open_tree("spent_outputs")?);
@@ -217,7 +215,7 @@ impl UtxoStore {
         for result in self.utxos.iter() {
             let (key, value) = result?;
             let outpoint = self.outpoint_from_key(&key)?;
-            
+
             // Decompress if data is compressed
             #[cfg(feature = "utxo-compression")]
             let utxo_data = if Self::is_compressed(&value) {
@@ -360,7 +358,7 @@ impl UtxoStore {
 
         for result in self.utxos.iter() {
             let (_, value) = result?;
-            
+
             // Decompress if data is compressed
             #[cfg(feature = "utxo-compression")]
             let utxo_data = if Self::is_compressed(&value) {
@@ -450,7 +448,7 @@ impl CachedUtxoStore {
         Self {
             inner,
             cache: std::sync::RwLock::new(lru::LruCache::new(
-                NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(100_000).unwrap())
+                NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(100_000).unwrap()),
             )),
             pending: std::sync::Mutex::new(Vec::with_capacity(10_000)),
             stats: std::sync::atomic::AtomicU64::new(0),
@@ -463,7 +461,8 @@ impl CachedUtxoStore {
         {
             let mut cache = self.cache.write().unwrap();
             if let Some(utxo) = cache.get(outpoint) {
-                self.stats.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // Cache hit
+                self.stats
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // Cache hit
                 return Ok(Some(utxo.clone()));
             }
         }
@@ -472,7 +471,7 @@ impl CachedUtxoStore {
         if let Some(utxo) = self.inner.get_utxo(outpoint)? {
             // Add to cache
             let mut cache = self.cache.write().unwrap();
-            cache.put(outpoint.clone(), utxo.clone());
+            cache.put(*outpoint, utxo.clone());
             return Ok(Some(utxo));
         }
 
@@ -484,7 +483,7 @@ impl CachedUtxoStore {
         // Add to cache
         {
             let mut cache = self.cache.write().unwrap();
-            cache.put(outpoint.clone(), utxo.clone());
+            cache.put(outpoint, utxo.clone());
         }
 
         // Add to pending writes
@@ -513,7 +512,7 @@ impl CachedUtxoStore {
         // Add delete to pending writes
         {
             let mut pending = self.pending.lock().unwrap();
-            pending.push((outpoint.clone(), None));
+            pending.push((*outpoint, None));
         }
 
         Ok(utxo)
@@ -536,7 +535,7 @@ impl CachedUtxoStore {
         }
 
         let count = pending_ops.len();
-        
+
         // Use batch writer for atomic commit
         let mut batch = self.inner.utxos.batch();
 
@@ -556,7 +555,7 @@ impl CachedUtxoStore {
         }
 
         batch.commit()?;
-        
+
         Ok(count)
     }
 

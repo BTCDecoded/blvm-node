@@ -1,15 +1,15 @@
-//! Example: Connect Electrum wallet to bllvm-node
+//! Example: Connect Electrum wallet to blvm-node
 //!
-//! This example demonstrates how to configure bllvm-node to work with Electrum wallet.
+//! This example demonstrates how to configure blvm-node to work with Electrum wallet.
 //! Electrum connects via JSON-RPC and requires specific RPC methods.
 //!
-//! Note: This is a configuration example. For a full running node, use the bllvm binary
+//! Note: This is a configuration example. For a full running node, use the blvm binary
 //! with the generated config.toml file.
 
 use blvm_node::config::NodeConfig;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Electrum Integration Configuration");
+    println!("blvm-node Electrum Integration Configuration");
     println!("=============================================");
     println!();
 
@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     println!("  P2P Port: 18333");
     println!();
     println!("To start the node with this config:");
-    println!("  bllvm-node --config {} --network testnet", config_path);
+    println!("  blvm-node --config {} --network testnet", config_path);
     println!();
     println!("Electrum Configuration:");
     println!("  1. Open Electrum");
@@ -55,7 +55,7 @@ fn main() -> anyhow::Result<()> {
     println!("  6. Protocol: TCP");
     println!("  7. Click 'Close'");
     println!();
-    println!("Electrum will now connect to your local bllvm-node!");
+    println!("Electrum will now connect to your local blvm-node!");
 
     Ok(())
 }

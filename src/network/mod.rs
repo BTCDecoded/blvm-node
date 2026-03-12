@@ -6,11 +6,13 @@
 pub mod address_db;
 pub mod ban_list_merging;
 pub mod ban_list_signing;
+pub mod bandwidth_protection;
 pub mod chain_access;
 pub mod dns_seeds;
 pub mod dos_protection;
+#[cfg(feature = "erlay")]
+pub mod erlay;
 pub mod ibd_protection;
-pub mod bandwidth_protection;
 pub mod inventory;
 pub mod lan_discovery;
 pub mod lan_security;
@@ -22,8 +24,6 @@ pub mod protocol;
 pub mod protocol_adapter;
 pub mod protocol_extensions;
 pub mod relay;
-#[cfg(feature = "erlay")]
-pub mod erlay;
 pub mod replay_protection;
 pub mod tcp_transport;
 pub mod transport;
@@ -353,7 +353,7 @@ impl PeerByteRateLimiter {
 
         if now > self.last_refill {
             let elapsed = now - self.last_refill;
-            let bytes_to_add = (elapsed as u64) * self.rate;
+            let bytes_to_add = elapsed * self.rate;
             self.bytes = self
                 .bytes
                 .saturating_add(bytes_to_add)
@@ -417,21 +417,26 @@ pub struct NetworkManager {
     /// Mempool manager for transaction access
     mempool_manager: Option<Arc<MempoolManager>>,
     /// Module registry for serving modules via P2P
-    module_registry: Arc<tokio::sync::Mutex<Option<Arc<crate::module::registry::client::ModuleRegistry>>>>,
+    module_registry:
+        Arc<tokio::sync::Mutex<Option<Arc<crate::module::registry::client::ModuleRegistry>>>>,
     /// Payment processor for BIP70 payments (HTTP and P2P)
-    payment_processor: Arc<tokio::sync::Mutex<Option<Arc<crate::payment::processor::PaymentProcessor>>>>,
+    payment_processor:
+        Arc<tokio::sync::Mutex<Option<Arc<crate::payment::processor::PaymentProcessor>>>>,
     /// Payment state machine for unified payment coordination
-    payment_state_machine: Arc<tokio::sync::Mutex<Option<Arc<crate::payment::state_machine::PaymentStateMachine>>>>,
+    payment_state_machine:
+        Arc<tokio::sync::Mutex<Option<Arc<crate::payment::state_machine::PaymentStateMachine>>>>,
     /// Merchant private key for signing payment ACKs (optional)
     merchant_key: Arc<tokio::sync::Mutex<Option<secp256k1::SecretKey>>>,
     /// Node payment address script (for module downloads - 10% fee)
     node_payment_script: Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
     /// Module encryption for encrypted module serving
-    module_encryption: Arc<tokio::sync::Mutex<Option<Arc<crate::module::encryption::ModuleEncryption>>>>,
+    module_encryption:
+        Arc<tokio::sync::Mutex<Option<Arc<crate::module::encryption::ModuleEncryption>>>>,
     /// Modules directory for encrypted/decrypted module storage
     modules_dir: Arc<tokio::sync::Mutex<Option<std::path::PathBuf>>>,
     /// Event publisher for module event notifications (optional)
-    event_publisher: Arc<tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>>,
+    event_publisher:
+        Arc<tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>>,
     /// FIBRE relay manager (for fast block relay)
     #[cfg(feature = "fibre")]
     fibre_relay: Option<Arc<Mutex<fibre::FibreRelay>>>,
@@ -478,10 +483,29 @@ pub struct NetworkManager {
     pending_requests: Arc<Mutex<HashMap<u64, PendingRequest>>>,
     /// Pending Headers requests (for IBD) - supports pipelining with queue per peer
     /// Key: peer_addr, Value: queue of sender channels (FIFO order)
-    pending_headers_requests: Arc<Mutex<HashMap<SocketAddr, std::collections::VecDeque<tokio::sync::oneshot::Sender<Vec<blvm_protocol::BlockHeader>>>>>>,
+    pending_headers_requests: Arc<
+        Mutex<
+            HashMap<
+                SocketAddr,
+                std::collections::VecDeque<
+                    tokio::sync::oneshot::Sender<Vec<blvm_protocol::BlockHeader>>,
+                >,
+            >,
+        >,
+    >,
     /// Pending Block requests (for IBD)
     /// Key: (peer_ip, block_hash) - uses IpAddr to match regardless of port (inbound vs outbound)
-    pending_block_requests: Arc<Mutex<HashMap<(IpAddr, blvm_protocol::Hash), tokio::sync::oneshot::Sender<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>>>>,
+    pending_block_requests: Arc<
+        Mutex<
+            HashMap<
+                (IpAddr, blvm_protocol::Hash),
+                tokio::sync::oneshot::Sender<(
+                    blvm_protocol::Block,
+                    Vec<Vec<blvm_protocol::segwit::Witness>>,
+                )>,
+            >,
+        >,
+    >,
     /// DoS protection manager
     dos_protection: Arc<dos_protection::DosProtectionManager>,
     /// IBD bandwidth protection manager
@@ -609,29 +633,43 @@ impl NetworkManager {
         ));
 
         // Initialize IBD protection (bandwidth exhaustion attack mitigation)
-        let ibd_protection = if let Some(ibd_config) = config.and_then(|c| c.ibd_protection.as_ref()) {
+        let ibd_protection = if let Some(ibd_config) =
+            config.and_then(|c| c.ibd_protection.as_ref())
+        {
             let mut ibd_protection_config = ibd_protection::IbdProtectionConfig::default();
             // Convert GB to bytes
-            ibd_protection_config.max_bandwidth_per_peer_per_day = (ibd_config.max_bandwidth_per_peer_per_day_gb * 1024 * 1024 * 1024) as u64;
-            ibd_protection_config.max_bandwidth_per_peer_per_hour = (ibd_config.max_bandwidth_per_peer_per_hour_gb * 1024 * 1024 * 1024) as u64;
-            ibd_protection_config.max_bandwidth_per_ip_per_day = (ibd_config.max_bandwidth_per_ip_per_day_gb * 1024 * 1024 * 1024) as u64;
-            ibd_protection_config.max_bandwidth_per_ip_per_hour = (ibd_config.max_bandwidth_per_ip_per_hour_gb * 1024 * 1024 * 1024) as u64;
-            ibd_protection_config.max_bandwidth_per_subnet_per_day = (ibd_config.max_bandwidth_per_subnet_per_day_gb * 1024 * 1024 * 1024) as u64;
-            ibd_protection_config.max_bandwidth_per_subnet_per_hour = (ibd_config.max_bandwidth_per_subnet_per_hour_gb * 1024 * 1024 * 1024) as u64;
-            ibd_protection_config.max_concurrent_ibd_serving = ibd_config.max_concurrent_ibd_serving;
-            ibd_protection_config.ibd_request_cooldown_seconds = ibd_config.ibd_request_cooldown_seconds;
-            ibd_protection_config.suspicious_reconnection_threshold = ibd_config.suspicious_reconnection_threshold;
+            ibd_protection_config.max_bandwidth_per_peer_per_day =
+                ibd_config.max_bandwidth_per_peer_per_day_gb * 1024 * 1024 * 1024;
+            ibd_protection_config.max_bandwidth_per_peer_per_hour =
+                ibd_config.max_bandwidth_per_peer_per_hour_gb * 1024 * 1024 * 1024;
+            ibd_protection_config.max_bandwidth_per_ip_per_day =
+                ibd_config.max_bandwidth_per_ip_per_day_gb * 1024 * 1024 * 1024;
+            ibd_protection_config.max_bandwidth_per_ip_per_hour =
+                ibd_config.max_bandwidth_per_ip_per_hour_gb * 1024 * 1024 * 1024;
+            ibd_protection_config.max_bandwidth_per_subnet_per_day =
+                ibd_config.max_bandwidth_per_subnet_per_day_gb * 1024 * 1024 * 1024;
+            ibd_protection_config.max_bandwidth_per_subnet_per_hour =
+                ibd_config.max_bandwidth_per_subnet_per_hour_gb * 1024 * 1024 * 1024;
+            ibd_protection_config.max_concurrent_ibd_serving =
+                ibd_config.max_concurrent_ibd_serving;
+            ibd_protection_config.ibd_request_cooldown_seconds =
+                ibd_config.ibd_request_cooldown_seconds;
+            ibd_protection_config.suspicious_reconnection_threshold =
+                ibd_config.suspicious_reconnection_threshold;
             ibd_protection_config.reputation_ban_threshold = ibd_config.reputation_ban_threshold;
             ibd_protection_config.enable_emergency_throttle = ibd_config.enable_emergency_throttle;
-            ibd_protection_config.emergency_throttle_percent = ibd_config.emergency_throttle_percent;
-            Arc::new(ibd_protection::IbdProtectionManager::with_config(ibd_protection_config))
+            ibd_protection_config.emergency_throttle_percent =
+                ibd_config.emergency_throttle_percent;
+            Arc::new(ibd_protection::IbdProtectionManager::with_config(
+                ibd_protection_config,
+            ))
         } else {
             Arc::new(ibd_protection::IbdProtectionManager::new())
         };
 
         // Initialize unified bandwidth protection (extends IBD protection)
         let bandwidth_protection = Arc::new(bandwidth_protection::BandwidthProtectionManager::new(
-            Arc::clone(&ibd_protection)
+            Arc::clone(&ibd_protection),
         ));
 
         // Use config for address database
@@ -907,12 +945,8 @@ impl NetworkManager {
     /// Check if address is local (loopback, private, link-local)
     pub(crate) fn is_local_address(addr: &SocketAddr) -> bool {
         match addr.ip() {
-            IpAddr::V4(ip) => {
-                ip.is_loopback() || ip.is_private() || ip.is_link_local()
-            }
-            IpAddr::V6(ip) => {
-                ip.is_loopback() || ip.is_unspecified()
-            }
+            IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+            IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified(),
         }
     }
 
@@ -931,25 +965,27 @@ impl NetworkManager {
     #[allow(dead_code)]
     async fn evict_extra_outbound_peers(&self) {
         const MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT: usize = 4;
-        
+
         let mut pm = self.peer_manager.lock().await;
-        
+
         // Get all outbound peers with their last block announcement time
-        let mut outbound_peers: Vec<(TransportAddr, u64)> = pm.peers.iter()
+        let mut outbound_peers: Vec<(TransportAddr, u64)> = pm
+            .peers
+            .iter()
             .filter(|(_, peer)| peer.is_outbound() && !peer.is_manual())
             .map(|(addr, peer)| {
                 let last_announce = peer.last_block_announcement().unwrap_or(0);
                 (addr.clone(), last_announce)
             })
             .collect();
-        
+
         if outbound_peers.len() <= MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT {
             return; // Not too many peers, no eviction needed
         }
-        
+
         // Sort by last announcement (oldest first) - peers with no announcements (0) come first
         outbound_peers.sort_by_key(|(_, time)| *time);
-        
+
         // Disconnect oldest peers (keep best MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT)
         let peers_to_evict = outbound_peers.len() - MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT;
         for (addr, last_announce) in outbound_peers.iter().take(peers_to_evict) {
@@ -967,7 +1003,9 @@ impl NetworkManager {
                 addr, time_ago
             );
             drop(pm); // Release lock before sending message
-            let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(addr.clone()));
+            let _ = self
+                .peer_tx
+                .send(NetworkMessage::PeerDisconnected(addr.clone()));
             pm = self.peer_manager.lock().await; // Re-acquire lock for next iteration
         }
     }
@@ -1035,20 +1073,20 @@ impl NetworkManager {
             .unwrap_or(false);
 
         if !governance_enabled {
-            // Relay to other peers (gossip) but don't forward to bllvm-commons
+            // Relay to other peers (gossip) but don't forward to blvm-commons
             debug!("Governance relay disabled, gossiping message to peers");
             self.gossip_governance_message(peer_addr, &msg).await?;
             return Ok(());
         }
 
-        // Forward to bllvm-commons via VPN
+        // Forward to blvm-commons via VPN
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
                 let env_api_key = std::env::var("COMMONS_API_KEY").ok();
                 let api_key = config
                     .api_key
                     .as_deref()
-                    .or_else(|| env_api_key.as_deref())
+                    .or(env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
                 let client = reqwest::Client::builder()
@@ -1056,7 +1094,7 @@ impl NetworkManager {
                     .build()
                     .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
-                let url = format!("{}/internal/governance/registration", commons_url);
+                let url = format!("{commons_url}/internal/governance/registration");
 
                 let response = client
                     .post(&url)
@@ -1068,7 +1106,7 @@ impl NetworkManager {
 
                 if response.status().is_success() {
                     info!(
-                        "Successfully forwarded EconomicNodeRegistration to bllvm-commons: message_id={}",
+                        "Successfully forwarded EconomicNodeRegistration to blvm-commons: message_id={}",
                         msg.message_id
                     );
                 } else {
@@ -1176,10 +1214,7 @@ impl NetworkManager {
             use crate::module::traits::EventType;
             let payload = EventPayload::EconomicNodeVeto {
                 proposal_id: format!("{}", msg.pr_id),
-                node_id: msg
-                    .node_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| String::new()),
+                node_id: msg.node_id.map(|id| id.to_string()).unwrap_or_default(),
                 reason: msg.signal_type.clone(),
             };
             if let Err(e) = event_publisher
@@ -1224,20 +1259,20 @@ impl NetworkManager {
             .unwrap_or(false);
 
         if !governance_enabled {
-            // Relay to other peers (gossip) but don't forward to bllvm-commons
+            // Relay to other peers (gossip) but don't forward to blvm-commons
             debug!("Governance relay disabled, gossiping message to peers");
             self.gossip_governance_message(peer_addr, &msg).await?;
             return Ok(());
         }
 
-        // Forward to bllvm-commons via VPN
+        // Forward to blvm-commons via VPN
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
                 let env_api_key = std::env::var("COMMONS_API_KEY").ok();
                 let api_key = config
                     .api_key
                     .as_deref()
-                    .or_else(|| env_api_key.as_deref())
+                    .or(env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
                 let client = reqwest::Client::builder()
@@ -1245,7 +1280,7 @@ impl NetworkManager {
                     .build()
                     .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
-                let url = format!("{}/internal/governance/veto", commons_url);
+                let url = format!("{commons_url}/internal/governance/veto");
 
                 let response = client
                     .post(&url)
@@ -1257,7 +1292,7 @@ impl NetworkManager {
 
                 if response.status().is_success() {
                     info!(
-                        "Successfully forwarded EconomicNodeVeto to bllvm-commons: message_id={}",
+                        "Successfully forwarded EconomicNodeVeto to blvm-commons: message_id={}",
                         msg.message_id
                     );
                 } else {
@@ -1324,7 +1359,7 @@ impl NetworkManager {
             return Ok(());
         }
 
-        // If this is a query, forward to bllvm-commons if we're a governance node
+        // If this is a query, forward to blvm-commons if we're a governance node
         let governance_enabled = self
             .governance_config
             .as_ref()
@@ -1338,7 +1373,7 @@ impl NetworkManager {
                     let api_key = config
                         .api_key
                         .as_deref()
-                        .or_else(|| env_api_key.as_deref())
+                        .or(env_api_key.as_deref())
                         .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
                     let client = reqwest::Client::builder()
@@ -1346,15 +1381,15 @@ impl NetworkManager {
                         .build()
                         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
-                    // Forward query to bllvm-commons (it expects the same format)
-                    let url = format!("{}/internal/governance/status", commons_url);
+                    // Forward query to blvm-commons (it expects the same format)
+                    let url = format!("{commons_url}/internal/governance/status");
 
                     info!(
-                        "Forwarding EconomicNodeStatus query to bllvm-commons: request_id={}, query_type={}",
+                        "Forwarding EconomicNodeStatus query to blvm-commons: request_id={}, query_type={}",
                         msg.request_id, msg.query_type
                     );
 
-                    // Create request payload (bllvm-commons expects EconomicNodeStatusMessage format)
+                    // Create request payload (blvm-commons expects EconomicNodeStatusMessage format)
                     let request_payload = serde_json::json!({
                         "request_id": msg.request_id,
                         "node_identifier": msg.node_identifier,
@@ -1547,14 +1582,14 @@ impl NetworkManager {
             return Ok(());
         }
 
-        // Forward to bllvm-commons via VPN
+        // Forward to blvm-commons via VPN
         if let Some(config) = &self.governance_config {
             if let Some(ref commons_url) = config.commons_url {
                 let env_api_key = std::env::var("COMMONS_API_KEY").ok();
                 let api_key = config
                     .api_key
                     .as_deref()
-                    .or_else(|| env_api_key.as_deref())
+                    .or(env_api_key.as_deref())
                     .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
 
                 let client = reqwest::Client::builder()
@@ -1562,7 +1597,7 @@ impl NetworkManager {
                     .build()
                     .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
-                let url = format!("{}/internal/governance/fork-decision", commons_url);
+                let url = format!("{commons_url}/internal/governance/fork-decision");
 
                 let response = client
                     .post(&url)
@@ -1574,7 +1609,7 @@ impl NetworkManager {
 
                 if response.status().is_success() {
                     info!(
-                        "Successfully forwarded EconomicNodeForkDecision to bllvm-commons: message_id={}",
+                        "Successfully forwarded EconomicNodeForkDecision to blvm-commons: message_id={}",
                         msg.message_id
                     );
                 } else {
@@ -1895,7 +1930,7 @@ impl NetworkManager {
         info!("Discovering LAN sibling nodes...");
         let lan_nodes = lan_discovery::discover_lan_bitcoin_nodes_with_port(port).await;
         let mut lan_connected = 0;
-        
+
         for lan_addr in &lan_nodes {
             info!("Connecting to LAN sibling node: {}", lan_addr);
             match self.connect_to_peer(*lan_addr).await {
@@ -1903,14 +1938,17 @@ impl NetworkManager {
                     lan_connected += 1;
                     // Add to persistent peers so we always try to reconnect
                     self.add_persistent_peer(*lan_addr);
-                    info!("Connected to LAN sibling node: {} (will be prioritized for IBD)", lan_addr);
+                    info!(
+                        "Connected to LAN sibling node: {} (will be prioritized for IBD)",
+                        lan_addr
+                    );
                 }
                 Err(e) => {
                     warn!("Failed to connect to LAN node {}: {}", lan_addr, e);
                 }
             }
         }
-        
+
         if lan_connected > 0 {
             info!("Connected to {} LAN sibling node(s) - these will be prioritized for block downloads", lan_connected);
         }
@@ -2387,21 +2425,21 @@ impl NetworkManager {
 
         // Start peer reconnection task
         self.start_peer_reconnection_task();
-        
+
         // Start periodic ping task (sends ping every 2 minutes)
         self.start_ping_task();
-        
+
         // Start ping timeout checking task (checks every 30 seconds)
         self.start_ping_timeout_check_task();
-        
-            // Start chain sync timeout checking task (checks every 60 seconds)
-            self.start_chain_sync_timeout_check_task();
-            
-            // Start outbound peer eviction task (checks every 5 minutes)
-            self.start_outbound_peer_eviction_task();
-            
-            // Start outbound peer eviction task (checks every 5 minutes)
-            self.start_outbound_peer_eviction_task();
+
+        // Start chain sync timeout checking task (checks every 60 seconds)
+        self.start_chain_sync_timeout_check_task();
+
+        // Start outbound peer eviction task (checks every 5 minutes)
+        self.start_outbound_peer_eviction_task();
+
+        // Start outbound peer eviction task (checks every 5 minutes)
+        self.start_outbound_peer_eviction_task();
 
         // Note: Peer connection initialization (DNS seeds, persistent peers, etc.)
         // should be called separately via initialize_peer_connections() after start()
@@ -2544,7 +2582,7 @@ impl NetworkManager {
             })
         })
     }
-    
+
     /// Get the number of pending header requests for a peer
     pub fn pending_headers_count(&self, peer_addr: SocketAddr) -> usize {
         tokio::task::block_in_place(|| {
@@ -2576,15 +2614,15 @@ impl NetworkManager {
         &self,
         peer_addr: SocketAddr,
         block_hash: blvm_protocol::Hash,
-    ) -> tokio::sync::oneshot::Receiver<(blvm_protocol::Block, Vec<Vec<blvm_protocol::segwit::Witness>>)> {
+    ) -> tokio::sync::oneshot::Receiver<(
+        blvm_protocol::Block,
+        Vec<Vec<blvm_protocol::segwit::Witness>>,
+    )> {
         let key = (Self::block_request_key(peer_addr), block_hash);
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                self.pending_block_requests
-                    .lock()
-                    .await
-                    .insert(key, tx);
+                self.pending_block_requests.lock().await.insert(key, tx);
             })
         });
         rx
@@ -2754,19 +2792,19 @@ impl NetworkManager {
         let peer_manager = Arc::clone(&self.peer_manager);
         let peer_tx = self.peer_tx.clone();
         let storage = self.storage.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Check every minute
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
                 let chain_sync_timeout = 20 * 60; // 20 minutes (CHAIN_SYNC_TIMEOUT)
-                
+
                 // Get our chainwork (from storage/chainstate)
                 let our_chainwork = {
                     if let Some(storage) = &storage {
@@ -2785,17 +2823,18 @@ impl NetworkManager {
                         0 // Storage not available
                     }
                 };
-                
+
                 let mut pm = peer_manager.lock().await;
-                let mut peers_to_disconnect: Vec<crate::network::transport::TransportAddr> = Vec::new();
-                
+                let mut peers_to_disconnect: Vec<crate::network::transport::TransportAddr> =
+                    Vec::new();
+
                 for (addr, peer) in pm.peers.iter() {
                     // Check if peer is outbound (we initiated connection)
                     let is_outbound = peer.is_outbound();
-                    
+
                     if is_outbound {
                         let connection_age = now.saturating_sub(peer.conntime());
-                        
+
                         if connection_age > chain_sync_timeout {
                             // Check if peer's chainwork is sufficient
                             if let Some(peer_chainwork) = peer.chainwork() {
@@ -2817,9 +2856,9 @@ impl NetworkManager {
                         }
                     }
                 }
-                
+
                 drop(pm); // Release lock before disconnecting
-                
+
                 for addr in peers_to_disconnect {
                     let _ = peer_tx.send(NetworkMessage::PeerDisconnected(addr));
                 }
@@ -2831,52 +2870,57 @@ impl NetworkManager {
     fn start_outbound_peer_eviction_task(&self) {
         let peer_manager = Arc::clone(&self.peer_manager);
         let peer_tx = self.peer_tx.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60)); // Check every 5 minutes
             const MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT: usize = 4;
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let mut pm = peer_manager.lock().await;
-                
+
                 // Get all outbound peers with their last block announcement time
-                let mut outbound_peers: Vec<(crate::network::transport::TransportAddr, u64)> = pm.peers.iter()
+                let mut outbound_peers: Vec<(crate::network::transport::TransportAddr, u64)> = pm
+                    .peers
+                    .iter()
                     .filter(|(_, peer)| peer.is_outbound() && !peer.is_manual())
                     .map(|(addr, peer)| {
                         let last_announce = peer.last_block_announcement().unwrap_or(0);
                         (addr.clone(), last_announce)
                     })
                     .collect();
-                
+
                 if outbound_peers.len() <= MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT {
                     continue; // Not too many peers, no eviction needed
                 }
-                
+
                 // Sort by last announcement (oldest first) - peers with no announcements (0) come first
                 outbound_peers.sort_by_key(|(_, time)| *time);
-                
+
                 // Disconnect oldest peers (keep best MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT)
-                let peers_to_evict = outbound_peers.len() - MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT;
-                let peers_to_disconnect: Vec<_> = outbound_peers.iter()
+                let peers_to_evict =
+                    outbound_peers.len() - MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT;
+                let peers_to_disconnect: Vec<_> = outbound_peers
+                    .iter()
                     .take(peers_to_evict)
                     .map(|(addr, _)| addr.clone())
                     .collect();
-                
+
                 drop(pm); // Release lock before sending messages
-                
+
                 for addr in peers_to_disconnect {
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_secs();
                     let pm_check = peer_manager.lock().await;
-                    let last_announce = pm_check.get_peer(&addr)
+                    let last_announce = pm_check
+                        .get_peer(&addr)
                         .and_then(|p| p.last_block_announcement())
                         .unwrap_or(0);
                     drop(pm_check);
-                    
+
                     warn!(
                         "Evicting extra outbound peer {:?} (last block announcement: {} seconds ago)",
                         addr,
@@ -2896,25 +2940,26 @@ impl NetworkManager {
     fn start_ping_timeout_check_task(&self) {
         let peer_manager = Arc::clone(&self.peer_manager);
         let peer_tx = self.peer_tx.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30)); // Check every 30 seconds
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let mut pm = peer_manager.lock().await;
-                let mut peers_to_disconnect: Vec<crate::network::transport::TransportAddr> = Vec::new();
-                
+                let mut peers_to_disconnect: Vec<crate::network::transport::TransportAddr> =
+                    Vec::new();
+
                 for (addr, peer) in pm.peers.iter() {
                     if peer.is_ping_timed_out() {
                         warn!("Ping timeout for peer {:?}, disconnecting", addr);
                         peers_to_disconnect.push(addr.clone());
                     }
                 }
-                
+
                 drop(pm); // Release lock before disconnecting
-                
+
                 for addr in peers_to_disconnect {
                     let _ = peer_tx.send(NetworkMessage::PeerDisconnected(addr));
                 }
@@ -2931,31 +2976,31 @@ impl NetworkManager {
         // can call ping_all_peers. Since ping_all_peers is async and uses &self, we need
         // to restructure this. For now, we'll use a channel-based approach or store
         // the necessary Arc fields.
-        
+
         // Actually, the simplest approach is to have a separate task that periodically
         // calls a method. But since we can't easily share &self across tasks, we'll
         // use the existing infrastructure: create a task that sends pings directly
         // using the same pattern as ping_all_peers but in a loop.
-        
+
         let peer_manager = Arc::clone(&self.peer_manager);
         let tcp_transport = self.tcp_transport.clone();
         #[cfg(feature = "quinn")]
         let quinn_transport = self.quinn_transport.clone();
         #[cfg(feature = "iroh")]
         let iroh_transport = self.iroh_transport.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // 2 minutes
-            
+
             loop {
                 interval.tick().await;
-                
+
                 // Generate nonce for ping
                 let nonce = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as u64;
-                
+
                 use crate::network::protocol::{PingMessage, ProtocolMessage, ProtocolParser};
                 let ping_msg = ProtocolMessage::Ping(PingMessage { nonce });
                 let wire_msg = match ProtocolParser::serialize_message(&ping_msg) {
@@ -2965,14 +3010,14 @@ impl NetworkManager {
                         continue;
                     }
                 };
-                
+
                 // Get all peers and send ping via their send channels
                 {
                     let mut pm = peer_manager.lock().await;
                     for (addr, peer) in pm.peers.iter_mut() {
                         // Record ping in peer state
                         peer.record_ping_sent(nonce);
-                        
+
                         // Send ping via peer's send channel (send_tx is pub(crate))
                         if let Err(e) = peer.send_tx.send(wire_msg.clone()) {
                             warn!("Failed to send ping to peer {:?}: {}", addr, e);
@@ -3369,7 +3414,7 @@ impl NetworkManager {
             let command_bytes = &message[4..16];
             let command_str = String::from_utf8_lossy(command_bytes);
             let command = command_str.trim_end_matches('\0');
-            
+
             // Get SocketAddr for bandwidth protection (needed for tracking)
             let peer_socket_addr_opt: Option<SocketAddr> = match &addr {
                 TransportAddr::Tcp(sock) => Some(*sock),
@@ -3379,7 +3424,9 @@ impl NetworkManager {
                 TransportAddr::Iroh(_) => {
                     // For Iroh, try to get from socket_to_transport mapping
                     // If not found, skip bandwidth tracking (Iroh uses different addressing)
-                    self.socket_to_transport.lock().await
+                    self.socket_to_transport
+                        .lock()
+                        .await
                         .iter()
                         .find_map(|(sock, &ref ta)| if ta == addr { Some(*sock) } else { None })
                 }
@@ -3389,7 +3436,9 @@ impl NetworkManager {
                 // Record bandwidth for IBD-serving messages
                 if command == "headers" || command == "block" {
                     // Record bandwidth for IBD protection
-                    self.ibd_protection.record_bandwidth(peer_socket_addr, message_len as u64).await;
+                    self.ibd_protection
+                        .record_bandwidth(peer_socket_addr, message_len as u64)
+                        .await;
                     debug!(
                         "IBD protection: Recorded {} bytes for {} message to {}",
                         message_len, command, peer_socket_addr
@@ -3400,7 +3449,11 @@ impl NetworkManager {
                     use crate::network::bandwidth_protection::ServiceType;
                     // Record transaction relay bandwidth (per-IP/subnet limits)
                     self.bandwidth_protection
-                        .record_service_bandwidth(ServiceType::TransactionRelay, peer_socket_addr, message_len as u64)
+                        .record_service_bandwidth(
+                            ServiceType::TransactionRelay,
+                            peer_socket_addr,
+                            message_len as u64,
+                        )
                         .await;
                     debug!(
                         "Transaction relay: Recorded {} bytes to {}",
@@ -3486,7 +3539,9 @@ impl NetworkManager {
                     }
 
                     // Send PeerConnected notification to trigger handshake (Version/VerAck)
-                    let _ = self.peer_tx.send(NetworkMessage::PeerConnected(transport_addr.clone()));
+                    let _ = self
+                        .peer_tx
+                        .send(NetworkMessage::PeerConnected(transport_addr.clone()));
 
                     info!(
                         "Successfully connected to {} via {:?} (transport: {:?})",
@@ -3558,11 +3613,7 @@ impl NetworkManager {
                 let stream = self.tcp_transport.connect_stream(addr).await?;
                 let transport_addr = TransportAddr::Tcp(addr);
                 Ok((
-                    peer::Peer::from_tcp_stream_split(
-                        stream,
-                        addr,
-                        self.peer_tx.clone(),
-                    ),
+                    peer::Peer::from_tcp_stream_split(stream, addr, self.peer_tx.clone()),
                     transport_addr,
                 ))
             }
@@ -3618,7 +3669,7 @@ impl NetworkManager {
             }
             pm.peer_addresses()
         };
-        
+
         for addr in peer_addrs {
             // Convert TransportAddr to SocketAddr for send_to_peer, or use send_to_peer_by_transport
             let addr_clone = addr.clone();
@@ -3665,7 +3716,7 @@ impl NetworkManager {
         };
         blocks.pop_front()
     }
-    
+
     /// Queue a block for processing (called when BlockReceived is received in process_messages)
     pub fn queue_block(&self, data: Vec<u8>) {
         if let Ok(mut blocks) = self.pending_blocks.try_lock() {
@@ -3677,22 +3728,30 @@ impl NetworkManager {
     /// Returns the number of messages processed
     pub async fn process_pending_messages(&self) -> Result<usize> {
         let mut processed = 0;
-        
+
         loop {
             // Try to receive a message without blocking
             let message = {
                 let mut rx = self.peer_rx.lock().await;
                 match rx.try_recv() {
                     Ok(msg) => {
-                        debug!("process_pending_messages: received message {:?}", 
+                        debug!(
+                            "process_pending_messages: received message {:?}",
                             match &msg {
-                                NetworkMessage::PeerConnected(addr) => format!("PeerConnected({:?})", addr),
-                                NetworkMessage::PeerDisconnected(addr) => format!("PeerDisconnected({:?})", addr),
-                                NetworkMessage::RawMessageReceived(data, addr) => format!("RawMessageReceived({} bytes from {})", data.len(), addr),
+                                NetworkMessage::PeerConnected(addr) =>
+                                    format!("PeerConnected({addr:?})"),
+                                NetworkMessage::PeerDisconnected(addr) =>
+                                    format!("PeerDisconnected({addr:?})"),
+                                NetworkMessage::RawMessageReceived(data, addr) => format!(
+                                    "RawMessageReceived({} bytes from {})",
+                                    data.len(),
+                                    addr
+                                ),
                                 _ => "other".to_string(),
-                            });
+                            }
+                        );
                         Some(msg)
-                    },
+                    }
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         warn!("process_pending_messages: channel disconnected");
@@ -3700,17 +3759,17 @@ impl NetworkManager {
                     }
                 }
             };
-            
+
             let message = match message {
                 Some(msg) => msg,
                 None => break, // No more pending messages
             };
-            
+
             // Process the message (reuse the same processing logic)
             self.handle_network_message(message).await;
             processed += 1;
         }
-        
+
         Ok(processed)
     }
 
@@ -3772,9 +3831,12 @@ impl NetworkManager {
                         true,
                     );
 
-                    match ProtocolParser::serialize_message(&ProtocolMessage::Version(version_msg)) {
+                    match ProtocolParser::serialize_message(&ProtocolMessage::Version(version_msg))
+                    {
                         Ok(wire_msg) => {
-                            if let Err(e) = self.send_to_peer_by_transport(addr.clone(), wire_msg).await {
+                            if let Err(e) =
+                                self.send_to_peer_by_transport(addr.clone(), wire_msg).await
+                            {
                                 warn!("Failed to send Version message to {:?}: {}", addr, e);
                             } else {
                                 info!("Sent Version message to {:?}", addr);
@@ -3789,7 +3851,7 @@ impl NetworkManager {
                 // Publish peer connected event
                 let event_publisher_guard = self.event_publisher.lock().await;
                 if let Some(ref event_publisher) = *event_publisher_guard {
-                    let addr_str = format!("{:?}", addr);
+                    let addr_str = format!("{addr:?}");
                     let transport_type = match &addr {
                         TransportAddr::Tcp(_) => "tcp",
                         #[cfg(feature = "quinn")]
@@ -3809,12 +3871,7 @@ impl NetworkManager {
                     let event_pub_clone = Arc::clone(event_publisher);
                     tokio::spawn(async move {
                         event_pub_clone
-                            .publish_peer_connected(
-                                &addr_str,
-                                transport_type,
-                                services,
-                                version,
-                            )
+                            .publish_peer_connected(&addr_str, transport_type, services, version)
                             .await;
                     });
                 }
@@ -3851,7 +3908,7 @@ impl NetworkManager {
                 let mut rx = self.peer_rx.lock().await;
                 rx.recv().await
             };
-            
+
             let message = match message {
                 Some(msg) => msg,
                 None => {
@@ -3860,7 +3917,7 @@ impl NetworkManager {
                     break;
                 }
             };
-            
+
             // Process message (no lock held)
             message_count += 1;
 
@@ -3962,7 +4019,7 @@ impl NetworkManager {
                         // Create version message with our node's capabilities
                         let version_msg = self.create_version_message(
                             70015, // Protocol version
-                            0,     // Additional services (base services added by create_version_message)
+                            0, // Additional services (base services added by create_version_message)
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -3976,9 +4033,13 @@ impl NetworkManager {
                         );
 
                         // Serialize and send Version message
-                        match ProtocolParser::serialize_message(&ProtocolMessage::Version(version_msg)) {
+                        match ProtocolParser::serialize_message(&ProtocolMessage::Version(
+                            version_msg,
+                        )) {
                             Ok(wire_msg) => {
-                                if let Err(e) = self.send_to_peer_by_transport(addr.clone(), wire_msg).await {
+                                if let Err(e) =
+                                    self.send_to_peer_by_transport(addr.clone(), wire_msg).await
+                                {
                                     warn!("Failed to send Version message to {:?}: {}", addr, e);
                                 } else {
                                     debug!("Sent Version message to {:?}", addr);
@@ -3993,7 +4054,7 @@ impl NetworkManager {
                     // Publish peer connected event
                     let event_publisher_guard = self.event_publisher.lock().await;
                     if let Some(ref event_publisher) = *event_publisher_guard {
-                        let addr_str = format!("{:?}", addr);
+                        let addr_str = format!("{addr:?}");
                         let transport_type = match &addr {
                             TransportAddr::Tcp(_) => "tcp",
                             #[cfg(feature = "quinn")]
@@ -4030,7 +4091,7 @@ impl NetworkManager {
                     // Publish peer disconnected event
                     let event_publisher_guard = self.event_publisher.lock().await;
                     if let Some(ref event_publisher) = *event_publisher_guard {
-                        let addr_str = format!("{:?}", addr);
+                        let addr_str = format!("{addr:?}");
                         let reason = "disconnected".to_string(); // Could be more specific
                         let event_pub_clone = Arc::clone(event_publisher);
                         tokio::spawn(async move {
@@ -4058,7 +4119,10 @@ impl NetworkManager {
                     } {
                         // IBD Protection: Stop IBD serving tracking when peer disconnects
                         self.ibd_protection.stop_ibd_serving(socket_addr).await;
-                        debug!("IBD protection: Stopped IBD serving tracking for disconnected peer {}", socket_addr);
+                        debug!(
+                            "IBD protection: Stopped IBD serving tracking for disconnected peer {}",
+                            socket_addr
+                        );
                         // Add to reconnection queue with exponential backoff
                         let now = current_timestamp();
                         // Add to reconnection queue with exponential backoff
@@ -4164,11 +4228,14 @@ impl NetworkManager {
                                 // Validation should be done in protocol handler
                                 continue; // Don't process invalid message
                             }
-                            
+
                             // Record block announcements for outbound peer eviction
                             // Check if this inv contains block announcements (MSG_BLOCK = 2)
                             use crate::network::inventory::MSG_BLOCK;
-                            let has_block_announcements = inv_msg.inventory.iter().any(|inv| inv.inv_type == MSG_BLOCK);
+                            let has_block_announcements = inv_msg
+                                .inventory
+                                .iter()
+                                .any(|inv| inv.inv_type == MSG_BLOCK);
                             if has_block_announcements {
                                 // Note: We don't have peer_addr here, so we can't update peer state
                                 // This is a limitation - block announcements should be tracked in the protocol handler
@@ -4715,7 +4782,7 @@ impl NetworkManager {
 
         // Check for Stratum V2 TLV message format
         // Stratum V2 messages start with [4-byte length][2-byte tag][4-byte length][payload]
-        // Valid Stratum V2 tags are in range 0x0001-0x0032 (see bllvm-stratum-v2/src/messages.rs)
+        // Valid Stratum V2 tags are in range 0x0001-0x0032 (see blvm-stratum-v2/src/messages.rs)
         #[cfg(feature = "stratum-v2")]
         if data.len() >= 10 {
             // Try to parse as Stratum V2 TLV
@@ -4751,9 +4818,10 @@ impl NetworkManager {
             // Enhanced: Check per-IP bandwidth limits (prevents bypass with multiple peers from same IP)
             use crate::network::bandwidth_protection::ServiceType;
             let tx_bytes = data.len() as u64;
-            
+
             // Check if IP has exceeded transaction relay bandwidth limits
-            match self.bandwidth_protection
+            match self
+                .bandwidth_protection
                 .check_service_request(ServiceType::TransactionRelay, peer_addr)
                 .await
             {
@@ -4880,10 +4948,16 @@ impl NetworkManager {
                 if let Some(transport_addr) = transport_addr_for_verack {
                     match ProtocolParser::serialize_message(&ProtocolMessage::Verack) {
                         Ok(verack_msg) => {
-                            if let Err(e) = self.send_to_peer_by_transport(transport_addr.clone(), verack_msg).await {
+                            if let Err(e) = self
+                                .send_to_peer_by_transport(transport_addr.clone(), verack_msg)
+                                .await
+                            {
                                 warn!("Failed to send VerAck to {:?}: {}", transport_addr, e);
                             } else {
-                                debug!("Sent VerAck to {:?} (handshake completing)", transport_addr);
+                                debug!(
+                                    "Sent VerAck to {:?} (handshake completing)",
+                                    transport_addr
+                                );
                             }
                         }
                         Err(e) => {
@@ -4897,14 +4971,19 @@ impl NetworkManager {
             ProtocolMessage::Ping(ping_msg) => {
                 use crate::network::protocol::PongMessage;
                 // Send Pong with the same nonce to keep connection alive
-                let pong_msg = ProtocolMessage::Pong(PongMessage { nonce: ping_msg.nonce });
+                let pong_msg = ProtocolMessage::Pong(PongMessage {
+                    nonce: ping_msg.nonce,
+                });
                 match ProtocolParser::serialize_message(&pong_msg) {
                     Ok(pong_wire) => {
                         let pm = self.peer_manager.lock().await;
                         let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
                         drop(pm);
                         if let Some(transport_addr) = transport_addr {
-                            if let Err(e) = self.send_to_peer_by_transport(transport_addr.clone(), pong_wire).await {
+                            if let Err(e) = self
+                                .send_to_peer_by_transport(transport_addr.clone(), pong_wire)
+                                .await
+                            {
                                 warn!("Failed to send Pong to {}: {}", peer_addr, e);
                             } else {
                                 debug!("Sent Pong to {} (nonce={})", peer_addr, ping_msg.nonce);
@@ -4923,27 +5002,32 @@ impl NetworkManager {
                 {
                     let mut pm = self.peer_manager.lock().await;
                     // Find TransportAddr for this SocketAddr
-                    let transport_addr = pm.find_transport_addr_by_socket(peer_addr)
-                        .or_else(|| {
+                    let transport_addr =
+                        pm.find_transport_addr_by_socket(peer_addr).or_else(|| {
                             // Fallback: try to find by iterating (if method doesn't exist)
-                            pm.peers.iter()
+                            pm.peers
+                                .iter()
                                 .find(|(addr, _)| {
                                     match addr {
                                         TransportAddr::Tcp(sock) => *sock == peer_addr,
                                         #[cfg(feature = "quinn")]
                                         TransportAddr::Quinn(sock) => *sock == peer_addr,
-                                        _ => false,
+                                        #[cfg(feature = "iroh")]
+                                        TransportAddr::Iroh(_) => false, // Iroh peers don't have SocketAddr
                                     }
                                 })
                                 .map(|(addr, _)| addr.clone())
                         });
-                    
+
                     if let Some(addr) = transport_addr {
                         if let Some(peer) = pm.get_peer_mut(&addr) {
                             if !peer.record_pong_received(pong_msg.nonce) {
                                 warn!("Received pong with non-matching nonce from {}", peer_addr);
                             } else {
-                                debug!("Received valid pong from {} (nonce={})", peer_addr, pong_msg.nonce);
+                                debug!(
+                                    "Received valid pong from {} (nonce={})",
+                                    peer_addr, pong_msg.nonce
+                                );
                             }
                         }
                     }
@@ -4958,14 +5042,17 @@ impl NetworkManager {
             ProtocolMessage::GetHeaders(getheaders) => {
                 // Detect if this is a full chain request (empty locator = IBD)
                 let is_full_chain_request = getheaders.block_locator_hashes.is_empty();
-                
+
                 if is_full_chain_request {
                     // Check IBD protection before serving
                     match self.ibd_protection.can_serve_ibd(peer_addr).await {
                         Ok(true) => {
                             // Start IBD serving tracking
                             self.ibd_protection.start_ibd_serving(peer_addr).await;
-                            debug!("IBD protection: Allowing full chain sync request from {}", peer_addr);
+                            debug!(
+                                "IBD protection: Allowing full chain sync request from {}",
+                                peer_addr
+                            );
                             // Continue to process the request normally
                         }
                         Ok(false) => {
@@ -4997,16 +5084,18 @@ impl NetworkManager {
                     );
                     // Check if peer should be disconnected (exempt manual connections and NoBan)
                     let mut pm = self.peer_manager.lock().await;
-                    let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
-                        !peer.is_manual() && !peer.has_noban_permission()
-                    } else {
-                        true // Peer not found, disconnect anyway
-                    };
+                    let should_disconnect =
+                        if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
+                            !peer.is_manual() && !peer.has_noban_permission()
+                        } else {
+                            true // Peer not found, disconnect anyway
+                        };
                     drop(pm);
-                    
+
                     if should_disconnect {
                         // Check if local/onion peer (don't ban, just disconnect)
-                        if Self::is_local_address(&peer_addr) || Self::is_onion_address(&peer_addr) {
+                        if Self::is_local_address(&peer_addr) || Self::is_onion_address(&peer_addr)
+                        {
                             warn!("Disconnecting local/onion peer {} for getdata size violation (not banning)", peer_addr);
                         } else {
                             // Add to ban list for misbehaving (normal peer)
@@ -5021,7 +5110,7 @@ impl NetworkManager {
                         }
                         // Disconnect peer for protocol violation
                         let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
-                            TransportAddr::Tcp(peer_addr)
+                            TransportAddr::Tcp(peer_addr),
                         ));
                         return Err(anyhow::anyhow!("getdata message size exceeded"));
                     } else {
@@ -5029,11 +5118,14 @@ impl NetworkManager {
                         return Ok(()); // Don't disconnect, but don't process message
                     }
                 }
-                
+
                 // Check if this GetData contains block requests (MSG_BLOCK = 2)
                 use crate::network::inventory::MSG_BLOCK;
-                let has_block_requests = getdata.inventory.iter().any(|inv| inv.inv_type == MSG_BLOCK);
-                
+                let has_block_requests = getdata
+                    .inventory
+                    .iter()
+                    .any(|inv| inv.inv_type == MSG_BLOCK);
+
                 if has_block_requests {
                     // Check IBD protection before serving blocks
                     match self.ibd_protection.can_serve_ibd(peer_addr).await {
@@ -5050,13 +5142,20 @@ impl NetworkManager {
                             );
                             // Send NotFound message for requested blocks (standard Bitcoin protocol behavior)
                             // This prevents the peer from retrying immediately
-                            use crate::network::protocol::{NotFoundMessage, ProtocolMessage, ProtocolParser};
+                            use crate::network::protocol::{
+                                NotFoundMessage, ProtocolMessage, ProtocolParser,
+                            };
                             let notfound = NotFoundMessage {
                                 inventory: getdata.inventory.clone(),
                             };
-                            if let Ok(wire_msg) = ProtocolParser::serialize_message(&ProtocolMessage::NotFound(notfound)) {
+                            if let Ok(wire_msg) = ProtocolParser::serialize_message(
+                                &ProtocolMessage::NotFound(notfound),
+                            ) {
                                 if let Err(e) = self.send_to_peer(peer_addr, wire_msg).await {
-                                    warn!("Failed to send NotFound message to {}: {}", peer_addr, e);
+                                    warn!(
+                                        "Failed to send NotFound message to {}: {}",
+                                        peer_addr, e
+                                    );
                                 }
                             }
                             return Ok(());
@@ -5113,17 +5212,18 @@ impl NetworkManager {
                     );
                     // Check if peer should be disconnected (exempt manual connections and NoBan)
                     let mut pm = self.peer_manager.lock().await;
-                    let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
-                        !peer.is_manual() && !peer.has_noban_permission()
-                    } else {
-                        true // Peer not found, disconnect anyway
-                    };
+                    let should_disconnect =
+                        if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
+                            !peer.is_manual() && !peer.has_noban_permission()
+                        } else {
+                            true // Peer not found, disconnect anyway
+                        };
                     drop(pm);
-                    
+
                     if should_disconnect {
                         // Disconnect peer for protocol violation
                         let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
-                            TransportAddr::Tcp(peer_addr)
+                            TransportAddr::Tcp(peer_addr),
                         ));
                         return Err(anyhow::anyhow!("inv message size exceeded"));
                     } else {
@@ -5184,16 +5284,18 @@ impl NetworkManager {
                     );
                     // Check if peer should be disconnected (exempt manual connections and NoBan)
                     let mut pm = self.peer_manager.lock().await;
-                    let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
-                        !peer.is_manual() && !peer.has_noban_permission()
-                    } else {
-                        true // Peer not found, disconnect anyway
-                    };
+                    let should_disconnect =
+                        if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
+                            !peer.is_manual() && !peer.has_noban_permission()
+                        } else {
+                            true // Peer not found, disconnect anyway
+                        };
                     drop(pm);
-                    
+
                     if should_disconnect {
                         // Check if local/onion peer (don't ban, just disconnect)
-                        if Self::is_local_address(&peer_addr) || Self::is_onion_address(&peer_addr) {
+                        if Self::is_local_address(&peer_addr) || Self::is_onion_address(&peer_addr)
+                        {
                             warn!("Disconnecting local/onion peer {} for headers size violation (not banning)", peer_addr);
                         } else {
                             // Add to ban list for misbehaving (normal peer)
@@ -5208,7 +5310,7 @@ impl NetworkManager {
                         }
                         // Disconnect peer for protocol violation
                         let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
-                            TransportAddr::Tcp(peer_addr)
+                            TransportAddr::Tcp(peer_addr),
                         ));
                         return Err(anyhow::anyhow!("headers message size exceeded"));
                     } else {
@@ -5216,17 +5318,24 @@ impl NetworkManager {
                         return Ok(()); // Don't disconnect, but don't process message
                     }
                 }
-                
+
                 // Check if there's a pending Headers request for this peer
                 let headers = headers_msg.headers.clone();
                 if self.complete_headers_request(peer_addr, headers) {
-                    debug!("Routed Headers response to pending request from {}", peer_addr);
+                    debug!(
+                        "Routed Headers response to pending request from {}",
+                        peer_addr
+                    );
                     return Ok(());
                 }
                 // No pending request - process normally through protocol layer
             }
             ProtocolMessage::Block(block_msg) => {
-                info!("Block message received from {} ({} bytes)", peer_addr, data.len());
+                info!(
+                    "Block message received from {} ({} bytes)",
+                    peer_addr,
+                    data.len()
+                );
                 // Check if there's a pending Block request for this peer
                 // Calculate block hash using proper Bitcoin format:
                 // double_sha256 of 80-byte header (version + prev_hash + merkle_root + timestamp + bits + nonce)
@@ -5234,23 +5343,31 @@ impl NetworkManager {
                 use crate::storage::hashing::double_sha256;
                 let header = &block_msg.block.header;
                 let mut header_bytes = Vec::with_capacity(80);
-                header_bytes.extend_from_slice(&(header.version as i32).to_le_bytes());    // 4 bytes
-                header_bytes.extend_from_slice(&header.prev_block_hash);                    // 32 bytes
-                header_bytes.extend_from_slice(&header.merkle_root);                        // 32 bytes
-                header_bytes.extend_from_slice(&(header.timestamp as u32).to_le_bytes());  // 4 bytes
-                header_bytes.extend_from_slice(&(header.bits as u32).to_le_bytes());       // 4 bytes
-                header_bytes.extend_from_slice(&(header.nonce as u32).to_le_bytes());      // 4 bytes
+                header_bytes.extend_from_slice(&(header.version as i32).to_le_bytes()); // 4 bytes
+                header_bytes.extend_from_slice(&header.prev_block_hash); // 32 bytes
+                header_bytes.extend_from_slice(&header.merkle_root); // 32 bytes
+                header_bytes.extend_from_slice(&(header.timestamp as u32).to_le_bytes()); // 4 bytes
+                header_bytes.extend_from_slice(&(header.bits as u32).to_le_bytes()); // 4 bytes
+                header_bytes.extend_from_slice(&(header.nonce as u32).to_le_bytes()); // 4 bytes
                 let block_hash = double_sha256(&header_bytes);
                 // block_msg.witnesses is Vec<Vec<Witness>> from deserialize_block_with_witnesses
-                if self.complete_block_request(peer_addr, block_hash, block_msg.block.clone(), block_msg.witnesses.clone()) {
-                    info!("Block routed to pending request from {} (hash {})", peer_addr, hex::encode(block_hash));
+                if self.complete_block_request(
+                    peer_addr,
+                    block_hash,
+                    block_msg.block.clone(),
+                    block_msg.witnesses.clone(),
+                ) {
+                    info!(
+                        "Block routed to pending request from {} (hash {})",
+                        peer_addr,
+                        hex::encode(block_hash)
+                    );
                     return Ok(()); // Message handled, return early
                 }
                 // No pending request - log at INFO to diagnose IBD stalls (blocks arriving but not matching any request)
                 let pending_count = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        self.pending_block_requests.lock().await.len()
-                    })
+                    tokio::runtime::Handle::current()
+                        .block_on(async { self.pending_block_requests.lock().await.len() })
                 });
                 info!(
                     "Block from {} (hash {}) had no pending request ({} pending for other peers/hashes)",
@@ -5267,17 +5384,22 @@ impl NetworkManager {
                 // Note: Compact block reconstruction happens in compact_blocks module
                 // For now, we'll add validation here and disconnect on errors
                 use crate::network::compact_blocks::CompactBlock;
-                
+
                 // Check if compact block is valid (basic checks)
                 if cmpct_msg.compact_block.short_ids.len() > 10000 {
-                    warn!("Invalid compact block: too many short IDs ({}) from {}", 
-                        cmpct_msg.compact_block.short_ids.len(), peer_addr);
-                    let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
-                        TransportAddr::Tcp(peer_addr)
-                    ));
+                    warn!(
+                        "Invalid compact block: too many short IDs ({}) from {}",
+                        cmpct_msg.compact_block.short_ids.len(),
+                        peer_addr
+                    );
+                    let _ =
+                        self.peer_tx
+                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                                peer_addr,
+                            )));
                     return Err(anyhow::anyhow!("Invalid compact block: too many short IDs"));
                 }
-                
+
                 // Route to protocol layer for processing
                 // If reconstruction fails there, it should signal disconnection
             }
@@ -5286,14 +5408,19 @@ impl NetworkManager {
                 // Check if indices are out of bounds (should be < short_ids count from previous compact block)
                 // For now, basic validation - if indices are unreasonably large, disconnect
                 if getblocktxn_msg.indices.len() > 10000 {
-                    warn!("GetBlockTxn with too many indices ({}) from {}", 
-                        getblocktxn_msg.indices.len(), peer_addr);
-                    let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
-                        TransportAddr::Tcp(peer_addr)
-                    ));
+                    warn!(
+                        "GetBlockTxn with too many indices ({}) from {}",
+                        getblocktxn_msg.indices.len(),
+                        peer_addr
+                    );
+                    let _ =
+                        self.peer_tx
+                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                                peer_addr,
+                            )));
                     return Err(anyhow::anyhow!("GetBlockTxn with too many indices"));
                 }
-                
+
                 // Check for out-of-bounds indices (would need to track previous compact block)
                 // For now, we'll let the compact block handler validate this
             }
@@ -5301,11 +5428,16 @@ impl NetworkManager {
                 // Validate BlockTxn response
                 // If transactions don't match expected indices or block hash, disconnect
                 if blocktxn_msg.transactions.len() > 10000 {
-                    warn!("BlockTxn with too many transactions ({}) from {}", 
-                        blocktxn_msg.transactions.len(), peer_addr);
-                    let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
-                        TransportAddr::Tcp(peer_addr)
-                    ));
+                    warn!(
+                        "BlockTxn with too many transactions ({}) from {}",
+                        blocktxn_msg.transactions.len(),
+                        peer_addr
+                    );
+                    let _ =
+                        self.peer_tx
+                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                                peer_addr,
+                            )));
                     return Err(anyhow::anyhow!("BlockTxn with too many transactions"));
                 }
             }
@@ -5314,7 +5446,7 @@ impl NetworkManager {
                 // ProtocolMessage variants are handled in handle_incoming_wire_tcp()
             }
         }
-        
+
         Ok(())
     }
 
@@ -5331,7 +5463,8 @@ impl NetworkManager {
         use crate::network::protocol_extensions::handle_get_utxo_set;
 
         // Check bandwidth limits before processing (UTXO set can be very large)
-        match self.bandwidth_protection
+        match self
+            .bandwidth_protection
             .check_service_request(ServiceType::UtxoSet, peer_addr)
             .await
         {
@@ -5389,7 +5522,8 @@ impl NetworkManager {
         use crate::network::protocol::ProtocolParser;
 
         // Check bandwidth limits before processing
-        match self.bandwidth_protection
+        match self
+            .bandwidth_protection
             .check_service_request(ServiceType::ModuleServing, peer_addr)
             .await
         {
@@ -5427,7 +5561,12 @@ impl NetworkManager {
         // Handle the request with registry integration and payment checking
         let registry = self.module_registry.lock().await.as_ref().map(Arc::clone);
         let payment_processor = self.payment_processor.lock().await.as_ref().map(Arc::clone);
-        let payment_state_machine = self.payment_state_machine.lock().await.as_ref().map(Arc::clone);
+        let payment_state_machine = self
+            .payment_state_machine
+            .lock()
+            .await
+            .as_ref()
+            .map(Arc::clone);
         let encryption = self.module_encryption.lock().await.as_ref().map(Arc::clone);
         let modules_dir = self.modules_dir.lock().await.clone();
 
@@ -5567,7 +5706,8 @@ impl NetworkManager {
         use std::time::Instant;
 
         // Check bandwidth limits before processing
-        match self.bandwidth_protection
+        match self
+            .bandwidth_protection
             .check_service_request(ServiceType::Filters, peer_addr)
             .await
         {
@@ -5607,25 +5747,36 @@ impl NetworkManager {
         const MAX_FILTER_CPU_TIME_MS: u64 = 5000; // 5 seconds
         if cpu_time_ms > MAX_FILTER_CPU_TIME_MS {
             // CPU time limit exceeded - disconnect peer (filter service violation)
-            warn!("Filter service CPU time limit exceeded ({}ms > {}ms) for peer {}, disconnecting", 
-                cpu_time_ms, MAX_FILTER_CPU_TIME_MS, peer_addr);
-            
+            warn!(
+                "Filter service CPU time limit exceeded ({}ms > {}ms) for peer {}, disconnecting",
+                cpu_time_ms, MAX_FILTER_CPU_TIME_MS, peer_addr
+            );
+
             // Check if peer has NoBan permission before disconnecting
             let mut pm = self.peer_manager.lock().await;
-            let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
+            let should_disconnect = if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr))
+            {
                 !peer.has_noban_permission()
             } else {
                 true // Peer not found, disconnect anyway
             };
             drop(pm);
-            
+
             if should_disconnect {
-                let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
-                    TransportAddr::Tcp(peer_addr)
+                let _ = self
+                    .peer_tx
+                    .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                        peer_addr,
+                    )));
+                return Err(anyhow::anyhow!(
+                    "Filter service CPU time limit exceeded: {}ms",
+                    cpu_time_ms
                 ));
-                return Err(anyhow::anyhow!("Filter service CPU time limit exceeded: {}ms", cpu_time_ms));
             } else {
-                warn!("Peer {} has NoBan permission, not disconnecting for filter CPU time violation", peer_addr);
+                warn!(
+                    "Peer {} has NoBan permission, not disconnecting for filter CPU time violation",
+                    peer_addr
+                );
                 return Ok(()); // Don't disconnect, but don't process further
             }
         }
@@ -5704,7 +5855,8 @@ impl NetworkManager {
         use blvm_protocol::Transaction;
 
         // Check bandwidth limits before processing
-        match self.bandwidth_protection
+        match self
+            .bandwidth_protection
             .check_service_request(ServiceType::PackageRelay, peer_addr)
             .await
         {
@@ -5805,7 +5957,8 @@ impl NetworkManager {
         use crate::network::protocol_extensions::handle_get_filtered_block;
 
         // Check bandwidth limits before processing
-        match self.bandwidth_protection
+        match self
+            .bandwidth_protection
             .check_service_request(ServiceType::FilteredBlocks, peer_addr)
             .await
         {
@@ -6047,9 +6200,11 @@ impl NetworkManager {
                 peer_addr
             );
             // Disconnect peer for protocol violation
-            let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
-                TransportAddr::Tcp(peer_addr)
-            ));
+            let _ = self
+                .peer_tx
+                .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                    peer_addr,
+                )));
             return Err(anyhow::anyhow!("addr message size exceeded"));
         }
 
@@ -6616,10 +6771,19 @@ impl NetworkManager {
     }
 }
 
+// Safety: NetworkManager is safe to share across threads (Sync) because:
+// - All internal state is protected by Arc<Mutex<>> or Arc<RwLock<>> which are Sync
+// - EventPublisher is already marked as Sync (see event_publisher.rs)
+// - All async operations are Send and don't require synchronous access to internal state
+// - The ZmqPublisher's Socket is only accessed through async methods which are Send
+// This is a workaround for ZMQ's Socket type not being Sync, but the actual usage is safe.
+#[cfg(feature = "zmq")]
+unsafe impl Sync for NetworkManager {}
+
 #[cfg(test)]
 mod tests {
-    mod concurrency_stress_tests;
     mod bandwidth_protection_tests;
+    mod concurrency_stress_tests;
     use super::*;
 
     #[tokio::test]
@@ -6896,8 +7060,8 @@ mod tests {
     /// since handle_incoming_wire_tcp can block in test environments.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_block_request_completion_direct() {
-        use blvm_protocol::genesis;
         use crate::storage::hashing::double_sha256;
+        use blvm_protocol::genesis;
 
         let genesis = genesis::mainnet_genesis();
         let mut header_bytes = Vec::with_capacity(80);
@@ -6912,12 +7076,7 @@ mod tests {
         hash_array.copy_from_slice(&block_hash);
 
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let network = NetworkManager::with_config(
-            addr,
-            5,
-            TransportPreference::TCP_ONLY,
-            None,
-        );
+        let network = NetworkManager::with_config(addr, 5, TransportPreference::TCP_ONLY, None);
 
         let peer_addr: std::net::SocketAddr = "127.0.0.1:18444".parse().unwrap();
         let block_rx = network.register_block_request(peer_addr, hash_array);
@@ -6930,26 +7089,18 @@ mod tests {
             genesis.clone(),
             empty_witnesses.clone(),
         );
-        assert!(ok, "complete_block_request should find matching pending request");
+        assert!(
+            ok,
+            "complete_block_request should find matching pending request"
+        );
 
-        let (received, witnesses) = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            block_rx,
-        )
-        .await
-        .expect("block rx should complete within 1s")
-        .expect("block channel should not be closed");
+        let (received, witnesses) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), block_rx)
+                .await
+                .expect("block rx should complete within 1s")
+                .expect("block channel should not be closed");
 
         assert_eq!(received.header.merkle_root, genesis.header.merkle_root);
         assert_eq!(witnesses.len(), genesis.transactions.len());
     }
 }
-
-// Safety: NetworkManager is safe to share across threads (Sync) because:
-// - All internal state is protected by Arc<Mutex<>> or Arc<RwLock<>> which are Sync
-// - EventPublisher is already marked as Sync (see event_publisher.rs)
-// - All async operations are Send and don't require synchronous access to internal state
-// - The ZmqPublisher's Socket is only accessed through async methods which are Send
-// This is a workaround for ZMQ's Socket type not being Sync, but the actual usage is safe.
-#[cfg(feature = "zmq")]
-unsafe impl Sync for NetworkManager {}

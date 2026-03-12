@@ -4,13 +4,13 @@ This document covers repo-specific security boundaries. See the [BTCDecoded Secu
 
 ## Overview
 
-This document defines the security boundaries, threat model, and limitations of the BTCDecoded reference-node implementation. This is critical for understanding what this node can and cannot do safely.
+This document defines the security boundaries, threat model, and limitations of the BTCDecoded blvm-node implementation. This is critical for understanding what this node can and cannot do safely.
 
 ## Security Boundaries
 
-### What bllvm-node Handles
+### What blvm-node Handles
 
-- Consensus validation (delegated to bllvm-consensus via bllvm-protocol)
+- Consensus validation (delegated to blvm-consensus via blvm-protocol)
 - Network protocol (P2P message parsing, peer management)
 - Storage layer (block storage, UTXO set, chain state)
 - RPC interface (JSON-RPC 2.0 API)
@@ -18,20 +18,20 @@ This document defines the security boundaries, threat model, and limitations of 
 - Mempool management
 - Mining coordination
 
-### What bllvm-node NEVER Handles
+### What blvm-node NEVER Handles
 
-- Consensus rule validation (delegated to bllvm-consensus)
-- Protocol variant selection (delegated to bllvm-protocol)
+- Consensus rule validation (delegated to blvm-consensus)
+- Protocol variant selection (delegated to blvm-protocol)
 - Private key management (no wallet functionality)
-- Cryptographic key generation (delegated to bllvm-sdk or modules)
-- Governance enforcement (delegated to bllvm-commons)
+- Cryptographic key generation (delegated to blvm-sdk or modules)
+- Governance enforcement (delegated to blvm-commons)
 
 ## Security Boundaries (Detailed)
 
 ### ✅ IN SCOPE - What This Node Handles
 
 1. **Consensus Validation**
-   - Block validation using consensus-proof
+   - Block validation using blvm-consensus
    - Transaction validation and script execution
    - Proof of work verification
    - Economic rule enforcement (supply limits, fees)
@@ -241,7 +241,7 @@ If you discover a security vulnerability:
 
 ## Conclusion
 
-This reference-node implementation provides a solid foundation for Bitcoin consensus validation but is **NOT suitable for production mainnet use** without significant hardening. It is designed for:
+This blvm-node implementation provides a solid foundation for Bitcoin consensus validation but is **NOT suitable for production mainnet use** without significant hardening. It is designed for:
 
 - **Educational purposes**
 - **Development and testing**

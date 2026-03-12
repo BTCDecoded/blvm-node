@@ -9,11 +9,15 @@
 
 #[cfg(feature = "miniscript")]
 pub mod miniscript_support {
-    use miniscript::{Miniscript, Policy, Descriptor};
-    use blvm_protocol::ByteString;
     use anyhow::{Context, Result};
-    use std::str::FromStr;
     use bech32::{ToBase32, Variant};
+    use blvm_consensus::opcodes::{
+        OP_0, OP_1, OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, PUSH_20_BYTES,
+        PUSH_32_BYTES,
+    };
+    use blvm_protocol::ByteString;
+    use miniscript::{Descriptor, Miniscript, Policy};
+    use std::str::FromStr;
 
     /// Miniscript compilation error
     #[derive(Debug, thiserror::Error)]
@@ -49,10 +53,10 @@ pub mod miniscript_support {
         let ms: Miniscript<_, _> = policy
             .compile()
             .map_err(|e| MiniscriptError::CompilationFailed(e.to_string()))?;
-        
+
         // Encode to script bytes
         let script_bytes = ms.encode();
-        
+
         Ok(ByteString::from(script_bytes.as_bytes()))
     }
 
@@ -68,12 +72,11 @@ pub mod miniscript_support {
         // Note: Miniscript::from_str expects hex string representation
         // Convert bytes to hex for parsing
         let script_hex = hex::encode(script.as_ref());
-        
+
         // Try to parse as miniscript
         // Note: This is a simplified version - full implementation would use
         // miniscript's script parsing capabilities directly from bytes
-        Miniscript::from_str(&script_hex)
-            .map_err(|e| MiniscriptError::ParseFailed(e.to_string()))
+        Miniscript::from_str(&script_hex).map_err(|e| MiniscriptError::ParseFailed(e.to_string()))
     }
 
     /// Analyze script for satisfaction properties
@@ -89,10 +92,10 @@ pub mod miniscript_support {
             Ok(ms) => {
                 // Calculate satisfaction weight
                 let satisfaction_weight = ms.max_satisfaction_weight();
-                
+
                 // Determine script type
                 let script_type = determine_script_type(script);
-                
+
                 Ok(ScriptAnalysis {
                     is_miniscript: true,
                     satisfaction_weight: Some(satisfaction_weight),
@@ -114,32 +117,42 @@ pub mod miniscript_support {
     /// Determine script type from script bytes
     fn determine_script_type(script: &ByteString) -> String {
         let bytes = script.as_ref();
-        
+
         // P2PKH: OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG
-        if bytes.len() == 25 && bytes[0] == 0x76 && bytes[1] == 0xa9 && bytes[2] == 0x14 && bytes[23] == 0x88 && bytes[24] == 0xac {
+        if bytes.len() == 25
+            && bytes[0] == OP_DUP
+            && bytes[1] == OP_HASH160
+            && bytes[2] == PUSH_20_BYTES
+            && bytes[23] == OP_EQUALVERIFY
+            && bytes[24] == OP_CHECKSIG
+        {
             return "P2PKH".to_string();
         }
-        
+
         // P2SH: OP_HASH160 <20 bytes> OP_EQUAL
-        if bytes.len() == 23 && bytes[0] == 0xa9 && bytes[1] == 0x14 && bytes[22] == 0x87 {
+        if bytes.len() == 23
+            && bytes[0] == OP_HASH160
+            && bytes[1] == PUSH_20_BYTES
+            && bytes[22] == OP_EQUAL
+        {
             return "P2SH".to_string();
         }
-        
+
         // P2WPKH: OP_0 <20 bytes>
-        if bytes.len() == 22 && bytes[0] == 0x00 && bytes[1] == 0x14 {
+        if bytes.len() == 22 && bytes[0] == OP_0 && bytes[1] == PUSH_20_BYTES {
             return "P2WPKH".to_string();
         }
-        
+
         // P2WSH: OP_0 <32 bytes>
-        if bytes.len() == 34 && bytes[0] == 0x00 && bytes[1] == 0x20 {
+        if bytes.len() == 34 && bytes[0] == OP_0 && bytes[1] == PUSH_32_BYTES {
             return "P2WSH".to_string();
         }
-        
+
         // P2TR: OP_1 <32 bytes>
-        if bytes.len() == 34 && bytes[0] == 0x51 && bytes[1] == 0x20 {
+        if bytes.len() == 34 && bytes[0] == OP_1 && bytes[1] == PUSH_32_BYTES {
             return "P2TR".to_string();
         }
-        
+
         "Unknown".to_string()
     }
 
@@ -167,18 +180,18 @@ pub mod miniscript_support {
     /// 8-character checksum string
     pub fn calculate_descriptor_checksum(descriptor: &str) -> String {
         use bech32::{ToBase32, Variant};
-        
+
         // Remove existing checksum if present
         let descriptor_clean = if let Some(sep_pos) = descriptor.rfind('#') {
             &descriptor[..sep_pos]
         } else {
             descriptor
         };
-        
+
         // Convert descriptor to base32
         let descriptor_bytes = descriptor_clean.as_bytes();
         let base32 = descriptor_bytes.to_base32();
-        
+
         // Encode with bech32m using HRP "dp" (descriptor prefix)
         // BIP380 uses bech32m (Variant::Bech32m) not bech32
         match bech32::encode("dp", base32, Variant::Bech32m) {
@@ -226,15 +239,13 @@ pub mod miniscript_support {
                 }
             }
         }
-        
+
         // Fallback: simple string matching for range patterns
         descriptor.contains("/0/*") || 
         descriptor.contains("/0/1") ||
         descriptor.contains("[0,") ||
         descriptor.contains("/*") ||
         descriptor.contains("/'/") ||  // HD key derivation with range
-        descriptor.matches('[').count() > 0  // Any bracket pattern suggests range
+        descriptor.matches('[').count() > 0 // Any bracket pattern suggests range
     }
 }
-
-

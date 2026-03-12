@@ -2,7 +2,7 @@
 
 ## Overview
 
-bllvm-node implements Phase 2 and 3 high availability features for production deployment: Prometheus metrics export, health check endpoints, disk space monitoring, peer reconnection, enhanced rate limiting, and structured logging.
+blvm-node implements Phase 2 and 3 high availability features for production deployment: Prometheus metrics export, health check endpoints, disk space monitoring, peer reconnection, enhanced rate limiting, and structured logging.
 
 ## Metrics Endpoint
 
@@ -128,7 +128,7 @@ curl http://localhost:18332/metrics
 
 ### Automatic Pruning
 
-bllvm-node monitors disk space and automatically prunes old blocks when space is low.
+blvm-node monitors disk space and automatically prunes old blocks when space is low.
 
 **Configuration**:
 ```toml
@@ -156,7 +156,7 @@ pruning_target_gb = 80      # Prune down to this size
 
 ### Automatic Reconnection
 
-bllvm-node automatically reconnects to disconnected peers with exponential backoff.
+blvm-node automatically reconnects to disconnected peers with exponential backoff.
 
 **Features**:
 - Exponential backoff: Reconnection attempts with increasing delays
@@ -186,7 +186,7 @@ reconnect_max_delay_secs = 3600
 
 ### Enhanced Rate Limiting
 
-bllvm-node implements multi-layer rate limiting for RPC requests.
+blvm-node implements multi-layer rate limiting for RPC requests.
 
 **Layers**:
 1. **Per-IP Rate Limiting**: Limits requests per IP address
@@ -215,7 +215,7 @@ per_method_limits = {      # Per-method overrides
 
 ### Request IDs and Tracing
 
-bllvm-node uses structured logging with request IDs and tracing spans.
+blvm-node uses structured logging with request IDs and tracing spans.
 
 **Features**:
 - Request IDs: Unique ID per RPC request
@@ -275,7 +275,7 @@ level = "info"
 
 ```yaml
 scrape_configs:
-  - job_name: 'bllvm-node'
+  - job_name: 'blvm-node'
     static_configs:
       - targets: ['localhost:18332']
     metrics_path: '/metrics'
@@ -312,4 +312,4 @@ readinessProbe:
 
 - [RPC Reference](RPC_REFERENCE.md) - Complete RPC API
 - [Configuration](CONFIGURATION.md) - Configuration reference
-- [Deployment](../bllvm-docs/DEPLOYMENT.md) - Production deployment
+- [Deployment](../blvm-docs/DEPLOYMENT.md) - Production deployment

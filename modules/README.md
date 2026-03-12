@@ -1,6 +1,6 @@
 # Modules Directory
 
-Contains runtime modules that can be loaded by bllvm-node.
+Contains runtime modules that can be loaded by blvm-node.
 
 ## Module Structure
 
@@ -61,7 +61,7 @@ config_key = "Description of this configuration option"
 1. Create a directory for your module: `mkdir modules/my-module`
 2. Copy your module binary to: `modules/my-module/target/release/my-module`
 3. Create `module.toml` manifest in the module directory
-4. Restart bllvm-node or use runtime module loading
+4. Restart blvm-node or use runtime module loading
 
 ## Module Development
 

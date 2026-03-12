@@ -10,9 +10,18 @@ use blvm_node::config::{
 fn test_default_assume_valid_height_per_network() {
     assert_eq!(default_assume_valid_height_for_network("mainnet"), 912_683);
     assert_eq!(default_assume_valid_height_for_network("Mainnet"), 912_683);
-    assert_eq!(default_assume_valid_height_for_network("bitcoinv1"), 912_683);
-    assert_eq!(default_assume_valid_height_for_network("testnet"), 4_550_000);
-    assert_eq!(default_assume_valid_height_for_network("Testnet"), 4_550_000);
+    assert_eq!(
+        default_assume_valid_height_for_network("bitcoinv1"),
+        912_683
+    );
+    assert_eq!(
+        default_assume_valid_height_for_network("testnet"),
+        4_550_000
+    );
+    assert_eq!(
+        default_assume_valid_height_for_network("Testnet"),
+        4_550_000
+    );
     assert_eq!(default_assume_valid_height_for_network("signet"), 267_665);
     assert_eq!(default_assume_valid_height_for_network("regtest"), 0);
     assert_eq!(default_assume_valid_height_for_network("unknown"), 0);

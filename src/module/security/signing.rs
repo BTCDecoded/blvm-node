@@ -80,7 +80,7 @@ impl ModuleSigner {
                 // Verify signature
                 if self
                     .secp
-                    .verify_ecdsa(message.clone(), &signature, &public_key)
+                    .verify_ecdsa(&message, &signature, &public_key)
                     .is_ok()
                 {
                     valid_signatures += 1;
@@ -140,12 +140,10 @@ impl ModuleSigner {
     ) -> Result<bool, ModuleError> {
         // Hash message
         let message_hash = Sha256::digest(message);
-        let secp_message = Message::from_digest(
-            message_hash
-                .as_slice()
-                .try_into()
-                .map_err(|_| ModuleError::CryptoError("Invalid message hash length".to_string()))?,
-        );
+        let secp_message =
+            Message::from_digest(message_hash.as_slice().try_into().map_err(|_| {
+                ModuleError::CryptoError("Invalid message hash length".to_string())
+            })?);
 
         // Parse signature
         let sig_bytes = hex::decode(signature_hex)
@@ -163,7 +161,7 @@ impl ModuleSigner {
         // Verify signature
         Ok(self
             .secp
-            .verify_ecdsa(secp_message, &signature, &public_key)
+            .verify_ecdsa(&secp_message, &signature, &public_key)
             .is_ok())
     }
 
@@ -196,12 +194,10 @@ impl ModuleSigner {
         // Create message: author_address || commons_address || price_sats
         let message_data = format!("{author_address}||{commons_address}||{price_sats}");
         let message_hash = Sha256::digest(message_data.as_bytes());
-        let message = Message::from_digest(
-            message_hash
-                .as_slice()
-                .try_into()
-                .map_err(|_| ModuleError::CryptoError("Invalid message hash length".to_string()))?,
-        );
+        let message =
+            Message::from_digest(message_hash.as_slice().try_into().map_err(|_| {
+                ModuleError::CryptoError("Invalid message hash length".to_string())
+            })?);
 
         // Parse signature
         let sig_bytes = hex::decode(signature_hex)
@@ -220,7 +216,7 @@ impl ModuleSigner {
 
             if self
                 .secp
-                .verify_ecdsa(message.clone(), &signature, &public_key)
+                .verify_ecdsa(&message, &signature, &public_key)
                 .is_ok()
             {
                 valid_signatures += 1;

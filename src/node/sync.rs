@@ -173,7 +173,7 @@ impl SyncCoordinator {
     /// Start parallel IBD sync (if enabled and peers available)
     ///
     /// Attempts to use parallel IBD for faster initial block download.
-    /// Falls back to sequential sync if parallel IBD is not available or fails.
+    /// Sequential sync is not supported; IBD must succeed in parallel mode.
     #[cfg(feature = "production")]
     pub async fn start_parallel_ibd(
         &mut self,
@@ -208,7 +208,10 @@ impl SyncCoordinator {
 
         // Check if we're actually in IBD (significant height difference)
         if target_height <= current_height {
-            debug!("Already synced (height {} >= target {}), skipping parallel IBD", current_height, target_height);
+            debug!(
+                "Already synced (height {} >= target {}), skipping parallel IBD",
+                current_height, target_height
+            );
             return Ok(false);
         }
 
@@ -226,16 +229,19 @@ impl SyncCoordinator {
         let parallel_ibd = std::sync::Arc::new(parallel_ibd);
 
         // Attempt parallel sync
-        match parallel_ibd.sync_parallel(
-            current_height,
-            target_height,
-            &peer_addresses,
-            blockstore,
-            storage.as_ref(),
-            std::sync::Arc::clone(&protocol),
-            utxo_set,
-            network,
-        ).await {
+        match parallel_ibd
+            .sync_parallel(
+                current_height,
+                target_height,
+                &peer_addresses,
+                blockstore,
+                storage.as_ref(),
+                std::sync::Arc::clone(&protocol),
+                utxo_set,
+                network,
+            )
+            .await
+        {
             Ok(()) => {
                 info!("Parallel IBD completed successfully");
                 self.state_machine.transition_to(SyncState::Synced);

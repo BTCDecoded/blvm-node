@@ -1,6 +1,6 @@
 # Transport Abstraction Layer
 
-This document describes the transport abstraction layer implementation for `reference-node`, enabling support for both traditional TCP (Bitcoin P2P) and modern Iroh (QUIC-based) transports.
+This document describes the transport abstraction layer implementation for blvm-node, enabling support for both traditional TCP (Bitcoin P2P) and modern Iroh (QUIC-based) transports.
 
 ## Architecture
 
@@ -41,12 +41,12 @@ Skeleton implementation for QUIC-based transport:
 ### 4. Protocol Adapter (`src/network/protocol_adapter.rs`)
 
 Handles message serialization between:
-- Consensus-proof `NetworkMessage` types
+- blvm-consensus `NetworkMessage` types
 - Transport-specific wire formats (TCP Bitcoin P2P vs Iroh message format)
 
 ### 5. Message Bridge (`src/network/message_bridge.rs`)
 
-Bridges consensus-proof message processing with transport layer:
+Bridges blvm-consensus message processing with transport layer:
 - Converts messages to/from transport formats
 - Processes incoming messages
 - Generates responses
@@ -63,7 +63,7 @@ Updated to support multiple transports:
 Transport preference can be configured via `NodeConfig`:
 
 ```rust
-use bllvm_node::{NodeConfig, TransportPreferenceConfig};
+use blvm_node::{NodeConfig, TransportPreferenceConfig};
 
 let config = NodeConfig {
     transport_preference: TransportPreferenceConfig::TcpOnly, // or Hybrid, IrohOnly
@@ -76,7 +76,7 @@ let config = NodeConfig {
 ### Basic Usage (TCP-only, default)
 
 ```rust
-use bllvm_node::network::{NetworkManager, transport::TransportPreference};
+use blvm_node::network::{NetworkManager, transport::TransportPreference};
 use std::net::SocketAddr;
 
 let addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
@@ -89,7 +89,7 @@ manager.start(addr).await?;
 ### Hybrid Mode (TCP + Iroh)
 
 ```rust
-use bllvm_node::network::{NetworkManager, transport::TransportPreference};
+use blvm_node::network::{NetworkManager, transport::TransportPreference};
 
 let manager = NetworkManager::with_transport_preference(
     addr,
@@ -131,6 +131,5 @@ The implementation maintains full backward compatibility:
 
 ## Documentation
 
-- See `docs/IROH_INTEGRATION_ANALYSIS.md` for detailed Iroh integration analysis
-- See `production-performance-optimizations.plan.md` for implementation plan
+- See [QUINN_INTEGRATION.md](../QUINN_INTEGRATION.md) for QUIC/RPC integration
 

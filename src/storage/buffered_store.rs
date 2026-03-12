@@ -24,8 +24,8 @@ use std::sync::Mutex;
 use tracing::{debug, info};
 
 use super::blockstore::BlockStore;
-use blvm_protocol::{Block, BlockHeader};
 use blvm_protocol::segwit::Witness;
+use blvm_protocol::{Block, BlockHeader};
 
 /// A deferred block write operation
 struct DeferredBlock {
@@ -76,7 +76,7 @@ impl BufferedBlockStore {
         height: u64,
     ) -> Result<()> {
         let block_hash = self.blockstore.get_block_hash(block);
-        
+
         let deferred = DeferredBlock {
             block: block.clone(),
             witnesses: witnesses.to_vec(),
@@ -125,14 +125,14 @@ impl BufferedBlockStore {
         {
             let blocks_tree = self.blockstore.blocks_tree()?;
             let mut batch = blocks_tree.batch();
-            
+
             for deferred in &blocks {
                 // Serialize block for storage
                 let block_data = bincode::serialize(&deferred.block)
                     .map_err(|e| anyhow::anyhow!("Failed to serialize block: {}", e))?;
                 batch.put(&deferred.block_hash, &block_data);
             }
-            
+
             batch.commit()?;
         }
 
@@ -140,7 +140,7 @@ impl BufferedBlockStore {
         {
             let witnesses_tree = self.blockstore.witnesses_tree()?;
             let mut batch = witnesses_tree.batch();
-            
+
             for deferred in &blocks {
                 if !deferred.witnesses.is_empty() {
                     let witness_data = bincode::serialize(&deferred.witnesses)
@@ -148,7 +148,7 @@ impl BufferedBlockStore {
                     batch.put(&deferred.block_hash, &witness_data);
                 }
             }
-            
+
             batch.commit()?;
         }
 
@@ -156,12 +156,12 @@ impl BufferedBlockStore {
         {
             let height_tree = self.blockstore.height_tree()?;
             let mut batch = height_tree.batch();
-            
+
             for deferred in &blocks {
                 let height_key = deferred.height.to_be_bytes();
                 batch.put(&height_key, &deferred.block_hash);
             }
-            
+
             batch.commit()?;
         }
 
@@ -214,5 +214,3 @@ mod tests {
         assert_eq!(1000, 1000); // Placeholder
     }
 }
-
-

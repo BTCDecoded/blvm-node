@@ -300,7 +300,10 @@ impl IbdProtectionManager {
 
         // Check emergency throttle mode
         if self.config.enable_emergency_throttle {
-            warn!("Emergency throttle mode enabled - rejecting IBD request from {}", peer_addr);
+            warn!(
+                "Emergency throttle mode enabled - rejecting IBD request from {}",
+                peer_addr
+            );
             return Ok(false);
         }
 
@@ -574,7 +577,7 @@ mod tests {
     async fn test_can_serve_ibd_first_request() {
         let manager = IbdProtectionManager::new();
         let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
-        
+
         let can_serve = manager.can_serve_ibd(peer_addr).await;
         assert!(can_serve.is_ok());
         assert!(can_serve.unwrap());
@@ -586,21 +589,21 @@ mod tests {
         config.ibd_request_cooldown_seconds = 1; // 1 second for testing
         let manager = IbdProtectionManager::with_config(config);
         let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
-        
+
         // First request should succeed
         let can_serve1 = manager.can_serve_ibd(peer_addr).await.unwrap();
         assert!(can_serve1);
-        
+
         // Start IBD serving
         manager.start_ibd_serving(peer_addr).await;
-        
+
         // Second request immediately should fail (cooldown)
         let can_serve2 = manager.can_serve_ibd(peer_addr).await.unwrap();
         assert!(!can_serve2);
-        
+
         // Wait for cooldown
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        
+
         // Third request after cooldown should succeed
         let can_serve3 = manager.can_serve_ibd(peer_addr).await.unwrap();
         assert!(can_serve3);
@@ -611,21 +614,21 @@ mod tests {
         let mut config = IbdProtectionConfig::default();
         config.max_concurrent_ibd_serving = 2;
         let manager = IbdProtectionManager::with_config(config);
-        
+
         let peer1: SocketAddr = "127.0.0.1:8333".parse().unwrap();
         let peer2: SocketAddr = "127.0.0.2:8333".parse().unwrap();
         let peer3: SocketAddr = "127.0.0.3:8333".parse().unwrap();
-        
+
         // First two should succeed
         assert!(manager.can_serve_ibd(peer1).await.unwrap());
         manager.start_ibd_serving(peer1).await;
-        
+
         assert!(manager.can_serve_ibd(peer2).await.unwrap());
         manager.start_ibd_serving(peer2).await;
-        
+
         // Third should fail (limit reached)
         assert!(!manager.can_serve_ibd(peer3).await.unwrap());
-        
+
         // After stopping one, third should succeed
         manager.stop_ibd_serving(peer1).await;
         assert!(manager.can_serve_ibd(peer3).await.unwrap());
@@ -635,25 +638,14 @@ mod tests {
     async fn test_bandwidth_tracking() {
         let manager = IbdProtectionManager::new();
         let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
-        
+
         // Record bandwidth
-        manager.record_bandwidth(peer_addr, 1024 * 1024 * 1024).await; // 1 GB
-        
+        manager
+            .record_bandwidth(peer_addr, 1024 * 1024 * 1024)
+            .await; // 1 GB
+
         // Check that bandwidth was recorded
         let can_serve = manager.can_serve_ibd(peer_addr).await.unwrap();
         assert!(can_serve); // Should still be under limit
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

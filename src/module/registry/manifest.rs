@@ -96,10 +96,10 @@ pub struct PaymentSection {
 ///
 /// # Dependencies
 /// [dependencies]
-/// "bllvm-lightning" = ">=1.0.0"
+/// "blvm-lightning" = ">=1.0.0"
 ///
 /// [optional_dependencies]
-/// "bllvm-mesh" = ">=0.5.0"
+/// "blvm-mesh" = ">=0.5.0"
 ///
 /// # Configuration schema (optional)
 /// [config_schema]

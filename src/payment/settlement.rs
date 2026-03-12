@@ -264,8 +264,7 @@ impl SettlementMonitor {
                         .get_height_by_hash(&block_hash)
                         .map_err(|e| {
                             PaymentError::ProcessingError(format!(
-                                "Failed to get block height: {}",
-                                e
+                                "Failed to get block height: {e}"
                             ))
                         })?
                         .ok_or_else(|| {
@@ -275,10 +274,7 @@ impl SettlementMonitor {
                         .chain()
                         .get_height()
                         .map_err(|e| {
-                            PaymentError::ProcessingError(format!(
-                                "Failed to get tip height: {}",
-                                e
-                            ))
+                            PaymentError::ProcessingError(format!("Failed to get tip height: {e}"))
                         })?
                         .unwrap_or(0);
                     let confirmations = (tip_height.saturating_sub(block_height) + 1) as u32;
@@ -316,11 +312,7 @@ impl SettlementMonitor {
             .iter()
             .filter_map(|po| {
                 // PaymentOutput.amount might be Option<u64> or u64, handle both
-                let amount = if let Some(amt) = po.amount {
-                    amt
-                } else {
-                    return None; // Skip if amount is None
-                };
+                let amount = po.amount?;
                 Some(TransactionOutput {
                     value: Integer::from(amount as i64),
                     script_pubkey: ByteString::from(po.script.clone()),

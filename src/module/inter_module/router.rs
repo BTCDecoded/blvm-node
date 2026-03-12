@@ -73,8 +73,7 @@ impl ModuleRouter {
                 Some((mid, mname)) => (mid, mname),
                 None => {
                     return Err(ModuleError::OperationError(format!(
-                        "Method '{}' not found in any module",
-                        method
+                        "Method '{method}' not found in any module"
                     )));
                 }
             }
@@ -97,8 +96,7 @@ impl ModuleRouter {
                 .await
             {
                 return Err(ModuleError::OperationError(format!(
-                    "Dependency validation failed for module '{}': {}",
-                    target_id, e
+                    "Dependency validation failed for module '{target_id}': {e}"
                 )));
             }
 
@@ -119,8 +117,7 @@ impl ModuleRouter {
                     }
                     ModuleHealth::Unresponsive | ModuleHealth::Crashed(_) => {
                         return Err(ModuleError::OperationError(format!(
-                            "Target module '{}' is not healthy (health: {:?})",
-                            target_id, health
+                            "Target module '{target_id}' is not healthy (health: {health:?})"
                         )));
                     }
                 }
@@ -130,8 +127,7 @@ impl ModuleRouter {
         // Get the API implementation
         let api = self.registry.get_api(&target_id).await.ok_or_else(|| {
             ModuleError::OperationError(format!(
-                "Module '{}' not found or has no API registered",
-                target_id
+                "Module '{target_id}' not found or has no API registered"
             ))
         })?;
 

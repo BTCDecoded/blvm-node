@@ -1,22 +1,22 @@
-//! Reference Node - Minimal Bitcoin implementation using protocol-engine
+//! Reference Node - Minimal Bitcoin implementation using blvm-protocol
 //!
 //! This crate provides a minimal, production-ready Bitcoin node implementation
-//! that uses the protocol-engine crate for protocol abstraction and consensus-proof
+//! that uses the blvm-protocol crate for protocol abstraction and blvm-consensus
 //! for all consensus decisions. It adds only the non-consensus infrastructure:
 //! storage, networking, RPC, and orchestration.
 //!
 //! ## 5-Tier Architecture
 //!
 //! 1. Orange Paper (mathematical foundation)
-//! 2. consensus-proof (pure math implementation)
-//! 3. protocol-engine (Bitcoin abstraction) ← USED HERE
+//! 2. blvm-consensus (pure math implementation)
+//! 3. blvm-protocol (Bitcoin abstraction) ← USED HERE
 //! 4. blvm-node (full node implementation) ← THIS CRATE
-//! 5. developer-sdk (ergonomic API - future)
+//! 5. blvm-sdk (ergonomic API - future)
 //!
 //! ## Design Principles
 //!
-//! 1. **Zero Consensus Re-implementation**: All consensus logic from consensus-proof
-//! 2. **Protocol Abstraction**: Uses protocol-engine for variant support
+//! 1. **Zero Consensus Re-implementation**: All consensus logic from blvm-consensus
+//! 2. **Protocol Abstraction**: Uses blvm-protocol for variant support
 //! 3. **Pure Infrastructure**: Only adds storage, networking, RPC, orchestration
 //! 4. **Production Ready**: Full Bitcoin node functionality
 
@@ -25,20 +25,22 @@
 // Allow design-level clippy warnings that would require significant refactoring
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::large_enum_variant)]
-#![allow(clippy::arc_with_non_send_sync)]
-#![allow(clippy::module_inception)]
-#![allow(clippy::should_implement_trait)]
-#![allow(clippy::inherent_to_string_shadow_display)]
-
-// Memory allocator optimization using mimalloc (faster than default allocator)
-// Note: Only in blvm-node, not consensus-proof, to maintain Kani compatibility
-// Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
+#![allow(clippy::type_complexity)] // Module storage, RPC types; refactor would be large
+#![allow(clippy::arc_with_non_send_sync)] // ZMQ Socket is not Sync; zmq crate limitation
+#![allow(clippy::field_reassign_with_default)] // Many config structs; init would be verbose
+#![allow(clippy::collapsible_match)] // Readability preference for nested matches
+#![allow(unused_doc_comments, unused_imports, unused_variables, unused_mut)] // Many feature-gated paths; fix in follow-up
+                                                                             // Memory allocator optimization using mimalloc (faster than default allocator)
+                                                                             // Note: Only in blvm-node, not blvm-consensus
+                                                                             // Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
 #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod bip21;
 pub mod config;
+#[cfg(feature = "miniscript")]
+pub mod miniscript;
 pub mod module;
 pub mod network;
 pub mod node;
@@ -50,22 +52,20 @@ pub mod utils;
 pub mod validation;
 #[cfg(feature = "zmq")]
 pub mod zmq;
-#[cfg(feature = "miniscript")]
-pub mod miniscript;
 
 // Re-export config module
 pub use config::*;
 
-// Re-export commonly used types from protocol-engine
-// This allows depending only on protocol-engine (which transitively provides consensus-proof)
+// Re-export commonly used types from blvm-protocol
+// This allows depending only on blvm-protocol (which transitively provides blvm-consensus)
 pub use blvm_protocol::mempool::Mempool;
 pub use blvm_protocol::{
-    Block, BlockHeader, ByteString, ConsensusError, Hash, Integer, Natural, OutPoint, Result,
-    Transaction, TransactionInput, TransactionOutput, UtxoSet, ValidationResult, UTXO,
-    tx_inputs, tx_outputs,
+    tx_inputs, tx_outputs, Block, BlockHeader, ByteString, ConsensusError, Hash, Integer, Natural,
+    OutPoint, Result, Transaction, TransactionInput, TransactionOutput, UtxoSet, ValidationResult,
+    UTXO,
 };
 
-// Re-export protocol-engine types
+// Re-export blvm-protocol types
 pub use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 
 /// Main node implementation
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_protocol_integration() {
-        // Test that protocol-engine works in blvm-node context
+        // Test that blvm-protocol works in blvm-node context
         let node = Node::new(Some(ProtocolVersion::Regtest)).unwrap();
         let protocol = node.protocol();
 
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_consensus_integration() {
-        // Test consensus validation through protocol-engine
+        // Test consensus validation through blvm-protocol
         let node = Node::new(None).unwrap(); // Uses default Regtest
         let protocol = node.protocol();
 
@@ -168,7 +168,7 @@ mod tests {
             inputs: blvm_protocol::tx_inputs![],
             outputs: blvm_protocol::tx_outputs![TransactionOutput {
                 value: 1000,
-                script_pubkey: vec![0x51].into(), // OP_1
+                script_pubkey: vec![blvm_consensus::opcodes::OP_1],
             }],
             lock_time: 0,
         };

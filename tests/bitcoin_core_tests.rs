@@ -4,14 +4,14 @@
 
 #[cfg(feature = "rocksdb")]
 mod bitcoin_core_tests {
+    use blvm_node::storage::bitcoin_core_blocks::BitcoinCoreBlockReader;
     use blvm_node::storage::bitcoin_core_detection::{BitcoinCoreDetection, BitcoinCoreNetwork};
     use blvm_node::storage::bitcoin_core_format::{
         convert_key, get_key_prefix, parse_block_index, parse_coin,
     };
-    use blvm_node::storage::bitcoin_core_blocks::BitcoinCoreBlockReader;
-    use tempfile::TempDir;
-    use std::fs::{File, create_dir_all};
+    use std::fs::{create_dir_all, File};
     use std::io::Write;
+    use tempfile::TempDir;
 
     #[test]
     fn test_bitcoin_core_detection_paths() {
@@ -24,7 +24,7 @@ mod bitcoin_core_tests {
     #[test]
     fn test_bitcoin_core_network_detection() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Test mainnet detection
         let mainnet_path = temp_dir.path().join(".bitcoin");
         create_dir_all(&mainnet_path).unwrap();
@@ -71,7 +71,7 @@ mod bitcoin_core_tests {
         // Create a simple coin format
         // Format: VarInt(code) + script + amount(8) + height(4) + coinbase(1)
         let mut data = Vec::new();
-        
+
         // VarInt code (0 = uncompressed, script length follows)
         data.push(0x00);
         // Script length VarInt (5 bytes)
@@ -96,7 +96,7 @@ mod bitcoin_core_tests {
     fn test_parse_block_index() {
         // Create a minimal block index (80+ bytes)
         let mut data = vec![0u8; 80];
-        
+
         // Height (4 bytes)
         data[0..4].copy_from_slice(&100u32.to_le_bytes());
         // Status (4 bytes)
@@ -157,7 +157,7 @@ mod bitcoin_core_tests {
         assert!(reader.is_ok());
 
         let reader = reader.unwrap();
-        
+
         // First access should build index
         let count = reader.block_count().unwrap();
         assert!(count > 0);
@@ -191,7 +191,8 @@ mod bitcoin_core_tests {
             &blocks_dir,
             BitcoinCoreNetwork::Mainnet,
             Some(&cache_dir),
-        ).unwrap();
+        )
+        .unwrap();
         let count1 = reader1.block_count().unwrap();
 
         // Second reader - should load from cache
@@ -199,7 +200,8 @@ mod bitcoin_core_tests {
             &blocks_dir,
             BitcoinCoreNetwork::Mainnet,
             Some(&cache_dir),
-        ).unwrap();
+        )
+        .unwrap();
         let count2 = reader2.block_count().unwrap();
 
         assert_eq!(count1, count2);
@@ -211,8 +213,8 @@ mod bitcoin_core_tests {
     #[test]
     fn test_bitcoin_core_not_available() {
         // Tests that Bitcoin Core features are not available when rocksdb feature is disabled
-        use blvm_node::storage::bitcoin_core_storage::BitcoinCoreStorage;
         use blvm_node::storage::bitcoin_core_detection::BitcoinCoreNetwork;
+        use blvm_node::storage::bitcoin_core_storage::BitcoinCoreStorage;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
@@ -223,4 +225,3 @@ mod bitcoin_core_tests {
         assert!(result.is_err());
     }
 }
-

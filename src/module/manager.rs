@@ -213,7 +213,7 @@ impl ModuleManager {
                             }
                             // Update state
                             managed.state =
-                                ModuleState::Error(format!("Dependency '{}' crashed", module_name));
+                                ModuleState::Error(format!("Dependency '{module_name}' crashed"));
                             warn!(
                                 "Dependent module '{}' unloaded due to crashed dependency",
                                 dependent
@@ -252,8 +252,7 @@ impl ModuleManager {
             // Check if dependency is loaded
             let dep_module = modules.get(dep_name).ok_or_else(|| {
                 ModuleError::DependencyMissing(format!(
-                    "Required dependency '{}' not loaded (required by '{}')",
-                    dep_name, module_name
+                    "Required dependency '{dep_name}' not loaded (required by '{module_name}')"
                 ))
             })?;
 
@@ -638,14 +637,14 @@ impl ModuleManager {
                                                     let new_prefix = if prefix.is_empty() {
                                                         key.clone()
                                                     } else {
-                                                        format!("{}.{}", prefix, key)
+                                                        format!("{prefix}.{key}")
                                                     };
                                                     flatten_toml_value(val, &new_prefix, result);
                                                 }
                                             }
                                             toml::Value::Array(arr) => {
                                                 for (idx, val) in arr.iter().enumerate() {
-                                                    let new_prefix = format!("{}[{}]", prefix, idx);
+                                                    let new_prefix = format!("{prefix}[{idx}]");
                                                     flatten_toml_value(val, &new_prefix, result);
                                                 }
                                             }
@@ -749,7 +748,7 @@ impl ModuleManager {
     pub async fn validate_module_dependencies(&self, module_name: &str) -> Result<(), ModuleError> {
         let modules = self.modules.lock().await;
         let module = modules.get(module_name).ok_or_else(|| {
-            ModuleError::OperationError(format!("Module {} not found", module_name))
+            ModuleError::OperationError(format!("Module {module_name} not found"))
         })?;
 
         // Check each required (hard) dependency
@@ -757,8 +756,7 @@ impl ModuleManager {
             // Check if dependency is loaded
             let dep_module = modules.get(dep_name).ok_or_else(|| {
                 ModuleError::OperationError(format!(
-                    "Required dependency '{}' not loaded (required by '{}')",
-                    dep_name, module_name
+                    "Required dependency '{dep_name}' not loaded (required by '{module_name}')"
                 ))
             })?;
 
@@ -796,7 +794,7 @@ impl ModuleManager {
         };
 
         let mut missing = Vec::new();
-        for (dep_name, _dep_version) in &module.metadata.optional_dependencies {
+        for dep_name in module.metadata.optional_dependencies.keys() {
             if !modules.contains_key(dep_name) {
                 missing.push(dep_name.clone());
             }

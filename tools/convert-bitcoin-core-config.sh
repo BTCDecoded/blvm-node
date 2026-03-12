@@ -1,9 +1,9 @@
 #!/bin/bash
-# Convert Bitcoin Core bitcoin.conf to bllvm-node config.toml
+# Convert Bitcoin Core bitcoin.conf to blvm-node config.toml
 #
 # Usage: ./convert-bitcoin-core-config.sh <bitcoin.conf> [output.toml]
 #
-# This script converts Bitcoin Core configuration to bllvm-node format.
+# This script converts Bitcoin Core configuration to blvm-node format.
 # Data directories are NOT converted (as requested).
 
 set -euo pipefail
@@ -14,11 +14,11 @@ OUTPUT_FILE="${2:-config.toml}"
 if [ -z "$INPUT_FILE" ]; then
     echo "Usage: $0 <bitcoin.conf> [output.toml]"
     echo ""
-    echo "Converts Bitcoin Core bitcoin.conf to bllvm-node config.toml"
+    echo "Converts Bitcoin Core bitcoin.conf to blvm-node config.toml"
     echo ""
     echo "Examples:"
     echo "  $0 ~/.bitcoin/bitcoin.conf"
-    echo "  $0 /etc/bitcoin/bitcoin.conf /etc/bllvm-node/config.toml"
+    echo "  $0 /etc/bitcoin/bitcoin.conf /etc/blvm-node/config.toml"
     exit 1
 fi
 
@@ -27,7 +27,7 @@ if [ ! -f "$INPUT_FILE" ]; then
     exit 1
 fi
 
-echo "# bllvm-node configuration converted from Bitcoin Core"
+echo "# blvm-node configuration converted from Bitcoin Core"
 echo "# Source: $INPUT_FILE"
 echo "# Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
 echo ""
@@ -184,7 +184,7 @@ done < "$INPUT_FILE"
 
 # Generate TOML config
 cat > "$OUTPUT_FILE" <<EOF
-# bllvm-node configuration
+# blvm-node configuration
 # Converted from Bitcoin Core: $INPUT_FILE
 
 # Network configuration

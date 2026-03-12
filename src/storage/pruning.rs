@@ -10,11 +10,11 @@ use crate::config::{PruningConfig, PruningMode};
 #[cfg(feature = "bip158")]
 use crate::network::filter_service::BlockFilterService;
 use crate::storage::blockstore::BlockStore;
-use crate::utils::current_timestamp;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::commitment_store::CommitmentStore;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::utxostore::UtxoStore;
+use crate::utils::current_timestamp;
 use anyhow::{anyhow, Result};
 #[cfg(feature = "utxo-commitments")]
 use blvm_protocol::Hash;
@@ -439,7 +439,7 @@ impl PruningManager {
 
         // Generate UTXO commitments before pruning if enabled
         if keep_commitments {
-            if let (Some(ref commitment_store), Some(ref utxostore)) =
+            if let (Some(commitment_store), Some(utxostore)) =
                 (self.commitment_store.as_ref(), self.utxostore.as_ref())
             {
                 info!("Generating UTXO commitments for blocks to be pruned...");
@@ -540,7 +540,7 @@ impl PruningManager {
                 if keep_commitments {
                     #[cfg(feature = "utxo-commitments")]
                     {
-                        if let (Some(ref commitment_store), Some(ref utxostore)) =
+                        if let (Some(commitment_store), Some(utxostore)) =
                             (self.commitment_store.as_ref(), self.utxostore.as_ref())
                         {
                             // Generate commitment if not exists
@@ -649,7 +649,7 @@ impl PruningManager {
 
         for (outpoint, utxo) in &utxo_set {
             utxo_tree
-                .insert(outpoint.clone(), utxo.as_ref().clone())
+                .insert(*outpoint, utxo.as_ref().clone())
                 .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
         }
 
@@ -697,7 +697,7 @@ impl PruningManager {
 
         for (outpoint, utxo) in utxo_set {
             utxo_tree
-                .insert(outpoint.clone(), utxo.as_ref().clone())
+                .insert(*outpoint, utxo.as_ref().clone())
                 .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
         }
 
@@ -759,15 +759,16 @@ impl PruningManager {
                     // Apply block to UTXO set using connect_block
                     // This properly handles coinbase transactions and input/output processing
                     let network_time = current_timestamp();
-                    let (validation_result, new_utxo_set, _undo_log) = connect_block::<blvm_protocol::BlockHeader>(
-                        &block,
-                        &witnesses,
-                        utxo_set,
-                        height,
-                        None, // No recent headers needed for historical replay
-                        network_time,
-                        blvm_protocol::types::Network::Mainnet,
-                    )?;
+                    let (validation_result, new_utxo_set, _undo_log) =
+                        connect_block::<blvm_protocol::BlockHeader>(
+                            &block,
+                            &witnesses,
+                            utxo_set,
+                            height,
+                            None, // No recent headers needed for historical replay
+                            network_time,
+                            blvm_protocol::types::Network::Mainnet,
+                        )?;
 
                     // Check validation result
                     if !matches!(validation_result, blvm_protocol::ValidationResult::Valid) {

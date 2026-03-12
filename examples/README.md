@@ -1,6 +1,6 @@
-# bllvm-node Examples
+# blvm-node Examples
 
-This directory contains example code demonstrating how to use bllvm-node.
+This directory contains example code demonstrating how to use blvm-node.
 
 ## Examples
 
@@ -19,7 +19,7 @@ cargo run --example electrum-integration
 # Generates electrum-config.toml
 
 # Then start node with:
-bllvm-node --config electrum-config.toml --network testnet
+blvm-node --config electrum-config.toml --network testnet
 ```
 
 **Output**: `electrum-config.toml` file ready to use
@@ -43,9 +43,9 @@ cargo run --example wallet-integration
 **Output**: Prints example RPC requests and integration checklist
 
 **Note**: This shows the request format. To test with a running node:
-1. Start node: `bllvm-node --network testnet`
+1. Start node: `blvm-node --network testnet`
 2. Use curl or HTTP client to send requests
-3. Or use bllvm-sdk for Rust integration
+3. Or use blvm-sdk for Rust integration
 
 ---
 
@@ -60,7 +60,7 @@ cargo run --example wallet-integration
 
 2. **Start node**:
    ```bash
-   bllvm-node --config electrum-config.toml --network testnet
+   blvm-node --config electrum-config.toml --network testnet
    ```
 
 3. **Configure Electrum**:
@@ -93,5 +93,5 @@ cargo run --example wallet-integration
 
 - **Integration Guide**: `docs/INTEGRATION_GUIDE.md`
 - **RPC Reference**: `docs/RPC_REFERENCE.md`
-- **Quick Start**: `../bLLVM_NODE_QUICK_START.md`
+- **Quick Start**: `../BLVM_NODE_QUICK_START.md`
 

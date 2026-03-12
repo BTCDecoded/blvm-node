@@ -84,7 +84,7 @@ impl MetricsManager {
             for metric in module_metrics {
                 let metric_name = format!("blvm_module_{}", metric.name.replace('-', "_"));
                 let labels_str = if metric.labels.is_empty() {
-                    format!("module_id=\"{}\"", module_id)
+                    format!("module_id=\"{module_id}\"")
                 } else {
                     let mut label_parts = vec![format!("module_id=\"{}\"", module_id)];
                     for (key, value) in &metric.labels {
@@ -95,23 +95,21 @@ impl MetricsManager {
 
                 match &metric.value {
                     MetricValue::Counter(value) => {
-                        output.push_str(&format!("# HELP {} Module metric counter\n", metric_name));
-                        output.push_str(&format!("# TYPE {} counter\n", metric_name));
-                        output.push_str(&format!("{}{{{}}} {}\n", metric_name, labels_str, value));
+                        output.push_str(&format!("# HELP {metric_name} Module metric counter\n"));
+                        output.push_str(&format!("# TYPE {metric_name} counter\n"));
+                        output.push_str(&format!("{metric_name}{{{labels_str}}} {value}\n"));
                     }
                     MetricValue::Gauge(value) => {
-                        output.push_str(&format!("# HELP {} Module metric gauge\n", metric_name));
-                        output.push_str(&format!("# TYPE {} gauge\n", metric_name));
-                        output.push_str(&format!("{}{{{}}} {}\n", metric_name, labels_str, value));
+                        output.push_str(&format!("# HELP {metric_name} Module metric gauge\n"));
+                        output.push_str(&format!("# TYPE {metric_name} gauge\n"));
+                        output.push_str(&format!("{metric_name}{{{labels_str}}} {value}\n"));
                     }
                     MetricValue::Histogram(buckets) => {
-                        output
-                            .push_str(&format!("# HELP {} Module metric histogram\n", metric_name));
-                        output.push_str(&format!("# TYPE {} histogram\n", metric_name));
+                        output.push_str(&format!("# HELP {metric_name} Module metric histogram\n"));
+                        output.push_str(&format!("# TYPE {metric_name} histogram\n"));
                         for (i, bucket_value) in buckets.iter().enumerate() {
                             output.push_str(&format!(
-                                "{}{{{},le=\"{}\"}} {}\n",
-                                metric_name, labels_str, i, bucket_value
+                                "{metric_name}{{{labels_str},le=\"{i}\"}} {bucket_value}\n"
                             ));
                         }
                     }

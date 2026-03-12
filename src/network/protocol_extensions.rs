@@ -15,11 +15,11 @@ use crate::storage::Storage;
 use crate::utils::option_to_result;
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
+use blvm_consensus::types::{OutPoint, UTXO};
+#[cfg(feature = "utxo-commitments")]
 use blvm_protocol::spam_filter::SpamFilter;
 #[cfg(feature = "utxo-commitments")]
 use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
-#[cfg(feature = "utxo-commitments")]
-use blvm_consensus::types::{OutPoint, UTXO};
 use hex;
 use std::sync::Arc;
 
@@ -65,7 +65,7 @@ pub async fn handle_get_utxo_set(
     #[cfg(feature = "utxo-commitments")]
     for (outpoint, utxo) in &utxo_set {
         utxo_tree
-            .insert(outpoint.clone(), utxo.as_ref().clone())
+            .insert(*outpoint, utxo.as_ref().clone())
             .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
     }
 
@@ -322,7 +322,7 @@ pub async fn handle_get_utxo_proof(
 
     for (outpoint, utxo) in &utxo_set {
         utxo_tree
-            .insert(outpoint.clone(), utxo.as_ref().clone())
+            .insert(*outpoint, utxo.as_ref().clone())
             .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
     }
 
@@ -330,7 +330,7 @@ pub async fn handle_get_utxo_proof(
     use blvm_consensus::types::OutPoint;
     let outpoint = OutPoint {
         hash: message.tx_hash,
-        index: message.output_index as u32,
+        index: message.output_index,
     };
 
     // Find UTXO in set
@@ -368,9 +368,7 @@ pub fn serialize_get_utxo_proof(
 }
 
 /// Deserialize UTXOProof message from protocol format
-pub fn deserialize_utxo_proof(
-    data: &[u8],
-) -> Result<crate::network::protocol::UTXOProofMessage> {
+pub fn deserialize_utxo_proof(data: &[u8]) -> Result<crate::network::protocol::UTXOProofMessage> {
     use crate::network::protocol::ProtocolParser;
     match ProtocolParser::parse_message(data)? {
         ProtocolMessage::UTXOProof(msg) => Ok(msg),
@@ -394,7 +392,7 @@ pub async fn handle_send_tx_rcncl(
         "Received Erlay negotiation: version={}, min_field={}, max_field={}",
         message.version, message.min_field_size, message.max_field_size
     );
-    
+
     // Negotiate field size (use minimum of both peers' max)
     // For now, just acknowledge
     Ok(())
@@ -410,10 +408,10 @@ pub async fn handle_req_recon(
     mempool: Option<Arc<MempoolManager>>,
 ) -> Result<crate::network::protocol::ReqSktMessage> {
     use crate::network::erlay::ErlayTxSet;
-    
+
     // Get local transaction set from mempool
     let mut tx_set = ErlayTxSet::new();
-    
+
     if let Some(mempool_mgr) = mempool {
         // Get all transactions from mempool and add their hashes to the set
         let transactions = mempool_mgr.get_transactions();
@@ -421,13 +419,17 @@ pub async fn handle_req_recon(
             let tx_hash = calculate_txid(&tx);
             tx_set.add(tx_hash);
         }
-        debug!("Erlay: Populated tx_set with {} transactions from mempool", tx_set.size());
+        debug!(
+            "Erlay: Populated tx_set with {} transactions from mempool",
+            tx_set.size()
+        );
     } else {
         warn!("MempoolManager not available for Erlay reconciliation, using empty set");
     }
-    
+
     // Create reconciliation sketch
-    let local_sketch = tx_set.create_reconciliation_sketch(message.local_set_size as usize)
+    let local_sketch = tx_set
+        .create_reconciliation_sketch(message.local_set_size as usize)
         .map_err(|e| anyhow::anyhow!("Failed to create reconciliation sketch: {}", e))?;
 
     // Return ReqSkt message with our sketch
@@ -448,10 +450,10 @@ pub async fn handle_req_skt(
     mempool: Option<Arc<MempoolManager>>,
 ) -> Result<crate::network::protocol::SketchMessage> {
     use crate::network::erlay::ErlayTxSet;
-    
+
     // Get local transaction set from mempool
     let mut tx_set = ErlayTxSet::new();
-    
+
     if let Some(mempool_mgr) = mempool {
         // Get all transactions from mempool and add their hashes to the set
         let transactions = mempool_mgr.get_transactions();
@@ -459,13 +461,17 @@ pub async fn handle_req_skt(
             let tx_hash = calculate_txid(&tx);
             tx_set.add(tx_hash);
         }
-        debug!("Erlay: Populated tx_set with {} transactions for sketch", tx_set.size());
+        debug!(
+            "Erlay: Populated tx_set with {} transactions for sketch",
+            tx_set.size()
+        );
     } else {
         warn!("MempoolManager not available for Erlay sketch, using empty set");
     }
-    
+
     // Create sketch
-    let sketch = tx_set.create_reconciliation_sketch(message.remote_set_size as usize)
+    let sketch = tx_set
+        .create_reconciliation_sketch(message.remote_set_size as usize)
         .map_err(|e| anyhow::anyhow!("Failed to create sketch: {}", e))?;
 
     Ok(crate::network::protocol::SketchMessage {
@@ -485,10 +491,10 @@ pub async fn handle_sketch(
     mempool: Option<Arc<MempoolManager>>,
 ) -> Result<Vec<blvm_protocol::Hash>> {
     use crate::network::erlay::ErlayTxSet;
-    
+
     // Get local transaction set from mempool
     let mut tx_set = ErlayTxSet::new();
-    
+
     if let Some(mempool_mgr) = mempool {
         // Get all transactions from mempool and add their hashes to the set
         let transactions = mempool_mgr.get_transactions();
@@ -496,20 +502,28 @@ pub async fn handle_sketch(
             let tx_hash = calculate_txid(&tx);
             tx_set.add(tx_hash);
         }
-        debug!("Erlay: Populated tx_set with {} transactions for reconciliation", tx_set.size());
+        debug!(
+            "Erlay: Populated tx_set with {} transactions for reconciliation",
+            tx_set.size()
+        );
     } else {
         warn!("MempoolManager not available for Erlay reconciliation, using empty set");
     }
-    
+
     // Create our local sketch
-    let local_sketch = tx_set.create_reconciliation_sketch(0)
+    let local_sketch = tx_set
+        .create_reconciliation_sketch(0)
         .map_err(|e| anyhow::anyhow!("Failed to create local sketch: {}", e))?;
 
     // Reconcile sets
-    let missing_txs = tx_set.reconcile_with_peer(&local_sketch, &message.sketch)
+    let missing_txs = tx_set
+        .reconcile_with_peer(&local_sketch, &message.sketch)
         .map_err(|e| anyhow::anyhow!("Failed to reconcile sets: {}", e))?;
 
-    debug!("Erlay: Reconciliation found {} missing transactions", missing_txs.len());
+    debug!(
+        "Erlay: Reconciliation found {} missing transactions",
+        missing_txs.len()
+    );
     Ok(missing_txs)
 }
 

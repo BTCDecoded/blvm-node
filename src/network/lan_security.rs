@@ -1,9 +1,9 @@
 //! LAN Peer Security Module
 //!
 //! Implements security policies for LAN peer discovery and prioritization.
-//! 
+//!
 //! ## Security Model
-//! 
+//!
 //! Internet checkpoints are the PRIMARY security mechanism. Even with discovery ON,
 //! we can't be eclipsed because we require internet consensus verification.
 //!
@@ -154,16 +154,20 @@ impl LanPeerState {
 
         if self.valid_blocks >= BLOCKS_FOR_LEVEL_3 && time_connected >= MIN_TIME_FOR_MAX_TRUST {
             if self.trust_level != LanTrustLevel::Maximum {
-                info!("LAN peer {} promoted to Maximum trust ({} blocks, {:?} connected)",
-                    self.addr, self.valid_blocks, time_connected);
+                info!(
+                    "LAN peer {} promoted to Maximum trust ({} blocks, {:?} connected)",
+                    self.addr, self.valid_blocks, time_connected
+                );
                 self.trust_level = LanTrustLevel::Maximum;
             }
-        } else if self.valid_blocks >= BLOCKS_FOR_LEVEL_2 {
-            if self.trust_level == LanTrustLevel::Initial {
-                info!("LAN peer {} promoted to Level2 trust ({} blocks)",
-                    self.addr, self.valid_blocks);
-                self.trust_level = LanTrustLevel::Level2;
-            }
+        } else if self.valid_blocks >= BLOCKS_FOR_LEVEL_2
+            && self.trust_level == LanTrustLevel::Initial
+        {
+            info!(
+                "LAN peer {} promoted to Level2 trust ({} blocks)",
+                self.addr, self.valid_blocks
+            );
+            self.trust_level = LanTrustLevel::Level2;
         }
     }
 
@@ -176,16 +180,21 @@ impl LanPeerState {
     /// Record a failure from this peer
     pub fn record_failure(&mut self) -> bool {
         self.failures += 1;
-        
+
         if self.failures >= LAN_DEMOTION_THRESHOLD {
-            warn!("LAN peer {} demoted after {} failures", self.addr, self.failures);
+            warn!(
+                "LAN peer {} demoted after {} failures",
+                self.addr, self.failures
+            );
             self.trust_level = LanTrustLevel::Demoted;
             return true; // Demoted
         }
 
         if self.failures >= LAN_FAILURE_TOLERANCE {
-            warn!("LAN peer {} exceeded failure tolerance ({}/{})",
-                self.addr, self.failures, LAN_FAILURE_TOLERANCE);
+            warn!(
+                "LAN peer {} exceeded failure tolerance ({}/{})",
+                self.addr, self.failures, LAN_FAILURE_TOLERANCE
+            );
         }
 
         false // Not yet demoted
@@ -193,8 +202,10 @@ impl LanPeerState {
 
     /// Ban this peer for checkpoint failure
     pub fn ban_for_checkpoint_failure(&mut self, reason: &str) {
-        error!("SECURITY: Banning LAN peer {} for checkpoint failure: {}",
-            self.addr, reason);
+        error!(
+            "SECURITY: Banning LAN peer {} for checkpoint failure: {}",
+            self.addr, reason
+        );
         self.trust_level = LanTrustLevel::Banned;
         self.ban_until = Some(Instant::now() + CHECKPOINT_FAILURE_BAN_DURATION);
     }
@@ -248,7 +259,7 @@ impl LanSecurityPolicy {
             warn!("Cannot whitelist non-LAN peer: {}", addr);
             return;
         }
-        
+
         self.whitelist.write().unwrap().insert(addr);
         info!("Added {} to LAN whitelist", addr);
     }
@@ -268,7 +279,7 @@ impl LanSecurityPolicy {
     ) -> (bool, String) {
         // Check ban list first
         if self.is_peer_banned(addr) {
-            return (false, format!("Peer {} is banned", addr));
+            return (false, format!("Peer {addr} is banned"));
         }
 
         // Whitelisted peers always accepted (but still count against cap)
@@ -281,8 +292,7 @@ impl LanSecurityPolicy {
         // Check 25% LAN cap
         if current_lan_peers >= max_lan {
             return (false, format!(
-                "LAN cap reached: {}/{} (max {}%)",
-                current_lan_peers, target_peers, MAX_LAN_PEER_PERCENTAGE
+                "LAN cap reached: {current_lan_peers}/{target_peers} (max {MAX_LAN_PEER_PERCENTAGE}%)"
             ));
         }
 
@@ -290,11 +300,10 @@ impl LanSecurityPolicy {
         let would_have_internet = current_internet_peers;
         let would_have_total = current_internet_peers + current_lan_peers + 1;
         let internet_percentage = (would_have_internet * 100) / would_have_total;
-        
+
         if internet_percentage < MIN_INTERNET_PEER_PERCENTAGE as usize {
             return (false, format!(
-                "Would violate {}% internet minimum: would have {}%",
-                MIN_INTERNET_PEER_PERCENTAGE, internet_percentage
+                "Would violate {MIN_INTERNET_PEER_PERCENTAGE}% internet minimum: would have {internet_percentage}%"
             ));
         }
 
@@ -303,8 +312,7 @@ impl LanSecurityPolicy {
             let discovered_count = self.count_discovered_lan_peers();
             if discovered_count >= MAX_DISCOVERED_LAN_PEERS {
                 return (false, format!(
-                    "Discovered LAN peer limit reached: {}/{}",
-                    discovered_count, MAX_DISCOVERED_LAN_PEERS
+                    "Discovered LAN peer limit reached: {discovered_count}/{MAX_DISCOVERED_LAN_PEERS}"
                 ));
             }
         }
@@ -316,8 +324,9 @@ impl LanSecurityPolicy {
     fn count_discovered_lan_peers(&self) -> usize {
         let lan_peers = self.lan_peers.read().unwrap();
         let whitelist = self.whitelist.read().unwrap();
-        
-        lan_peers.keys()
+
+        lan_peers
+            .keys()
             .filter(|addr| !whitelist.contains(*addr))
             .count()
     }
@@ -326,8 +335,7 @@ impl LanSecurityPolicy {
     pub fn can_sync(&self, internet_peer_count: usize) -> (bool, String) {
         if internet_peer_count < MIN_INTERNET_PEERS_FOR_SYNC {
             return (false, format!(
-                "Need at least {} internet peers for checkpoint validation, have {}",
-                MIN_INTERNET_PEERS_FOR_SYNC, internet_peer_count
+                "Need at least {MIN_INTERNET_PEERS_FOR_SYNC} internet peers for checkpoint validation, have {internet_peer_count}"
             ));
         }
         (true, "OK".to_string())
@@ -337,14 +345,19 @@ impl LanSecurityPolicy {
     pub fn register_lan_peer(&self, addr: SocketAddr) {
         let is_whitelisted = self.is_whitelisted(&addr);
         let state = LanPeerState::new(addr, is_whitelisted);
-        
+
         self.lan_peers.write().unwrap().insert(addr, state);
-        debug!("Registered LAN peer: {} (whitelisted: {})", addr, is_whitelisted);
+        debug!(
+            "Registered LAN peer: {} (whitelisted: {})",
+            addr, is_whitelisted
+        );
     }
 
     /// Get current multiplier for a LAN peer
     pub fn get_peer_multiplier(&self, addr: &SocketAddr) -> f64 {
-        self.lan_peers.read().unwrap()
+        self.lan_peers
+            .read()
+            .unwrap()
             .get(addr)
             .map(|s| s.get_multiplier())
             .unwrap_or(INITIAL_LAN_MULTIPLIER)
@@ -367,8 +380,11 @@ impl LanSecurityPolicy {
 
     /// Ban a peer for checkpoint failure
     pub fn ban_for_checkpoint_failure(&self, addr: &SocketAddr, reason: &str) {
-        error!("SECURITY: Banning peer {} for checkpoint failure: {}", addr, reason);
-        
+        error!(
+            "SECURITY: Banning peer {} for checkpoint failure: {}",
+            addr, reason
+        );
+
         // Update peer state
         if let Some(state) = self.lan_peers.write().unwrap().get_mut(addr) {
             state.ban_for_checkpoint_failure(reason);
@@ -377,7 +393,10 @@ impl LanSecurityPolicy {
         // Add to persistent ban list
         self.banned_peers.write().unwrap().insert(
             *addr,
-            (Instant::now() + CHECKPOINT_FAILURE_BAN_DURATION, reason.to_string())
+            (
+                Instant::now() + CHECKPOINT_FAILURE_BAN_DURATION,
+                reason.to_string(),
+            ),
         );
     }
 
@@ -429,10 +448,22 @@ impl LanSecurityPolicy {
             whitelisted_peers: whitelist.len(),
             discovered_peers: lan_peers.keys().filter(|a| !whitelist.contains(*a)).count(),
             banned_peers: banned.len(),
-            initial_trust: lan_peers.values().filter(|s| s.trust_level == LanTrustLevel::Initial).count(),
-            level2_trust: lan_peers.values().filter(|s| s.trust_level == LanTrustLevel::Level2).count(),
-            max_trust: lan_peers.values().filter(|s| s.trust_level == LanTrustLevel::Maximum).count(),
-            demoted: lan_peers.values().filter(|s| s.trust_level == LanTrustLevel::Demoted).count(),
+            initial_trust: lan_peers
+                .values()
+                .filter(|s| s.trust_level == LanTrustLevel::Initial)
+                .count(),
+            level2_trust: lan_peers
+                .values()
+                .filter(|s| s.trust_level == LanTrustLevel::Level2)
+                .count(),
+            max_trust: lan_peers
+                .values()
+                .filter(|s| s.trust_level == LanTrustLevel::Maximum)
+                .count(),
+            demoted: lan_peers
+                .values()
+                .filter(|s| s.trust_level == LanTrustLevel::Demoted)
+                .count(),
         }
     }
 }
@@ -466,8 +497,8 @@ pub enum CheckpointResult {
     /// Checkpoint passed
     Valid,
     /// Checkpoint failed - peer lied
-    Invalid { 
-        expected: [u8; 32], 
+    Invalid {
+        expected: [u8; 32],
         got: [u8; 32],
         height: u64,
     },
@@ -515,7 +546,7 @@ pub const CHECKPOINT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CHECKPOINT_MAX_RETRIES: usize = 3;
 
 /// Internet checkpoint validator
-/// 
+///
 /// Validates blocks from LAN peers against internet consensus every N blocks.
 /// This is the PRIMARY security mechanism against LAN-based eclipse attacks.
 pub struct InternetCheckpointValidator {
@@ -550,23 +581,25 @@ impl InternetCheckpointValidator {
 
     /// Get last validated height
     pub fn last_validated(&self) -> u64 {
-        self.last_validated_height.load(std::sync::atomic::Ordering::Relaxed)
+        self.last_validated_height
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Record successful validation
     pub fn record_validation(&self, height: u64, hash: [u8; 32]) {
-        self.last_validated_height.store(height, std::sync::atomic::Ordering::Relaxed);
-        
+        self.last_validated_height
+            .store(height, std::sync::atomic::Ordering::Relaxed);
+
         // Cache the result
         let mut cache = self.checkpoint_cache.write().unwrap();
-        
+
         // Evict old entries if cache is full
         if cache.len() >= self.max_cache_size {
             // Remove entries below current height - 10000
             let evict_below = height.saturating_sub(10000);
             cache.retain(|h, _| *h > evict_below);
         }
-        
+
         cache.insert(height, hash);
     }
 
@@ -576,10 +609,10 @@ impl InternetCheckpointValidator {
     }
 
     /// Validate a block from LAN peer against internet consensus
-    /// 
+    ///
     /// This is called every BLOCK_CHECKPOINT_INTERVAL blocks during IBD.
     /// If validation fails, the LAN peer is immediately banned.
-    /// 
+    ///
     /// Returns Ok(()) if validation passed or was skipped,
     /// Err with details if validation failed.
     pub async fn validate_lan_block(
@@ -588,7 +621,12 @@ impl InternetCheckpointValidator {
         lan_block_hash: [u8; 32],
         height: u64,
         internet_peers: &[SocketAddr],
-        get_block_hash_fn: impl Fn(SocketAddr, u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<[u8; 32]>> + Send>>,
+        get_block_hash_fn: impl Fn(
+            SocketAddr,
+            u64,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<[u8; 32]>> + Send>,
+        >,
     ) -> Result<(), CheckpointValidationError> {
         // Skip if not a checkpoint height
         if !self.needs_validation(height) {
@@ -612,8 +650,11 @@ impl InternetCheckpointValidator {
 
         // Need at least MIN_CHECKPOINT_PEERS internet peers
         if internet_peers.len() < MIN_CHECKPOINT_PEERS {
-            warn!("Insufficient internet peers for checkpoint validation: {} < {}",
-                internet_peers.len(), MIN_CHECKPOINT_PEERS);
+            warn!(
+                "Insufficient internet peers for checkpoint validation: {} < {}",
+                internet_peers.len(),
+                MIN_CHECKPOINT_PEERS
+            );
             return Err(CheckpointValidationError::InsufficientPeers {
                 have: internet_peers.len(),
                 need: MIN_CHECKPOINT_PEERS,
@@ -623,23 +664,28 @@ impl InternetCheckpointValidator {
         // Query internet peers for the block hash at this height
         // We need consensus from MIN_CHECKPOINT_PEERS
         let mut internet_hashes: Vec<[u8; 32]> = Vec::with_capacity(internet_peers.len());
-        
+
         for peer in internet_peers.iter().take(MIN_CHECKPOINT_PEERS + 2) {
-            match tokio::time::timeout(
-                CHECKPOINT_REQUEST_TIMEOUT,
-                get_block_hash_fn(*peer, height)
-            ).await {
+            match tokio::time::timeout(CHECKPOINT_REQUEST_TIMEOUT, get_block_hash_fn(*peer, height))
+                .await
+            {
                 Ok(Some(hash)) => {
                     internet_hashes.push(hash);
                 }
                 Ok(None) => {
-                    debug!("Internet peer {} didn't return hash for height {}", peer, height);
+                    debug!(
+                        "Internet peer {} didn't return hash for height {}",
+                        peer, height
+                    );
                 }
                 Err(_) => {
-                    debug!("Timeout getting hash from internet peer {} for height {}", peer, height);
+                    debug!(
+                        "Timeout getting hash from internet peer {} for height {}",
+                        peer, height
+                    );
                 }
             }
-            
+
             // Early exit if we have enough consensus
             if internet_hashes.len() >= MIN_CHECKPOINT_PEERS {
                 break;
@@ -656,21 +702,29 @@ impl InternetCheckpointValidator {
         // Check that internet peers agree with each other
         let consensus_hash = internet_hashes[0];
         let all_agree = internet_hashes.iter().all(|h| *h == consensus_hash);
-        
+
         if !all_agree {
-            warn!("Internet peers disagree on hash at height {} - network may be under attack", height);
+            warn!(
+                "Internet peers disagree on hash at height {} - network may be under attack",
+                height
+            );
             // In this case, we can't trust anyone - pause sync
             return Err(CheckpointValidationError::InternetDisagreement { height });
         }
 
         // Now validate LAN peer's hash against internet consensus
         if lan_block_hash == consensus_hash {
-            info!("Checkpoint {} passed: LAN peer {} verified against {} internet peers",
-                height, lan_peer, internet_hashes.len());
+            info!(
+                "Checkpoint {} passed: LAN peer {} verified against {} internet peers",
+                height,
+                lan_peer,
+                internet_hashes.len()
+            );
             self.record_validation(height, consensus_hash);
             Ok(())
         } else {
-            error!("CHECKPOINT FAILURE at height {}: LAN peer {} provided wrong hash!\n\
+            error!(
+                "CHECKPOINT FAILURE at height {}: LAN peer {} provided wrong hash!\n\
                     Internet consensus: {}\n\
                     LAN peer provided:  {}",
                 height,
@@ -715,18 +769,32 @@ pub enum CheckpointValidationError {
 impl std::fmt::Display for CheckpointValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::HashMismatch { height, expected, got, lan_peer } => {
+            Self::HashMismatch {
+                height,
+                expected,
+                got,
+                lan_peer,
+            } => {
                 write!(f, "Checkpoint failure at height {}: LAN peer {} provided wrong hash. Expected: {}, got: {}",
                     height, lan_peer, hex::encode(expected), hex::encode(got))
             }
             Self::InsufficientPeers { have, need } => {
-                write!(f, "Insufficient internet peers for checkpoint: have {}, need {}", have, need)
+                write!(
+                    f,
+                    "Insufficient internet peers for checkpoint: have {have}, need {need}"
+                )
             }
             Self::InsufficientResponses { have, need } => {
-                write!(f, "Insufficient internet responses for checkpoint: have {}, need {}", have, need)
+                write!(
+                    f,
+                    "Insufficient internet responses for checkpoint: have {have}, need {need}"
+                )
             }
             Self::InternetDisagreement { height } => {
-                write!(f, "Internet peers disagree on hash at height {} - possible attack", height)
+                write!(
+                    f,
+                    "Internet peers disagree on hash at height {height} - possible attack"
+                )
             }
         }
     }
@@ -776,7 +844,7 @@ pub enum HeadersVerifyResult {
 }
 
 /// LAN peer discovery verifier
-/// 
+///
 /// Verifies that discovered LAN peers are:
 /// 1. Real Bitcoin nodes (protocol handshake)
 /// 2. On the same chain as internet consensus (headers check)
@@ -811,43 +879,54 @@ impl DiscoveryVerifier {
     }
 
     /// Verify a discovered LAN peer
-    /// 
+    ///
     /// This performs:
     /// 1. Protocol handshake verification (version/verack)
     /// 2. Chain verification (compare headers with internet)
-    /// 
+    ///
     /// Returns true only if both pass.
     pub async fn verify_lan_peer(
         &self,
         addr: SocketAddr,
-        do_handshake: impl Fn(SocketAddr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<(u32, String, u64)>> + Send>>,
-        get_peer_tip: impl Fn(SocketAddr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<(u64, [u8; 32])>> + Send>>,
+        do_handshake: impl Fn(
+            SocketAddr,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<(u32, String, u64)>> + Send>,
+        >,
+        get_peer_tip: impl Fn(
+            SocketAddr,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<(u64, [u8; 32])>> + Send>,
+        >,
     ) -> (bool, String) {
         // Step 1: Protocol handshake
-        info!("Verifying discovered LAN peer {} - protocol handshake...", addr);
-        
-        let handshake_result = match tokio::time::timeout(
-            PROTOCOL_VERIFY_TIMEOUT,
-            do_handshake(addr)
-        ).await {
-            Ok(Some((version, user_agent, height))) => {
-                debug!("LAN peer {} handshake OK: version={}, agent={}, height={}",
-                    addr, version, user_agent, height);
-                ProtocolVerifyResult::Valid {
-                    protocol_version: version,
-                    user_agent,
-                    start_height: height,
+        info!(
+            "Verifying discovered LAN peer {} - protocol handshake...",
+            addr
+        );
+
+        let handshake_result =
+            match tokio::time::timeout(PROTOCOL_VERIFY_TIMEOUT, do_handshake(addr)).await {
+                Ok(Some((version, user_agent, height))) => {
+                    debug!(
+                        "LAN peer {} handshake OK: version={}, agent={}, height={}",
+                        addr, version, user_agent, height
+                    );
+                    ProtocolVerifyResult::Valid {
+                        protocol_version: version,
+                        user_agent,
+                        start_height: height,
+                    }
                 }
-            }
-            Ok(None) => {
-                warn!("LAN peer {} failed protocol handshake", addr);
-                return (false, "Protocol handshake failed".to_string());
-            }
-            Err(_) => {
-                warn!("LAN peer {} protocol handshake timed out", addr);
-                return (false, "Protocol handshake timeout".to_string());
-            }
-        };
+                Ok(None) => {
+                    warn!("LAN peer {} failed protocol handshake", addr);
+                    return (false, "Protocol handshake failed".to_string());
+                }
+                Err(_) => {
+                    warn!("LAN peer {} protocol handshake timed out", addr);
+                    return (false, "Protocol handshake timeout".to_string());
+                }
+            };
 
         // Step 2: Headers verification (only if we have an internet tip)
         let internet_tip = match self.get_internet_tip() {
@@ -860,13 +939,13 @@ impl DiscoveryVerifier {
             }
         };
 
-        info!("Verifying LAN peer {} - checking chain against internet (tip: {})", 
-            addr, internet_tip.height);
+        info!(
+            "Verifying LAN peer {} - checking chain against internet (tip: {})",
+            addr, internet_tip.height
+        );
 
-        let peer_tip = match tokio::time::timeout(
-            HEADERS_VERIFY_TIMEOUT,
-            get_peer_tip(addr)
-        ).await {
+        let peer_tip = match tokio::time::timeout(HEADERS_VERIFY_TIMEOUT, get_peer_tip(addr)).await
+        {
             Ok(Some((height, hash))) => (height, hash),
             Ok(None) => {
                 warn!("LAN peer {} didn't provide chain tip", addr);
@@ -880,58 +959,78 @@ impl DiscoveryVerifier {
 
         // Check if peer is on same chain
         // If peer height is close to internet tip and hash matches, they're on same chain
-        let height_diff = if peer_tip.0 > internet_tip.height {
-            peer_tip.0 - internet_tip.height
-        } else {
-            internet_tip.height - peer_tip.0
-        };
+        let height_diff = peer_tip.0.abs_diff(internet_tip.height);
 
         if height_diff > MAX_HEADER_DIVERGENCE {
             // Peer is significantly ahead or behind - might be on different chain
             // This could be normal (peer is syncing) or attack (minority chain)
             if peer_tip.0 < internet_tip.height.saturating_sub(100) {
                 // Peer is way behind - probably still syncing, OK to use but with caution
-                warn!("LAN peer {} is {} blocks behind internet tip - may still be syncing",
-                    addr, internet_tip.height - peer_tip.0);
-                return (true, format!("Behind by {} blocks, use with caution", 
-                    internet_tip.height - peer_tip.0));
+                warn!(
+                    "LAN peer {} is {} blocks behind internet tip - may still be syncing",
+                    addr,
+                    internet_tip.height - peer_tip.0
+                );
+                return (
+                    true,
+                    format!(
+                        "Behind by {} blocks, use with caution",
+                        internet_tip.height - peer_tip.0
+                    ),
+                );
             } else if peer_tip.0 > internet_tip.height + MAX_HEADER_DIVERGENCE {
                 // Peer claims to be ahead - suspicious
-                warn!("LAN peer {} claims to be {} blocks ahead of internet - suspicious",
-                    addr, peer_tip.0 - internet_tip.height);
+                warn!(
+                    "LAN peer {} claims to be {} blocks ahead of internet - suspicious",
+                    addr,
+                    peer_tip.0 - internet_tip.height
+                );
                 // Still allow but will be caught by checkpoint validation
-                return (true, format!("Ahead by {} blocks, will verify via checkpoints",
-                    peer_tip.0 - internet_tip.height));
+                return (
+                    true,
+                    format!(
+                        "Ahead by {} blocks, will verify via checkpoints",
+                        peer_tip.0 - internet_tip.height
+                    ),
+                );
             }
         }
 
         // Heights are close - peer is likely on same chain
-        info!("LAN peer {} verified: protocol OK, chain height {} (internet: {})",
-            addr, peer_tip.0, internet_tip.height);
-        
+        info!(
+            "LAN peer {} verified: protocol OK, chain height {} (internet: {})",
+            addr, peer_tip.0, internet_tip.height
+        );
+
         (true, format!("Verified: height {}", peer_tip.0))
     }
 
     /// Batch verify multiple LAN peers
-    /// 
+    ///
     /// Returns list of verified peers
     pub async fn verify_peers(
         &self,
         peers: Vec<SocketAddr>,
-        do_handshake: impl Fn(SocketAddr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<(u32, String, u64)>> + Send>> + Clone,
-        get_peer_tip: impl Fn(SocketAddr) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<(u64, [u8; 32])>> + Send>> + Clone,
+        do_handshake: impl Fn(
+                SocketAddr,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Option<(u32, String, u64)>> + Send>,
+            > + Clone,
+        get_peer_tip: impl Fn(
+                SocketAddr,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Option<(u64, [u8; 32])>> + Send>,
+            > + Clone,
     ) -> Vec<(SocketAddr, bool, String)> {
         let mut results = Vec::with_capacity(peers.len());
-        
+
         for peer in peers {
-            let (ok, reason) = self.verify_lan_peer(
-                peer,
-                do_handshake.clone(),
-                get_peer_tip.clone()
-            ).await;
+            let (ok, reason) = self
+                .verify_lan_peer(peer, do_handshake.clone(), get_peer_tip.clone())
+                .await;
             results.push((peer, ok, reason));
         }
-        
+
         results
     }
 }
@@ -962,23 +1061,23 @@ mod tests {
     #[test]
     fn test_75_percent_internet_minimum_enforced() {
         let policy = LanSecurityPolicy::new();
-        
+
         // 8 target peers: need 6 internet (75%), max 2 LAN (25%)
         let target = 8;
-        
+
         // With 6 internet and 1 LAN, can add another LAN
         let (ok, _) = policy.should_accept_lan_peer(&lan_addr(100), 6, 1, target);
         assert!(ok, "Should accept LAN peer when under cap");
-        
+
         // With 6 internet and 2 LAN, cannot add more LAN (25% cap)
         let (ok, reason) = policy.should_accept_lan_peer(&lan_addr(101), 6, 2, target);
-        assert!(!ok, "Should reject LAN peer at cap: {}", reason);
+        assert!(!ok, "Should reject LAN peer at cap: {reason}");
     }
 
     #[test]
     fn test_25_percent_lan_cap_enforced() {
         let policy = LanSecurityPolicy::new();
-        
+
         // Even with many internet peers, LAN cap is enforced
         let (ok, _) = policy.should_accept_lan_peer(&lan_addr(100), 10, 3, 12);
         assert!(!ok, "Should enforce 25% LAN cap");
@@ -987,10 +1086,10 @@ mod tests {
     #[test]
     fn test_trust_progression() {
         let mut state = LanPeerState::new(lan_addr(100), false);
-        
+
         assert_eq!(state.trust_level, LanTrustLevel::Initial);
         assert!((state.get_multiplier() - 1.5).abs() < 0.01);
-        
+
         // Simulate 1000 valid blocks
         for _ in 0..1000 {
             state.record_valid_block();
@@ -1002,7 +1101,7 @@ mod tests {
     #[test]
     fn test_whitelisted_starts_at_max_trust() {
         let state = LanPeerState::new(lan_addr(100), true);
-        
+
         assert_eq!(state.trust_level, LanTrustLevel::Maximum);
         assert!((state.get_multiplier() - 3.0).abs() < 0.01);
     }
@@ -1010,12 +1109,12 @@ mod tests {
     #[test]
     fn test_failure_demotion() {
         let mut state = LanPeerState::new(lan_addr(100), false);
-        
+
         // 3 failures should demote
         assert!(!state.record_failure()); // 1
         assert!(!state.record_failure()); // 2
-        assert!(state.record_failure());  // 3 - demoted
-        
+        assert!(state.record_failure()); // 3 - demoted
+
         assert_eq!(state.trust_level, LanTrustLevel::Demoted);
         assert!((state.get_multiplier() - 1.0).abs() < 0.01); // No bonus
     }
@@ -1024,12 +1123,12 @@ mod tests {
     fn test_checkpoint_failure_ban() {
         let policy = LanSecurityPolicy::new();
         let addr = lan_addr(100);
-        
+
         policy.register_lan_peer(addr);
         policy.ban_for_checkpoint_failure(&addr, "Block hash mismatch");
-        
+
         assert!(policy.is_peer_banned(&addr));
-        
+
         // Banned peer should not be accepted
         let (ok, _) = policy.should_accept_lan_peer(&addr, 6, 0, 8);
         assert!(!ok, "Banned peer should be rejected");
@@ -1038,7 +1137,7 @@ mod tests {
     #[test]
     fn test_lan_addresses_not_advertisable() {
         let policy = LanSecurityPolicy::new();
-        
+
         assert!(!policy.is_advertisable(&lan_addr(100)));
         assert!(policy.is_advertisable(&internet_addr(1)));
     }
@@ -1046,12 +1145,12 @@ mod tests {
     #[test]
     fn test_checkpoint_intervals() {
         let policy = LanSecurityPolicy::new();
-        
+
         assert!(!policy.needs_block_checkpoint(0));
         assert!(!policy.needs_block_checkpoint(500));
         assert!(policy.needs_block_checkpoint(1000));
         assert!(policy.needs_block_checkpoint(2000));
-        
+
         assert!(!policy.needs_header_checkpoint(0));
         assert!(!policy.needs_header_checkpoint(5000));
         assert!(policy.needs_header_checkpoint(10000));
@@ -1060,10 +1159,10 @@ mod tests {
     #[test]
     fn test_min_internet_peers_for_sync() {
         let policy = LanSecurityPolicy::new();
-        
+
         let (ok, _) = policy.can_sync(2);
         assert!(!ok, "Should not allow sync with only 2 internet peers");
-        
+
         let (ok, _) = policy.can_sync(3);
         assert!(ok, "Should allow sync with 3 internet peers");
     }
@@ -1073,10 +1172,10 @@ mod tests {
         let policy = LanSecurityPolicy::new();
         let addr1 = lan_addr(100);
         let addr2 = lan_addr(101);
-        
+
         // Register first discovered peer
         policy.register_lan_peer(addr1);
-        
+
         // Second discovered peer should be rejected (limit is 1)
         let (ok, _) = policy.should_accept_lan_peer(&addr2, 6, 1, 8);
         assert!(!ok, "Should reject second discovered LAN peer");
@@ -1087,13 +1186,13 @@ mod tests {
         let policy = LanSecurityPolicy::new();
         let discovered = lan_addr(100);
         let whitelisted = lan_addr(101);
-        
+
         // Register discovered peer
         policy.register_lan_peer(discovered);
-        
+
         // Add another to whitelist
         policy.add_to_whitelist(whitelisted);
-        
+
         // Whitelisted peer should be accepted (but still counts against 25% cap)
         let (ok, _) = policy.should_accept_lan_peer(&whitelisted, 6, 1, 8);
         assert!(ok, "Whitelisted peer should be accepted");
@@ -1106,7 +1205,7 @@ mod tests {
     #[test]
     fn test_checkpoint_validator_needs_validation() {
         let validator = InternetCheckpointValidator::new();
-        
+
         assert!(!validator.needs_validation(0));
         assert!(!validator.needs_validation(500));
         assert!(!validator.needs_validation(999));
@@ -1119,7 +1218,7 @@ mod tests {
     #[test]
     fn test_checkpoint_validator_is_header_checkpoint() {
         let validator = InternetCheckpointValidator::new();
-        
+
         assert!(!validator.is_header_checkpoint(0));
         assert!(!validator.is_header_checkpoint(5000));
         assert!(!validator.is_header_checkpoint(9999));
@@ -1132,13 +1231,13 @@ mod tests {
     fn test_checkpoint_validator_caching() {
         let validator = InternetCheckpointValidator::new();
         let hash = [0xab; 32];
-        
+
         // Initially no cached hash
         assert!(validator.get_cached_hash(1000).is_none());
-        
+
         // Record validation
         validator.record_validation(1000, hash);
-        
+
         // Now should be cached
         assert_eq!(validator.get_cached_hash(1000), Some(hash));
         assert_eq!(validator.last_validated(), 1000);
@@ -1148,17 +1247,17 @@ mod tests {
     fn test_checkpoint_validator_cache_eviction() {
         let mut validator = InternetCheckpointValidator::new();
         validator.max_cache_size = 10; // Small cache for testing
-        
+
         // Fill cache
         for i in 0..15 {
             let height = i * 1000;
             validator.record_validation(height, [i as u8; 32]);
         }
-        
+
         // Old entries should be evicted
         assert!(validator.get_cached_hash(0).is_none());
         assert!(validator.get_cached_hash(1000).is_none());
-        
+
         // Recent entries should still be there
         assert!(validator.get_cached_hash(14000).is_some());
     }
@@ -1167,7 +1266,7 @@ mod tests {
     fn test_validate_block_checkpoint_valid() {
         let lan_peer = lan_addr(100);
         let hash = [0xab; 32];
-        
+
         let result = validate_block_checkpoint(lan_peer, hash, hash, 1000);
         assert!(matches!(result, CheckpointResult::Valid));
     }
@@ -1177,10 +1276,14 @@ mod tests {
         let lan_peer = lan_addr(100);
         let lan_hash = [0xab; 32];
         let internet_hash = [0xcd; 32];
-        
+
         let result = validate_block_checkpoint(lan_peer, lan_hash, internet_hash, 1000);
         match result {
-            CheckpointResult::Invalid { expected, got, height } => {
+            CheckpointResult::Invalid {
+                expected,
+                got,
+                height,
+            } => {
                 assert_eq!(expected, internet_hash);
                 assert_eq!(got, lan_hash);
                 assert_eq!(height, 1000);
@@ -1196,10 +1299,10 @@ mod tests {
     #[test]
     fn test_discovery_verifier_chain_tip() {
         let verifier = DiscoveryVerifier::new();
-        
+
         // Initially no tip
         assert!(verifier.get_internet_tip().is_none());
-        
+
         // Update tip
         let tip = ChainTipInfo {
             height: 800000,
@@ -1207,7 +1310,7 @@ mod tests {
             timestamp: 1700000000,
         };
         verifier.update_internet_tip(tip.clone());
-        
+
         // Now should have tip
         let retrieved = verifier.get_internet_tip().unwrap();
         assert_eq!(retrieved.height, 800000);
@@ -1222,12 +1325,12 @@ mod tests {
             got: [0xcd; 32],
             lan_peer: lan_addr(100),
         };
-        let display = format!("{}", err);
+        let display = format!("{err}");
         assert!(display.contains("1000"));
         assert!(display.contains("192.168.1.100"));
-        
+
         let err2 = CheckpointValidationError::InsufficientPeers { have: 2, need: 3 };
-        let display2 = format!("{}", err2);
+        let display2 = format!("{err2}");
         assert!(display2.contains("2"));
         assert!(display2.contains("3"));
     }
@@ -1241,7 +1344,8 @@ mod tests {
         assert_eq!(MIN_CHECKPOINT_PEERS, 3);
         assert_eq!(BLOCK_CHECKPOINT_INTERVAL, 1000);
         assert_eq!(HEADER_CHECKPOINT_INTERVAL, 10000);
-        assert!(CHECKPOINT_FAILURE_BAN_DURATION >= Duration::from_secs(86400 * 365)); // At least 1 year
+        assert!(CHECKPOINT_FAILURE_BAN_DURATION >= Duration::from_secs(86400 * 365));
+        // At least 1 year
     }
 
     #[test]
@@ -1250,10 +1354,9 @@ mod tests {
         assert!(INITIAL_LAN_MULTIPLIER <= 2.0);
         assert!(LEVEL_2_LAN_MULTIPLIER <= 3.0);
         assert!(MAX_LAN_MULTIPLIER <= 3.0);
-        
+
         // Verify progression
         assert!(INITIAL_LAN_MULTIPLIER < LEVEL_2_LAN_MULTIPLIER);
         assert!(LEVEL_2_LAN_MULTIPLIER <= MAX_LAN_MULTIPLIER);
     }
 }
-

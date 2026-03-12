@@ -4,8 +4,8 @@
 
 #[cfg(feature = "rocksdb")]
 mod rocksdb_integration_tests {
-    use blvm_node::storage::*;
     use blvm_node::storage::database::{create_database, DatabaseBackend};
+    use blvm_node::storage::*;
     use blvm_protocol::*;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -13,10 +13,7 @@ mod rocksdb_integration_tests {
     #[test]
     fn test_storage_with_rocksdb_backend() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Storage::with_backend(
-            temp_dir.path(),
-            DatabaseBackend::RocksDB,
-        ).unwrap();
+        let storage = Storage::with_backend(temp_dir.path(), DatabaseBackend::RocksDB).unwrap();
 
         // Test that storage components are accessible
         let _blocks = storage.blocks();
@@ -28,9 +25,8 @@ mod rocksdb_integration_tests {
     #[test]
     fn test_blockstore_with_rocksdb() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(
-            create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap()
-        );
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
         let blockstore = blockstore::BlockStore::new(db).unwrap();
 
         // Create a test block
@@ -62,9 +58,8 @@ mod rocksdb_integration_tests {
     #[test]
     fn test_utxostore_with_rocksdb() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(
-            create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap()
-        );
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
         let utxostore = utxostore::UtxoStore::new(db).unwrap();
 
         let outpoint = OutPoint {
@@ -93,9 +88,8 @@ mod rocksdb_integration_tests {
     #[test]
     fn test_chainstate_with_rocksdb() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(
-            create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap()
-        );
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
         let chainstate = chainstate::ChainState::new(db).unwrap();
 
         let genesis_header = BlockHeader {
@@ -118,9 +112,8 @@ mod rocksdb_integration_tests {
     #[test]
     fn test_txindex_with_rocksdb() {
         let temp_dir = TempDir::new().unwrap();
-        let db = Arc::from(
-            create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap()
-        );
+        let db =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::RocksDB, None).unwrap());
         let txindex = txindex::TxIndex::new(db).unwrap();
 
         // Create a test transaction
@@ -130,7 +123,8 @@ mod rocksdb_integration_tests {
             outputs: vec![TransactionOutput {
                 value: 1000,
                 script_pubkey: vec![0x76, 0xa9, 0x14],
-            }].into(),
+            }]
+            .into(),
             lock_time: 0,
         };
 
@@ -152,16 +146,10 @@ mod rocksdb_integration_tests {
         let temp_dir2 = TempDir::new().unwrap();
 
         // Test with redb
-        let storage1 = Storage::with_backend(
-            temp_dir1.path(),
-            DatabaseBackend::Redb,
-        ).unwrap();
+        let storage1 = Storage::with_backend(temp_dir1.path(), DatabaseBackend::Redb).unwrap();
 
         // Test with RocksDB
-        let storage2 = Storage::with_backend(
-            temp_dir2.path(),
-            DatabaseBackend::RocksDB,
-        ).unwrap();
+        let storage2 = Storage::with_backend(temp_dir2.path(), DatabaseBackend::RocksDB).unwrap();
 
         // Both should work the same way
         let block = Block {
@@ -188,16 +176,12 @@ mod rocksdb_integration_tests {
 mod rocksdb_integration_tests {
     #[test]
     fn test_rocksdb_not_available() {
-        use blvm_node::storage::Storage;
         use blvm_node::storage::database::DatabaseBackend;
+        use blvm_node::storage::Storage;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let result = Storage::with_backend(
-            temp_dir.path(),
-            DatabaseBackend::RocksDB,
-        );
+        let result = Storage::with_backend(temp_dir.path(), DatabaseBackend::RocksDB);
         assert!(result.is_err());
     }
 }
-

@@ -5,7 +5,7 @@ use blvm_node::module::ipc::protocol::{
     RequestPayload, ResponseMessage, ResponsePayload,
 };
 use blvm_node::module::traits::EventType;
-use blvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use blvm_node::{Hash, OutPoint, UTXO};
 
 #[test]
 fn test_request_message_serialization() {

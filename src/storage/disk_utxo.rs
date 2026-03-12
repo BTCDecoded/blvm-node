@@ -254,7 +254,9 @@ pub fn flush_batch_to_disk(
         b.commit()?;
         total_flushed += chunk.len();
     }
-    debug!("flush_batch_to_disk: flushed {} operations to disk", total_flushed);
+    debug!(
+        "flush_batch_to_disk: flushed {} operations to disk",
+        total_flushed
+    );
     Ok(total_flushed)
 }
-

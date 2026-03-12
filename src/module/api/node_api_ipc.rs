@@ -3,8 +3,8 @@
 //! This module provides a NodeAPI trait implementation that translates
 //! method calls into IPC requests to the node. This can be reused by all modules.
 
-use async_trait::async_trait;
 use crate::module::ipc::client::ModuleIpcClient;
+use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::ipc::protocol::{
     EventPayload, MessageType, RequestMessage, RequestPayload, ResponsePayload,
 };
@@ -13,7 +13,7 @@ use crate::module::traits::{
     PaymentState, PeerInfo,
 };
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
-use crate::module::ipc::protocol::ModuleMessage;
+use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -42,7 +42,10 @@ impl NodeApiIpc {
     }
 
     /// Set event broadcast sender (called by ModuleIntegration)
-    pub fn set_event_broadcast(&mut self, broadcast: Arc<tokio::sync::broadcast::Sender<ModuleMessage>>) {
+    pub fn set_event_broadcast(
+        &mut self,
+        broadcast: Arc<tokio::sync::broadcast::Sender<ModuleMessage>>,
+    ) {
         self.event_broadcast = Some(broadcast);
     }
 
@@ -136,7 +139,9 @@ impl NodeApiIpc {
             RequestPayload::GetAllModuleHealth => MessageType::GetAllModuleHealth,
             RequestPayload::ReportModuleHealth { .. } => MessageType::ReportModuleHealth,
             RequestPayload::SendMeshPacketToPeer { .. } => MessageType::SendMeshPacketToPeer,
-            RequestPayload::SendStratumV2MessageToPeer { .. } => MessageType::SendStratumV2MessageToPeer,
+            RequestPayload::SendStratumV2MessageToPeer { .. } => {
+                MessageType::SendStratumV2MessageToPeer
+            }
             RequestPayload::GetBlockTemplate { .. } => MessageType::GetBlockTemplate,
             RequestPayload::SubmitBlock { .. } => MessageType::SubmitBlock,
             _ => MessageType::Response,
@@ -221,7 +226,7 @@ impl NodeAPI for NodeApiIpc {
     async fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
         self.request(
             RequestPayload::GetUtxo {
-                outpoint: outpoint.clone(),
+                outpoint: *outpoint,
             },
             |payload| match payload {
                 ResponsePayload::Utxo(utxo) => Ok(utxo),
@@ -244,16 +249,18 @@ impl NodeAPI for NodeApiIpc {
             request_type: MessageType::SubscribeEvents,
             payload: RequestPayload::SubscribeEvents { event_types },
         };
-        
+
         let mut client = self.ipc_client.lock().await;
         let response = client.request(request).await?;
-        
+
         if !response.success {
             return Err(ModuleError::IpcError(
-                response.error.unwrap_or_else(|| "Subscribe failed".to_string()),
+                response
+                    .error
+                    .unwrap_or_else(|| "Subscribe failed".to_string()),
             ));
         }
-        
+
         // Return a receiver from the broadcast channel
         // If broadcast is not set, create a dummy receiver (shouldn't happen if using ModuleIntegration)
         if let Some(broadcast) = &self.event_broadcast {
@@ -264,14 +271,9 @@ impl NodeAPI for NodeApiIpc {
             let tx_clone = tx.clone();
             tokio::spawn(async move {
                 let mut brx = broadcast_rx;
-                loop {
-                    match brx.recv().await {
-                        Ok(msg) => {
-                            if tx_clone.send(msg).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+                while let Ok(msg) = brx.recv().await {
+                    if tx_clone.send(msg).await.is_err() {
+                        break;
                     }
                 }
             });
@@ -829,13 +831,12 @@ impl NodeAPI for NodeApiIpc {
         std::collections::HashMap<String, Vec<crate::module::metrics::manager::Metric>>,
         ModuleError,
     > {
-        self.request(
-            RequestPayload::GetAllMetrics,
-            |payload| match payload {
-                ResponsePayload::AllMetrics(metrics) => Ok(metrics),
-                _ => Err(ModuleError::OperationError("Unexpected response type".to_string())),
-            },
-        )
+        self.request(RequestPayload::GetAllMetrics, |payload| match payload {
+            ResponsePayload::AllMetrics(metrics) => Ok(metrics),
+            _ => Err(ModuleError::OperationError(
+                "Unexpected response type".to_string(),
+            )),
+        })
         .await
     }
 
@@ -853,7 +854,9 @@ impl NodeAPI for NodeApiIpc {
             },
             |payload| match payload {
                 ResponsePayload::ModuleApiResponse(response) => Ok(response),
-                _ => Err(ModuleError::OperationError("Unexpected response type".to_string())),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
             },
         )
         .await
@@ -864,7 +867,8 @@ impl NodeAPI for NodeApiIpc {
         _api: Arc<dyn crate::module::inter_module::api::ModuleAPI>,
     ) -> Result<(), ModuleError> {
         Err(ModuleError::OperationError(
-            "Module API registration must be done via module-side registration, not IPC".to_string(),
+            "Module API registration must be done via module-side registration, not IPC"
+                .to_string(),
         ))
     }
 
@@ -873,7 +877,9 @@ impl NodeAPI for NodeApiIpc {
             RequestPayload::UnregisterModuleApi,
             |payload| match payload {
                 ResponsePayload::ModuleApiUnregistered => Ok(()),
-                _ => Err(ModuleError::OperationError("Unexpected response type".to_string())),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
             },
         )
         .await
@@ -956,7 +962,9 @@ impl NodeAPI for NodeApiIpc {
             },
             |payload| match payload {
                 ResponsePayload::ModuleHealth(health) => Ok(health),
-                _ => Err(ModuleError::OperationError("Unexpected response type".to_string())),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
             },
         )
         .await
@@ -969,7 +977,9 @@ impl NodeAPI for NodeApiIpc {
             RequestPayload::GetAllModuleHealth,
             |payload| match payload {
                 ResponsePayload::AllModuleHealth(health) => Ok(health),
-                _ => Err(ModuleError::OperationError("Unexpected response type".to_string())),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
             },
         )
         .await
@@ -983,7 +993,9 @@ impl NodeAPI for NodeApiIpc {
             RequestPayload::ReportModuleHealth { health },
             |payload| match payload {
                 ResponsePayload::HealthReported => Ok(()),
-                _ => Err(ModuleError::OperationError("Unexpected response type".to_string())),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
             },
         )
         .await
@@ -1003,21 +1015,27 @@ impl NodeAPI for NodeApiIpc {
             },
             |payload| match payload {
                 ResponsePayload::BlockTemplate(template) => Ok(template),
-                _ => Err(ModuleError::OperationError("Unexpected response type".to_string())),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
             },
         )
         .await
     }
 
-    async fn submit_block(&self, block: Block) -> Result<crate::module::traits::SubmitBlockResult, ModuleError> {
+    async fn submit_block(
+        &self,
+        block: Block,
+    ) -> Result<crate::module::traits::SubmitBlockResult, ModuleError> {
         self.request(
             RequestPayload::SubmitBlock { block },
             |payload| match payload {
                 ResponsePayload::SubmitBlockResult(result) => Ok(result),
-                _ => Err(ModuleError::OperationError("Unexpected response type".to_string())),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
             },
         )
         .await
     }
 }
-

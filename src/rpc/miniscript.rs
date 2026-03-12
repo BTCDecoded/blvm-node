@@ -23,9 +23,7 @@ pub mod miniscript_rpc {
     ///
     /// # Returns
     /// Descriptor information (isvalid, descriptor, checksum, etc.)
-    pub async fn get_descriptor_info(
-        params: &Value,
-    ) -> Result<Value, RpcError> {
+    pub async fn get_descriptor_info(params: &Value) -> Result<Value, RpcError> {
         // Extract descriptor from params
         let descriptor_str = params
             .get(0)
@@ -38,16 +36,17 @@ pub mod miniscript_rpc {
                 // Get script from descriptor
                 let script = descriptor.script_pubkey();
                 let script_bytes: Vec<u8> = script.into();
-                
+
                 // Analyze script
                 let analysis = miniscript_support::analyze_script(
-                    &blvm_protocol::ByteString::from(script_bytes)
-                ).map_err(|e| RpcError::internal_error(e.to_string()))?;
+                    &blvm_protocol::ByteString::from(script_bytes),
+                )
+                .map_err(|e| RpcError::internal_error(e.to_string()))?;
 
                 // Calculate checksum and detect range
                 let checksum = miniscript_support::calculate_descriptor_checksum(descriptor_str);
                 let is_range = miniscript_support::is_range_descriptor(descriptor_str);
-                
+
                 // Return descriptor info (standard compatible format)
                 Ok(json!({
                     "descriptor": descriptor_str,
@@ -80,9 +79,7 @@ pub mod miniscript_rpc {
     ///
     /// # Returns
     /// PSBT analysis including script information
-    pub async fn analyze_psbt(
-        params: &Value,
-    ) -> Result<Value, RpcError> {
+    pub async fn analyze_psbt(params: &Value) -> Result<Value, RpcError> {
         // Extract PSBT from params
         let psbt_str = params
             .get(0)
@@ -90,8 +87,9 @@ pub mod miniscript_rpc {
             .ok_or_else(|| RpcError::invalid_params("PSBT string required"))?;
 
         // Decode base64 PSBT
-        use base64::{Engine as _, engine::general_purpose};
-        let psbt_bytes = general_purpose::STANDARD.decode(psbt_str)
+        use base64::{engine::general_purpose, Engine as _};
+        let psbt_bytes = general_purpose::STANDARD
+            .decode(psbt_str)
             .map_err(|e| RpcError::invalid_params(&format!("Invalid PSBT base64: {}", e)))?;
 
         // Parse PSBT using bitcoin crate's built-in PSBT support
@@ -113,9 +111,10 @@ pub mod miniscript_rpc {
             if let Some(ref utxo) = input.witness_utxo {
                 let script_bytes = utxo.script_pubkey.as_bytes();
                 let analysis = miniscript_support::analyze_script(
-                    &blvm_protocol::ByteString::from(script_bytes.to_vec())
-                ).ok();
-                
+                    &blvm_protocol::ByteString::from(script_bytes.to_vec()),
+                )
+                .ok();
+
                 if let Some(analysis) = analysis {
                     input_info["script_type"] = json!(analysis.script_type);
                     input_info["is_miniscript"] = json!(analysis.is_miniscript);
@@ -129,7 +128,11 @@ pub mod miniscript_rpc {
         let estimated_vsize = psbt.unsigned_tx.weight().to_wu() as u64 / 4;
 
         // Determine next step
-        let next = if psbt.inputs.iter().all(|i| i.final_script_sig.is_some() || i.final_script_witness.is_some()) {
+        let next = if psbt
+            .inputs
+            .iter()
+            .all(|i| i.final_script_sig.is_some() || i.final_script_witness.is_some())
+        {
             "finalizer"
         } else if psbt.inputs.iter().any(|i| !i.partial_sigs.is_empty()) {
             "signer"
@@ -146,5 +149,3 @@ pub mod miniscript_rpc {
         }))
     }
 }
-
-

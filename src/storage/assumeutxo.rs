@@ -67,7 +67,11 @@ pub fn write_base_blockhash_marker(data_dir: &Path, base_blockhash: &[u8; 32]) -
     std::fs::create_dir_all(&dir).context("Failed to create chainstate_snapshot dir")?;
     let path = dir.join(BASE_BLOCKHASH_FILE);
     std::fs::write(&path, hex::encode(base_blockhash)).context("Failed to write base_blockhash")?;
-    info!("Wrote assumeutxo marker: {}/{}", dir.display(), BASE_BLOCKHASH_FILE);
+    info!(
+        "Wrote assumeutxo marker: {}/{}",
+        dir.display(),
+        BASE_BLOCKHASH_FILE
+    );
     Ok(())
 }
 
@@ -80,7 +84,10 @@ pub fn read_base_blockhash_marker(data_dir: &Path) -> Result<Option<[u8; 32]>> {
     let hex_str = std::fs::read_to_string(&path).context("Failed to read base_blockhash")?;
     let bytes = hex::decode(hex_str.trim()).context("Invalid base_blockhash hex")?;
     if bytes.len() != 32 {
-        return Err(anyhow::anyhow!("base_blockhash must be 32 bytes, got {}", bytes.len()));
+        return Err(anyhow::anyhow!(
+            "base_blockhash must be 32 bytes, got {}",
+            bytes.len()
+        ));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
@@ -108,7 +115,8 @@ pub fn write_background_validated_marker(data_dir: &Path, base_blockhash: &[u8; 
     let dir = chainstate_snapshot_dir(data_dir);
     std::fs::create_dir_all(&dir).context("Failed to create chainstate_snapshot dir")?;
     let path = dir.join("background_validated");
-    std::fs::write(path, hex::encode(base_blockhash)).context("Failed to write background_validated")?;
+    std::fs::write(path, hex::encode(base_blockhash))
+        .context("Failed to write background_validated")?;
     info!("Wrote assumeutxo background_validated marker");
     Ok(())
 }
@@ -136,7 +144,10 @@ pub fn height_for_blockhash(network: &str, block_hash: &[u8; 32]) -> Option<u64>
 }
 
 /// Look up full AssumeutxoData for a block hash. Returns None if not a known snapshot.
-pub fn assumeutxo_data_for_blockhash(network: &str, block_hash: &[u8; 32]) -> Option<AssumeutxoData> {
+pub fn assumeutxo_data_for_blockhash(
+    network: &str,
+    block_hash: &[u8; 32],
+) -> Option<AssumeutxoData> {
     assumeutxo_data_for_network(network)
         .iter()
         .find(|d| d.block_hash == *block_hash)
@@ -222,7 +233,7 @@ impl AssumeUtxoManager {
     pub fn new(data_dir: impl Into<std::path::PathBuf>) -> Self {
         let data_dir = data_dir.into();
         let mut known_snapshots = HashMap::new();
-        
+
         // Load known mainnet snapshots
         for &(height, hash_hex) in MAINNET_ASSUMEUTXO_SNAPSHOTS {
             if let Ok(hash) = hex::decode(hash_hex) {
@@ -233,7 +244,7 @@ impl AssumeUtxoManager {
                 }
             }
         }
-        
+
         Self {
             data_dir,
             known_snapshots,
@@ -244,7 +255,7 @@ impl AssumeUtxoManager {
 
     /// Get the snapshot file path for a given height
     fn snapshot_path(&self, height: u64) -> std::path::PathBuf {
-        self.data_dir.join(format!("utxo_snapshot_{}.dat", height))
+        self.data_dir.join(format!("utxo_snapshot_{height}.dat"))
     }
 
     /// Check if a snapshot exists for the given height
@@ -313,10 +324,10 @@ impl AssumeUtxoManager {
         block_height: u64,
     ) -> Result<SnapshotMetadata> {
         info!("Creating UTXO snapshot at height {}", block_height);
-        
+
         let utxo_hash = Self::calculate_utxo_hash(utxo_set)?;
         let utxo_count = utxo_set.len() as u64;
-        
+
         let metadata = SnapshotMetadata {
             version: SNAPSHOT_VERSION,
             block_hash,
@@ -324,21 +335,21 @@ impl AssumeUtxoManager {
             utxo_hash,
             utxo_count,
         };
-        
+
         // Write snapshot to disk
         let path = self.snapshot_path(block_height);
         std::fs::create_dir_all(&self.data_dir)?;
-        
+
         let file = File::create(&path).context("Failed to create snapshot file")?;
         let mut writer = BufWriter::new(file);
-        
+
         // Write header
         writer.write_all(&metadata.version.to_le_bytes())?;
         writer.write_all(&metadata.block_hash)?;
         writer.write_all(&metadata.block_height.to_le_bytes())?;
         writer.write_all(&metadata.utxo_hash)?;
         writer.write_all(&metadata.utxo_count.to_le_bytes())?;
-        
+
         // Write UTXOs
         for (outpoint, utxo) in utxo_set.iter() {
             // Serialize entry
@@ -346,35 +357,33 @@ impl AssumeUtxoManager {
             writer.write_all(&(entry.len() as u32).to_le_bytes())?;
             writer.write_all(&entry)?;
         }
-        
+
         writer.flush()?;
-        
+
         let file_size = std::fs::metadata(&path)?.len();
         info!(
             "Created snapshot: {} UTXOs, {} bytes compressed at height {}",
-            utxo_count,
-            file_size,
-            block_height
+            utxo_count, file_size, block_height
         );
-        
+
         Ok(metadata)
     }
 
     /// Serialize a UTXO entry for snapshot storage
     fn serialize_utxo_entry(outpoint: &OutPoint, utxo: &UTXO) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
-        
+
         // Outpoint (index is stored as u32 for Bitcoin compatibility)
         buf.extend_from_slice(&outpoint.hash);
-        buf.extend_from_slice(&(outpoint.index as u32).to_le_bytes());
-        
+        buf.extend_from_slice(&outpoint.index.to_le_bytes());
+
         // UTXO (value is i64 Integer, height is u64 Natural)
         buf.extend_from_slice(&utxo.value.to_le_bytes());
         buf.extend_from_slice(&(utxo.script_pubkey.len() as u32).to_le_bytes());
         buf.extend_from_slice(&utxo.script_pubkey);
         buf.push(utxo.is_coinbase as u8);
         buf.extend_from_slice(&utxo.height.to_le_bytes());
-        
+
         Ok(buf)
     }
 
@@ -382,47 +391,51 @@ impl AssumeUtxoManager {
     fn deserialize_utxo_entry(data: &[u8]) -> Result<(OutPoint, UTXO)> {
         if data.len() < 56 {
             // 32 (hash) + 4 (index) + 8 (value) + 4 (script_len) + 0 (min script) + 1 (coinbase) + 8 (height) = 57 min
-            return Err(anyhow::anyhow!("UTXO entry too short: {} bytes", data.len()));
+            return Err(anyhow::anyhow!(
+                "UTXO entry too short: {} bytes",
+                data.len()
+            ));
         }
-        
+
         let mut pos = 0;
-        
+
         // Outpoint
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&data[pos..pos + 32]);
         pos += 32;
-        
+
         let index = u32::from_le_bytes(data[pos..pos + 4].try_into()?);
         pos += 4;
-        
+
         let outpoint = OutPoint { hash, index };
-        
+
         // UTXO (value is i64, height is u64)
         let value = i64::from_le_bytes(data[pos..pos + 8].try_into()?);
         pos += 8;
-        
+
         let script_len = u32::from_le_bytes(data[pos..pos + 4].try_into()?) as usize;
         pos += 4;
-        
+
         if pos + script_len + 1 + 8 > data.len() {
             return Err(anyhow::anyhow!("UTXO entry truncated at script"));
         }
-        
-        let script_pubkey = blvm_consensus::types::SharedByteString::from(&data[pos..pos + script_len]);
+
+        let script_pubkey =
+            blvm_consensus::types::SharedByteString::from(&data[pos..pos + script_len]);
         pos += script_len;
-        
+
         let is_coinbase = data[pos] != 0;
         pos += 1;
-        
+
         let height = u64::from_le_bytes(data[pos..pos + 8].try_into()?);
-        
+
         let utxo = UTXO {
             value,
             script_pubkey,
             is_coinbase,
             height,
         };
-        
+
         Ok((outpoint, utxo))
     }
 
@@ -431,7 +444,10 @@ impl AssumeUtxoManager {
     /// Returns the UTXO set and metadata. Does not verify against known_snapshots.
     pub fn load_snapshot_from_path(&self, path: &Path) -> Result<(UtxoSet, SnapshotMetadata)> {
         if !path.exists() {
-            return Err(anyhow::anyhow!("Snapshot file not found: {}", path.display()));
+            return Err(anyhow::anyhow!(
+                "Snapshot file not found: {}",
+                path.display()
+            ));
         }
         let file = File::open(path).context("Failed to open snapshot file")?;
         let mut reader = BufReader::new(file);
@@ -527,16 +543,16 @@ impl AssumeUtxoManager {
                 height
             );
         }
-        
+
         self.loaded_snapshot = Some(metadata.clone());
-        
+
         info!(
             "Loaded {} UTXOs from snapshot at height {} (block: {})",
             utxo_set.len(),
             metadata.block_height,
             hex::encode(metadata.block_hash)
         );
-        
+
         Ok((utxo_set, metadata))
     }
 
@@ -547,14 +563,19 @@ impl AssumeUtxoManager {
 
     /// Check if we're using an assumeutxo snapshot (background validation not complete)
     pub fn is_using_snapshot(&self) -> bool {
-        self.loaded_snapshot.is_some() && 
-            self.loaded_snapshot.as_ref().map(|s| s.block_height).unwrap_or(0) > self.background_validated_height
+        self.loaded_snapshot.is_some()
+            && self
+                .loaded_snapshot
+                .as_ref()
+                .map(|s| s.block_height)
+                .unwrap_or(0)
+                > self.background_validated_height
     }
 
     /// Update background validation progress
     pub fn set_background_validated_height(&mut self, height: u64) {
         self.background_validated_height = height;
-        
+
         // Check if we've caught up to the snapshot
         if let Some(snapshot) = &self.loaded_snapshot {
             if height >= snapshot.block_height {
@@ -584,23 +605,31 @@ mod tests {
 
     fn create_test_utxo_set() -> UtxoSet {
         let mut utxo_set = UtxoSet::default();
-        
+
         // Add some test UTXOs
         for i in 0..100u32 {
             let mut hash = [0u8; 32];
             hash[0..4].copy_from_slice(&i.to_le_bytes());
-            
+
             let outpoint = OutPoint { hash, index: 0 };
             let utxo = UTXO {
                 value: 50_000_000 * (i as i64 + 1), // 0.5 BTC * (i+1)
-                script_pubkey: vec![0x76, 0xa9, 0x14, 0x00, 0x88, 0xac].into(), // P2PKH placeholder
+                                script_pubkey: vec![
+                    blvm_consensus::opcodes::OP_DUP,
+                    blvm_consensus::opcodes::OP_HASH160,
+                    blvm_consensus::opcodes::PUSH_20_BYTES,
+                    0x00, // placeholder hash byte (abbreviated P2PKH)
+                    blvm_consensus::opcodes::OP_EQUALVERIFY,
+                    blvm_consensus::opcodes::OP_CHECKSIG,
+                ]
+                .into(), // P2PKH placeholder
                 is_coinbase: i == 0,
                 height: 100 + i as u64,
             };
-            
+
             utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
         }
-        
+
         utxo_set
     }
 
@@ -608,24 +637,26 @@ mod tests {
     fn test_snapshot_roundtrip() {
         let dir = tempdir().unwrap();
         let manager = AssumeUtxoManager::new(dir.path());
-        
+
         let utxo_set = create_test_utxo_set();
         let block_hash = [1u8; 32];
         let height = 800_000u64;
-        
+
         // Create snapshot
-        let metadata = manager.create_snapshot(&utxo_set, block_hash, height).unwrap();
+        let metadata = manager
+            .create_snapshot(&utxo_set, block_hash, height)
+            .unwrap();
         assert_eq!(metadata.utxo_count, 100);
         assert_eq!(metadata.block_height, height);
-        
+
         // Load snapshot
         let mut manager2 = AssumeUtxoManager::new(dir.path());
         let (loaded_set, loaded_metadata) = manager2.load_snapshot(height).unwrap();
-        
+
         assert_eq!(loaded_set.len(), utxo_set.len());
         assert_eq!(loaded_metadata.block_height, metadata.block_height);
         assert_eq!(loaded_metadata.utxo_hash, metadata.utxo_hash);
-        
+
         // Verify contents match
         for (outpoint, utxo) in utxo_set.iter() {
             let loaded_utxo = loaded_set.get(outpoint).expect("UTXO not found");
@@ -639,10 +670,10 @@ mod tests {
     #[test]
     fn test_utxo_hash_deterministic() {
         let utxo_set = create_test_utxo_set();
-        
+
         let hash1 = AssumeUtxoManager::calculate_utxo_hash(&utxo_set).unwrap();
         let hash2 = AssumeUtxoManager::calculate_utxo_hash(&utxo_set).unwrap();
-        
+
         assert_eq!(hash1, hash2, "Hash should be deterministic");
     }
 
@@ -650,14 +681,15 @@ mod tests {
     fn test_has_snapshot() {
         let dir = tempdir().unwrap();
         let manager = AssumeUtxoManager::new(dir.path());
-        
+
         assert!(!manager.has_snapshot(800_000));
-        
+
         // Create a snapshot
         let utxo_set = create_test_utxo_set();
-        manager.create_snapshot(&utxo_set, [0u8; 32], 800_000).unwrap();
-        
+        manager
+            .create_snapshot(&utxo_set, [0u8; 32], 800_000)
+            .unwrap();
+
         assert!(manager.has_snapshot(800_000));
     }
 }
-

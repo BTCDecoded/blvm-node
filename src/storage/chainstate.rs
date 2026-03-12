@@ -617,12 +617,12 @@ impl ChainState {
         // Serialize block header for hashing (80 bytes total)
         // CRITICAL: Must use 4-byte types for version/timestamp/bits/nonce (Bitcoin wire format)
         let mut header_data = [0u8; 80];
-        header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());    // 4 bytes
-        header_data[4..36].copy_from_slice(&header.prev_block_hash);                   // 32 bytes
-        header_data[36..68].copy_from_slice(&header.merkle_root);                      // 32 bytes
+        header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes()); // 4 bytes
+        header_data[4..36].copy_from_slice(&header.prev_block_hash); // 32 bytes
+        header_data[36..68].copy_from_slice(&header.merkle_root); // 32 bytes
         header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes()); // 4 bytes
-        header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());      // 4 bytes
-        header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());     // 4 bytes
+        header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes()); // 4 bytes
+        header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes()); // 4 bytes
 
         // Calculate Bitcoin double SHA256 hash
         double_sha256(&header_data)

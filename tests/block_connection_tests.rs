@@ -58,27 +58,37 @@ async fn test_block_request_completion_first_connection() -> Result<()> {
 
     // NetworkManager with minimal config
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let network =
-        NetworkManager::with_config(addr, 5, blvm_node::network::transport::TransportPreference::TCP_ONLY, None);
+    let network = NetworkManager::with_config(
+        addr,
+        5,
+        blvm_node::network::transport::TransportPreference::TCP_ONLY,
+        None,
+    );
 
     // Simulate IBD: register a block request before "receiving" the block
     let peer_addr: SocketAddr = "127.0.0.1:18444".parse().unwrap();
     let block_rx = network.register_block_request(peer_addr, block_hash);
 
     // Simulate peer sending block (same path as RawMessageReceived -> handle_incoming_wire_tcp)
-    network.handle_incoming_wire_tcp(peer_addr, block_wire).await?;
+    network
+        .handle_incoming_wire_tcp(peer_addr, block_wire)
+        .await?;
 
     // Await the oneshot; should complete with the genesis block
-    let (received_block, witnesses) = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        block_rx,
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("Block response timeout"))?
-    .map_err(|_| anyhow::anyhow!("Block channel closed"))?;
+    let (received_block, witnesses) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), block_rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("Block response timeout"))?
+            .map_err(|_| anyhow::anyhow!("Block channel closed"))?;
 
-    assert_eq!(received_block.header.merkle_root, genesis.header.merkle_root);
-    assert_eq!(received_block.transactions.len(), genesis.transactions.len());
+    assert_eq!(
+        received_block.header.merkle_root,
+        genesis.header.merkle_root
+    );
+    assert_eq!(
+        received_block.transactions.len(),
+        genesis.transactions.len()
+    );
     assert_eq!(witnesses.len(), genesis.transactions.len());
 
     Ok(())

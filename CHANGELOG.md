@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial release of reference-node crate
+- Initial release of blvm-node crate
 - Minimal Bitcoin node implementation
 - Storage layer with sled database
 - Networking layer with P2P protocol
@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial release
-- Minimal Bitcoin node implementation using protocol-engine and consensus-proof
+- Minimal Bitcoin node implementation using blvm-protocol and blvm-consensus
 - Storage layer with block, UTXO, chain state, and transaction indexing
 - Networking layer with peer management and message handling
 - RPC interface with blockchain, network, and mining methods
@@ -80,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 0.1.0 - Initial Release
 
-This is the initial release of reference-node, providing a minimal Bitcoin node implementation.
+This is the initial release of blvm-node, providing a minimal Bitcoin node implementation.
 
 **Key Features:**
 - Minimal Bitcoin node implementation

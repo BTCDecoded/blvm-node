@@ -3,20 +3,18 @@
 //! This module provides sync coordination, mempool management,
 //! mining coordination, and overall node state management.
 
-pub mod block_processor;
 #[cfg(feature = "production")]
 pub mod background_validation;
+pub mod block_processor;
 pub mod event_publisher;
 pub mod health;
 pub mod mempool;
-#[cfg(kani)]
-pub mod mempool_proofs;
 pub mod metrics;
 pub mod miner;
-pub mod performance;
-pub mod sync;
 #[cfg(feature = "production")]
 pub mod parallel_ibd;
+pub mod performance;
+pub mod sync;
 
 use anyhow::Result;
 use hex;
@@ -115,11 +113,7 @@ impl Node {
         info!("[NODE_INIT] Creating storage...");
         let (backend, pruning_config, indexing_config) = if let Some(sc) = storage_config {
             let backend = crate::storage::database::backend_from_config(sc.database_backend)?;
-            (
-                backend,
-                sc.pruning.clone(),
-                sc.indexing.clone(),
-            )
+            (backend, sc.pruning.clone(), sc.indexing.clone())
         } else {
             use crate::storage::database::default_backend;
             (default_backend(), None, None)
@@ -208,7 +202,7 @@ impl Node {
                                     .build();
 
                                 if let Ok(client) = client {
-                                    let health_url = format!("{}/internal/health", url);
+                                    let health_url = format!("{url}/internal/health");
                                     if let Ok(response) = client.get(&health_url).send().await {
                                         if response.status().is_success() {
                                             info!("Governance server detected at {}, consider setting governance.enabled = true", url);
@@ -240,7 +234,7 @@ impl Node {
                 transport_preference,
                 Some(&config),
             )
-            .with_dependencies(protocol_arc, storage_arc, mempool_manager_arc)
+            .with_dependencies(protocol_arc, storage_arc, mempool_manager_arc),
         );
 
         // Governance is handled via the blvm-governance module
@@ -383,7 +377,10 @@ impl Node {
             warn!("[START_COMPONENTS] Failed to start RPC server: {}", e);
             // Continue anyway - RPC might be optional
         } else {
-            info!("[START_COMPONENTS] RPC server started on {}", self.rpc.rpc_addr());
+            info!(
+                "[START_COMPONENTS] RPC server started on {}",
+                self.rpc.rpc_addr()
+            );
         }
 
         info!("Network manager initialized");
@@ -392,7 +389,10 @@ impl Node {
         info!("Mining coordinator initialized");
 
         // Start network manager
-        info!("[START_COMPONENTS] About to call network.start() on {:?}", self.network_addr);
+        info!(
+            "[START_COMPONENTS] About to call network.start() on {:?}",
+            self.network_addr
+        );
         if let Err(e) = self.network.start(self.network_addr).await {
             warn!("[START_COMPONENTS] Failed to start network manager: {}", e);
             // Continue anyway - network might be optional
@@ -426,7 +426,10 @@ impl Node {
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
-        info!("[START_COMPONENTS] Handshake period complete, processed {} total messages", total_processed);
+        info!(
+            "[START_COMPONENTS] Handshake period complete, processed {} total messages",
+            total_processed
+        );
 
         // Spawn background message processing task BEFORE starting IBD
         // This ensures Headers responses and other messages are processed during IBD
@@ -453,26 +456,47 @@ impl Node {
                 0
             }
             Err(e) => {
-                warn!("[START_COMPONENTS] Error getting height from storage: {}, using 0", e);
+                warn!(
+                    "[START_COMPONENTS] Error getting height from storage: {}, using 0",
+                    e
+                );
                 0
             }
         };
         let mut initial_utxo_set = blvm_protocol::UtxoSet::default();
         if current_height == 0 {
-            if let Some(block_hash) = self.config.as_ref().and_then(|c| c.assumeutxo_blockhash.as_ref()) {
-                use crate::storage::assumeutxo::{write_base_blockhash_marker, AssumeUtxoManager, height_for_blockhash};
-                let network = self.config.as_ref().and_then(|c| c.protocol_version.as_deref()).unwrap_or("regtest");
+            if let Some(block_hash) = self
+                .config
+                .as_ref()
+                .and_then(|c| c.assumeutxo_blockhash.as_ref())
+            {
+                use crate::storage::assumeutxo::{
+                    height_for_blockhash, write_base_blockhash_marker, AssumeUtxoManager,
+                };
+                let network = self
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.protocol_version.as_deref())
+                    .unwrap_or("regtest");
                 if let Some(snapshot_height) = height_for_blockhash(network, block_hash) {
                     let data_dir = std::path::Path::new(&self.data_dir);
                     let mut manager = AssumeUtxoManager::new(data_dir);
                     if let Ok((utxo_set, metadata)) = manager.load_snapshot(snapshot_height) {
-                        if let Err(e) = self.storage.load_assumeutxo_snapshot(&utxo_set, &metadata, None) {
+                        if let Err(e) = self
+                            .storage
+                            .load_assumeutxo_snapshot(&utxo_set, &metadata, None)
+                        {
                             warn!("AssumeUTXO: failed to load snapshot into storage: {}. Falling back to full IBD.", e);
                         } else {
                             current_height = metadata.block_height;
                             initial_utxo_set = utxo_set;
-                            if let Err(e) = write_base_blockhash_marker(data_dir, &metadata.block_hash) {
-                                warn!("AssumeUTXO: failed to write chainstate_snapshot marker: {}", e);
+                            if let Err(e) =
+                                write_base_blockhash_marker(data_dir, &metadata.block_hash)
+                            {
+                                warn!(
+                                    "AssumeUTXO: failed to write chainstate_snapshot marker: {}",
+                                    e
+                                );
                             }
                             info!("AssumeUTXO: loaded snapshot at height {}, continuing sync from tip", current_height);
                         }
@@ -485,7 +509,8 @@ impl Node {
             }
         }
         // Get target height and peer addresses for IBD decision
-        let peer_addresses: Vec<String> = self.network
+        let peer_addresses: Vec<String> = self
+            .network
             .peer_addresses()
             .iter()
             .map(|addr| addr.to_string())
@@ -500,17 +525,21 @@ impl Node {
             let data_dir = std::path::Path::new(&self.data_dir);
             if let Ok(Some(base_blockhash)) = read_base_blockhash_marker(data_dir) {
                 if !is_background_validated(data_dir, &base_blockhash) {
-                    let network = self.config.as_ref().and_then(|c| c.protocol_version.as_deref()).unwrap_or("regtest");
+                    let network = self
+                        .config
+                        .as_ref()
+                        .and_then(|c| c.protocol_version.as_deref())
+                        .unwrap_or("regtest");
                     if let Some(base_height) = height_for_blockhash(network, &base_blockhash) {
                         crate::node::background_validation::spawn_assumeutxo_background_validation(
-                        data_dir,
-                        base_blockhash,
-                        base_height,
-                        network,
-                        Arc::clone(&self.protocol),
-                        Arc::clone(&self.network),
-                        peer_addresses.clone(),
-                    );
+                            data_dir,
+                            base_blockhash,
+                            base_height,
+                            network,
+                            Arc::clone(&self.protocol),
+                            Arc::clone(&self.network),
+                            peer_addresses.clone(),
+                        );
                     }
                 }
             }
@@ -521,14 +550,21 @@ impl Node {
             None => current_height + 1_000_000,
         };
         let is_ibd = current_height < target_height;
-        
-        info!("[START_COMPONENTS] IBD check: current_height={}, target_height={}, is_ibd={}", current_height, target_height, is_ibd);
-        
+
+        info!(
+            "[START_COMPONENTS] IBD check: current_height={}, target_height={}, is_ibd={}",
+            current_height, target_height, is_ibd
+        );
+
         if is_ibd {
             info!("[START_COMPONENTS] Need to sync (height {} < target {}), checking for parallel IBD support...", current_height, target_height);
-            
-            info!("[START_COMPONENTS] IBD: Found {} peer addresses: {:?}", peer_addresses.len(), peer_addresses);
-            
+
+            info!(
+                "[START_COMPONENTS] IBD: Found {} peer addresses: {:?}",
+                peer_addresses.len(),
+                peer_addresses
+            );
+
             // Allow 1 peer when BLVM_IBD_PEERS is set (e.g. LAN-only IBD)
             let min_peers = if std::env::var("BLVM_IBD_PEERS")
                 .map(|s| !s.trim().is_empty())
@@ -539,32 +575,45 @@ impl Node {
                 2
             };
             if peer_addresses.len() >= min_peers {
-                info!("[START_COMPONENTS] Attempting parallel IBD with {} peers", peer_addresses.len());
-                
-                info!("[START_COMPONENTS] Starting parallel IBD: current_height={}, target_height={}", current_height, target_height);
-                
+                info!(
+                    "[START_COMPONENTS] Attempting parallel IBD with {} peers",
+                    peer_addresses.len()
+                );
+
+                info!(
+                    "[START_COMPONENTS] Starting parallel IBD: current_height={}, target_height={}",
+                    current_height, target_height
+                );
+
                 // Attempt parallel IBD (initial_utxo_set is snapshot when AssumeUTXO loaded, else empty)
                 let blockstore = Arc::clone(&self.storage.blocks());
                 let storage_arc = Arc::clone(&self.storage);
                 let protocol_arc = Arc::clone(&self.protocol);
                 let mut utxo_set = initial_utxo_set;
-                
+
                 info!("[START_COMPONENTS] Calling sync_coordinator.start_parallel_ibd()...");
-                match self.sync_coordinator.start_parallel_ibd(
-                    current_height,
-                    target_height,
-                    blockstore,
-                    Some(storage_arc),
-                    protocol_arc,
-                    &mut utxo_set,
-                    Some(Arc::clone(&self.network)),
-                    peer_addresses,
-                ).await {
+                match self
+                    .sync_coordinator
+                    .start_parallel_ibd(
+                        current_height,
+                        target_height,
+                        blockstore,
+                        Some(storage_arc),
+                        protocol_arc,
+                        &mut utxo_set,
+                        Some(Arc::clone(&self.network)),
+                        peer_addresses,
+                    )
+                    .await
+                {
                     Ok(true) => {
                         info!("[START_COMPONENTS] Parallel IBD completed successfully");
                         // Update current height after parallel IBD
                         let new_height = self.storage.chain().get_height()?.unwrap_or(0);
-                        info!("[START_COMPONENTS] IBD completed, current height: {}", new_height);
+                        info!(
+                            "[START_COMPONENTS] IBD completed, current height: {}",
+                            new_height
+                        );
                     }
                     Ok(false) => {
                         warn!("[START_COMPONENTS] Parallel IBD not available (not enough peers or already synced)");
@@ -578,9 +627,12 @@ impl Node {
                 info!("[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need {}), waiting for more peers...", peer_addresses.len(), min_peers);
             }
         } else {
-            info!("[START_COMPONENTS] Not in IBD (current_height={}), skipping IBD", current_height);
+            info!(
+                "[START_COMPONENTS] Not in IBD (current_height={}), skipping IBD",
+                current_height
+            );
         }
-        
+
         info!("[START_COMPONENTS] Component startup complete");
 
         // Prune on startup if configured
@@ -659,7 +711,7 @@ impl Node {
         // Start module manager if enabled
         if let Some(ref mut module_manager) = self.module_manager {
             use crate::utils::env_or_default;
-            
+
             // Reuse the existing storage instance (Redb only allows one connection)
             let storage_arc = Arc::clone(&self.storage);
 
@@ -672,7 +724,7 @@ impl Node {
                 Some(Arc::clone(event_manager)),
                 None, // module_id will be set per-module
                 Some(Arc::clone(&self.mempool_manager)),
-                Some(Arc::clone(&self.network)),  // Now we can set it directly
+                Some(Arc::clone(&self.network)), // Now we can set it directly
             );
 
             // Set node storage for module storage API (needed for opening storage trees)
@@ -756,7 +808,7 @@ impl Node {
                                 processor.with_module_encryption(Arc::clone(&module_encryption));
 
                             // Add modules directory for storing encrypted/decrypted modules
-                            if let Some(ref module_config) =
+                            if let Some(module_config) =
                                 self.config.as_ref().and_then(|c| c.modules.as_ref())
                             {
                                 let modules_dir = PathBuf::from(&module_config.modules_dir);
@@ -822,7 +874,7 @@ impl Node {
                                 payment_config.merchant_key.as_ref().and_then(|hex_key| {
                                     hex::decode(hex_key).ok().and_then(|bytes| {
                                         let arr: [u8; 32] = bytes.try_into().ok()?;
-                                        secp256k1::SecretKey::from_secret_bytes(arr).ok()
+                                        secp256k1::SecretKey::from_slice(&arr).ok()
                                     })
                                 });
                             self.network.set_merchant_key(merchant_key).await;
@@ -839,13 +891,13 @@ impl Node {
                                         match (addr.witness_version, addr.witness_program.len()) {
                                             // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
                                             (0, 20) | (0, 32) => {
-                                                let mut script = vec![0x00]; // OP_0
+                                                let mut script = vec![blvm_consensus::opcodes::OP_0];
                                                 script.extend_from_slice(&addr.witness_program);
                                                 Some(script)
                                             }
                                             // Taproot v1: P2TR (32 bytes)
                                             (1, 32) => {
-                                                let mut script = vec![0x51]; // OP_1
+                                                let mut script = vec![blvm_consensus::opcodes::OP_1];
                                                 script.extend_from_slice(&addr.witness_program);
                                                 Some(script)
                                             }
@@ -859,7 +911,7 @@ impl Node {
                             self.network
                                 .set_module_encryption(Arc::clone(&module_encryption))
                                 .await;
-                            if let Some(ref module_config) =
+                            if let Some(module_config) =
                                 self.config.as_ref().and_then(|c| c.modules.as_ref())
                             {
                                 self.network
@@ -911,16 +963,15 @@ impl Node {
                                     .with_storage(Arc::clone(&self.storage))
                                     .with_tx_cache(Arc::clone(&tx_cache)),
                                 );
-                                self.payment_reorg_handler = Some(
-                                    crate::payment::PaymentReorgHandler::new(
+                                self.payment_reorg_handler =
+                                    Some(crate::payment::PaymentReorgHandler::new(
                                         Arc::clone(&state_machine_arc),
                                         Some(Arc::clone(&self.storage)),
                                         Some(Arc::clone(&self.mempool_manager)),
                                         Some(tx_cache),
                                         Some(settlement_monitor),
                                         Arc::clone(event_manager),
-                                    ),
-                                );
+                                    ));
                             }
 
                             info!(
@@ -1036,7 +1087,7 @@ impl Node {
                     // Serialize config to JSON for modules that need full config
                     let config_json = serde_json::to_string(config)
                         .ok()
-                        .map(|s| format!("{{\"config\":{}}}", s));
+                        .map(|s| format!("{{\"config\":{s}}}"));
 
                     // Publish event (non-blocking, modules will receive it when they subscribe)
                     // Modules can also request config via NodeAPI if needed
@@ -1134,7 +1185,6 @@ impl Node {
 
         Ok(())
     }
-
 
     /// Main node run loop
     async fn run(&mut self) -> Result<()> {
@@ -1434,7 +1484,7 @@ impl Node {
                                     current_height,
                                     false,
                                     validation_time_ms,
-                                    Some(&format!("Block processing error: {}", e)),
+                                    Some(&format!("Block processing error: {e}")),
                                 )
                                 .await;
                         }
@@ -1715,7 +1765,7 @@ impl Node {
 
     /// Get network manager
     pub fn network(&self) -> &NetworkManager {
-        &*self.network  // Deref Arc to maintain API compatibility
+        &self.network // Deref Arc to maintain API compatibility
     }
 
     /// Get RPC manager

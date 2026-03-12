@@ -63,7 +63,7 @@ async fn resolve_dns_seed(seed: &str, port: u16) -> Result<Vec<NetworkAddress>, 
     // Use std::net::ToSocketAddrs which handles DNS resolution properly
     // Format: "hostname:port" works with ToSocketAddrs
     let hostname_with_port = format!("{seed}:{port}");
-    
+
     // Perform DNS lookup with timeout using tokio::task::spawn_blocking
     // since ToSocketAddrs is blocking
     let timeout = Duration::from_secs(5);
@@ -71,8 +71,10 @@ async fn resolve_dns_seed(seed: &str, port: u16) -> Result<Vec<NetworkAddress>, 
     let socket_addrs = tokio::time::timeout(
         timeout,
         tokio::task::spawn_blocking(move || {
-            hostname_clone.to_socket_addrs().map(|iter| iter.collect::<Vec<_>>())
-        })
+            hostname_clone
+                .to_socket_addrs()
+                .map(|iter| iter.collect::<Vec<_>>())
+        }),
     )
     .await
     .map_err(|_| format!("DNS lookup timeout for {seed}"))?

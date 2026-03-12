@@ -16,7 +16,7 @@ fn test_calculate_transaction_fee() {
         index: 0,
     };
     let utxo = UTXO {
-        value: 100_000_000,                    // 1 BTC
+        value: 100_000_000,                           // 1 BTC
         script_pubkey: vec![0x76, 0xa9, 0x14].into(), // P2PKH script
         height: 0,
 

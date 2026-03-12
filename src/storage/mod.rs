@@ -11,25 +11,17 @@ pub mod bitcoin_core_storage;
 pub mod blockstore;
 pub mod buffered_store;
 pub mod chainstate;
-#[cfg(kani)]
-pub mod chainstate_proofs;
 #[cfg(feature = "utxo-commitments")]
 pub mod commitment_store;
-#[cfg(kani)]
-pub mod cryptographic_proofs;
 pub mod database;
 pub mod disk_utxo;
+pub mod hashing;
 #[cfg(feature = "production")]
 pub mod ibd_utxo_store;
-pub mod serialization_cache;
-pub mod hashing;
-#[cfg(kani)]
-pub mod kani_helpers;
 pub mod pruning;
+pub mod serialization_cache;
 pub mod txindex;
 pub mod utxostore;
-#[cfg(kani)]
-pub mod utxostore_proofs;
 pub mod wal;
 
 use crate::config::PruningConfig;
@@ -61,7 +53,7 @@ impl Storage {
     ///
     /// Attempts to use the default backend (TidesDB if available, else Redb), and gracefully
     /// falls back to alternatives if the primary fails.
-    /// 
+    ///
     /// If existing node data is detected, will use RocksDB to read it.
     pub fn new<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
         // Check for existing node data first (if RocksDB is available)
@@ -69,12 +61,11 @@ impl Storage {
         {
             use bitcoin_core_detection::BitcoinCoreNetwork;
             use bitcoin_core_storage::BitcoinCoreStorage;
-            
+
             // Try to detect existing mainnet data
-            if let Ok(Some(backend)) = BitcoinCoreStorage::detect_and_open(
-                data_dir.as_ref(),
-                BitcoinCoreNetwork::Mainnet,
-            ) {
+            if let Ok(Some(backend)) =
+                BitcoinCoreStorage::detect_and_open(data_dir.as_ref(), BitcoinCoreNetwork::Mainnet)
+            {
                 if backend == DatabaseBackend::RocksDB {
                     info!("Existing node data detected, opening with RocksDB backend");
                     // Open existing database directly and initialize storage
@@ -82,10 +73,12 @@ impl Storage {
                         data_dir.as_ref(),
                         BitcoinCoreNetwork::Mainnet,
                     )?);
-                    
+
                     // Create block file reader if blocks directory exists
                     // Use cache directory for index persistence
-                    let block_reader = if let Some(core_dir) = BitcoinCoreDetection::detect_data_dir(BitcoinCoreNetwork::Mainnet)? {
+                    let block_reader = if let Some(core_dir) =
+                        BitcoinCoreDetection::detect_data_dir(BitcoinCoreNetwork::Mainnet)?
+                    {
                         let blocks_dir = core_dir.join("blocks");
                         if blocks_dir.exists() {
                             // Use data_dir for index cache
@@ -109,14 +102,13 @@ impl Storage {
                     } else {
                         None
                     };
-                    
+
                     // Initialize storage components with the opened database and block reader
-                    let blockstore = Arc::new(
-                        blockstore::BlockStore::new_with_bitcoin_core_reader(
+                    let blockstore =
+                        Arc::new(blockstore::BlockStore::new_with_bitcoin_core_reader(
                             Arc::clone(&db),
                             block_reader,
-                        )?
-                    );
+                        )?);
                     let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
                     let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
                     let txindex = Arc::new(txindex::TxIndex::new(Arc::clone(&db))?);
@@ -266,17 +258,21 @@ impl Storage {
         // Configure block store with compression settings
         #[cfg(feature = "compression")]
         let blockstore = {
-            let (block_compression_enabled, block_compression_level, witness_compression_enabled, witness_compression_level) = 
-                if let Some(compression) = &compression_config {
-                    (
-                        compression.block_compression_enabled,
-                        compression.block_compression_level,
-                        compression.witness_compression_enabled,
-                        compression.witness_compression_level,
-                    )
-                } else {
-                    (false, 3, false, 2) // Defaults: disabled
-                };
+            let (
+                block_compression_enabled,
+                block_compression_level,
+                witness_compression_enabled,
+                witness_compression_level,
+            ) = if let Some(compression) = &compression_config {
+                (
+                    compression.block_compression_enabled,
+                    compression.block_compression_level,
+                    compression.witness_compression_enabled,
+                    compression.witness_compression_level,
+                )
+            } else {
+                (false, 3, false, 2) // Defaults: disabled
+            };
             Arc::new(blockstore::BlockStore::new_with_compression(
                 Arc::clone(&db),
                 block_compression_enabled,

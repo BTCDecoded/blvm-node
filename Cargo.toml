@@ -13,7 +13,7 @@ categories = ["cryptography::cryptocurrencies", "network-programming"]
 rust-version = "1.82"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance", "erlay"))'] }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -26,6 +26,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 blvm-protocol = { path = "../blvm-protocol" }
 # Direct dependency on blvm-consensus for CTV feature (CTV functions not re-exported by protocol)
 blvm-consensus = { path = "../blvm-consensus", optional = true }
+# Spec-lock for #[spec_locked("10.6")] Dandelion verification (Orange Paper)
+blvm-spec-lock = { path = "../blvm-spec-lock", optional = true, default-features = false }
 # MuHash3072 for AssumeUTXO (Core-compatible gettxoutsetinfo / hash_serialized)
 blvm-muhash = { path = "../blvm-muhash" }
 
@@ -184,7 +186,7 @@ stratum-v2 = []
 bip158 = []
 # Signature operations counting
 sigop = []
-# FIBRE (Fast Internet Bitcoin Relay Engine) - requires bllvm-protocol with fibre module
+# FIBRE (Fast Internet Bitcoin Relay Engine) - requires blvm-protocol with fibre module
 fibre = []
 # System information for memory stats
 sysinfo = ["dep:sysinfo"]
@@ -198,11 +200,14 @@ tidesdb = ["dep:tidesdb"]
 nix = ["dep:nix", "dep:libc"]
 libc = ["dep:libc"]
 # Production optimizations (parallel block validation, etc.)
-production = ["blvm-protocol/production", "dep:rayon", "dep:lru", "dep:blvm-consensus", "dep:smallvec", "dep:dashmap", "mimalloc", "libc"]
+production = ["blvm-protocol/production", "rayon", "dep:lru", "dep:blvm-consensus", "dep:smallvec", "dep:dashmap", "mimalloc", "libc"]
+# Rayon for parallel block validation (enabled by production)
+rayon = ["dep:rayon"]
 # Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
 profile = ["blvm-protocol/profile", "dep:blvm-consensus"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF
-dandelion = []
+# blvm-spec-lock: #[spec_locked("10.6")] for Orange Paper Dandelion verification
+dandelion = ["dep:blvm-spec-lock"]
 # CTV (BIP119 CheckTemplateVerify) - passed through from blvm-protocol
 ctv = ["blvm-protocol/ctv", "dep:blvm-consensus"]
 # Governance webhook integration
@@ -249,9 +254,9 @@ proptest = "1.4.0"
 dhat = "0.3"  # Heap profiling
 serial_test = "3.0"  # Sequential test execution for database isolation
 
-# Release profile optimizations (mirrors bllvm-consensus)
+# Release profile optimizations (mirrors blvm-consensus)
 [profile.release]
-# Production optimizations (mirrors bllvm-consensus)
+# Production optimizations (mirrors blvm-consensus)
 opt-level = 3
 lto = false        # off: fastest iteration; use thin/fat for production/CI
 codegen-units = 256  # max parallelism

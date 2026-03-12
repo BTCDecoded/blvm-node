@@ -18,10 +18,10 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn, Span};
 use uuid::Uuid;
 
-#[cfg(feature = "bip70-http")]
-use super::payment;
 #[cfg(feature = "miniscript")]
 use super::miniscript::miniscript_rpc;
+#[cfg(feature = "bip70-http")]
+use super::payment;
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};
 use crate::module::rpc::handler::ModuleRpcHandler;
 use crate::node::metrics::MetricsCollector;
@@ -437,7 +437,7 @@ impl RpcServer {
 
                 // Check per-user rate limiting (for authenticated users)
                 if let Some(ref user_id) = auth_result.user_id {
-                    let endpoint = format!("rpc:{}", method_name);
+                    let endpoint = format!("rpc:{method_name}");
                     if !auth_manager
                         .check_rate_limit_with_endpoint(user_id, Some(addr), Some(&endpoint))
                         .await
@@ -450,7 +450,7 @@ impl RpcServer {
                 }
             } else {
                 // Unauthenticated request - check per-IP rate limit
-                let endpoint = format!("rpc:{}", method_name);
+                let endpoint = format!("rpc:{method_name}");
                 if !auth_manager
                     .check_ip_rate_limit_with_endpoint(addr, Some(&endpoint))
                     .await
@@ -751,7 +751,7 @@ impl RpcServer {
 
                         let response_body = json!({
                             "status": status,
-                            "service": "bllvm-node"
+                            "service": "blvm-node"
                         });
 
                         let status_code = if is_healthy {
@@ -776,7 +776,7 @@ impl RpcServer {
 
                         let response_body = json!({
                             "status": if is_ready { "ready" } else { "not_ready" },
-                            "service": "bllvm-node"
+                            "service": "blvm-node"
                         });
 
                         let status_code = if is_ready {
@@ -811,7 +811,7 @@ impl RpcServer {
                 // Health check failed
                 let response_body = json!({
                     "status": "unhealthy",
-                    "service": "bllvm-node",
+                    "service": "blvm-node",
                     "error": "Health check failed"
                 });
                 (
@@ -1429,17 +1429,13 @@ impl RpcServer {
                 }
             }
             #[cfg(feature = "miniscript")]
-            "getdescriptorinfo" => {
-                miniscript_rpc::get_descriptor_info(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
+            "getdescriptorinfo" => miniscript_rpc::get_descriptor_info(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
             #[cfg(feature = "miniscript")]
-            "analyzepsbt" => {
-                miniscript_rpc::analyze_psbt(&params)
-                    .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-            }
+            "analyzepsbt" => miniscript_rpc::analyze_psbt(&params)
+                .await
+                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
 
             _ => {
                 // Check module endpoints
@@ -1541,7 +1537,7 @@ impl RpcServer {
         ];
 
         if core_methods.contains(&method.as_str()) {
-            return Err(format!("Cannot override core RPC method: {}", method));
+            return Err(format!("Cannot override core RPC method: {method}"));
         }
 
         // Check module prefix (recommended but not enforced)
@@ -1565,7 +1561,7 @@ impl RpcServer {
             tracing::info!("Unregistered module RPC endpoint: {}", method);
             Ok(())
         } else {
-            Err(format!("Module RPC endpoint not found: {}", method))
+            Err(format!("Module RPC endpoint not found: {method}"))
         }
     }
 }

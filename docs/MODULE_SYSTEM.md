@@ -20,7 +20,7 @@ The module system enables optional features (Lightning, merge mining, privacy en
                               │ (REST API, Signatures, Governance)
                               │
 ┌─────────────────────────────────────────────────────────────────┐
-│                         bllvm-node                              │
+│                         blvm-node                              │
 │  ┌──────────────────────────────────────────────────────────┐ │
 │  │                    Module Manager                         │ │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐ │ │
@@ -152,7 +152,7 @@ Modules run in separate processes with isolated memory. Node consensus state is 
 
 ```
 ┌─────────────────────────────────────┐
-│         bllvm-node Process          │
+│         blvm-node Process          │
 │  ┌───────────────────────────────┐ │
 │  │    Consensus State             │ │
 │  │    (Protected, Read-Only)      │ │
@@ -236,11 +236,11 @@ capabilities = [
 # ----------------------------------------------------------------------------
 # Required dependencies (module cannot load without these)
 [dependencies]
-"bllvm-node" = ">=1.0.0"
+"blvm-node" = ">=1.0.0"
 
 # Optional dependencies (module can work without these)
 [optional_dependencies]
-"bllvm-mesh" = ">=0.5.0"  # Optional mesh networking support
+"blvm-mesh" = ">=0.5.0"  # Optional mesh networking support
 
 # ----------------------------------------------------------------------------
 # Configuration Schema

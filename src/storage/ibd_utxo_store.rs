@@ -4,11 +4,13 @@
 //! validation writes via .insert/.remove. Flush task drains to disk.
 
 use crate::storage::database::Tree;
-use crate::storage::disk_utxo::{key_to_outpoint, load_keys_from_disk, outpoint_to_key, SyncBatch, MAX_BATCH_OPS};
+use crate::storage::disk_utxo::{
+    key_to_outpoint, load_keys_from_disk, outpoint_to_key, SyncBatch, MAX_BATCH_OPS,
+};
 use anyhow::Result;
 use blvm_consensus::block::compute_block_tx_ids;
 use blvm_consensus::transaction::is_coinbase;
-use blvm_consensus::types::{OutPoint, UTXO, UtxoSet};
+use blvm_consensus::types::{OutPoint, UtxoSet, UTXO};
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
@@ -93,12 +95,24 @@ impl IbdUtxoStore {
     pub fn new_memory_only() -> Self {
         struct NullTree;
         impl Tree for NullTree {
-            fn insert(&self, _: &[u8], _: &[u8]) -> Result<()> { Ok(()) }
-            fn get(&self, _: &[u8]) -> Result<Option<Vec<u8>>> { Ok(None) }
-            fn remove(&self, _: &[u8]) -> Result<()> { Ok(()) }
-            fn contains_key(&self, _: &[u8]) -> Result<bool> { Ok(false) }
-            fn clear(&self) -> Result<()> { Ok(()) }
-            fn len(&self) -> Result<usize> { Ok(0) }
+            fn insert(&self, _: &[u8], _: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn get(&self, _: &[u8]) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn remove(&self, _: &[u8]) -> Result<()> {
+                Ok(())
+            }
+            fn contains_key(&self, _: &[u8]) -> Result<bool> {
+                Ok(false)
+            }
+            fn clear(&self) -> Result<()> {
+                Ok(())
+            }
+            fn len(&self) -> Result<usize> {
+                Ok(0)
+            }
             fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
                 Box::new(std::iter::empty())
             }
@@ -107,8 +121,12 @@ impl IbdUtxoStore {
                 impl crate::storage::database::BatchWriter for NullBatch {
                     fn put(&mut self, _: &[u8], _: &[u8]) {}
                     fn delete(&mut self, _: &[u8]) {}
-                    fn commit(self: Box<Self>) -> Result<()> { Ok(()) }
-                    fn len(&self) -> usize { 0 }
+                    fn commit(self: Box<Self>) -> Result<()> {
+                        Ok(())
+                    }
+                    fn len(&self) -> usize {
+                        0
+                    }
                 }
                 Box::new(NullBatch)
             }
@@ -137,9 +155,11 @@ impl IbdUtxoStore {
             pending_writes: Mutex::new(FxHashMap::default()),
             memory_only,
             max_entries,
-            eviction_queue: Mutex::new(VecDeque::with_capacity(
-                if max_entries == usize::MAX { 100_000 } else { max_entries.min(100_000) },
-            )),
+            eviction_queue: Mutex::new(VecDeque::with_capacity(if max_entries == usize::MAX {
+                100_000
+            } else {
+                max_entries.min(100_000)
+            })),
             eviction_strategy,
             recently_accessed: Mutex::new(FxHashSet::default()),
             stats_disk_loads: AtomicU64::new(0),
@@ -220,7 +240,10 @@ impl IbdUtxoStore {
             }
         }
         if evicted > 0 {
-            debug!("IbdUtxoStore: evicted {} entries (cache was over limit)", evicted);
+            debug!(
+                "IbdUtxoStore: evicted {} entries (cache was over limit)",
+                evicted
+            );
         }
     }
 
@@ -308,7 +331,10 @@ impl IbdUtxoStore {
         }
         recent.clear();
         if evicted > 0 {
-            debug!("IbdUtxoStore: evicted {} entries (dynamic, cache was over limit)", evicted);
+            debug!(
+                "IbdUtxoStore: evicted {} entries (dynamic, cache was over limit)",
+                evicted
+            );
         }
         evicted
     }
@@ -345,7 +371,10 @@ impl IbdUtxoStore {
             }
         }
         if evicted > 0 {
-            debug!("IbdUtxoStore: evicted {} of {} entries for RSS (target {})", evicted, len, target);
+            debug!(
+                "IbdUtxoStore: evicted {} of {} entries for RSS (target {})",
+                evicted, len, target
+            );
         }
     }
 
@@ -411,7 +440,10 @@ impl IbdUtxoStore {
 
     /// Direct cache lookup for single-pass prefetch.
     #[inline]
-    pub fn cache_get(&self, key: &OutPointKey) -> Option<dashmap::mapref::one::Ref<'_, OutPointKey, PendingValue>> {
+    pub fn cache_get(
+        &self,
+        key: &OutPointKey,
+    ) -> Option<dashmap::mapref::one::Ref<'_, OutPointKey, PendingValue>> {
         self.cache.get(key)
     }
 
@@ -477,7 +509,8 @@ impl IbdUtxoStore {
             let to_load = std::mem::take(cache_misses_buf);
             let load_count = to_load.len();
             if let Ok(loaded) = load_keys_from_disk(Arc::clone(&self.disk), to_load) {
-                self.stats_disk_loads.fetch_add(load_count as u64, Ordering::Relaxed);
+                self.stats_disk_loads
+                    .fetch_add(load_count as u64, Ordering::Relaxed);
                 for (key, utxo) in loaded {
                     let arc = Arc::new(utxo);
                     map.insert(key_to_outpoint(&key), Arc::clone(&arc));
@@ -517,7 +550,8 @@ impl IbdUtxoStore {
     /// Apply UtxoDelta directly — skips intermediate SyncBatch Vec allocations.
     pub fn apply_utxo_delta(&self, delta: &blvm_consensus::block::UtxoDelta) {
         let total_delta = delta.additions.len() as isize - delta.deletions.len() as isize;
-        self.total_utxo_count.fetch_add(total_delta, Ordering::Relaxed);
+        self.total_utxo_count
+            .fetch_add(total_delta, Ordering::Relaxed);
         {
             let mut pending = self.pending_writes.lock().expect("lock");
             for op in &delta.deletions {
@@ -565,14 +599,21 @@ impl IbdUtxoStore {
     }
 
     /// Flush pending to disk. Returns count flushed.
-    pub fn flush_pending_batch(&self, batch: &FxHashMap<OutPointKey, PendingValue>) -> Result<usize> {
+    pub fn flush_pending_batch(
+        &self,
+        batch: &FxHashMap<OutPointKey, PendingValue>,
+    ) -> Result<usize> {
         if batch.is_empty() {
             return Ok(0);
         }
         let mut total_flushed = 0;
         let mut iter = batch.iter();
         loop {
-            let chunk: Vec<_> = iter.by_ref().take(MAX_BATCH_OPS).map(|(k, v)| (*k, v.clone())).collect();
+            let chunk: Vec<_> = iter
+                .by_ref()
+                .take(MAX_BATCH_OPS)
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
             if chunk.is_empty() {
                 break;
             }
@@ -605,7 +646,10 @@ impl IbdUtxoStore {
                 }
             }
             if evicted > 0 {
-                debug!("IbdUtxoStore: evicted {} flushed entries (cache over limit)", evicted);
+                debug!(
+                    "IbdUtxoStore: evicted {} flushed entries (cache over limit)",
+                    evicted
+                );
             }
         }
         Ok(total_flushed)
@@ -615,13 +659,18 @@ impl IbdUtxoStore {
         self.cache.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
     /// Build full UtxoSet for IBD snapshot dump. Used when BLVM_IBD_SNAPSHOT_DIR is set.
     pub fn to_utxo_set_snapshot(&self) -> UtxoSet {
         self.cache
             .iter()
             .filter_map(|r| {
                 let (key, val) = (r.key(), r.value());
-                val.as_ref().map(|arc| (key_to_outpoint(key), Arc::clone(arc)))
+                val.as_ref()
+                    .map(|arc| (key_to_outpoint(key), Arc::clone(arc)))
             })
             .collect()
     }

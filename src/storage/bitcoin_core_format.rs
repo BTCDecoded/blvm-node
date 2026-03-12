@@ -329,4 +329,3 @@ mod tests {
         assert_eq!(get_key_prefix(core_key), Some(b'c'));
     }
 }
-

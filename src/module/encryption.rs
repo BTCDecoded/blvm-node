@@ -50,7 +50,7 @@ impl ModuleEncryption {
         // Encrypt
         let encrypted = cipher
             .encrypt(&nonce, module_binary)
-            .map_err(|e| ModuleError::CryptoError(format!("Encryption failed: {}", e)))?;
+            .map_err(|e| ModuleError::CryptoError(format!("Encryption failed: {e}")))?;
 
         Ok((encrypted, nonce.to_vec()))
     }
@@ -86,7 +86,7 @@ impl ModuleEncryption {
         // Decrypt
         let decrypted = cipher
             .decrypt(nonce, encrypted_data)
-            .map_err(|e| ModuleError::CryptoError(format!("Decryption failed: {}", e)))?;
+            .map_err(|e| ModuleError::CryptoError(format!("Decryption failed: {e}")))?;
 
         Ok(decrypted)
     }
@@ -144,33 +144,30 @@ pub async fn store_encrypted_module(
     // Create encrypted modules directory
     let encrypted_dir = modules_dir.join("encrypted");
     fs::create_dir_all(&encrypted_dir).map_err(|e| {
-        ModuleError::OperationError(format!(
-            "Failed to create encrypted modules directory: {}",
-            e
-        ))
+        ModuleError::OperationError(format!("Failed to create encrypted modules directory: {e}"))
     })?;
 
     // Create module directory
     let module_dir = encrypted_dir.join(module_name);
     fs::create_dir_all(&module_dir).map_err(|e| {
-        ModuleError::OperationError(format!("Failed to create module directory: {}", e))
+        ModuleError::OperationError(format!("Failed to create module directory: {e}"))
     })?;
 
     // Write encrypted binary
     let binary_path = module_dir.join("encrypted_binary");
     let mut file = tokio::fs::File::create(&binary_path).await.map_err(|e| {
-        ModuleError::OperationError(format!("Failed to create encrypted binary file: {}", e))
+        ModuleError::OperationError(format!("Failed to create encrypted binary file: {e}"))
     })?;
     file.write_all(encrypted_binary).await.map_err(|e| {
-        ModuleError::OperationError(format!("Failed to write encrypted binary: {}", e))
+        ModuleError::OperationError(format!("Failed to write encrypted binary: {e}"))
     })?;
 
     // Write metadata
     let metadata_path = module_dir.join("metadata.json");
     let metadata_json = serde_json::to_string_pretty(metadata)
-        .map_err(|e| ModuleError::OperationError(format!("Failed to serialize metadata: {}", e)))?;
+        .map_err(|e| ModuleError::OperationError(format!("Failed to serialize metadata: {e}")))?;
     fs::write(&metadata_path, metadata_json)
-        .map_err(|e| ModuleError::OperationError(format!("Failed to write metadata: {}", e)))?;
+        .map_err(|e| ModuleError::OperationError(format!("Failed to write metadata: {e}")))?;
 
     Ok(binary_path)
 }
@@ -187,14 +184,14 @@ pub async fn load_encrypted_module(
     // Load metadata
     let metadata_path = module_dir.join("metadata.json");
     let metadata_json = fs::read_to_string(&metadata_path)
-        .map_err(|e| ModuleError::OperationError(format!("Failed to read metadata: {}", e)))?;
+        .map_err(|e| ModuleError::OperationError(format!("Failed to read metadata: {e}")))?;
     let metadata: EncryptedModuleMetadata = serde_json::from_str(&metadata_json)
-        .map_err(|e| ModuleError::OperationError(format!("Failed to parse metadata: {}", e)))?;
+        .map_err(|e| ModuleError::OperationError(format!("Failed to parse metadata: {e}")))?;
 
     // Load encrypted binary
     let binary_path = module_dir.join("encrypted_binary");
     let encrypted_binary = fs::read(&binary_path).map_err(|e| {
-        ModuleError::OperationError(format!("Failed to read encrypted binary: {}", e))
+        ModuleError::OperationError(format!("Failed to read encrypted binary: {e}"))
     })?;
 
     Ok((encrypted_binary, metadata))
@@ -213,30 +210,27 @@ pub async fn store_decrypted_module(
     // Create decrypted modules directory
     let decrypted_dir = modules_dir.join("decrypted");
     fs::create_dir_all(&decrypted_dir).map_err(|e| {
-        ModuleError::OperationError(format!(
-            "Failed to create decrypted modules directory: {}",
-            e
-        ))
+        ModuleError::OperationError(format!("Failed to create decrypted modules directory: {e}"))
     })?;
 
     // Create module directory
     let module_dir = decrypted_dir.join(module_name);
     fs::create_dir_all(&module_dir).map_err(|e| {
-        ModuleError::OperationError(format!("Failed to create module directory: {}", e))
+        ModuleError::OperationError(format!("Failed to create module directory: {e}"))
     })?;
 
     // Write manifest
     let manifest_path = module_dir.join("module.toml");
     fs::write(&manifest_path, manifest)
-        .map_err(|e| ModuleError::OperationError(format!("Failed to write manifest: {}", e)))?;
+        .map_err(|e| ModuleError::OperationError(format!("Failed to write manifest: {e}")))?;
 
     // Write decrypted binary
     let binary_path = module_dir.join(module_name);
     let mut file = tokio::fs::File::create(&binary_path).await.map_err(|e| {
-        ModuleError::OperationError(format!("Failed to create decrypted binary file: {}", e))
+        ModuleError::OperationError(format!("Failed to create decrypted binary file: {e}"))
     })?;
     file.write_all(decrypted_binary).await.map_err(|e| {
-        ModuleError::OperationError(format!("Failed to write decrypted binary: {}", e))
+        ModuleError::OperationError(format!("Failed to write decrypted binary: {e}"))
     })?;
 
     // Make binary executable (Unix)
@@ -246,15 +240,13 @@ pub async fn store_decrypted_module(
         let mut perms = file
             .metadata()
             .await
-            .map_err(|e| {
-                ModuleError::OperationError(format!("Failed to get file metadata: {}", e))
-            })?
+            .map_err(|e| ModuleError::OperationError(format!("Failed to get file metadata: {e}")))?
             .permissions();
         perms.set_mode(0o755);
         tokio::fs::set_permissions(&binary_path, perms)
             .await
             .map_err(|e| {
-                ModuleError::OperationError(format!("Failed to set file permissions: {}", e))
+                ModuleError::OperationError(format!("Failed to set file permissions: {e}"))
             })?;
     }
 

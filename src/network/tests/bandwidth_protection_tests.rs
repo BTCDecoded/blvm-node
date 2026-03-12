@@ -11,8 +11,8 @@
 
 use crate::network::bandwidth_protection::{BandwidthProtectionManager, ServiceType};
 use crate::network::ibd_protection::IbdProtectionManager;
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 /// Create a test bandwidth protection manager
@@ -44,7 +44,10 @@ async fn test_filter_service_bandwidth_limit() {
         .check_service_request(ServiceType::Filters, peer_addr)
         .await;
     assert!(result.is_ok());
-    assert!(!result.unwrap(), "Request should be rejected after limit exceeded");
+    assert!(
+        !result.unwrap(),
+        "Request should be rejected after limit exceeded"
+    );
 }
 
 #[tokio::test]
@@ -58,11 +61,7 @@ async fn test_filter_service_rate_limit() {
             .check_service_request(ServiceType::Filters, peer_addr)
             .await;
         assert!(result.is_ok());
-        assert!(
-            result.unwrap(),
-            "Request {} should be allowed",
-            i
-        );
+        assert!(result.unwrap(), "Request {i} should be allowed");
         manager
             .record_service_request(ServiceType::Filters, peer_addr)
             .await;
@@ -73,7 +72,10 @@ async fn test_filter_service_rate_limit() {
         .check_service_request(ServiceType::Filters, peer_addr)
         .await;
     assert!(result.is_ok());
-    assert!(!result.unwrap(), "51st request should be rejected (rate limit)");
+    assert!(
+        !result.unwrap(),
+        "51st request should be rejected (rate limit)"
+    );
 }
 
 #[tokio::test]
@@ -106,7 +108,10 @@ async fn test_per_ip_bandwidth_limit() {
         .check_service_request(ServiceType::Filters, peer2)
         .await;
     assert!(result.is_ok());
-    assert!(!result.unwrap(), "peer2 should be rejected (IP limit exceeded)");
+    assert!(
+        !result.unwrap(),
+        "peer2 should be rejected (IP limit exceeded)"
+    );
 }
 
 #[tokio::test]
@@ -164,7 +169,10 @@ async fn test_utxo_set_very_restrictive_limit() {
         .check_service_request(ServiceType::UtxoSet, peer_addr)
         .await;
     assert!(result.is_ok());
-    assert!(!result.unwrap(), "Second UTXO set request should be rejected (rate limit)");
+    assert!(
+        !result.unwrap(),
+        "Second UTXO set request should be rejected (rate limit)"
+    );
 }
 
 #[tokio::test]
@@ -215,7 +223,10 @@ async fn test_different_services_independent_limits() {
         .check_service_request(ServiceType::PackageRelay, peer_addr)
         .await;
     assert!(result.is_ok());
-    assert!(result.unwrap(), "Package relay should still work (different service)");
+    assert!(
+        result.unwrap(),
+        "Package relay should still work (different service)"
+    );
 }
 
 #[tokio::test]
@@ -223,7 +234,7 @@ async fn test_attack_scenario_multiple_peers_same_ip() {
     let manager = create_test_manager();
     // Simulate attack: multiple peers from same IP trying to bypass per-peer limits
     let peers: Vec<SocketAddr> = (8333..8353)
-        .map(|port| format!("127.0.0.1:{}", port).parse().unwrap())
+        .map(|port| format!("127.0.0.1:{port}").parse().unwrap())
         .collect();
 
     // All peers should initially succeed
@@ -250,7 +261,10 @@ async fn test_attack_scenario_multiple_peers_same_ip() {
             .check_service_request(ServiceType::Filters, *peer)
             .await;
         assert!(result.is_ok());
-        assert!(!result.unwrap(), "Peer from same IP should be blocked (IP limit)");
+        assert!(
+            !result.unwrap(),
+            "Peer from same IP should be blocked (IP limit)"
+        );
     }
 }
 
@@ -314,7 +328,10 @@ async fn test_package_relay_limits() {
         .check_service_request(ServiceType::PackageRelay, peer_addr)
         .await;
     assert!(result.is_ok());
-    assert!(!result.unwrap(), "Should be blocked after package relay limit");
+    assert!(
+        !result.unwrap(),
+        "Should be blocked after package relay limit"
+    );
 }
 
 #[tokio::test]
@@ -333,7 +350,10 @@ async fn test_module_serving_limits() {
         .check_service_request(ServiceType::ModuleServing, peer_addr)
         .await;
     assert!(result.is_ok());
-    assert!(!result.unwrap(), "Should be blocked after module serving limit");
+    assert!(
+        !result.unwrap(),
+        "Should be blocked after module serving limit"
+    );
 }
 
 #[tokio::test]
@@ -342,7 +362,7 @@ async fn test_window_reset() {
     let peer_addr: SocketAddr = "127.0.0.1:8333".parse().unwrap();
 
     // Exceed hourly limit
-    let hourly_limit = 1 * 1024 * 1024 * 1024; // 1 GB/hour for filters
+    let hourly_limit = 1024 * 1024 * 1024; // 1 GB/hour for filters
     manager
         .record_service_bandwidth(ServiceType::Filters, peer_addr, hourly_limit)
         .await;
@@ -375,7 +395,7 @@ async fn test_multiple_services_same_peer() {
     for service in &services {
         let result = manager.check_service_request(*service, peer_addr).await;
         assert!(result.is_ok());
-        assert!(result.unwrap(), "Service {:?} should be allowed", service);
+        assert!(result.unwrap(), "Service {service:?} should be allowed");
     }
 
     // Exceed limit for one service
@@ -395,7 +415,7 @@ async fn test_multiple_services_same_peer() {
     for service in &[ServiceType::PackageRelay, ServiceType::FilteredBlocks] {
         let result = manager.check_service_request(*service, peer_addr).await;
         assert!(result.is_ok());
-        assert!(result.unwrap(), "Service {:?} should still work", service);
+        assert!(result.unwrap(), "Service {service:?} should still work");
     }
 }
 
@@ -425,4 +445,3 @@ async fn test_concurrent_requests() {
         assert!(check_result.is_ok(), "Check should succeed");
     }
 }
-

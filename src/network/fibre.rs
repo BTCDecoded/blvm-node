@@ -1,10 +1,10 @@
 //! FIBRE: Fast Internet Bitcoin Relay Engine - Transport Implementation
 //!
 //! This module provides FIBRE transport implementation (UDP, FEC encoding, peer management).
-//! Protocol definitions (packet format, types) are in bllvm-protocol.
+//! Protocol definitions (packet format, types) are in blvm-protocol.
 //!
 //! Note: This entire module is gated behind the `fibre` feature flag.
-//! The `fibre` feature requires local dependencies (bllvm-protocol with fibre module).
+//! The `fibre` feature requires local dependencies (blvm-protocol with fibre module).
 
 #![cfg(feature = "fibre")]
 

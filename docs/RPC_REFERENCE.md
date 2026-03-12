@@ -335,7 +335,7 @@ Returns network information.
 ```json
 {
   "version": 70015,
-  "subversion": "/reference-node:0.1.0/",
+  "subversion": "/blvm-node:0.1.0/",
   "protocolversion": 70015,
   "localservices": "0000000000000001",
   "localrelay": true,
@@ -767,7 +767,7 @@ Stops the node.
 
 **Parameters**: None
 
-**Returns**: `"bllvm-node stopping"`
+**Returns**: `"blvm-node stopping"`
 
 ---
 
@@ -879,5 +879,5 @@ All methods return JSON-RPC 2.0 error responses on failure:
 ## Related Documentation
 
 - [High Availability](HIGH_AVAILABILITY.md) - Health checks and metrics
-- [Configuration](../bllvm-docs/CONFIGURATION.md) - Configuration reference
+- [Configuration](../blvm-docs/CONFIGURATION.md) - Configuration reference
 - [Module System](MODULE_SYSTEM.md) - Module system documentation

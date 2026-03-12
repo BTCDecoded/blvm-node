@@ -6,10 +6,10 @@
 //! once validation completes.
 
 use crate::node::parallel_ibd::{ParallelIBD, ParallelIBDConfig};
-use crate::storage::Storage;
 use crate::storage::assumeutxo::{
     assumeutxo_data_for_blockhash, write_background_validated_marker, AssumeUtxoManager,
 };
+use crate::storage::Storage;
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
@@ -118,8 +118,8 @@ async fn run_background_validation(
     let utxo_set = storage_arc.utxos().get_all_utxos()?;
     let computed_hash = AssumeUtxoManager::calculate_utxo_hash(&utxo_set)?;
 
-    let expected = assumeutxo_data_for_blockhash(network, &base_blockhash)
-        .and_then(|d| d.hash_serialized);
+    let expected =
+        assumeutxo_data_for_blockhash(network, &base_blockhash).and_then(|d| d.hash_serialized);
 
     match expected {
         Some(expected_hash) => {

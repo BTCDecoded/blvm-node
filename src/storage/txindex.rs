@@ -136,7 +136,7 @@ impl TxIndex {
         block_height: u64,
         tx_index: u32,
     ) -> Result<()> {
-        // Use the standard transaction ID calculation from bllvm-protocol
+        // Use the standard transaction ID calculation from blvm-protocol
         let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
 
         // Pre-serialize all data before database writes (batch optimization)

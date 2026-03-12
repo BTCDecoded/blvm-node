@@ -57,7 +57,9 @@ impl ModuleIntegration {
                 info!("Handshake successful! Node version: {}", node_version);
             }
             _ => {
-                return Err(ModuleError::IpcError("Invalid handshake response".to_string()));
+                return Err(ModuleError::IpcError(
+                    "Invalid handshake response".to_string(),
+                ));
             }
         }
 
@@ -83,10 +85,10 @@ impl ModuleIntegration {
                 }
             }
         });
-        
+
         // Create a receiver from the broadcast channel for ModuleIntegration
         let event_receiver = broadcast_rx;
-        
+
         // Create NodeAPI over IPC
         let mut node_api_impl = NodeApiIpc::new(ipc_client_arc, module_id.clone());
         node_api_impl.set_event_broadcast(broadcast_tx_arc);
@@ -100,10 +102,7 @@ impl ModuleIntegration {
     }
 
     /// Create from existing NodeAPI (for in-process modules)
-    pub fn from_node_api(
-        module_id: String,
-        node_api: Arc<dyn NodeAPI>,
-    ) -> Self {
+    pub fn from_node_api(module_id: String, node_api: Arc<dyn NodeAPI>) -> Self {
         // In-process: events handled differently (via callbacks or direct subscription)
         // For now, create empty broadcast receiver - can be enhanced later
         let (_tx, rx) = tokio::sync::broadcast::channel(1);
@@ -145,4 +144,3 @@ impl ModuleIntegration {
         &self.module_id
     }
 }
-

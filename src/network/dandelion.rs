@@ -3,11 +3,16 @@
 //! Specification: https://github.com/bitcoin/bips/blob/master/bip-0156.mediawiki (Dandelion)
 //! Extended version: Dandelion++ with improved anonymity guarantees
 //!
+//! Orange Paper Section 10.6: Implementation invariants verified via blvm-spec-lock.
+//!
 //! Dandelion++ operates in two phases:
 //! 1. Stem Phase: Transaction relayed along a random path (obscures origin)
 //! 2. Fluff Phase: Transaction broadcast to all peers (standard diffusion)
 //!
 //! This provides formal anonymity guarantees against transaction origin analysis.
+
+#[cfg(feature = "dandelion")]
+use blvm_spec_lock::spec_locked;
 
 use blvm_protocol::Hash;
 use rand::rngs::StdRng;
@@ -201,7 +206,9 @@ impl<C: Clock> DandelionRelay<C> {
         }
     }
 
-    /// Start stem phase for a transaction
+    /// Start stem phase for a transaction.
+    /// Orange Paper 10.6: Single stem state per tx (|stem_states(tx)| ≤ 1).
+    #[spec_locked("10.6")]
     pub fn start_stem_phase(
         &mut self,
         tx_hash: Hash,
@@ -241,7 +248,9 @@ impl<C: Clock> DandelionRelay<C> {
         next_peer
     }
 
-    /// Check if transaction should fluff (transition to broadcast phase)
+    /// Check if transaction should fluff (transition to broadcast phase).
+    /// Orange Paper 10.6: Timeout enforcement (elapsed > stem_timeout ⟹ Fluff).
+    #[spec_locked("10.6")]
     pub fn should_fluff(&mut self, tx_hash: &Hash) -> bool {
         if let Some(state) = self.stem_txs.get(tx_hash) {
             // Check timeout
@@ -266,7 +275,9 @@ impl<C: Clock> DandelionRelay<C> {
         false
     }
 
-    /// Advance stem phase (move to next peer)
+    /// Advance stem phase (move to next peer).
+    /// Orange Paper 10.6: Bounded stem length (stem_hops(tx) ≤ max_stem_hops).
+    #[spec_locked("10.6")]
     pub fn advance_stem(&mut self, tx_hash: Hash, available_peers: &[String]) -> Option<String> {
         if let Some(state) = self.stem_txs.get_mut(&tx_hash) {
             state.hops += 1;
@@ -294,7 +305,9 @@ impl<C: Clock> DandelionRelay<C> {
         None
     }
 
-    /// Transition transaction to fluff phase
+    /// Transition transaction to fluff phase.
+    /// Orange Paper 10.6: Eventual fluff (removes from stem, enters broadcast phase).
+    #[spec_locked("10.6")]
     pub fn transition_to_fluff(&mut self, tx_hash: Hash) -> DandelionPhase {
         self.stem_txs.remove(&tx_hash);
         debug!(
@@ -304,7 +317,9 @@ impl<C: Clock> DandelionRelay<C> {
         DandelionPhase::Fluff
     }
 
-    /// Get current phase for a transaction
+    /// Get current phase for a transaction.
+    /// Orange Paper 10.6: phase = Stem ⟹ single-peer relay (no broadcast).
+    #[spec_locked("10.6")]
     pub fn get_phase(&self, tx_hash: &Hash) -> Option<DandelionPhase> {
         if self.stem_txs.contains_key(tx_hash) {
             Some(DandelionPhase::Stem)
@@ -417,204 +432,5 @@ mod tests {
         clock.advance(Duration::from_millis(60));
         d.clock = clock.clone();
         assert!(d.should_fluff(&tx));
-    }
-}
-
-#[cfg(kani)]
-mod kani_proofs {
-    use super::*;
-    use kani::*;
-
-    /// Proof 1: No Premature Broadcast - Single stem state per transaction
-    ///
-    /// Mathematical Specification: Orange Paper Theorem 10.6.5
-    /// ∀ tx: phase(tx) = Stem ⟹ broadcast_count(tx) = 0
-    ///
-    /// Reference: THE_ORANGE_PAPER.md Section 10.6, Theorem 10.6.5
-    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
-    ///
-    /// Invariant: At most one stem state exists per transaction hash
-    #[kani::proof]
-    fn kani_no_premature_broadcast_single_state() {
-        let mut relay = DandelionRelay::new();
-        let tx: Hash = kani::any();
-
-        // Start stem phase
-        let peers = vec!["p1".into(), "p2".into()];
-        let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-
-        // Verify: exactly one stem state exists
-        let state_count = relay.stem_txs.get(&tx).is_some() as usize;
-        assert!(state_count <= 1, "At most one stem state per transaction");
-
-        // Start again should overwrite (not duplicate)
-        let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-        let state_count_after = relay.stem_txs.get(&tx).is_some() as usize;
-        assert!(
-            state_count_after <= 1,
-            "Still at most one stem state after restart"
-        );
-    }
-
-    /// Proof 2: Bounded Stem Length - hops never exceed max_stem_hops
-    ///
-    /// Mathematical Specification: Orange Paper Theorem 10.6.6
-    /// ∀ tx: stem_hops(tx) ≤ max_stem_hops
-    ///
-    /// Reference: THE_ORANGE_PAPER.md Section 10.6, Theorem 10.6.6
-    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
-    ///
-    /// Invariant: stem_hops(tx) ≤ max_stem_hops
-    #[kani::proof]
-    fn kani_bounded_stem_length() {
-        let mut relay = DandelionRelay::new();
-        let max_hops: u8 = kani::any();
-        kani::assume(max_hops <= 255);
-        relay.max_stem_hops = max_hops;
-
-        let tx: Hash = kani::any();
-        let peers = vec!["p1".into(), "p2".into(), "p3".into()];
-
-        // Start stem phase
-        let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-
-        // Advance up to max_hops + 1 times
-        for _ in 0..=max_hops {
-            if let Some(state) = relay.stem_txs.get(&tx) {
-                assert!(state.hops <= max_hops, "Hops never exceed max_stem_hops");
-                if state.hops < max_hops {
-                    let _ = relay.advance_stem(tx, &peers);
-                } else {
-                    // Should fluff when max reached
-                    break;
-                }
-            } else {
-                break; // Already fluffed
-            }
-        }
-
-        // Final check
-        if let Some(state) = relay.stem_txs.get(&tx) {
-            assert!(state.hops <= max_hops, "Final hop count respects bound");
-        }
-    }
-
-    /// Proof 3: Single Stem State - at most one entry per transaction in stem_txs
-    ///
-    /// Mathematical Specification: Orange Paper Theorem 10.6.7
-    /// ∀ tx: |stem_states(tx)| ≤ 1
-    ///
-    /// Reference: THE_ORANGE_PAPER.md Section 10.6, Theorem 10.6.7
-    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
-    ///
-    /// Invariant: |stem_states(tx)| ≤ 1
-    #[kani::proof]
-    fn kani_single_stem_state() {
-        let mut relay = DandelionRelay::new();
-        let tx: Hash = kani::any();
-        let peers = vec!["p1".into(), "p2".into()];
-
-        // Insert once
-        let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-        let count1 = relay.stem_txs.iter().filter(|(h, _)| **h == tx).count();
-        assert!(count1 <= 1, "At most one state entry per transaction");
-
-        // Insert again (should overwrite)
-        let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-        let count2 = relay.stem_txs.iter().filter(|(h, _)| **h == tx).count();
-        assert!(count2 <= 1, "Still at most one after reinsert");
-        assert_eq!(count1, count2, "Reinsertion does not duplicate");
-    }
-
-    /// Proof 4: Timeout Enforcement - if elapsed > timeout, should_fluff returns true
-    ///
-    /// Mathematical Specification: Orange Paper Theorem 10.6.8
-    /// ∀ tx: elapsed_time(tx) > stem_timeout ⟹ phase(tx) = Fluff
-    ///
-    /// Reference: THE_ORANGE_PAPER.md Section 10.6, Theorem 10.6.8
-    /// Proof: Verified via Kani - see Orange Paper for formal statement and proof
-    ///
-    /// Note: This proof uses a deterministic clock that we can control
-    #[kani::proof]
-    fn kani_timeout_enforcement_structure() {
-        let mut relay = DandelionRelay::new();
-        let timeout_secs: u64 = kani::any();
-        kani::assume(timeout_secs > 0 && timeout_secs < 3600); // Reasonable bounds
-        relay.stem_timeout = Duration::from_secs(timeout_secs);
-
-        let tx: Hash = kani::any();
-        let peers = vec!["p1".into()];
-
-        // Start stem phase with deterministic clock would be needed
-        // For now, verify the structure: if state exists and elapsed >= timeout, should_fluff
-        // This proves the logic path, not the time-dependent behavior
-        let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-
-        if let Some(state) = relay.stem_txs.get(&tx) {
-            // Verify that should_fluff checks timeout correctly
-            // The actual time check requires runtime, but we verify the structure
-            assert!(
-                state.hops <= relay.max_stem_hops,
-                "Structure: hops bound respected"
-            );
-        }
-    }
-
-    /// Proof 5: No duplicate transactions in stem_txs map
-    /// Invariant: HashMap uniqueness guarantees single entry per key
-    #[kani::proof]
-    fn kani_stem_txs_map_uniqueness() {
-        let mut relay = DandelionRelay::new();
-        let tx1: Hash = kani::any();
-        let tx2: Hash = kani::any();
-        let peers = vec!["p1".into()];
-
-        // Insert two different transactions
-        let _ = relay.start_stem_phase(tx1, "p0".into(), &peers);
-        let _ = relay.start_stem_phase(tx2, "p0".into(), &peers);
-
-        // Verify both exist and are distinct
-        assert!(relay.stem_txs.contains_key(&tx1), "tx1 exists");
-        assert!(relay.stem_txs.contains_key(&tx2), "tx2 exists");
-        assert_eq!(
-            relay.stem_txs.len(),
-            2,
-            "Exactly two entries for two distinct transactions"
-        );
-
-        // Reinsert same transaction should not increase count
-        let _ = relay.start_stem_phase(tx1, "p0".into(), &peers);
-        assert_eq!(
-            relay.stem_txs.len(),
-            2,
-            "Reinsertion does not increase count"
-        );
-    }
-
-    /// Proof 6: Max hops check in should_fluff structure
-    #[kani::proof]
-    fn kani_max_hops_check_structure() {
-        let mut relay = DandelionRelay::new();
-        let max_hops: u8 = kani::any();
-        kani::assume(max_hops <= 255);
-        relay.max_stem_hops = max_hops;
-        relay.fluff_probability = 0.0; // Disable random fluff for deterministic proof
-
-        let tx: Hash = kani::any();
-        let peers = vec!["p1".into(), "p2".into()];
-
-        let _ = relay.start_stem_phase(tx, "p0".into(), &peers);
-
-        // Manually set hops to max_hops
-        if let Some(state) = relay.stem_txs.get_mut(&tx) {
-            state.hops = max_hops;
-        }
-
-        // Verify should_fluff detects max hops
-        // Note: This requires &mut self, so we test the invariant structure
-        // Actual fluff decision requires the full should_fluff call
-        if let Some(state) = relay.stem_txs.get(&tx) {
-            assert!(state.hops <= max_hops, "Hops bound maintained");
-        }
     }
 }

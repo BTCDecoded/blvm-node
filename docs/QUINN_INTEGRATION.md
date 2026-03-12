@@ -16,7 +16,7 @@ Quinn QUIC transport has been integrated as a standalone transport option alongs
 ### Basic Transport Selection
 
 ```rust
-use bllvm_node::network::transport::TransportPreference;
+use blvm_node::network::transport::TransportPreference;
 
 // Single transport
 let tcp_only = TransportPreference::TCP_ONLY;
@@ -31,7 +31,7 @@ let all_transports = TransportPreference::ALL; // TCP | IROH | QUINN
 ### Network Manager
 
 ```rust
-use bllvm_node::network::{NetworkManager, transport::TransportPreference};
+use blvm_node::network::{NetworkManager, transport::TransportPreference};
 
 let manager = NetworkManager::with_transport_preference(
     listen_addr,
@@ -119,7 +119,7 @@ bitflags = "2.4"
 ### Runtime Configuration
 
 ```rust
-use bllvm_node::config::{NodeConfig, TransportPreferenceConfig};
+use blvm_node::config::{NodeConfig, TransportPreferenceConfig};
 
 let config = NodeConfig {
     transport_preference: TransportPreferenceConfig::QuinnOnly,
@@ -144,7 +144,5 @@ All existing code continues to work:
 
 ## See Also
 
-- [Transport Abstraction Documentation](./TRANSPORT_ABSTRACTION_COMPLETE.md)
-- [Stratum V2 Implementation](./STRATUM_V2_IMPLEMENTATION_STATUS.md)
-- [Iroh Integration](./IROH_COMPLETION_STATUS.md)
+- [Transport Abstraction](transport/README_TRANSPORT_ABSTRACTION.md)
 

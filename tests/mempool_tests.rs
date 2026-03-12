@@ -26,11 +26,11 @@ async fn test_mempool_stores_full_transactions() {
     };
 
     // Add transaction
-    let added = mempool.add_transaction(tx.clone()).await.unwrap();
+    let added = mempool.add_transaction(tx.clone()).unwrap();
     assert!(added);
 
     // Verify we can retrieve it
-    use blvm_protocol::mempool::calculate_tx_id;
+    use blvm_protocol::block::calculate_tx_id;
     let tx_hash = calculate_tx_id(&tx);
     let retrieved = mempool.get_transaction(&tx_hash);
     assert!(retrieved.is_some());
@@ -49,12 +49,12 @@ async fn test_mempool_get_prioritized_transactions() {
     };
     utxo_set.insert(
         outpoint.clone(),
-        UTXO {
+        std::sync::Arc::new(UTXO {
             value: 10000,
             script_pubkey: vec![0x51].into(),
             height: 0,
             is_coinbase: false,
-        },
+        }),
     );
 
     // Create two transactions with different fee rates
@@ -92,8 +92,8 @@ async fn test_mempool_get_prioritized_transactions() {
     };
 
     // Add both transactions
-    mempool.add_transaction(low_fee_tx.clone()).await.unwrap();
-    mempool.add_transaction(high_fee_tx.clone()).await.unwrap();
+    mempool.add_transaction(low_fee_tx.clone()).unwrap();
+    mempool.add_transaction(high_fee_tx.clone()).unwrap();
 
     // Get prioritized (should return high fee first)
     let prioritized = mempool.get_prioritized_transactions(10, &utxo_set);
@@ -136,10 +136,10 @@ async fn test_mempool_remove_transaction() {
         lock_time: 0,
     };
 
-    mempool.add_transaction(tx.clone()).await.unwrap();
+    mempool.add_transaction(tx.clone()).unwrap();
     assert_eq!(mempool.size(), 1);
 
-    use blvm_protocol::mempool::calculate_tx_id;
+    use blvm_protocol::block::calculate_tx_id;
     let tx_hash = calculate_tx_id(&tx);
     let removed = mempool.remove_transaction(&tx_hash);
     assert!(removed);

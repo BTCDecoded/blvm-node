@@ -277,7 +277,7 @@ pub async fn handle_get_module_by_hash(
 
                         // Fetch binary from CAS
                         let cas = cas_arc.read().await;
-                        cas.get(&hash_array).ok().map(|bin_data| {
+                        cas.get(&hash_array).ok().inspect(|bin_data| {
                             // Verify size matches if specified
                             if let Some(expected_size) = binary_section.size {
                                 if bin_data.len() != expected_size as usize {
@@ -288,7 +288,6 @@ pub async fn handle_get_module_by_hash(
                                     );
                                 }
                             }
-                            bin_data
                         })
                     } else {
                         return Err(anyhow::anyhow!("Binary hash must be 32 bytes"));

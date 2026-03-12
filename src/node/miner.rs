@@ -122,7 +122,11 @@ impl TransactionSelector {
     }
 
     /// Calculate fee rate (satoshis per byte) using UTXO set
-    fn calculate_fee_rate_with_utxo(&self, tx: &Transaction, utxo_set: &blvm_protocol::UtxoSet) -> u64 {
+    fn calculate_fee_rate_with_utxo(
+        &self,
+        tx: &Transaction,
+        utxo_set: &blvm_protocol::UtxoSet,
+    ) -> u64 {
         let size = self.calculate_transaction_size(tx);
         if size == 0 {
             return 0;
@@ -656,11 +660,16 @@ impl MiningCoordinator {
         Ok(Transaction {
             version: 1,
             inputs: crate::tx_inputs![],
-              outputs: crate::tx_outputs![blvm_protocol::TransactionOutput {
+            outputs: crate::tx_outputs![blvm_protocol::TransactionOutput {
                 value: coinbase_value as i64,
                 script_pubkey: vec![
-                    0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0xac,
+                    blvm_consensus::opcodes::OP_DUP,
+                    blvm_consensus::opcodes::OP_HASH160,
+                    blvm_consensus::opcodes::PUSH_20_BYTES,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    blvm_consensus::opcodes::OP_EQUALVERIFY,
+                    blvm_consensus::opcodes::OP_CHECKSIG,
                 ],
             }],
             lock_time: 0,
@@ -672,7 +681,7 @@ impl MiningCoordinator {
         debug!("Submitting mined block");
 
         // In a real implementation, this would:
-        // 1. Validate the block using consensus-proof
+        // 1. Validate the block using blvm-consensus
         // 2. Add to blockchain
         // 3. Relay to peers
 
@@ -879,7 +888,7 @@ mod tests {
             outpoint,
             std::sync::Arc::new(blvm_protocol::UTXO {
                 value: 100_000_000, // 1 BTC - enough for all test tx outputs
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: vec![blvm_consensus::opcodes::OP_1].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -911,7 +920,7 @@ mod tests {
             outpoint,
             std::sync::Arc::new(blvm_protocol::UTXO {
                 value: 10000,
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: vec![blvm_consensus::opcodes::OP_1].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -1316,16 +1325,26 @@ mod tests {
                     index: 0,
                 },
                 script_sig: vec![
-                    0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0xac,
+                    blvm_consensus::opcodes::OP_DUP,
+                    blvm_consensus::opcodes::OP_HASH160,
+                    blvm_consensus::opcodes::PUSH_20_BYTES,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    blvm_consensus::opcodes::OP_EQUALVERIFY,
+                    blvm_consensus::opcodes::OP_CHECKSIG,
                 ],
                 sequence: 0xffffffff,
             }],
             outputs: blvm_protocol::tx_outputs![TransactionOutput {
                 value: output_value as i64,
                 script_pubkey: vec![
-                    0x76, 0xa9, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0xac,
+                    blvm_consensus::opcodes::OP_DUP,
+                    blvm_consensus::opcodes::OP_HASH160,
+                    blvm_consensus::opcodes::PUSH_20_BYTES,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    blvm_consensus::opcodes::OP_EQUALVERIFY,
+                    blvm_consensus::opcodes::OP_CHECKSIG,
                 ],
             }],
             lock_time: 0,

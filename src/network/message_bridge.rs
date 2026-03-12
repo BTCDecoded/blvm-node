@@ -1,6 +1,6 @@
-//! Message bridge between consensus-proof and transport layer
+//! Message bridge between blvm-consensus and transport layer
 //!
-//! Provides conversion between consensus-proof NetworkMessage types
+//! Provides conversion between blvm-consensus NetworkMessage types
 //! and the transport layer's message format.
 
 use crate::network::protocol_adapter::ProtocolAdapter;
@@ -9,12 +9,12 @@ use anyhow::Result;
 use blvm_protocol::network::{NetworkMessage as ConsensusNetworkMessage, NetworkResponse};
 use tracing::debug;
 
-/// Message bridge for connecting consensus-proof message processing
+/// Message bridge for connecting blvm-consensus message processing
 /// with the transport layer
 pub struct MessageBridge;
 
 impl MessageBridge {
-    /// Convert consensus-proof NetworkMessage to transport wire format
+    /// Convert blvm-consensus NetworkMessage to transport wire format
     pub fn to_transport_message(
         msg: &ConsensusNetworkMessage,
         transport: TransportType,
@@ -26,7 +26,7 @@ impl MessageBridge {
         ProtocolAdapter::serialize_message(msg, transport)
     }
 
-    /// Convert transport wire format to consensus-proof NetworkMessage
+    /// Convert transport wire format to blvm-consensus NetworkMessage
     pub fn from_transport_message(
         data: &[u8],
         transport: TransportType,
@@ -38,7 +38,7 @@ impl MessageBridge {
         ProtocolAdapter::deserialize_message(data, transport)
     }
 
-    /// Process a consensus-proof NetworkResponse and extract messages to send
+    /// Process a blvm-consensus NetworkResponse and extract messages to send
     ///
     /// NetworkResponse can indicate sending one or multiple messages,
     /// or other actions (Ok, Reject).

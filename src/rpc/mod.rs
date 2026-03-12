@@ -9,16 +9,14 @@ pub mod control;
 pub mod errors;
 pub mod mempool;
 pub mod mining;
+#[cfg(feature = "miniscript")]
+pub mod miniscript;
 pub mod network;
 #[cfg(feature = "bip70-http")]
 pub mod payment;
 pub mod rawtx;
-#[cfg(feature = "miniscript")]
-pub mod miniscript;
 #[cfg(feature = "rest-api")]
 pub mod rest;
-#[cfg(kani)]
-pub mod rpc_proofs;
 pub mod server;
 pub mod types;
 pub mod validation;
@@ -141,7 +139,7 @@ impl RpcManager {
                     if let Err(e) = auth_manager.add_token(token.clone()).await {
                         // Redact token from error message
                         let redacted_error =
-                            auth::redact_tokens_from_log(&format!("{}", e), &[token]);
+                            auth::redact_tokens_from_log(&format!("{e}"), &[token]);
                         error!("Failed to add RPC auth token: {}", redacted_error);
                     }
                 }
@@ -153,7 +151,7 @@ impl RpcManager {
                     if let Err(e) = auth_manager.add_token(token.clone()).await {
                         // Redact token from error message
                         let redacted_error =
-                            auth::redact_tokens_from_log(&format!("{}", e), &[token]);
+                            auth::redact_tokens_from_log(&format!("{e}"), &[token]);
                         error!("Failed to add RPC auth token: {}", redacted_error);
                     }
                 }

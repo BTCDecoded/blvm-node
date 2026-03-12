@@ -41,7 +41,7 @@ impl std::str::FromStr for BitcoinCoreNetwork {
             "testnet" => Ok(BitcoinCoreNetwork::Testnet),
             "regtest" => Ok(BitcoinCoreNetwork::Regtest),
             "signet" => Ok(BitcoinCoreNetwork::Signet),
-            _ => Err(format!("Unknown network: {}", s)),
+            _ => Err(format!("Unknown network: {s}")),
         }
     }
 }
@@ -94,7 +94,9 @@ impl BitcoinCoreDetection {
         // System-wide paths
         paths.push(Some(PathBuf::from("/var/lib/bitcoind")));
         if network != BitcoinCoreNetwork::Mainnet {
-            paths.push(Some(PathBuf::from("/var/lib/bitcoind").join(network.directory_name())));
+            paths.push(Some(
+                PathBuf::from("/var/lib/bitcoind").join(network.directory_name()),
+            ));
         }
 
         paths
@@ -130,7 +132,9 @@ impl BitcoinCoreDetection {
         let current_file = data_dir.join("CURRENT");
 
         if !current_file.exists() {
-            return Err(anyhow::anyhow!("CURRENT file not found - not a LevelDB database"));
+            return Err(anyhow::anyhow!(
+                "CURRENT file not found - not a LevelDB database"
+            ));
         }
 
         // Read CURRENT file - should contain "MANIFEST-XXXXXX"
@@ -210,7 +214,10 @@ impl BitcoinCoreDetection {
 
         let manifest = chainstate.join(manifest_name);
         if !manifest.exists() {
-            return Err(anyhow::anyhow!("MANIFEST file not found: {}", manifest_name));
+            return Err(anyhow::anyhow!(
+                "MANIFEST file not found: {}",
+                manifest_name
+            ));
         }
 
         Ok(())
@@ -240,4 +247,3 @@ mod tests {
         assert!(!paths.is_empty());
     }
 }
-

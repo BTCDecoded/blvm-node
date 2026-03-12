@@ -113,16 +113,25 @@ impl Peer {
                     let mut guard = conn_read.lock().await;
                     guard.recv().await
                 };
-                
+
                 match result {
                     Ok(data) if data.is_empty() => {
-                        info!("Peer {:?} connection closed (empty read)", transport_addr_clone);
+                        info!(
+                            "Peer {:?} connection closed (empty read)",
+                            transport_addr_clone
+                        );
                         // CRITICAL: Send PeerDisconnected to remove peer from PeerManager
-                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
+                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                            transport_addr_clone.clone(),
+                        ));
                         break;
                     }
                     Ok(data) => {
-                        debug!("Received {} bytes from {:?}", data.len(), transport_addr_clone);
+                        debug!(
+                            "Received {} bytes from {:?}",
+                            data.len(),
+                            transport_addr_clone
+                        );
                         let peer_addr = match &transport_addr_clone {
                             super::transport::TransportAddr::Tcp(sock) => *sock,
                             #[cfg(feature = "quinn")]
@@ -132,12 +141,15 @@ impl Peer {
                                 std::net::SocketAddr::from(([0, 0, 0, 0], 0))
                             }
                         };
-                        let _ = message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_addr));
+                        let _ = message_tx_clone
+                            .send(NetworkMessage::RawMessageReceived(data, peer_addr));
                     }
                     Err(e) => {
                         warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
                         // CRITICAL: Send PeerDisconnected on read error
-                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
+                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                            transport_addr_clone.clone(),
+                        ));
                         break;
                     }
                 }
@@ -145,7 +157,7 @@ impl Peer {
         });
 
         // Spawn write task with its own connection clone
-        let conn_write = conn;  // Take ownership since we don't need it anymore
+        let conn_write = conn; // Take ownership since we don't need it anymore
         tokio::spawn(async move {
             let mut send_rx = send_rx;
 
@@ -156,7 +168,11 @@ impl Peer {
                 };
                 match result {
                     Ok(_) => {
-                        debug!("Sent {} bytes to peer {:?}", data.len(), transport_addr_write);
+                        debug!(
+                            "Sent {} bytes to peer {:?}",
+                            data.len(),
+                            transport_addr_write
+                        );
                     }
                     Err(e) => {
                         warn!("Peer write error for {:?}: {}", transport_addr_write, e);
@@ -199,8 +215,8 @@ impl Peer {
             best_block_hash: None,
             best_block_height: None,
             chainwork: None,
-            permissions: 0, // No special permissions by default
-            is_manual: false, // Default to false, set to true for manual connections
+            permissions: 0,                // No special permissions by default
+            is_manual: false,              // Default to false, set to true for manual connections
             last_block_announcement: None, // No block announcements yet
         }
     }
@@ -256,20 +272,28 @@ impl Peer {
                             warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
                         }
                         // CRITICAL: Send PeerDisconnected to remove peer from PeerManager
-                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
+                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                            transport_addr_clone.clone(),
+                        ));
                         break;
                     }
                 }
 
                 // Extract payload length from bytes 16-19 (little-endian)
-                let payload_len = u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
+                let payload_len =
+                    u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
 
                 // Read payload if any
                 let data = if payload_len > 0 {
                     if payload_len > 32 * 1024 * 1024 - 24 {
-                        warn!("Peer {:?} sent oversized message: {} bytes", transport_addr_clone, payload_len);
+                        warn!(
+                            "Peer {:?} sent oversized message: {} bytes",
+                            transport_addr_clone, payload_len
+                        );
                         // CRITICAL: Send PeerDisconnected on oversized message
-                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
+                        let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                            transport_addr_clone.clone(),
+                        ));
                         break;
                     }
                     let mut payload = vec![0u8; payload_len];
@@ -280,9 +304,14 @@ impl Peer {
                             data
                         }
                         Err(e) => {
-                            warn!("Peer read payload error for {:?}: {}", transport_addr_clone, e);
+                            warn!(
+                                "Peer read payload error for {:?}: {}",
+                                transport_addr_clone, e
+                            );
                             // CRITICAL: Send PeerDisconnected on payload read error
-                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(transport_addr_clone.clone()));
+                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                transport_addr_clone.clone(),
+                            ));
                             break;
                         }
                     }
@@ -290,7 +319,11 @@ impl Peer {
                     header.to_vec()
                 };
 
-                debug!("Received {} bytes from {:?}", data.len(), transport_addr_clone);
+                debug!(
+                    "Received {} bytes from {:?}",
+                    data.len(),
+                    transport_addr_clone
+                );
                 let peer_socket = match &transport_addr_clone {
                     TransportAddr::Tcp(sock) => *sock,
                     #[cfg(feature = "quinn")]
@@ -298,11 +331,12 @@ impl Peer {
                     #[cfg(feature = "iroh")]
                     TransportAddr::Iroh(_) => std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
                 };
-                let _ = message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_socket));
+                let _ =
+                    message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_socket));
             }
         });
 
-        // Spawn write task - owns the writer half exclusively  
+        // Spawn write task - owns the writer half exclusively
         tokio::spawn(async move {
             let mut writer = writer;
             while let Some(data) = send_rx.recv().await {
@@ -312,7 +346,11 @@ impl Peer {
                             warn!("Peer flush error for {:?}: {}", transport_addr_write, e);
                             break;
                         }
-                        debug!("Sent {} bytes to peer {:?}", data.len(), transport_addr_write);
+                        debug!(
+                            "Sent {} bytes to peer {:?}",
+                            data.len(),
+                            transport_addr_write
+                        );
                     }
                     Err(e) => {
                         warn!("Peer write error for {:?}: {}", transport_addr_write, e);
@@ -352,8 +390,8 @@ impl Peer {
             best_block_hash: None,
             best_block_height: None,
             chainwork: None,
-            permissions: 0, // No special permissions by default
-            is_manual: false, // Default to false, set to true for manual connections
+            permissions: 0,                // No special permissions by default
+            is_manual: false,              // Default to false, set to true for manual connections
             last_block_announcement: None, // No block announcements yet
             pending_ping_nonce: None,
             ping_sent_time: None,
@@ -564,7 +602,7 @@ impl Peer {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs()
+                .as_secs(),
         );
     }
 
@@ -576,7 +614,7 @@ impl Peer {
                 self.ping_sent_time = None;
                 true
             }
-            _ => false // Nonce mismatch or no pending ping
+            _ => false, // Nonce mismatch or no pending ping
         }
     }
 
@@ -590,7 +628,7 @@ impl Peer {
                     .as_secs();
                 now.saturating_sub(sent_time) > self.ping_timeout_seconds
             }
-            _ => false
+            _ => false,
         }
     }
 
@@ -656,7 +694,7 @@ impl Peer {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs()
+                .as_secs(),
         );
     }
 

@@ -64,7 +64,7 @@ impl EventManager {
 
         let mut subscribers = self.subscribers.lock().await;
         let mut channels = self.module_channels.lock().await;
-        let mut loaded_modules = self.loaded_modules.lock().await;
+        let loaded_modules = self.loaded_modules.lock().await;
 
         // Register module channel
         channels.insert(module_id.clone(), sender.clone());
@@ -72,7 +72,7 @@ impl EventManager {
         // Add module to subscribers for each event type
         for event_type in &event_types {
             subscribers
-                .entry(event_type.clone())
+                .entry(*event_type)
                 .or_insert_with(Vec::new)
                 .push(module_id.clone());
         }
@@ -113,7 +113,7 @@ impl EventManager {
                     payload,
                 });
                 // Send to module (non-blocking, best-effort)
-                if let Err(_) = sender.try_send(event_msg) {
+                if sender.try_send(event_msg).is_err() {
                     warn!("Failed to send ModuleLoaded event for {} to newly subscribing module {} (channel full)", module_name, module_id);
                 }
             }

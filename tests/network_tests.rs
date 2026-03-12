@@ -121,7 +121,7 @@ async fn test_protocol_parser() {
             port: 8333,
         },
         nonce: 12345,
-        user_agent: "bllvm-node/0.1.0".to_string(),
+        user_agent: "blvm-node/0.1.0".to_string(),
         start_height: 0,
         relay: true,
     };
@@ -219,7 +219,7 @@ async fn test_message_serialization() {
             port: 8333,
         },
         nonce: 12345,
-        user_agent: "bllvm-node/0.1.0".to_string(),
+        user_agent: "blvm-node/0.1.0".to_string(),
         start_height: 0,
         relay: true,
     };
@@ -253,7 +253,7 @@ async fn test_message_deserialization() {
             port: 8333,
         },
         nonce: 12345,
-        user_agent: "bllvm-node/0.1.0".to_string(),
+        user_agent: "blvm-node/0.1.0".to_string(),
         start_height: 0,
         relay: true,
     };
@@ -293,7 +293,7 @@ async fn test_checksum_validation() {
             port: 8333,
         },
         nonce: 12345,
-        user_agent: "bllvm-node/0.1.0".to_string(),
+        user_agent: "blvm-node/0.1.0".to_string(),
         start_height: 0,
         relay: true,
     };

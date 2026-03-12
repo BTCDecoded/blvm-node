@@ -221,8 +221,7 @@ impl RawTxRpc {
                             return Err(RpcError::with_data(
                                 RpcErrorCode::TxRejected,
                                 format!(
-                                    "Fee rate {} BTC/kvB exceeds maximum allowed {} BTC/kvB",
-                                    fee_rate_btc_per_kvb, max_feerate
+                                    "Fee rate {fee_rate_btc_per_kvb} BTC/kvB exceeds maximum allowed {max_feerate} BTC/kvB"
                                 ),
                                 json!({
                                     "txid": txid_hex,
@@ -468,7 +467,13 @@ impl RawTxRpc {
     /// Returns (transaction, all_witnesses) tuple where all_witnesses is Vec<Witness> (one per input)
     fn deserialize_transaction_with_witness(
         data: &[u8],
-    ) -> Result<(blvm_protocol::Transaction, Vec<blvm_consensus::segwit::Witness>), RpcError> {
+    ) -> Result<
+        (
+            blvm_protocol::Transaction,
+            Vec<blvm_consensus::segwit::Witness>,
+        ),
+        RpcError,
+    > {
         use blvm_consensus::serialization::varint::decode_varint;
         use blvm_protocol::serialization::transaction::deserialize_transaction;
 
@@ -595,7 +600,7 @@ impl RawTxRpc {
         // Inputs (non-witness serialization)
         for input in &tx.inputs {
             serialized.extend_from_slice(&input.prevout.hash);
-            serialized.extend_from_slice(&(input.prevout.index as u32).to_le_bytes());
+            serialized.extend_from_slice(&input.prevout.index.to_le_bytes());
             serialized.extend_from_slice(&encode_varint(input.script_sig.len() as u64));
             serialized.extend_from_slice(&input.script_sig);
             serialized.extend_from_slice(&(input.sequence as u32).to_le_bytes());
@@ -679,16 +684,13 @@ impl RawTxRpc {
                             .iter()
                             .any(|input| input.prevout.hash == ancestor_hash)
                     })
-                    .map(|ancestor_tx| calculate_tx_id(ancestor_tx))
+                    .map(calculate_tx_id)
                     .collect();
 
                 // Convert to wtxids (hex strings)
                 // For non-SegWit transactions, txid equals wtxid (by definition)
                 // For SegWit transactions, wtxid would require witness data storage in mempool
-                includes = ancestor_txids
-                    .iter()
-                    .map(|hash| hex::encode(hash))
-                    .collect();
+                includes = ancestor_txids.iter().map(hex::encode).collect();
             }
         }
 
@@ -802,7 +804,7 @@ impl RawTxRpc {
         // Inputs (non-witness serialization)
         for input in &tx.inputs {
             serialized.extend_from_slice(&input.prevout.hash);
-            serialized.extend_from_slice(&(input.prevout.index as u32).to_le_bytes());
+            serialized.extend_from_slice(&input.prevout.index.to_le_bytes());
             serialized.extend_from_slice(&encode_varint(input.script_sig.len() as u64));
             serialized.extend_from_slice(&input.script_sig);
             serialized.extend_from_slice(&(input.sequence as u32).to_le_bytes());
@@ -1051,7 +1053,6 @@ impl RawTxRpc {
             match with_storage_timeout(async {
                 tokio::task::spawn_blocking({
                     let storage = storage.clone();
-                    let outpoint = outpoint.clone();
                     move || storage.utxos().get_utxo(&outpoint)
                 })
                 .await
@@ -1515,7 +1516,7 @@ impl RawTxRpc {
                         .flatten();
                     let tip_height = storage.chain().get_height().ok().flatten().unwrap_or(0);
                     block_height
-                        .map(|h| (tip_height.saturating_sub(h) + 1))
+                        .map(|h| tip_height.saturating_sub(h) + 1)
                         .unwrap_or(0)
                 } else {
                     0
@@ -1602,16 +1603,16 @@ impl RawTxRpc {
         let mut tx_inputs = Vec::new();
         for (idx, input) in inputs.iter().enumerate() {
             let input_obj = input.as_object().ok_or_else(|| {
-                RpcError::invalid_params(format!("Input {} must be an object", idx))
+                RpcError::invalid_params(format!("Input {idx} must be an object"))
             })?;
 
             let txid_hex = input_obj
                 .get("txid")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| RpcError::invalid_params(format!("Input {} missing 'txid'", idx)))?;
+                .ok_or_else(|| RpcError::invalid_params(format!("Input {idx} missing 'txid'")))?;
 
             let txid_bytes = hex::decode(txid_hex).map_err(|e| {
-                RpcError::invalid_params(format!("Invalid txid hex in input {}: {}", idx, e))
+                RpcError::invalid_params(format!("Invalid txid hex in input {idx}: {e}"))
             })?;
             if txid_bytes.len() != 32 {
                 return Err(RpcError::invalid_params(format!(
@@ -1626,7 +1627,7 @@ impl RawTxRpc {
             let vout = input_obj
                 .get("vout")
                 .and_then(|v| v.as_u64())
-                .ok_or_else(|| RpcError::invalid_params(format!("Input {} missing 'vout'", idx)))?;
+                .ok_or_else(|| RpcError::invalid_params(format!("Input {idx} missing 'vout'")))?;
 
             // Sequence: use provided value, or set based on RBF
             let sequence = if let Some(seq_val) = input_obj.get("sequence").and_then(|v| v.as_u64())
@@ -1663,12 +1664,11 @@ impl RawTxRpc {
                     let data_hex = value.as_str().ok_or_else(|| {
                         RpcError::invalid_params("'data' output must be hex string")
                     })?;
-                    let data = hex::decode(data_hex).map_err(|e| {
-                        RpcError::invalid_params(format!("Invalid data hex: {}", e))
-                    })?;
+                    let data = hex::decode(data_hex)
+                        .map_err(|e| RpcError::invalid_params(format!("Invalid data hex: {e}")))?;
 
                     // OP_RETURN script: OP_RETURN <data>
-                    let mut script = vec![0x6a]; // OP_RETURN
+                    let mut script = vec![blvm_consensus::opcodes::OP_RETURN];
                     script.push(data.len() as u8);
                     script.extend_from_slice(&data);
 
@@ -1684,8 +1684,7 @@ impl RawTxRpc {
                         .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))
                         .ok_or_else(|| {
                             RpcError::invalid_params(format!(
-                                "Invalid amount for address '{}'",
-                                address_str
+                                "Invalid amount for address '{address_str}'"
                             ))
                         })?;
 
@@ -1705,25 +1704,19 @@ impl RawTxRpc {
             // Array format: [{"address": amount}, {"data": "hex"}, ...]
             for (idx, output) in outputs_arr.iter().enumerate() {
                 let output_obj = output.as_object().ok_or_else(|| {
-                    RpcError::invalid_params(format!("Output {} must be an object", idx))
+                    RpcError::invalid_params(format!("Output {idx} must be an object"))
                 })?;
 
                 if let Some(data_val) = output_obj.get("data") {
                     // OP_RETURN output
                     let data_hex = data_val.as_str().ok_or_else(|| {
-                        RpcError::invalid_params(format!(
-                            "Output {} 'data' must be hex string",
-                            idx
-                        ))
+                        RpcError::invalid_params(format!("Output {idx} 'data' must be hex string"))
                     })?;
                     let data = hex::decode(data_hex).map_err(|e| {
-                        RpcError::invalid_params(format!(
-                            "Invalid data hex in output {}: {}",
-                            idx, e
-                        ))
+                        RpcError::invalid_params(format!("Invalid data hex in output {idx}: {e}"))
                     })?;
 
-                    let mut script = vec![0x6a]; // OP_RETURN
+                    let mut script = vec![blvm_consensus::opcodes::OP_RETURN];
                     script.push(data.len() as u8);
                     script.extend_from_slice(&data);
 
@@ -1734,7 +1727,7 @@ impl RawTxRpc {
                 } else if let Some(addr_val) = output_obj.get("address") {
                     // Address output
                     let address_str = addr_val.as_str().ok_or_else(|| {
-                        RpcError::invalid_params(format!("Output {} 'address' must be string", idx))
+                        RpcError::invalid_params(format!("Output {idx} 'address' must be string"))
                     })?;
 
                     // Get amount from the same object (key-value pair)
@@ -1745,7 +1738,7 @@ impl RawTxRpc {
                                 .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
                         })
                         .ok_or_else(|| {
-                            RpcError::invalid_params(format!("Output {} missing amount", idx))
+                            RpcError::invalid_params(format!("Output {idx} missing amount"))
                         })?;
 
                     let satoshis = (amount * 100_000_000.0) as u64;
@@ -1757,8 +1750,7 @@ impl RawTxRpc {
                     });
                 } else {
                     return Err(RpcError::invalid_params(format!(
-                        "Output {} must have either 'address' or 'data' key",
-                        idx
+                        "Output {idx} must have either 'address' or 'data' key"
                     )));
                 }
             }
@@ -1795,10 +1787,10 @@ impl RawTxRpc {
             // Serialize and return
             use blvm_protocol::serialization::transaction::serialize_transaction;
             let tx_bytes = serialize_transaction(&tx);
-            return Ok(json!({
+            Ok(json!({
                 "hex": hex::encode(&tx_bytes),
                 "complete": true,
-            }));
+            }))
         }
         #[cfg(not(feature = "production"))]
         {
@@ -1835,7 +1827,7 @@ impl RawTxRpc {
                 }
                 // Taproot v1: P2TR (32 bytes)
                 (1, 32) => {
-                    let mut script = vec![0x51]; // OP_1
+                    let mut script = vec![blvm_consensus::opcodes::OP_1];
                     script.extend_from_slice(&addr.witness_program);
                     Ok(script)
                 }

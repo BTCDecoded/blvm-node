@@ -4,12 +4,12 @@
 
 use crate::network::transport::TransportType;
 use anyhow::Result;
-use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::wire::{
     deserialize_getdata, deserialize_headers, deserialize_inv, deserialize_notfound,
     serialize_getdata, serialize_getheaders, serialize_inv, serialize_notfound,
 };
+use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
 
 /// Bitcoin protocol constants
@@ -384,7 +384,7 @@ pub struct UTXOSetMessage {
     pub chunk_id: Option<u32>,
 }
 
-/// UTXO commitment structure (matches consensus-proof definition)
+/// UTXO commitment structure (matches blvm-consensus definition)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UTXOCommitment {
     pub merkle_root: Hash,
@@ -876,7 +876,7 @@ impl ProtocolParser {
     /// Parse a raw message into a protocol message
     pub fn parse_message(data: &[u8]) -> Result<ProtocolMessage> {
         use tracing::{debug, warn};
-        
+
         // Validate message size
         if data.len() < 24 {
             return Err(anyhow::anyhow!("Message too short: {} bytes", data.len()));
@@ -888,19 +888,26 @@ impl ProtocolParser {
 
         // Parse message header
         let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        debug!("Parsing message: magic=0x{:08x}, total_len={}", magic, data.len());
-        
+        debug!(
+            "Parsing message: magic=0x{:08x}, total_len={}",
+            magic,
+            data.len()
+        );
+
         if magic != 0xd9b4bef9 {
             // Log first 24 bytes as hex for debugging
-            let header_hex: String = data.iter().take(24).map(|b| format!("{:02x}", b)).collect();
-            warn!("Invalid magic number 0x{:08x}, expected 0xd9b4bef9. Header hex: {}", magic, header_hex);
+            let header_hex: String = data.iter().take(24).map(|b| format!("{b:02x}")).collect();
+            warn!(
+                "Invalid magic number 0x{:08x}, expected 0xd9b4bef9. Header hex: {}",
+                magic, header_hex
+            );
             return Err(anyhow::anyhow!("Invalid magic number 0x{:08x}", magic));
         }
 
         let command = String::from_utf8_lossy(&data[4..16])
             .trim_end_matches('\0')
             .to_string();
-        
+
         debug!("Message command: '{}', data_len={}", command, data.len());
 
         // Validate command string
@@ -938,7 +945,7 @@ impl ProtocolParser {
 
                 // Convert to node's ProtocolMessage format
                 Ok(ProtocolMessage::Version(VersionMessage {
-                    version: version_msg.version as i32, // bllvm-node uses i32, bllvm-protocol uses u32
+                    version: version_msg.version as i32, // blvm-node uses i32, blvm-protocol uses u32
                     services: version_msg.services,
                     timestamp: version_msg.timestamp,
                     addr_recv: NetworkAddress {
@@ -962,14 +969,18 @@ impl ProtocolParser {
                 // Use proper Bitcoin wire format (8-byte nonce)
                 let wire_msg = blvm_protocol::wire::deserialize_ping(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize ping: {}", e))?;
-                Ok(ProtocolMessage::Ping(PingMessage { nonce: wire_msg.nonce }))
-            },
+                Ok(ProtocolMessage::Ping(PingMessage {
+                    nonce: wire_msg.nonce,
+                }))
+            }
             "pong" => {
                 // Use proper Bitcoin wire format (8-byte nonce)
                 let wire_msg = blvm_protocol::wire::deserialize_pong(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize pong: {}", e))?;
-                Ok(ProtocolMessage::Pong(PongMessage { nonce: wire_msg.nonce }))
-            },
+                Ok(ProtocolMessage::Pong(PongMessage {
+                    nonce: wire_msg.nonce,
+                }))
+            }
             "getheaders" => {
                 // Use proper Bitcoin wire format deserialization
                 let wire_msg = blvm_protocol::wire::deserialize_getheaders(payload)
@@ -979,7 +990,7 @@ impl ProtocolParser {
                     block_locator_hashes: wire_msg.block_locator_hashes,
                     hash_stop: wire_msg.hash_stop,
                 }))
-            },
+            }
             "headers" => {
                 // Use proper Bitcoin wire format deserialization
                 let wire_msg = deserialize_headers(payload)
@@ -987,29 +998,30 @@ impl ProtocolParser {
                 Ok(ProtocolMessage::Headers(HeadersMessage {
                     headers: wire_msg.headers,
                 }))
-            },
+            }
             "getblocks" => Ok(ProtocolMessage::GetBlocks(bincode::deserialize(payload)?)),
             "block" => {
                 // Use consensus wire format (Bitcoin block + witness structure)
-                let (block, witnesses) = blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
+                let (block, witnesses) =
+                    blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
                 Ok(ProtocolMessage::Block(BlockMessage { block, witnesses }))
-            },
+            }
             "getdata" => {
                 let msg = deserialize_getdata(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize getdata: {}", e))?;
                 Ok(ProtocolMessage::GetData(msg))
-            },
+            }
             "inv" => {
                 let msg = deserialize_inv(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize inv: {}", e))?;
                 Ok(ProtocolMessage::Inv(msg))
-            },
+            }
             "notfound" => {
                 let msg = deserialize_notfound(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize notfound: {}", e))?;
                 Ok(ProtocolMessage::NotFound(msg))
-            },
+            }
             "tx" => Ok(ProtocolMessage::Tx(bincode::deserialize(payload)?)),
             "feefilter" => {
                 // BIP133: 8-byte feerate (satoshis per KB) in little-endian
@@ -1027,7 +1039,9 @@ impl ProtocolParser {
             // UTXO commitment protocol extensions
             "getutxoset" => Ok(ProtocolMessage::GetUTXOSet(bincode::deserialize(payload)?)),
             "utxoset" => Ok(ProtocolMessage::UTXOSet(bincode::deserialize(payload)?)),
-            "getutxoproof" => Ok(ProtocolMessage::GetUTXOProof(bincode::deserialize(payload)?)),
+            "getutxoproof" => Ok(ProtocolMessage::GetUTXOProof(bincode::deserialize(
+                payload,
+            )?)),
             "utxoproof" => Ok(ProtocolMessage::UTXOProof(bincode::deserialize(payload)?)),
             "getfilteredblock" => Ok(ProtocolMessage::GetFilteredBlock(bincode::deserialize(
                 payload,
@@ -1112,7 +1126,7 @@ impl ProtocolParser {
         let (command, payload) = match message {
             ProtocolMessage::Version(msg) => {
                 // Use proper Bitcoin wire format for version messages
-                // Convert to bllvm-protocol format and use its wire serialization
+                // Convert to blvm-protocol format and use its wire serialization
                 use blvm_protocol::network::{NetworkAddress, VersionMessage};
                 use blvm_protocol::wire::serialize_version;
 
@@ -1137,7 +1151,7 @@ impl ProtocolParser {
                 };
 
                 // Serialize payload using proper Bitcoin wire format
-                // This uses the serialize_version function from bllvm-protocol wire.rs
+                // This uses the serialize_version function from blvm-protocol wire.rs
                 // which implements the exact Bitcoin protocol format
                 let payload = serialize_version(&version_msg)?;
                 ("version", payload)
@@ -1152,22 +1166,36 @@ impl ProtocolParser {
                     block_locator_hashes: msg.block_locator_hashes.clone(),
                     hash_stop: msg.hash_stop,
                 };
-                ("getheaders", serialize_getheaders(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?)
-            },
+                (
+                    "getheaders",
+                    serialize_getheaders(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+                )
+            }
             ProtocolMessage::Headers(msg) => {
                 // Use proper Bitcoin wire format for headers
                 let wire_msg = blvm_protocol::network::HeadersMessage {
                     headers: msg.headers.clone(),
                 };
-                ("headers", blvm_protocol::wire::serialize_headers(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?)
-            },
+                (
+                    "headers",
+                    blvm_protocol::wire::serialize_headers(&wire_msg)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?,
+                )
+            }
             ProtocolMessage::GetBlocks(msg) => ("getblocks", bincode::serialize(msg)?),
             ProtocolMessage::Block(msg) => ("block", bincode::serialize(msg)?),
-            ProtocolMessage::GetData(msg) => {
-                ("getdata", serialize_getdata(msg).map_err(|e| anyhow::anyhow!("{}", e))?)
-            },
-            ProtocolMessage::Inv(msg) => ("inv", serialize_inv(msg).map_err(|e| anyhow::anyhow!("{}", e))?),
-            ProtocolMessage::NotFound(msg) => ("notfound", serialize_notfound(msg).map_err(|e| anyhow::anyhow!("{}", e))?),
+            ProtocolMessage::GetData(msg) => (
+                "getdata",
+                serialize_getdata(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+            ),
+            ProtocolMessage::Inv(msg) => (
+                "inv",
+                serialize_inv(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+            ),
+            ProtocolMessage::NotFound(msg) => (
+                "notfound",
+                serialize_notfound(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+            ),
             ProtocolMessage::Tx(msg) => ("tx", bincode::serialize(msg)?),
             ProtocolMessage::FeeFilter(msg) => ("feefilter", msg.feerate.to_le_bytes().to_vec()),
             // Compact Block Relay (BIP152)

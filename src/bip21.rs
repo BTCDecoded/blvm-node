@@ -534,21 +534,21 @@ mod registration_tests {
     #[test]
     fn test_windows_registry_generation() {
         let config = UriSchemeRegistration::new(
-            PathBuf::from("C:\\Program Files\\Bitcoin Commons\\bllvm.exe"),
+            PathBuf::from("C:\\Program Files\\Bitcoin Commons\\blvm.exe"),
             "Bitcoin Commons BLLVM",
         )
         .with_description("Bitcoin Node");
 
         let reg_content = registration::generate_windows_registry_file(&config);
         assert!(reg_content.contains("bitcoin"));
-        assert!(reg_content.contains("bllvm.exe"));
+        assert!(reg_content.contains("blvm.exe"));
         assert!(reg_content.contains("URL:Bitcoin Payment Protocol"));
     }
 
     #[test]
     fn test_macos_info_plist_generation() {
         let config = UriSchemeRegistration::new(
-            PathBuf::from("/usr/local/bin/bllvm"),
+            PathBuf::from("/usr/local/bin/blvm"),
             "Bitcoin Commons BLLVM",
         );
 
@@ -561,12 +561,12 @@ mod registration_tests {
     #[test]
     fn test_linux_desktop_entry_generation() {
         let config =
-            UriSchemeRegistration::new(PathBuf::from("/usr/bin/bllvm"), "Bitcoin Commons BLLVM")
+            UriSchemeRegistration::new(PathBuf::from("/usr/bin/blvm"), "Bitcoin Commons BLLVM")
                 .with_description("Bitcoin Node");
 
         let desktop_content = registration::generate_linux_desktop_entry(&config);
         assert!(desktop_content.contains("bitcoin"));
-        assert!(desktop_content.contains("bllvm"));
+        assert!(desktop_content.contains("blvm"));
         assert!(desktop_content.contains("x-scheme-handler/bitcoin"));
         assert!(desktop_content.contains("Bitcoin Node"));
     }
@@ -574,7 +574,7 @@ mod registration_tests {
     #[test]
     fn test_installer_files_generation() {
         let config =
-            UriSchemeRegistration::new(PathBuf::from("/usr/bin/bllvm"), "Bitcoin Commons BLLVM");
+            UriSchemeRegistration::new(PathBuf::from("/usr/bin/blvm"), "Bitcoin Commons BLLVM");
 
         let files = config.generate_installer_files();
         assert_eq!(files.len(), 4);

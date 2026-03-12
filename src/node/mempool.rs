@@ -209,7 +209,7 @@ impl MempoolManager {
     async fn process_pending_transactions(&mut self) -> Result<()> {
         // In a real implementation, this would:
         // 1. Get new transactions from network
-        // 2. Validate transactions using consensus-proof
+        // 2. Validate transactions using blvm-consensus
         // 3. Add valid transactions to mempool
         // 4. Relay transactions to peers
 
@@ -396,7 +396,8 @@ impl MempoolManager {
         // Get all transactions with timestamps, sorted by age (oldest first)
         let mut tx_ages: Vec<(Hash, u64, usize)> = {
             let timestamps = self.tx_timestamps.read().unwrap();
-            self.pool_lock().transactions
+            self.pool_lock()
+                .transactions
                 .iter()
                 .filter_map(|(hash, tx)| {
                     timestamps.get(hash).map(|&timestamp| {
@@ -507,7 +508,8 @@ impl MempoolManager {
             let descendants = self.tx_descendants.read().unwrap();
             let fee_cache = self.fee_cache.read().unwrap();
 
-            self.pool_lock().transactions
+            self.pool_lock()
+                .transactions
                 .iter()
                 .filter_map(|(hash, tx)| {
                     let has_descendants = descendants
@@ -560,7 +562,8 @@ impl MempoolManager {
             let timestamps = self.tx_timestamps.read().unwrap();
             let fee_cache = self.fee_cache.read().unwrap();
 
-            self.pool_lock().transactions
+            self.pool_lock()
+                .transactions
                 .iter()
                 .map(|(hash, tx)| {
                     let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
@@ -731,8 +734,13 @@ impl MempoolManager {
             Some(config) => config.clone(),
             None => {
                 // No RBF config - use default BIP125 behavior
-                return replacement_checks(new_tx, existing_tx, utxo_set, &*self.mempool.read().unwrap())
-                    .map_err(|e| anyhow::anyhow!("RBF check failed: {}", e));
+                return replacement_checks(
+                    new_tx,
+                    existing_tx,
+                    utxo_set,
+                    &self.mempool.read().unwrap(),
+                )
+                .map_err(|e| anyhow::anyhow!("RBF check failed: {}", e));
             }
         };
 
@@ -884,7 +892,8 @@ impl MempoolManager {
         // Note: replacement_checks will re-check fee rate, but we've already validated with our multiplier
         // So we call it to verify the other BIP125 rules (dependencies, etc.)
         // However, since we've already done stricter checks, if replacement_checks passes, we're good
-        let bip125_result = replacement_checks(new_tx, existing_tx, utxo_set, &*self.mempool.read().unwrap())?;
+        let bip125_result =
+            replacement_checks(new_tx, existing_tx, utxo_set, &self.mempool.read().unwrap())?;
         if !bip125_result {
             // BIP125 check failed (likely new dependencies issue)
             return Ok(false);
@@ -1171,7 +1180,7 @@ impl MempoolManager {
 
         // Track spent outputs
         for input in &tx.inputs {
-            self.pool_lock().spent_outputs.insert(input.prevout.clone());
+            self.pool_lock().spent_outputs.insert(input.prevout);
         }
 
         // Update dependency graph
@@ -1323,11 +1332,7 @@ impl MempoolManager {
             .pool_lock()
             .transactions
             .iter()
-            .flat_map(|(tx_hash, tx)| {
-                tx.inputs
-                    .iter()
-                    .map(move |input| (*tx_hash, input.prevout.clone()))
-            })
+            .flat_map(|(tx_hash, tx)| tx.inputs.iter().map(move |input| (*tx_hash, input.prevout)))
             .collect();
 
         // Batch UTXO lookup for all transactions (single pass through HashMap)

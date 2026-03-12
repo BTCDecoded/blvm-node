@@ -11,10 +11,10 @@
 //! Run:
 //!   cargo test -p blvm-node --test ibd_snapshot_node_bench --features production --release -- --ignored bench_node_hot_path --nocapture
 
-use blvm_consensus::block::{compute_block_tx_ids, connect_block_ibd};
 use blvm_consensus::bip_validation::Bip30Index;
+use blvm_consensus::block::{compute_block_tx_ids, connect_block_ibd};
 use blvm_consensus::segwit::Witness;
-use blvm_consensus::types::{Block, Network, OutPoint, UTXO, UtxoSet};
+use blvm_consensus::types::{Block, Network, OutPoint, UtxoSet, UTXO};
 use blvm_consensus::ValidationResult;
 use blvm_node::storage::disk_utxo::{
     block_input_keys_into, key_to_outpoint, outpoint_to_key, OutPointKey,
@@ -32,24 +32,27 @@ fn snapshot_dir() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ibd-snapshots-20260307-192410"),
-    ];
+    let candidates =
+        [PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ibd-snapshots-20260307-192410")];
     candidates.into_iter().find(|p| p.exists())
 }
 
-fn load_snapshot(
-    dir: &Path,
-) -> Option<(Block, Vec<Vec<Witness>>, UtxoSet)> {
+fn load_snapshot(dir: &Path) -> Option<(Block, Vec<Vec<Witness>>, UtxoSet)> {
     if !dir.join("block.bin").exists() {
         return None;
     }
-    let block: Block =
-        bincode::deserialize_from(std::io::BufReader::new(std::fs::File::open(dir.join("block.bin")).ok()?)).ok()?;
-    let witnesses: Vec<Vec<Witness>> =
-        bincode::deserialize_from(std::io::BufReader::new(std::fs::File::open(dir.join("witnesses.bin")).ok()?)).ok()?;
-    let raw: std::collections::HashMap<OutPoint, UTXO> =
-        bincode::deserialize_from(std::io::BufReader::new(std::fs::File::open(dir.join("utxo_set.bin")).ok()?)).ok()?;
+    let block: Block = bincode::deserialize_from(std::io::BufReader::new(
+        std::fs::File::open(dir.join("block.bin")).ok()?,
+    ))
+    .ok()?;
+    let witnesses: Vec<Vec<Witness>> = bincode::deserialize_from(std::io::BufReader::new(
+        std::fs::File::open(dir.join("witnesses.bin")).ok()?,
+    ))
+    .ok()?;
+    let raw: std::collections::HashMap<OutPoint, UTXO> = bincode::deserialize_from(
+        std::io::BufReader::new(std::fs::File::open(dir.join("utxo_set.bin")).ok()?),
+    )
+    .ok()?;
     let utxo_set: UtxoSet = raw.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
     Some((block, witnesses, utxo_set))
 }
@@ -107,19 +110,18 @@ fn node_hot_path_once(
     }
 
     // 4. Build witness Arc (pre-segwit: empty witnesses via Arc)
-    let witnesses_arc: Arc<Vec<Vec<Witness>>> = if witnesses.is_empty()
-        || witnesses.iter().all(|w| w.iter().all(|v| v.is_empty()))
-    {
-        Arc::new(
-            block
-                .transactions
-                .iter()
-                .map(|tx| vec![Witness::default(); tx.inputs.len()])
-                .collect(),
-        )
-    } else {
-        Arc::new(witnesses.to_vec())
-    };
+    let witnesses_arc: Arc<Vec<Vec<Witness>>> =
+        if witnesses.is_empty() || witnesses.iter().all(|w| w.iter().all(|v| v.is_empty())) {
+            Arc::new(
+                block
+                    .transactions
+                    .iter()
+                    .map(|tx| vec![Witness::default(); tx.inputs.len()])
+                    .collect(),
+            )
+        } else {
+            Arc::new(witnesses.to_vec())
+        };
     let witnesses_to_use: &[Vec<Witness>] = witnesses_arc.as_ref();
 
     // 5. Precompute tx_ids
@@ -160,8 +162,10 @@ fn node_hot_path_once(
     let total_ms = t.elapsed().as_secs_f64() * 1000.0;
     let prep_ms = total_ms - validate_ms - delta_ms;
     if height >= 100_000 && height % 50_000 == 0 {
-        eprintln!("  [BREAKDOWN h={}] total={:.2}ms prep={:.2}ms validate={:.2}ms delta={:.2}ms",
-            height, total_ms, prep_ms, validate_ms, delta_ms);
+        eprintln!(
+            "  [BREAKDOWN h={}] total={:.2}ms prep={:.2}ms validate={:.2}ms delta={:.2}ms",
+            height, total_ms, prep_ms, validate_ms, delta_ms
+        );
     }
 
     total_ms

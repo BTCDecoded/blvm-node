@@ -1,6 +1,6 @@
-//! Convert Bitcoin Core bitcoin.conf to bllvm-node config.toml
+//! Convert Bitcoin Core bitcoin.conf to blvm-node config.toml
 //!
-//! This tool converts Bitcoin Core configuration files to bllvm-node format.
+//! This tool converts Bitcoin Core configuration files to blvm-node format.
 //! Data directories are NOT converted (as requested).
 
 use std::fs;
@@ -218,7 +218,7 @@ fn parse_bitcoin_conf(path: &PathBuf) -> std::io::Result<BitcoinCoreConfig> {
 fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &std::path::Path) -> String {
     let mut toml = String::new();
 
-    toml.push_str("# bllvm-node configuration\n");
+    toml.push_str("# blvm-node configuration\n");
     toml.push_str(&format!(
         "# Converted from Bitcoin Core: {}\n",
         input_path.display()
@@ -359,7 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Error: Input file '{}' not found", args.input.display());
         eprintln!();
         eprintln!("Usage: convert-bitcoin-core-config <bitcoin.conf> [output.toml]");
-        eprintln!("Converts Bitcoin Core bitcoin.conf to bllvm-node config.toml");
+        eprintln!("Converts Bitcoin Core bitcoin.conf to blvm-node config.toml");
         std::process::exit(1);
     }
 
@@ -370,7 +370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bitcoin_config = parse_bitcoin_conf(&args.input)?;
 
     if args.verbose {
-        eprintln!("Generating bllvm-node config...");
+        eprintln!("Generating blvm-node config...");
     }
 
     let toml_config = generate_toml_config(&bitcoin_config, &args.input);

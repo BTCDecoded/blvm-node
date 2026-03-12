@@ -61,7 +61,7 @@ impl ModuleApiRegistry {
         {
             let mut routing = self.method_routing.write().await;
             for method in methods {
-                let full_method_name = format!("{}::{}", module_id, method);
+                let full_method_name = format!("{module_id}::{method}");
                 routing.insert(
                     full_method_name.clone(),
                     (module_id.clone(), method.clone()),
@@ -69,9 +69,9 @@ impl ModuleApiRegistry {
 
                 // Also allow routing by just method name if unique
                 // (will be overridden if another module uses same method name)
-                if !routing.contains_key(&method) {
-                    routing.insert(method, (module_id.clone(), full_method_name));
-                }
+                routing
+                    .entry(method)
+                    .or_insert_with(|| (module_id.clone(), full_method_name));
             }
         }
 

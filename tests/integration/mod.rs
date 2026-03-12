@@ -1,4 +1,4 @@
-//! Integration tests for bllvm-node
+//! Integration tests for blvm-node
 
 pub mod basic;
 mod e2e_protocol_validation;

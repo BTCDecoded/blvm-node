@@ -84,7 +84,7 @@ impl CommitmentStore {
 
     /// Check if a commitment exists for a block
     pub fn has_commitment(&self, block_hash: &Hash) -> Result<bool> {
-        Ok(self.commitments.contains_key(block_hash.as_slice())?)
+        self.commitments.contains_key(block_hash.as_slice())
     }
 
     /// Remove commitment for a block (cleanup)
@@ -116,7 +116,7 @@ impl CommitmentStore {
 
     /// Get count of stored commitments
     pub fn commitment_count(&self) -> Result<usize> {
-        Ok(self.commitments.len()?)
+        self.commitments.len()
     }
 }
 

@@ -10,12 +10,12 @@
 //!
 //! Reference: parallel block validation for IBD
 
+use crate::utils::current_timestamp;
 use anyhow::Result;
 use blvm_protocol::block::connect_block;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::types::Network;
 use blvm_protocol::{Block, BlockHeader, UtxoSet, ValidationResult};
-use crate::utils::current_timestamp;
 
 /// Block validation context
 #[derive(Debug, Clone)]

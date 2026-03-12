@@ -31,8 +31,15 @@ use super::database::{Database, Tree};
 /// WAL operation types
 #[derive(Debug, Clone)]
 enum WalOp {
-    Put { tree: String, key: Vec<u8>, value: Vec<u8> },
-    Delete { tree: String, key: Vec<u8> },
+    Put {
+        tree: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        tree: String,
+        key: Vec<u8>,
+    },
 }
 
 /// Serialization format for WAL entries (simple binary format)
@@ -73,7 +80,8 @@ impl WalOp {
         if pos + 4 > data.len() {
             anyhow::bail!("Truncated WAL entry");
         }
-        let tree_len = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let tree_len =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
         if pos + tree_len > data.len() {
             anyhow::bail!("Truncated WAL entry");
@@ -85,7 +93,8 @@ impl WalOp {
         if pos + 4 > data.len() {
             anyhow::bail!("Truncated WAL entry");
         }
-        let key_len = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let key_len =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
         if pos + key_len > data.len() {
             anyhow::bail!("Truncated WAL entry");
@@ -99,7 +108,9 @@ impl WalOp {
                 if pos + 4 > data.len() {
                     anyhow::bail!("Truncated WAL entry");
                 }
-                let value_len = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+                let value_len =
+                    u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
                 pos += 4;
                 if pos + value_len > data.len() {
                     anyhow::bail!("Truncated WAL entry");
@@ -232,7 +243,11 @@ impl WalBufferedDb {
             }
         }
 
-        info!("Replaying {} WAL operations across {} trees", ops_count, tree_ops.len());
+        info!(
+            "Replaying {} WAL operations across {} trees",
+            ops_count,
+            tree_ops.len()
+        );
 
         // Apply operations using batch writes for efficiency
         for (tree_name, ops) in tree_ops {
@@ -596,5 +611,3 @@ mod tests {
         }
     }
 }
-
-

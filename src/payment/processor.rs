@@ -190,7 +190,7 @@ impl PaymentProcessor {
         // Sign if merchant key provided (uses fork secp256k1 directly)
         if let Some(key) = merchant_key {
             payment_request.sign(key).map_err(|e| {
-                PaymentError::ProcessingError(format!("Failed to sign payment request: {}", e))
+                PaymentError::ProcessingError(format!("Failed to sign payment request: {e}"))
             })?;
         }
 
@@ -230,7 +230,7 @@ impl PaymentProcessor {
 
         // PaymentProtocolServer uses fork secp256k1 directly
         let ack = PaymentProtocolServer::process_payment(&payment, &request, merchant_key)
-            .map_err(|e| PaymentError::ValidationFailed(format!("{:?}", e)))?;
+            .map_err(|e| PaymentError::ValidationFailed(format!("{e:?}")))?;
 
         info!("Processed payment: {}", payment_id);
 
@@ -297,7 +297,7 @@ impl PaymentProcessor {
             })?;
 
         let module_hash = hex::decode(module_hash_hex)
-            .map_err(|e| PaymentError::ProcessingError(format!("Invalid module hash: {}", e)))?
+            .map_err(|e| PaymentError::ProcessingError(format!("Invalid module hash: {e}")))?
             .try_into()
             .map_err(|_| {
                 PaymentError::ProcessingError("Module hash must be 32 bytes".to_string())
@@ -321,7 +321,7 @@ impl PaymentProcessor {
         let entry = module_registry
             .fetch_module(module_name)
             .await
-            .map_err(|e| PaymentError::ProcessingError(format!("Failed to fetch module: {}", e)))?;
+            .map_err(|e| PaymentError::ProcessingError(format!("Failed to fetch module: {e}")))?;
 
         let binary = entry.binary.ok_or_else(|| {
             PaymentError::ProcessingError("Module binary not available".to_string())
@@ -330,7 +330,7 @@ impl PaymentProcessor {
         // Encrypt module
         let (encrypted_binary, nonce) = encryption
             .encrypt_module(&binary, payment_id, &module_hash)
-            .map_err(|e| PaymentError::ProcessingError(format!("Encryption failed: {}", e)))?;
+            .map_err(|e| PaymentError::ProcessingError(format!("Encryption failed: {e}")))?;
 
         // Create metadata
         use crate::module::encryption::EncryptedModuleMetadata;
@@ -357,7 +357,7 @@ impl PaymentProcessor {
         )
         .await
         .map_err(|e| {
-            PaymentError::ProcessingError(format!("Failed to store encrypted module: {}", e))
+            PaymentError::ProcessingError(format!("Failed to store encrypted module: {e}"))
         })?;
 
         info!(
@@ -434,9 +434,8 @@ impl PaymentProcessor {
             // This is a placeholder that can be extended with proper BIP47 library integration
             Err(PaymentError::ProcessingError(format!(
                 "BIP47 payment code derivation requires full cryptographic implementation. \
-                 Payment code: {}, index: {}. \
-                 Please provide a legacy address as fallback or implement BIP47 library integration.",
-                payment_code, notification_index
+                 Payment code: {payment_code}, index: {notification_index}. \
+                 Please provide a legacy address as fallback or implement BIP47 library integration."
             )))
         }
 
@@ -515,8 +514,7 @@ impl PaymentProcessor {
                 )
                 .map_err(|e| {
                     PaymentError::ValidationFailed(format!(
-                        "Payment address signature verification failed: {}",
-                        e
+                        "Payment address signature verification failed: {e}"
                     ))
                 })?;
 
@@ -539,11 +537,11 @@ impl PaymentProcessor {
 
         // Decode addresses to script pubkeys
         let author_address = BitcoinAddress::decode(&author_address_str).map_err(|e| {
-            PaymentError::ProcessingError(format!("Invalid author address format: {:?}", e))
+            PaymentError::ProcessingError(format!("Invalid author address format: {e:?}"))
         })?;
 
         let marketplace_address = BitcoinAddress::decode(&commons_address_str).map_err(|e| {
-            PaymentError::ProcessingError(format!("Invalid marketplace address format: {:?}", e))
+            PaymentError::ProcessingError(format!("Invalid marketplace address format: {e:?}"))
         })?;
 
         // Convert addresses to script pubkeys
@@ -598,7 +596,7 @@ impl PaymentProcessor {
                 "commons_address": commons_address_str,
             }))
             .map_err(|e| {
-                PaymentError::ProcessingError(format!("Failed to serialize merchant_data: {}", e))
+                PaymentError::ProcessingError(format!("Failed to serialize merchant_data: {e}"))
             })?,
         );
 

@@ -252,7 +252,7 @@ impl RpcAuthManager {
                     if let Some(user_id) = matched_user_id {
                         debug!("Token authentication successful for {}", client_addr);
                         SecurityEvent::AuthSuccess {
-                            user_id: format!("{:?}", user_id),
+                            user_id: format!("{user_id:?}"),
                             client_addr,
                             auth_method: "token".to_string(),
                         }
@@ -301,7 +301,7 @@ impl RpcAuthManager {
                 if let Some(user_id) = matched_user_id {
                     debug!("Certificate authentication successful for {}", client_addr);
                     SecurityEvent::AuthSuccess {
-                        user_id: format!("{:?}", user_id),
+                        user_id: format!("{user_id:?}"),
                         client_addr,
                         auth_method: "certificate".to_string(),
                     }
@@ -377,7 +377,7 @@ impl RpcAuthManager {
             // Log rate limit violation
             if let Some(addr) = client_addr {
                 SecurityEvent::RateLimitViolation {
-                    user_id: format!("{:?}", user_id),
+                    user_id: format!("{user_id:?}"),
                     client_addr: addr,
                     endpoint: endpoint.unwrap_or("unknown").to_string(),
                 }
@@ -410,7 +410,7 @@ impl RpcAuthManager {
         if !allowed {
             // Log rate limit violation
             SecurityEvent::RateLimitViolation {
-                user_id: format!("{:?}", user_id),
+                user_id: format!("{user_id:?}"),
                 client_addr,
                 endpoint: endpoint.unwrap_or("unknown").to_string(),
             }

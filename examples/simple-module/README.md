@@ -1,6 +1,6 @@
 # Simple Module Example
 
-This is a minimal example module demonstrating how to create a module for the BTCDecoded reference-node.
+This is a minimal example module demonstrating how to create a module for the BTCDecoded blvm-node.
 
 ## Features
 

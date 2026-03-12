@@ -301,30 +301,30 @@ impl ModuleRegistry {
 
         // Decode hashes from hex
         let hash = hex::decode(hash_str)
-            .map_err(|e| ModuleError::OperationError(format!("Invalid hash hex: {}", e)))?
+            .map_err(|e| ModuleError::OperationError(format!("Invalid hash hex: {e}")))?
             .try_into()
             .map_err(|_| ModuleError::OperationError("Hash must be 32 bytes".to_string()))?;
 
         let manifest_hash = hex::decode(manifest_hash_str)
-            .map_err(|e| ModuleError::OperationError(format!("Invalid manifest_hash hex: {}", e)))?
+            .map_err(|e| ModuleError::OperationError(format!("Invalid manifest_hash hex: {e}")))?
             .try_into()
             .map_err(|_| {
                 ModuleError::OperationError("Manifest hash must be 32 bytes".to_string())
             })?;
 
         let binary_hash = hex::decode(binary_hash_str)
-            .map_err(|e| ModuleError::OperationError(format!("Invalid binary_hash hex: {}", e)))?
+            .map_err(|e| ModuleError::OperationError(format!("Invalid binary_hash hex: {e}")))?
             .try_into()
             .map_err(|_| ModuleError::OperationError("Binary hash must be 32 bytes".to_string()))?;
 
         // Parse manifest (TOML string or JSON object)
         let manifest = if let Some(manifest_str) = data.get("manifest").and_then(|v| v.as_str()) {
             toml::from_str::<ModuleManifest>(manifest_str)
-                .map_err(|e| ModuleError::OperationError(format!("Invalid manifest TOML: {}", e)))?
+                .map_err(|e| ModuleError::OperationError(format!("Invalid manifest TOML: {e}")))?
         } else if let Some(manifest_obj) = data.get("manifest") {
             // Try parsing as JSON and converting to TOML format
             serde_json::from_value::<ModuleManifest>(manifest_obj.clone())
-                .map_err(|e| ModuleError::OperationError(format!("Invalid manifest JSON: {}", e)))?
+                .map_err(|e| ModuleError::OperationError(format!("Invalid manifest JSON: {e}")))?
         } else {
             return Err(ModuleError::OperationError(
                 "Missing 'manifest' field".to_string(),
@@ -334,9 +334,7 @@ impl ModuleRegistry {
         // Verify manifest hash matches
         let cas = self.cas.read().await;
         let manifest_bytes = toml::to_string(&manifest)
-            .map_err(|e| {
-                ModuleError::OperationError(format!("Failed to serialize manifest: {}", e))
-            })?
+            .map_err(|e| ModuleError::OperationError(format!("Failed to serialize manifest: {e}")))?
             .into_bytes();
         if !cas.verify(&manifest_bytes, &manifest_hash) {
             return Err(ModuleError::CryptoError(

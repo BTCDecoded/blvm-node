@@ -26,7 +26,7 @@ pub fn sign_ban_list(
     let message = Message::from_digest(hash_array);
 
     // Sign
-    let signature = secp.sign_ecdsa(message, private_key);
+    let signature = secp.sign_ecdsa(&message, private_key);
 
     // Serialize signature
     Ok(signature.serialize_compact().to_vec())
@@ -61,7 +61,7 @@ pub fn verify_ban_list_signature(
     let sig = Signature::from_compact(signature).map_err(|_| secp256k1::Error::InvalidSignature)?;
 
     // Verify
-    Ok(secp.verify_ecdsa(message, &sig, public_key).is_ok())
+    Ok(secp.verify_ecdsa(&message, &sig, public_key).is_ok())
 }
 
 /// Extended ban list message with signature
@@ -82,7 +82,7 @@ impl SignedBanListMessage {
         private_key: &SecretKey,
     ) -> Result<Self, secp256k1::Error> {
         let secp = Secp256k1::new();
-        let public_key = PublicKey::from_secret_key(private_key);
+        let public_key = PublicKey::from_secret_key(&secp, private_key);
 
         let signature = sign_ban_list(&ban_list, private_key)?;
 

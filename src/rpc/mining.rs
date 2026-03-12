@@ -1,7 +1,7 @@
 //! Mining RPC methods
 //!
 //! Implements mining-related JSON-RPC methods for block template generation and mining.
-//! Uses formally verified consensus-proof mining functions.
+//! Uses formally verified blvm-consensus mining functions.
 
 use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::{RpcError, RpcResult};
@@ -10,6 +10,7 @@ use crate::utils::current_timestamp;
 use blvm_protocol::mining::BlockTemplate;
 use blvm_protocol::serialization::deserialize_block_with_witnesses;
 use blvm_protocol::serialization::serialize_transaction;
+use blvm_consensus::opcodes::{OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY};
 use blvm_protocol::{
     types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
     ConsensusProof, ValidationResult,
@@ -179,8 +180,8 @@ impl MiningRpc {
     ///
     /// Params: [template_request (optional)]
     ///
-    /// Uses formally verified consensus-proof::mining::create_block_template() function
-    /// which has Kani proofs ensuring correctness per Orange Paper Section 12.4
+    /// Uses formally verified blvm-consensus::mining::create_block_template() function
+    /// which has spec-lock verification ensuring correctness per Orange Paper Section 12.4
     pub async fn get_block_template(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getblocktemplate");
 
@@ -203,8 +204,8 @@ impl MiningRpc {
         let coinbase_script = self.extract_coinbase_script(params).unwrap_or_default();
         let coinbase_address = self.extract_coinbase_address(params).unwrap_or_default();
 
-        // 5. Use formally verified function from consensus-proof
-        // This function has Kani proofs: kani_create_block_template_completeness
+        // 5. Use formally verified function from blvm-consensus
+        // This function has spec-lock verification for block template completeness
         let template = match self.consensus.create_block_template(
             &utxo_set,
             &mempool_txs,
@@ -375,7 +376,7 @@ impl MiningRpc {
         // Difficulty = MAX_TARGET / target
         // MAX_TARGET for Bitcoin mainnet is 0x00000000FFFF0000000000000000000000000000000000000000000000000000
         // For display purposes, we normalize to genesis difficulty = 1.0
-        // MAX_TARGET is 256 bits, use U256 from bllvm-consensus
+        // MAX_TARGET is 256 bits, use U256 from blvm-consensus
         // 0x00000000FFFF0000000000000000000000000000000000000000000000000000
         // For now, use a placeholder - this should be calculated from difficulty bits
         const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
@@ -561,10 +562,10 @@ impl MiningRpc {
             for output in &tx.outputs {
                 for &byte in &output.script_pubkey {
                     match byte {
-                        0xac => count += 1,  // OP_CHECKSIG
-                        0xad => count += 1,  // OP_CHECKSIGVERIFY
-                        0xae => count += 1,  // OP_CHECKMULTISIG
-                        0xaf => count += 20, // OP_CHECKMULTISIGVERIFY
+                        OP_CHECKSIG => count += 1,
+                        OP_CHECKSIGVERIFY => count += 1,
+                        OP_CHECKMULTISIG => count += 1,
+                        OP_CHECKMULTISIGVERIFY => count += 20,
                         _ => {}
                     }
                 }
@@ -581,7 +582,7 @@ impl MiningRpc {
     }
 
     fn calculate_coinbase_value(&self, template: &BlockTemplate, _height: Natural) -> u64 {
-        // Use consensus-proof's get_block_subsidy (formally verified)
+        // Use blvm-consensus's get_block_subsidy (formally verified)
         let subsidy = self.consensus.get_block_subsidy(template.height) as u64;
 
         // Calculate total fees from transactions

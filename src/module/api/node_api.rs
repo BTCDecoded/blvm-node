@@ -9,7 +9,7 @@ use tracing::debug;
 
 /// Thread-local storage for current module ID during API calls
 thread_local! {
-    static CURRENT_MODULE_ID: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    static CURRENT_MODULE_ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 use crate::module::api::events::EventManager;
@@ -507,7 +507,7 @@ impl NodeAPI for NodeApiImpl {
     async fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
         // Query UTXO store (read-only)
         // Note: This is read-only, modules cannot modify UTXO set
-        let outpoint_clone = outpoint.clone();
+        let outpoint_clone = *outpoint;
         tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
             move || {
@@ -669,7 +669,7 @@ impl NodeAPI for NodeApiImpl {
                     // Calculate approximate hash rate from difficulty
                     // Hash rate = difficulty * 2^32 / 600 (seconds per block)
                     let difficulty = calculate_difficulty_from_bits(chain_info.tip_header.bits);
-                    (difficulty * 4294967296.0 / 600.0) as f64
+                    difficulty * 4294967296.0 / 600.0
                 } else {
                     0.0
                 }
@@ -834,13 +834,13 @@ impl NodeAPI for NodeApiImpl {
     async fn get_lightning_node_url(&self) -> Result<Option<String>, ModuleError> {
         // Query Lightning module storage for node URL
         // Lightning module stores its URL in module storage tree "lightning_config" with key "node_url"
-        let lightning_module_id = "bllvm-lightning";
+        let lightning_module_id = "blvm-lightning";
 
         // Check if Lightning module storage tree exists
         let trees = self.module_storage_trees.read().await;
         if let Some(module_trees) = trees.get(lightning_module_id) {
             // Look for lightning_config tree
-            let tree_name = format!("module_{}_lightning_config", lightning_module_id);
+            let tree_name = format!("module_{lightning_module_id}_lightning_config");
             if let Some(tree) = module_trees.get(&tree_name) {
                 // Get node_url from storage
                 if let Ok(Some(url_bytes)) = tree.get(b"node_url") {
@@ -857,13 +857,13 @@ impl NodeAPI for NodeApiImpl {
     async fn get_lightning_info(&self) -> Result<Option<LightningInfo>, ModuleError> {
         // Query Lightning module storage for info
         // Lightning module stores its info in module storage tree "lightning_config"
-        let lightning_module_id = "bllvm-lightning";
+        let lightning_module_id = "blvm-lightning";
 
         // Check if Lightning module storage tree exists
         let trees = self.module_storage_trees.read().await;
         if let Some(module_trees) = trees.get(lightning_module_id) {
             // Look for lightning_config tree
-            let tree_name = format!("module_{}_lightning_config", lightning_module_id);
+            let tree_name = format!("module_{lightning_module_id}_lightning_config");
             if let Some(tree) = module_trees.get(&tree_name) {
                 // Get node_url (required field)
                 let node_url = match tree.get(b"node_url") {
@@ -1136,10 +1136,7 @@ impl NodeAPI for NodeApiImpl {
             .get_rpc_channel(&module_id)
             .await
             .ok_or_else(|| {
-                ModuleError::OperationError(format!(
-                    "RPC channel not found for module {}",
-                    module_id
-                ))
+                ModuleError::OperationError(format!("RPC channel not found for module {module_id}"))
             })?;
         drop(ipc_server_guard);
 
@@ -1155,7 +1152,7 @@ impl NodeAPI for NodeApiImpl {
             .register_module_endpoint(method.clone(), handler)
             .await
             .map_err(|e| {
-                ModuleError::OperationError(format!("Failed to register RPC endpoint: {}", e))
+                ModuleError::OperationError(format!("Failed to register RPC endpoint: {e}"))
             })?;
 
         Ok(())
@@ -1170,7 +1167,7 @@ impl NodeAPI for NodeApiImpl {
         rpc_server
             .unregister_module_endpoint(method)
             .await
-            .map_err(|e| ModuleError::OperationError(e))
+            .map_err(ModuleError::OperationError)
     }
 
     async fn register_timer(
@@ -1189,7 +1186,7 @@ impl NodeAPI for NodeApiImpl {
         timer_manager
             .register_timer(module_id.clone(), interval_seconds, callback)
             .await
-            .map_err(|e| ModuleError::OperationError(e))
+            .map_err(ModuleError::OperationError)
     }
 
     async fn cancel_timer(
@@ -1203,7 +1200,7 @@ impl NodeAPI for NodeApiImpl {
         timer_manager
             .cancel_timer(timer_id)
             .await
-            .map_err(|e| ModuleError::OperationError(e))
+            .map_err(ModuleError::OperationError)
     }
 
     async fn schedule_task(
@@ -1222,7 +1219,7 @@ impl NodeAPI for NodeApiImpl {
         timer_manager
             .schedule_task(module_id.clone(), delay_seconds, callback)
             .await
-            .map_err(|e| ModuleError::OperationError(e))
+            .map_err(ModuleError::OperationError)
     }
 
     async fn report_metric(&self, metric: Metric) -> Result<(), ModuleError> {
@@ -1270,8 +1267,7 @@ impl NodeAPI for NodeApiImpl {
                 .get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Filesystem sandbox not initialized for module {}",
-                        module_id
+                        "Filesystem sandbox not initialized for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1282,8 +1278,7 @@ impl NodeAPI for NodeApiImpl {
             dirs.get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Module data directory not set for module {}",
-                        module_id
+                        "Module data directory not set for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1301,7 +1296,7 @@ impl NodeAPI for NodeApiImpl {
 
         tokio::fs::read(&full_path)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to read file: {}", e)))
+            .map_err(|e| ModuleError::OperationError(format!("Failed to read file: {e}")))
     }
 
     async fn write_file(&self, path: String, data: Vec<u8>) -> Result<(), ModuleError> {
@@ -1315,8 +1310,7 @@ impl NodeAPI for NodeApiImpl {
                 .get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Filesystem sandbox not initialized for module {}",
-                        module_id
+                        "Filesystem sandbox not initialized for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1327,8 +1321,7 @@ impl NodeAPI for NodeApiImpl {
             dirs.get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Module data directory not set for module {}",
-                        module_id
+                        "Module data directory not set for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1345,13 +1338,13 @@ impl NodeAPI for NodeApiImpl {
         // Create parent directory if needed
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                ModuleError::OperationError(format!("Failed to create directory: {}", e))
+                ModuleError::OperationError(format!("Failed to create directory: {e}"))
             })?;
         }
 
         tokio::fs::write(&full_path, data)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to write file: {}", e)))
+            .map_err(|e| ModuleError::OperationError(format!("Failed to write file: {e}")))
     }
 
     async fn delete_file(&self, path: String) -> Result<(), ModuleError> {
@@ -1365,8 +1358,7 @@ impl NodeAPI for NodeApiImpl {
                 .get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Filesystem sandbox not initialized for module {}",
-                        module_id
+                        "Filesystem sandbox not initialized for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1377,8 +1369,7 @@ impl NodeAPI for NodeApiImpl {
             dirs.get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Module data directory not set for module {}",
-                        module_id
+                        "Module data directory not set for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1394,7 +1385,7 @@ impl NodeAPI for NodeApiImpl {
 
         tokio::fs::remove_file(&full_path)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to delete file: {}", e)))
+            .map_err(|e| ModuleError::OperationError(format!("Failed to delete file: {e}")))
     }
 
     async fn list_directory(&self, path: String) -> Result<Vec<String>, ModuleError> {
@@ -1408,8 +1399,7 @@ impl NodeAPI for NodeApiImpl {
                 .get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Filesystem sandbox not initialized for module {}",
-                        module_id
+                        "Filesystem sandbox not initialized for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1420,8 +1410,7 @@ impl NodeAPI for NodeApiImpl {
             dirs.get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Module data directory not set for module {}",
-                        module_id
+                        "Module data directory not set for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1438,10 +1427,10 @@ impl NodeAPI for NodeApiImpl {
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&full_path)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to read directory: {}", e)))?;
+            .map_err(|e| ModuleError::OperationError(format!("Failed to read directory: {e}")))?;
 
         while let Some(entry) = dir.next_entry().await.map_err(|e| {
-            ModuleError::OperationError(format!("Failed to read directory entry: {}", e))
+            ModuleError::OperationError(format!("Failed to read directory entry: {e}"))
         })? {
             if let Some(name) = entry.file_name().to_str() {
                 entries.push(name.to_string());
@@ -1462,8 +1451,7 @@ impl NodeAPI for NodeApiImpl {
                 .get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Filesystem sandbox not initialized for module {}",
-                        module_id
+                        "Filesystem sandbox not initialized for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1474,8 +1462,7 @@ impl NodeAPI for NodeApiImpl {
             dirs.get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Module data directory not set for module {}",
-                        module_id
+                        "Module data directory not set for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1491,7 +1478,7 @@ impl NodeAPI for NodeApiImpl {
 
         tokio::fs::create_dir_all(&full_path)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to create directory: {}", e)))
+            .map_err(|e| ModuleError::OperationError(format!("Failed to create directory: {e}")))
     }
 
     async fn get_file_metadata(
@@ -1508,8 +1495,7 @@ impl NodeAPI for NodeApiImpl {
                 .get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Filesystem sandbox not initialized for module {}",
-                        module_id
+                        "Filesystem sandbox not initialized for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1520,8 +1506,7 @@ impl NodeAPI for NodeApiImpl {
             dirs.get(&module_id)
                 .ok_or_else(|| {
                     ModuleError::OperationError(format!(
-                        "Module data directory not set for module {}",
-                        module_id
+                        "Module data directory not set for module {module_id}"
                     ))
                 })?
                 .clone()
@@ -1536,7 +1521,7 @@ impl NodeAPI for NodeApiImpl {
         };
 
         let metadata = tokio::fs::metadata(&full_path).await.map_err(|e| {
-            ModuleError::OperationError(format!("Failed to get file metadata: {}", e))
+            ModuleError::OperationError(format!("Failed to get file metadata: {e}"))
         })?;
 
         let modified = metadata
@@ -1581,7 +1566,7 @@ impl NodeAPI for NodeApiImpl {
 
         // Use node's storage to create an isolated tree for this module
         // Tree name format: module_{module_id}_{name}
-        let tree_name = format!("module_{}_{}", module_id, name);
+        let tree_name = format!("module_{module_id}_{name}");
 
         // Check if tree already exists
         {
@@ -1605,13 +1590,13 @@ impl NodeAPI for NodeApiImpl {
             let tree_name_clone = tree_name.clone();
             move || {
                 storage.open_tree(&tree_name_clone).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to open storage tree: {}", e))
+                    ModuleError::OperationError(format!("Failed to open storage tree: {e}"))
                 })
             }
         })
         .await
         .map_err(|e| {
-            ModuleError::OperationError(format!("Failed to spawn blocking task: {}", e))
+            ModuleError::OperationError(format!("Failed to spawn blocking task: {e}"))
         })??;
 
         // Store the tree
@@ -1640,21 +1625,19 @@ impl NodeAPI for NodeApiImpl {
             let trees = self.module_storage_trees.read().await;
             let module_trees = trees.get(&module_id).ok_or_else(|| {
                 ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {}",
-                    module_id
+                    "Module storage not initialized for module {module_id}"
                 ))
             })?;
             module_trees
                 .get(&tree_id)
                 .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {}", tree_id))
+                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
                 })?
                 .clone()
         };
 
-        tree.insert(&key, &value).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to insert into storage: {}", e))
-        })
+        tree.insert(&key, &value)
+            .map_err(|e| ModuleError::OperationError(format!("Failed to insert into storage: {e}")))
     }
 
     async fn storage_get(
@@ -1670,20 +1653,19 @@ impl NodeAPI for NodeApiImpl {
             let trees = self.module_storage_trees.read().await;
             let module_trees = trees.get(&module_id).ok_or_else(|| {
                 ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {}",
-                    module_id
+                    "Module storage not initialized for module {module_id}"
                 ))
             })?;
             module_trees
                 .get(&tree_id)
                 .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {}", tree_id))
+                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
                 })?
                 .clone()
         };
 
         tree.get(&key)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to get from storage: {}", e)))
+            .map_err(|e| ModuleError::OperationError(format!("Failed to get from storage: {e}")))
     }
 
     async fn storage_remove(&self, tree_id: String, key: Vec<u8>) -> Result<(), ModuleError> {
@@ -1695,21 +1677,19 @@ impl NodeAPI for NodeApiImpl {
             let trees = self.module_storage_trees.read().await;
             let module_trees = trees.get(&module_id).ok_or_else(|| {
                 ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {}",
-                    module_id
+                    "Module storage not initialized for module {module_id}"
                 ))
             })?;
             module_trees
                 .get(&tree_id)
                 .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {}", tree_id))
+                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
                 })?
                 .clone()
         };
 
-        tree.remove(&key).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to remove from storage: {}", e))
-        })
+        tree.remove(&key)
+            .map_err(|e| ModuleError::OperationError(format!("Failed to remove from storage: {e}")))
     }
 
     async fn storage_contains_key(
@@ -1725,20 +1705,19 @@ impl NodeAPI for NodeApiImpl {
             let trees = self.module_storage_trees.read().await;
             let module_trees = trees.get(&module_id).ok_or_else(|| {
                 ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {}",
-                    module_id
+                    "Module storage not initialized for module {module_id}"
                 ))
             })?;
             module_trees
                 .get(&tree_id)
                 .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {}", tree_id))
+                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
                 })?
                 .clone()
         };
 
         tree.contains_key(&key).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to check key in storage: {}", e))
+            ModuleError::OperationError(format!("Failed to check key in storage: {e}"))
         })
     }
 
@@ -1751,14 +1730,13 @@ impl NodeAPI for NodeApiImpl {
             let trees = self.module_storage_trees.read().await;
             let module_trees = trees.get(&module_id).ok_or_else(|| {
                 ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {}",
-                    module_id
+                    "Module storage not initialized for module {module_id}"
                 ))
             })?;
             module_trees
                 .get(&tree_id)
                 .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {}", tree_id))
+                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
                 })?
                 .clone()
         };
@@ -1769,8 +1747,7 @@ impl NodeAPI for NodeApiImpl {
                 Ok((key, value)) => result.push((key, value)),
                 Err(e) => {
                     return Err(ModuleError::OperationError(format!(
-                        "Failed to iterate storage: {}",
-                        e
+                        "Failed to iterate storage: {e}"
                     )))
                 }
             }
@@ -1792,14 +1769,13 @@ impl NodeAPI for NodeApiImpl {
             let trees = self.module_storage_trees.read().await;
             let module_trees = trees.get(&module_id).ok_or_else(|| {
                 ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {}",
-                    module_id
+                    "Module storage not initialized for module {module_id}"
                 ))
             })?;
             module_trees
                 .get(&tree_id)
                 .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {}", tree_id))
+                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
                 })?
                 .clone()
         };
@@ -1809,18 +1785,12 @@ impl NodeAPI for NodeApiImpl {
             match op {
                 crate::module::ipc::protocol::StorageOperation::Insert { key, value } => {
                     tree.insert(&key, &value).map_err(|e| {
-                        ModuleError::OperationError(format!(
-                            "Failed to insert in transaction: {}",
-                            e
-                        ))
+                        ModuleError::OperationError(format!("Failed to insert in transaction: {e}"))
                     })?;
                 }
                 crate::module::ipc::protocol::StorageOperation::Remove { key } => {
                     tree.remove(&key).map_err(|e| {
-                        ModuleError::OperationError(format!(
-                            "Failed to remove in transaction: {}",
-                            e
-                        ))
+                        ModuleError::OperationError(format!("Failed to remove in transaction: {e}"))
                     })?;
                 }
             }
@@ -1913,7 +1883,7 @@ impl NodeAPI for NodeApiImpl {
             let modules = manager.list_modules().await;
             let actual_module_id = modules
                 .iter()
-                .find(|id| id.starts_with(&format!("{}_", module_name)))
+                .find(|id| id.starts_with(&format!("{module_name}_")))
                 .cloned()
                 .unwrap_or_else(|| module_id.to_string());
 
@@ -1974,7 +1944,7 @@ impl NodeAPI for NodeApiImpl {
             .module_id
             .as_ref()
             .or_else(|| self.current_module_id_for_api.as_ref())
-            .map(|s| s.clone())
+            .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
         router
@@ -2056,19 +2026,16 @@ impl NodeAPI for NodeApiImpl {
                 .send_to_peer(socket_addr, packet_data)
                 .await
                 .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to send mesh packet: {}", e))
+                    ModuleError::OperationError(format!("Failed to send mesh packet: {e}"))
                 })?;
         } else {
             // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
             use crate::network::transport::TransportAddr;
-            let transport_addr = if peer_addr.starts_with("tcp:") {
-                let addr_str = &peer_addr[4..];
+            let transport_addr = if let Some(addr_str) = peer_addr.strip_prefix("tcp:") {
                 addr_str
                     .parse::<std::net::SocketAddr>()
                     .map(TransportAddr::Tcp)
-                    .map_err(|e| {
-                        ModuleError::OperationError(format!("Invalid TCP address: {}", e))
-                    })?
+                    .map_err(|e| ModuleError::OperationError(format!("Invalid TCP address: {e}")))?
             } else if peer_addr.starts_with("quinn:") {
                 #[cfg(feature = "quinn")]
                 {
@@ -2107,8 +2074,7 @@ impl NodeAPI for NodeApiImpl {
                 ));
             } else {
                 return Err(ModuleError::OperationError(format!(
-                    "Invalid peer address format: {}",
-                    peer_addr
+                    "Invalid peer address format: {peer_addr}"
                 )));
             };
 
@@ -2117,7 +2083,7 @@ impl NodeAPI for NodeApiImpl {
                 .send_to_peer_by_transport(transport_addr, packet_data)
                 .await
                 .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to send mesh packet: {}", e))
+                    ModuleError::OperationError(format!("Failed to send mesh packet: {e}"))
                 })?;
         }
 
@@ -2141,19 +2107,16 @@ impl NodeAPI for NodeApiImpl {
                 .send_to_peer(socket_addr, message_data)
                 .await
                 .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to send Stratum V2 message: {}", e))
+                    ModuleError::OperationError(format!("Failed to send Stratum V2 message: {e}"))
                 })?;
         } else {
             // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
             use crate::network::transport::TransportAddr;
-            let transport_addr = if peer_addr.starts_with("tcp:") {
-                let addr_str = &peer_addr[4..];
+            let transport_addr = if let Some(addr_str) = peer_addr.strip_prefix("tcp:") {
                 addr_str
                     .parse::<std::net::SocketAddr>()
                     .map(TransportAddr::Tcp)
-                    .map_err(|e| {
-                        ModuleError::OperationError(format!("Invalid TCP address: {}", e))
-                    })?
+                    .map_err(|e| ModuleError::OperationError(format!("Invalid TCP address: {e}")))?
             } else if peer_addr.starts_with("quinn:") {
                 #[cfg(feature = "quinn")]
                 {
@@ -2192,8 +2155,7 @@ impl NodeAPI for NodeApiImpl {
                 ));
             } else {
                 return Err(ModuleError::OperationError(format!(
-                    "Invalid peer address format: {}",
-                    peer_addr
+                    "Invalid peer address format: {peer_addr}"
                 )));
             };
 
@@ -2202,7 +2164,7 @@ impl NodeAPI for NodeApiImpl {
                 .send_to_peer_by_transport(transport_addr, message_data)
                 .await
                 .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to send Stratum V2 message: {}", e))
+                    ModuleError::OperationError(format!("Failed to send Stratum V2 message: {e}"))
                 })?;
         }
 
@@ -2292,7 +2254,7 @@ impl NodeAPI for NodeApiImpl {
             .storage
             .chain()
             .get_height()
-            .map_err(|e| ModuleError::OperationError(format!("Failed to get height: {}", e)))?
+            .map_err(|e| ModuleError::OperationError(format!("Failed to get height: {e}")))?
             .ok_or_else(|| ModuleError::OperationError("Chain not initialized".to_string()))?;
 
         // Get tip header
@@ -2300,7 +2262,7 @@ impl NodeAPI for NodeApiImpl {
             .storage
             .chain()
             .get_tip_header()
-            .map_err(|e| ModuleError::OperationError(format!("Failed to get tip header: {}", e)))?
+            .map_err(|e| ModuleError::OperationError(format!("Failed to get tip header: {e}")))?
             .ok_or_else(|| ModuleError::OperationError("No chain tip".to_string()))?;
 
         // Get headers for difficulty adjustment
@@ -2336,13 +2298,11 @@ impl NodeAPI for NodeApiImpl {
             .storage
             .utxos()
             .get_all_utxos()
-            .map_err(|e| ModuleError::OperationError(format!("Failed to get UTXO set: {}", e)))?;
+            .map_err(|e| ModuleError::OperationError(format!("Failed to get UTXO set: {e}")))?;
 
         // Convert coinbase script/address to ByteString
         let coinbase_script_bytes = coinbase_script.unwrap_or_default();
-        let coinbase_address_bytes = coinbase_address
-            .map(|a| a.into_bytes())
-            .unwrap_or_default();
+        let coinbase_address_bytes = coinbase_address.map(|a| a.into_bytes()).unwrap_or_default();
 
         // Use formally verified consensus function (same as RPC getblocktemplate)
         let template = blvm_consensus::mining::create_block_template(
@@ -2354,7 +2314,7 @@ impl NodeAPI for NodeApiImpl {
             &coinbase_script_bytes,
             &coinbase_address_bytes,
         )
-        .map_err(|e| ModuleError::OperationError(format!("Template creation failed: {}", e)))?;
+        .map_err(|e| ModuleError::OperationError(format!("Template creation failed: {e}")))?;
 
         Ok(template)
     }
@@ -2380,9 +2340,10 @@ impl NodeAPI for NodeApiImpl {
         let params = json!([block_hex]);
 
         // Call submit_block via RPC method
-        let result = mining_rpc.submit_block(&params).await.map_err(|e| {
-            ModuleError::OperationError(format!("Failed to submit block: {}", e))
-        })?;
+        let result = mining_rpc
+            .submit_block(&params)
+            .await
+            .map_err(|e| ModuleError::OperationError(format!("Failed to submit block: {e}")))?;
 
         // Parse result
         let result_str = result.as_str().unwrap_or("");

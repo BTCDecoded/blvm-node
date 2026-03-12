@@ -218,7 +218,7 @@ impl TimerManager {
             debug!("Cancelled timer {}", timer_id);
             Ok(())
         } else {
-            Err(format!("Timer {} not found", timer_id))
+            Err(format!("Timer {timer_id} not found"))
         }
     }
 
@@ -267,7 +267,7 @@ impl TimerManager {
             debug!("Cancelled task {}", task_id);
             Ok(())
         } else {
-            Err(format!("Task {} not found", task_id))
+            Err(format!("Task {task_id} not found"))
         }
     }
 

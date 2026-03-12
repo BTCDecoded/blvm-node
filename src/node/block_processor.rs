@@ -94,11 +94,13 @@ pub fn prepare_block_validation_context(
 ) -> Result<(Vec<Vec<Witness>>, Option<Vec<BlockHeader>>)> {
     // Get witnesses for this block
     let block_hash = blockstore.get_block_hash(block);
-    let witnesses = blockstore
-        .get_witness(&block_hash)?
-        .unwrap_or_else(|| block.transactions.iter()
+    let witnesses = blockstore.get_witness(&block_hash)?.unwrap_or_else(|| {
+        block
+            .transactions
+            .iter()
             .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
-            .collect());
+            .collect()
+    });
 
     // Get recent headers for median time-past (BIP113)
     let recent_headers = blockstore

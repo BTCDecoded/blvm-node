@@ -69,7 +69,7 @@ pub fn calculate_tx_hash(tx: &Transaction) -> Hash {
         // Previous output hash (32 bytes)
         data.extend_from_slice(&input.prevout.hash);
         // Previous output index (4 bytes, little-endian)
-        data.extend_from_slice(&(input.prevout.index as u32).to_le_bytes());
+        data.extend_from_slice(&input.prevout.index.to_le_bytes());
         // Script length (varint)
         data.extend_from_slice(&encode_varint(input.script_sig.len() as u64));
         // Script

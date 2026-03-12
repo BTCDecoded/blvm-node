@@ -71,7 +71,10 @@ impl BitcoinCoreBlockReader {
         cache_dir: Option<&Path>,
     ) -> Result<Self> {
         if !blocks_dir.exists() {
-            return Err(anyhow::anyhow!("Blocks directory does not exist: {:?}", blocks_dir));
+            return Err(anyhow::anyhow!(
+                "Blocks directory does not exist: {:?}",
+                blocks_dir
+            ));
         }
 
         let index_cache_path = cache_dir.map(|dir| {
@@ -81,7 +84,7 @@ impl BitcoinCoreBlockReader {
                 BitcoinCoreNetwork::Regtest => "regtest",
                 BitcoinCoreNetwork::Signet => "signet",
             };
-            dir.join(format!("block_index_{}.bin", network_str))
+            dir.join(format!("block_index_{network_str}.bin"))
         });
 
         Ok(Self {
@@ -138,7 +141,7 @@ impl BitcoinCoreBlockReader {
         for file_path in block_files {
             if let Err(e) = self.scan_block_file(&file_path, magic, &mut index) {
                 // Log error but continue with other files
-                eprintln!("Warning: Failed to scan block file {:?}: {}", file_path, e);
+                eprintln!("Warning: Failed to scan block file {file_path:?}: {e}");
             }
         }
 
@@ -153,7 +156,7 @@ impl BitcoinCoreBlockReader {
         index: &mut HashMap<Hash, BlockLocation>,
     ) -> Result<()> {
         let mut file = File::open(file_path)
-            .with_context(|| format!("Failed to open block file: {:?}", file_path))?;
+            .with_context(|| format!("Failed to open block file: {file_path:?}"))?;
 
         let mut offset = 0u64;
 
@@ -243,7 +246,7 @@ impl BitcoinCoreBlockReader {
                     let index = self.build_index()?;
                     // Save to cache for next time
                     if let Err(e) = self.save_index_to_cache(cache_path, &index) {
-                        eprintln!("Warning: Failed to save block index cache: {}", e);
+                        eprintln!("Warning: Failed to save block index cache: {e}");
                     }
                     *index_guard = Some(index);
                 }
@@ -266,7 +269,7 @@ impl BitcoinCoreBlockReader {
         use std::io::Read;
 
         let mut file = File::open(cache_path)
-            .with_context(|| format!("Failed to open index cache: {:?}", cache_path))?;
+            .with_context(|| format!("Failed to open index cache: {cache_path:?}"))?;
 
         let mut data = Vec::new();
         file.read_to_end(&mut data)
@@ -315,7 +318,7 @@ impl BitcoinCoreBlockReader {
         // Create parent directory if it doesn't exist
         if let Some(parent) = cache_path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create cache directory: {:?}", parent))?;
+                .with_context(|| format!("Failed to create cache directory: {parent:?}"))?;
         }
 
         let network_str = match self.network {
@@ -336,7 +339,7 @@ impl BitcoinCoreBlockReader {
             .map_err(|e| anyhow::anyhow!("Failed to serialize index cache: {}", e))?;
 
         let mut file = File::create(cache_path)
-            .with_context(|| format!("Failed to create index cache: {:?}", cache_path))?;
+            .with_context(|| format!("Failed to create index cache: {cache_path:?}"))?;
 
         file.write_all(&data)
             .context("Failed to write index cache")?;
@@ -377,13 +380,12 @@ impl BitcoinCoreBlockReader {
 
         // Read block data
         let mut block_data = vec![0u8; location.size as usize];
-        file.read_exact(&mut block_data)
-            .with_context(|| {
-                format!(
-                    "Failed to read block data (size: {}) from file {:?}",
-                    location.size, location.file_path
-                )
-            })?;
+        file.read_exact(&mut block_data).with_context(|| {
+            format!(
+                "Failed to read block data (size: {}) from file {:?}",
+                location.size, location.file_path
+            )
+        })?;
 
         // Deserialize block
         let (block, _witnesses) = deserialize_block_with_witnesses(&block_data)
@@ -408,9 +410,9 @@ impl BitcoinCoreBlockReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs::File;
     use std::io::Write;
+    use tempfile::TempDir;
 
     fn create_test_block_file(dir: &Path, filename: &str, blocks: &[&[u8]]) -> Result<()> {
         let file_path = dir.join(filename);
@@ -438,7 +440,7 @@ mod tests {
         // Test that reader can be created
         let reader = BitcoinCoreBlockReader::new(&blocks_dir, BitcoinCoreNetwork::Mainnet);
         assert!(reader.is_ok());
-        
+
         let reader = reader.unwrap();
         // Test that block_count works (should return 0 for empty directory)
         assert_eq!(reader.block_count().unwrap(), 0);
@@ -448,10 +450,9 @@ mod tests {
     fn test_block_reader_nonexistent_dir() {
         let temp_dir = TempDir::new().unwrap();
         let blocks_dir = temp_dir.path().join("nonexistent");
-        
+
         // Test that reader fails gracefully for nonexistent directory
         let reader = BitcoinCoreBlockReader::new(&blocks_dir, BitcoinCoreNetwork::Mainnet);
         assert!(reader.is_err());
     }
 }
-

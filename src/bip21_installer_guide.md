@@ -15,7 +15,7 @@ use blvm_node::bip21::UriSchemeRegistration;
 
 // Configure registration
 let registration = UriSchemeRegistration::new(
-    "/usr/local/bin/bllvm",  // or "C:\\Program Files\\Bitcoin Commons\\bllvm.exe" on Windows
+    "/usr/local/bin/blvm",  // or "C:\\Program Files\\Bitcoin Commons\\blvm.exe" on Windows
     "Bitcoin Commons BLLVM"
 )
 .with_description("Bitcoin Node")
@@ -68,7 +68,7 @@ let files = registration.generate_installer_files();
 ```bash
 # Generate desktop entry
 registration::write_linux_desktop_entry(&config, 
-    &home_dir.join(".local/share/applications/bitcoin-commons-bllvm-bitcoin.desktop"))?;
+    &home_dir.join(".local/share/applications/bitcoin-commons-blvm-bitcoin.desktop"))?;
 
 # Update desktop database
 xdg-desktop-menu forceupdate
@@ -79,7 +79,7 @@ xdg-desktop-menu forceupdate
 # Requires root
 # Install desktop entry
 registration::write_linux_desktop_entry(&config,
-    Path::new("/usr/share/applications/bitcoin-commons-bllvm-bitcoin.desktop"))?;
+    Path::new("/usr/share/applications/bitcoin-commons-blvm-bitcoin.desktop"))?;
 
 # Install MIME type
 write_file("/usr/share/mime/packages/bitcoin.xml", 
@@ -102,7 +102,7 @@ update-mime-database /usr/share/mime
 %install
 # Generate desktop entry
 # (Run during build with registration utilities)
-install -m 644 bitcoin-commons-bllvm-bitcoin.desktop %{buildroot}%{_datadir}/applications/
+install -m 644 bitcoin-commons-blvm-bitcoin.desktop %{buildroot}%{_datadir}/applications/
 install -m 644 bitcoin.xml %{buildroot}%{_datadir}/mime/packages/
 
 %post
@@ -113,13 +113,13 @@ update-mime-database %{_datadir}/mime || :
 
 ### Example 2: DEB Package
 
-Add to `debian/bitcoin-commons-bllvm.install`:
+Add to `debian/bitcoin-commons-blvm.install`:
 ```
-usr/share/applications/bitcoin-commons-bllvm-bitcoin.desktop
+usr/share/applications/bitcoin-commons-blvm-bitcoin.desktop
 usr/share/mime/packages/bitcoin.xml
 ```
 
-Add to `debian/bitcoin-commons-bllvm.postinst`:
+Add to `debian/bitcoin-commons-blvm.postinst`:
 ```bash
 #!/bin/bash
 set -e

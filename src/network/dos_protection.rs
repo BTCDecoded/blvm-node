@@ -145,6 +145,17 @@ pub struct DosProtectionManager {
     ban_duration_seconds: u64,
 }
 
+impl Default for DosProtectionManager {
+    fn default() -> Self {
+        Self::new(
+            10,    // Max 10 connections per IP per window
+            60,    // 60 second window
+            10000, // Max 10k messages in queue
+            200,   // Max 200 active connections
+        )
+    }
+}
+
 impl DosProtectionManager {
     /// Create a new DoS protection manager
     pub fn new(
@@ -191,16 +202,6 @@ impl DosProtectionManager {
             })),
             ban_duration_seconds,
         }
-    }
-
-    /// Create with default settings
-    pub fn default() -> Self {
-        Self::new(
-            10,    // Max 10 connections per IP per window
-            60,    // 60 second window
-            10000, // Max 10k messages in queue
-            200,   // Max 200 active connections
-        )
     }
 
     /// Check if a connection attempt is allowed

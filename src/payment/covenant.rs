@@ -212,7 +212,7 @@ impl CovenantEngine {
 
         #[cfg(feature = "ctv")]
         {
-            // Transaction type from bllvm-node is the same as bllvm-consensus (re-exported)
+            // Transaction type from blvm-node is the same as blvm-consensus (re-exported)
             // Calculate template hash for the transaction
             let tx_template_hash = calculate_template_hash(tx, input_index).map_err(|e| {
                 PaymentError::ProcessingError(format!("CTV hash calculation failed: {}", e))

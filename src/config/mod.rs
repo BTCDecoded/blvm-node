@@ -288,7 +288,7 @@ impl Default for ModuleResourceLimitsConfig {
 /// Per-network default assume-valid height (Core chainparams defaultAssumeValid)
 pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
     match network.to_lowercase().as_str() {
-        "mainnet" | "bitcoinv1" => 912_683,   // Core mainnet default
+        "mainnet" | "bitcoinv1" => 912_683,  // Core mainnet default
         "testnet" | "testnet3" => 4_550_000, // Core testnet default
         "signet" => 267_665,                 // Core signet default
         _ => 0,                              // Regtest and unknown: validate all
@@ -501,36 +501,24 @@ impl Default for NodeConfig {
     }
 }
 
-
 /// Governance message relay configuration
 #[cfg(feature = "governance")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GovernanceConfig {
     /// Enable governance message relay (default: false)
-    /// If false, governance messages are gossiped but not forwarded to bllvm-commons
+    /// If false, governance messages are gossiped but not forwarded to blvm-commons
     #[serde(default = "default_false")]
     pub enabled: bool,
 
-    /// URL for bllvm-commons internal API (e.g., "http://10.0.0.2:8080")
+    /// URL for blvm-commons internal API (e.g., "http://10.0.0.2:8080")
     /// Used for forwarding P2P governance messages via VPN
     #[serde(default)]
     pub commons_url: Option<String>,
 
-    /// API key for authenticating with bllvm-commons internal API
+    /// API key for authenticating with blvm-commons internal API
     /// Can also be set via COMMONS_API_KEY environment variable
     #[serde(default)]
     pub api_key: Option<String>,
-}
-
-#[cfg(feature = "governance")]
-impl Default for GovernanceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            commons_url: None,
-            api_key: None,
-        }
-    }
 }
 
 /// Ban list sharing configuration
@@ -773,7 +761,7 @@ impl NodeConfig {
                         .timeout(std::time::Duration::from_secs(5))
                         .build()?;
 
-                    let health_url = format!("{}/internal/health", commons_url);
+                    let health_url = format!("{commons_url}/internal/health");
                     debug!("Auto-detecting governance server at {}", health_url);
 
                     match client.get(&health_url).send().await {
@@ -840,7 +828,7 @@ pub struct MergeMiningFeeConfig {
     /// Contributor identifier (for tracking)
     pub contributor_id: Option<String>,
 
-    /// Automatic distribution enabled (default: false, requires bllvm-commons integration)
+    /// Automatic distribution enabled (default: false, requires blvm-commons integration)
     #[serde(default = "default_false")]
     pub auto_distribute: bool,
 }
@@ -1422,9 +1410,8 @@ impl NodeConfig {
                 // Check if binding to non-localhost
                 if !is_localhost(&rpc_addr) {
                     warnings.push(format!(
-                        "SECURITY WARNING: RPC server is binding to {} (non-localhost) but authentication is not required. \
-                        This exposes your node to unauthorized access. Consider setting rpc_auth.required = true",
-                        rpc_addr
+                        "SECURITY WARNING: RPC server is binding to {rpc_addr} (non-localhost) but authentication is not required. \
+                        This exposes your node to unauthorized access. Consider setting rpc_auth.required = true"
                     ));
                 }
             } else if rpc_auth.tokens.is_empty() && rpc_auth.certificates.is_empty() {
@@ -1438,9 +1425,8 @@ impl NodeConfig {
             // No auth config at all
             if !is_localhost(&rpc_addr) {
                 warnings.push(format!(
-                    "SECURITY WARNING: RPC server is binding to {} (non-localhost) without authentication. \
-                    This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true",
-                    rpc_addr
+                    "SECURITY WARNING: RPC server is binding to {rpc_addr} (non-localhost) without authentication. \
+                    This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true"
                 ));
             }
         }
@@ -1451,16 +1437,14 @@ impl NodeConfig {
                 if let Some(ref rpc_auth) = self.rpc_auth {
                     if !rpc_auth.required {
                         warnings.push(format!(
-                            "SECURITY WARNING: REST API is binding to {} (non-localhost) but authentication is not required. \
-                            This exposes your node to unauthorized access. Consider setting rpc_auth.required = true",
-                            rest_addr
+                            "SECURITY WARNING: REST API is binding to {rest_addr} (non-localhost) but authentication is not required. \
+                            This exposes your node to unauthorized access. Consider setting rpc_auth.required = true"
                         ));
                     }
                 } else {
                     warnings.push(format!(
-                        "SECURITY WARNING: REST API is binding to {} (non-localhost) without authentication. \
-                        This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true",
-                        rest_addr
+                        "SECURITY WARNING: REST API is binding to {rest_addr} (non-localhost) without authentication. \
+                        This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true"
                     ));
                 }
             }

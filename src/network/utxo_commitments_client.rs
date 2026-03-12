@@ -9,8 +9,11 @@
 
 #[cfg(feature = "utxo-commitments")]
 use crate::network::{
-    protocol::{GetFilteredBlockMessage, GetUTXOSetMessage, GetUTXOProofMessage},
-    protocol_extensions::{serialize_get_filtered_block, serialize_get_utxo_set, serialize_get_utxo_proof, deserialize_utxo_proof},
+    protocol::{GetFilteredBlockMessage, GetUTXOProofMessage, GetUTXOSetMessage},
+    protocol_extensions::{
+        deserialize_utxo_proof, serialize_get_filtered_block, serialize_get_utxo_proof,
+        serialize_get_utxo_set,
+    },
     transport::TransportType,
     NetworkManager,
 };
@@ -148,7 +151,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 Some((addr, transport)) => (addr, transport),
                 None => {
                     return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Invalid peer_id format: {}", peer_id)
+                        format!("Invalid peer_id format: {peer_id}")
                     ));
                 }
             };
@@ -196,7 +199,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // If we know the peer doesn't support UTXO commitments, return error early
             if !peer_supports_utxo_commitments {
                 return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::VerificationFailed(
-                    format!("Peer {} does not support UTXO commitments (missing NODE_UTXO_COMMITMENTS service flag)", peer_id)
+                    format!("Peer {peer_id} does not support UTXO commitments (missing NODE_UTXO_COMMITMENTS service flag)")
                 ));
             }
 
@@ -212,7 +215,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
             let wire_format = serialize_get_utxo_set(&get_utxo_set_msg)
                 .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                    format!("Failed to serialize GetUTXOSet: {}", e)
+                    format!("Failed to serialize GetUTXOSet: {e}")
                 ))?;
 
             // Send message to peer via NetworkManager
@@ -220,7 +223,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 let network = network_manager.read().await;
                 network.send_to_peer(peer_addr, wire_format).await
                     .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Failed to send GetUTXOSet to peer {}: {}", peer_addr, e)
+                        format!("Failed to send GetUTXOSet to peer {peer_addr}: {e}")
                     ))?;
             }
 
@@ -239,7 +242,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                             use crate::network::protocol::{ProtocolMessage, ProtocolParser};
                             let parsed = ProtocolParser::parse_message(&response_data)
                                 .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                                    format!("Failed to parse UTXOSet response: {}", e)
+                                    format!("Failed to parse UTXOSet response: {e}")
                                 ))?;
 
                             match parsed {
@@ -255,7 +258,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                     Ok(commitment)
                                 }
                                 _ => Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                                    format!("Unexpected response type: expected UTXOSet")
+                                    "Unexpected response type: expected UTXOSet".to_string()
                                 ))
                             }
                         }
@@ -275,7 +278,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         pending.remove(&request_id);
                     }
                     Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Request timeout: no response received within {} seconds", timeout_seconds)
+                        format!("Request timeout: no response received within {timeout_seconds} seconds")
                     ))
                 }
             }
@@ -362,7 +365,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 Some((addr, transport)) => (addr, transport),
                 None => {
                     return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Invalid peer_id format: {}", peer_id)
+                        format!("Invalid peer_id format: {peer_id}")
                     ));
                 }
             };
@@ -401,7 +404,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // Serialize message using protocol adapter (handles TCP vs Iroh format)
             let wire_format = serialize_get_filtered_block(&get_filtered_block_msg)
                 .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                    format!("Failed to serialize GetFilteredBlock: {}", e)
+                    format!("Failed to serialize GetFilteredBlock: {e}")
                 ))?;
 
             // Send message to peer via NetworkManager
@@ -409,7 +412,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 let network = network_manager.read().await;
                 network.send_to_peer(peer_addr, wire_format).await
                     .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Failed to send GetFilteredBlock to peer {}: {}", peer_addr, e)
+                        format!("Failed to send GetFilteredBlock to peer {peer_addr}: {e}")
                     ))?;
             }
 
@@ -428,7 +431,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                             use crate::network::protocol::{ProtocolMessage, ProtocolParser};
                             let parsed = ProtocolParser::parse_message(&response_data)
                                 .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                                    format!("Failed to parse FilteredBlock response: {}", e)
+                                    format!("Failed to parse FilteredBlock response: {e}")
                                 ))?;
 
                             match parsed {
@@ -479,7 +482,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                                     Ok(filtered_block)
                                 }
                                 _ => Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                                    format!("Unexpected response type: expected FilteredBlock")
+                                    "Unexpected response type: expected FilteredBlock".to_string()
                                 ))
                             }
                         }
@@ -499,7 +502,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         pending.remove(&request_id);
                     }
                     Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Request timeout: no response received within {} seconds", timeout_seconds)
+                        format!("Request timeout: no response received within {timeout_seconds} seconds")
                     ))
                 }
             }
@@ -515,15 +518,24 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
         peer_id: &str,
         block_hash: Hash,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = UtxoCommitmentResult<blvm_protocol::utxo_commitments::network_integration::FullBlock>> + Send + '_>,
+        Box<
+            dyn std::future::Future<
+                    Output = UtxoCommitmentResult<
+                        blvm_protocol::utxo_commitments::network_integration::FullBlock,
+                    >,
+                > + Send
+                + '_,
+        >,
     > {
         let network_manager = self.network_manager.clone();
         let peer_id = peer_id.to_string();
 
         Box::pin(async move {
-            use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage, ProtocolParser};
-            use blvm_protocol::utxo_commitments::network_integration::FullBlock;
+            use crate::network::protocol::{
+                GetDataMessage, InventoryVector, ProtocolMessage, ProtocolParser,
+            };
             use blvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
+            use blvm_protocol::utxo_commitments::network_integration::FullBlock;
 
             // Parse peer address
             let peer_addr = if peer_id.starts_with("tcp:") {
@@ -531,7 +543,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     .strip_prefix("tcp:")
                     .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
                     .ok_or_else(|| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Invalid TCP peer address: {}", peer_id)
+                        format!("Invalid TCP peer address: {peer_id}")
                     ))?
             } else if peer_id.starts_with("iroh:") {
                 // For Iroh, we'd need to resolve the pubkey to an address
@@ -544,7 +556,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 peer_id
                     .parse::<std::net::SocketAddr>()
                     .map_err(|_| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Invalid peer address format: {}", peer_id)
+                        format!("Invalid peer address format: {peer_id}")
                     ))?
             };
 
@@ -565,14 +577,14 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // Serialize and send GetData message
             let wire_format = ProtocolParser::serialize_message(&ProtocolMessage::GetData(get_data_msg))
                 .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                    format!("Failed to serialize GetData: {}", e)
+                    format!("Failed to serialize GetData: {e}")
                 ))?;
 
             {
                 let network = network_manager.read().await;
                 network.send_to_peer(peer_addr, wire_format).await
                     .map_err(|e| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Failed to send GetData to peer {}: {}", peer_addr, e)
+                        format!("Failed to send GetData to peer {peer_addr}: {e}")
                     ))?;
             }
 
@@ -608,7 +620,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                         pending.remove(&(peer_addr.ip(), block_hash));
                     }
                     Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Block request timeout: no response received within {} seconds", timeout_seconds)
+                        format!("Block request timeout: no response received within {timeout_seconds} seconds")
                     ))
                 }
             }
@@ -636,7 +648,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     .read()
                     .await
                     .keys()
-                    .map(|addr| format!("tcp:{}", addr))
+                    .map(|addr| format!("tcp:{addr}"))
                     .collect();
                 // Shuffle to prevent predictable peer selection (eclipse resistance)
                 use rand::seq::SliceRandom;
@@ -668,7 +680,12 @@ impl UtxoCommitmentsClient {
         block_height: Natural,
         block_hash: Hash,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(blvm_consensus::types::UTXO, Vec<u8>), anyhow::Error>> + Send + '_>,
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(blvm_consensus::types::UTXO, Vec<u8>), anyhow::Error>,
+                > + Send
+                + '_,
+        >,
     > {
         let network_manager = self.network_manager.clone();
         let peer_id = peer_id.to_string();
@@ -691,7 +708,9 @@ impl UtxoCommitmentsClient {
                         .and_then(|s| hex::decode(s).ok())
                         .and_then(|bytes| {
                             if bytes.len() == 32 {
-                                Some(crate::network::transport::TransportAddr::Iroh(bytes.try_into().unwrap()))
+                                Some(crate::network::transport::TransportAddr::Iroh(
+                                    bytes.try_into().unwrap(),
+                                ))
                             } else {
                                 None
                             }
@@ -704,10 +723,15 @@ impl UtxoCommitmentsClient {
                 }
             } else {
                 // Try parsing as direct SocketAddr
-                peer_id.parse::<std::net::SocketAddr>().ok().map(|addr| (addr, None))
+                peer_id
+                    .parse::<std::net::SocketAddr>()
+                    .ok()
+                    .map(|addr| (addr, None))
             };
 
-            let peer_addr = peer_addr_opt.ok_or_else(|| anyhow::anyhow!("Invalid peer ID: {}", peer_id))?.0;
+            let peer_addr = peer_addr_opt
+                .ok_or_else(|| anyhow::anyhow!("Invalid peer ID: {}", peer_id))?
+                .0;
 
             // Register pending request
             let (request_id, response_rx) = {
@@ -730,14 +754,20 @@ impl UtxoCommitmentsClient {
 
             {
                 let network = network_manager.read().await;
-                network.send_to_peer(peer_addr, wire_format).await
-                    .map_err(|e| anyhow::anyhow!("Failed to send GetUTXOProof to peer {}: {}", peer_addr, e))?;
+                network
+                    .send_to_peer(peer_addr, wire_format)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to send GetUTXOProof to peer {}: {}", peer_addr, e)
+                    })?;
             }
 
             // Await response
             let timeout_seconds = {
                 let network = network_manager.read().await;
-                network.request_timeout_config.utxo_commitment_request_timeout_seconds
+                network
+                    .request_timeout_config
+                    .utxo_commitment_request_timeout_seconds
             };
 
             tokio::select! {

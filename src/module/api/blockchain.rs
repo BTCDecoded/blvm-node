@@ -230,7 +230,7 @@ impl BlockchainApi {
     pub async fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
         tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
-            let outpoint = outpoint.clone();
+            let outpoint = *outpoint;
             move || {
                 storage
                     .utxos()
@@ -246,7 +246,7 @@ impl BlockchainApi {
     pub async fn has_utxo(&self, outpoint: &OutPoint) -> Result<bool, ModuleError> {
         tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
-            let outpoint = outpoint.clone();
+            let outpoint = *outpoint;
             move || {
                 storage.utxos().has_utxo(&outpoint).map_err(|e| {
                     ModuleError::OperationError(format!("Failed to check UTXO existence: {e}"))
@@ -309,9 +309,8 @@ mod tests {
     #[tokio::test]
     async fn test_blockchain_api_creation() {
         let (_temp_dir, storage) = create_test_storage();
-        let api = BlockchainApi::new(storage);
-        // Should create successfully
-        assert!(true);
+        let _api = BlockchainApi::new(storage);
+        // Creation succeeded (no panic)
     }
 
     #[tokio::test]

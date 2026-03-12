@@ -62,21 +62,24 @@ impl Transport for TcpTransport {
 
 impl TcpTransport {
     /// Connect and return raw TcpStream (for use with Peer::from_tcp_stream_split)
-    /// 
+    ///
     /// Includes a 10-second connection timeout to prevent blocking on unresponsive peers.
     pub async fn connect_stream(&self, addr: SocketAddr) -> Result<TcpStream> {
         use tokio::time::{timeout, Duration};
-        
+
         info!("Connecting to peer at {}", addr);
-        
+
         // 10 second connection timeout - prevents blocking on unresponsive peers
         const CONNECT_TIMEOUT_SECS: u64 = 10;
-        
-        let stream = timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), TcpStream::connect(addr))
-            .await
-            .map_err(|_| anyhow::anyhow!("Connection timeout to {}", addr))?
-            .map_err(|e| anyhow::anyhow!("Connection failed to {}: {}", addr, e))?;
-        
+
+        let stream = timeout(
+            Duration::from_secs(CONNECT_TIMEOUT_SECS),
+            TcpStream::connect(addr),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Connection timeout to {}", addr))?
+        .map_err(|e| anyhow::anyhow!("Connection failed to {}: {}", addr, e))?;
+
         Ok(stream)
     }
 }
@@ -157,16 +160,16 @@ impl TcpConnection {
 #[async_trait::async_trait]
 impl TransportConnection for TcpConnection {
     async fn send(&mut self, data: &[u8]) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
         use std::sync::atomic::Ordering;
-        
+        use tokio::io::AsyncWriteExt;
+
         if !self.connected.load(Ordering::Relaxed) {
             return Err(anyhow::anyhow!("Connection closed"));
         }
 
         // Lock writer half (doesn't block reader)
         let mut writer = self.writer.lock().await;
-        
+
         // Send data directly - it's already in Bitcoin wire format
         // (magic + command + length + checksum + payload)
         writer.write_all(data).await?;
@@ -176,9 +179,9 @@ impl TransportConnection for TcpConnection {
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
-        use tokio::io::AsyncReadExt;
         use std::sync::atomic::Ordering;
-        
+        use tokio::io::AsyncReadExt;
+
         if !self.connected.load(Ordering::Relaxed) {
             return Ok(Vec::new()); // Graceful close
         }
@@ -208,7 +211,8 @@ impl TransportConnection for TcpConnection {
         }
 
         // Extract payload length from bytes 16-19 (little-endian)
-        let payload_len = u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
+        let payload_len =
+            u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
 
         if payload_len == 0 {
             // Message with no payload (like verack)
@@ -246,9 +250,9 @@ impl TransportConnection for TcpConnection {
     }
 
     async fn close(&mut self) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
         use std::sync::atomic::Ordering;
-        
+        use tokio::io::AsyncWriteExt;
+
         if self.connected.load(Ordering::Relaxed) {
             // Shutdown the writer half to signal end of connection
             let mut writer = self.writer.lock().await;

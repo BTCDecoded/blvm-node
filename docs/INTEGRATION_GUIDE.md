@@ -1,6 +1,6 @@
-# Integration Guide: Using bllvm-node with Existing Tools
+# Integration Guide: Using blvm-node with Existing Tools
 
-This guide shows how to integrate bllvm-node with existing Bitcoin tools and services.
+This guide shows how to integrate blvm-node with existing Bitcoin tools and services.
 
 ---
 
@@ -19,9 +19,9 @@ This guide shows how to integrate bllvm-node with existing Bitcoin tools and ser
 
 ### Quick Start
 
-1. **Start bllvm-node**:
+1. **Start blvm-node**:
    ```bash
-   bllvm-node --network testnet --rpc-bind 127.0.0.1 --rpc-port 18332
+   blvm-node --network testnet --rpc-bind 127.0.0.1 --rpc-port 18332
    ```
 
 2. **Configure Electrum**:
@@ -37,7 +37,7 @@ This guide shows how to integrate bllvm-node with existing Bitcoin tools and ser
 
 ### Required RPC Methods
 
-bllvm-node implements all methods Electrum needs:
+blvm-node implements all methods Electrum needs:
 
 - ✅ `gettxout` - Check UTXO existence and value
 - ✅ `getrawtransaction` - Get transaction data
@@ -56,7 +56,7 @@ See `examples/electrum-integration.rs` for a complete example.
 
 ### RPC API Compatibility
 
-bllvm-node implements Bitcoin Core-compatible JSON-RPC API:
+blvm-node implements Bitcoin Core-compatible JSON-RPC API:
 
 ```json
 {
@@ -254,7 +254,7 @@ maxconnections=8
 addnode=1.2.3.4
 ```
 
-**bllvm-node** (`config.toml`):
+**blvm-node** (`config.toml`):
 ```toml
 [network]
 protocol_version = "testnet3"
@@ -281,7 +281,7 @@ password = "mypassword"
 
 ```bash
 # Start node
-bllvm-node --network testnet
+blvm-node --network testnet
 
 # Test RPC
 curl -X POST http://127.0.0.1:18332 \
@@ -322,7 +322,7 @@ curl -X POST http://127.0.0.1:18332 \
 **Solution**: Check `docs/RPC_REFERENCE.md` for available methods
 
 **Problem**: Different response format
-**Solution**: bllvm-node matches Bitcoin Core format exactly
+**Solution**: blvm-node matches Bitcoin Core format exactly
 
 ---
 

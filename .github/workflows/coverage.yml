@@ -35,8 +35,8 @@ jobs:
       - name: Cleanup any leftover dependency directories
         run: |
           # Remove any leftover dependency directories from previous jobs
-          if [ -d "../bllvm-protocol" ]; then rm -rf ../bllvm-protocol; fi
-          if [ -d "../bllvm-consensus" ]; then rm -rf ../bllvm-consensus; fi
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           # Also remove any .cargo/config.toml that might have been left behind
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
       
@@ -128,7 +128,7 @@ jobs:
         with:
           file: coverage/cobertura.xml
           flags: unittests
-          name: codecov-bllvm-node
+          name: codecov-blvm-node
           fail_ci_if_error: false
       
       - name: Cache registry

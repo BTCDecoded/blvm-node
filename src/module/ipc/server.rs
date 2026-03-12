@@ -560,10 +560,6 @@ impl ModuleIpcServer {
                     ResponsePayload::Transaction(tx),
                 ))
             }
-            _ => Ok(ResponseMessage::error(
-                request.correlation_id,
-                format!("Unimplemented request payload: {:?}", request.payload),
-            )),
             RequestPayload::HasTransaction { hash } => {
                 let exists = node_api.has_transaction(hash).await?;
                 Ok(ResponseMessage::success(
@@ -915,6 +911,10 @@ impl ModuleIpcServer {
                     ResponsePayload::SubmitBlockResult(result),
                 ))
             }
+            _ => Ok(ResponseMessage::error(
+                request.correlation_id,
+                format!("Unimplemented request payload: {:?}", request.payload),
+            )),
         }
     }
 }

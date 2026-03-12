@@ -33,10 +33,7 @@ pub async fn handle_get_payment_request(
 
     // Extract signature from embedded PaymentRequest signature field
     // The PaymentRequest is already signed when created via PaymentProcessor
-    let merchant_signature = payment_request
-        .signature
-        .clone()
-        .unwrap_or_default();
+    let merchant_signature = payment_request.signature.clone().unwrap_or_default();
 
     // Extract merchant pubkey from PaymentRequest if available, otherwise use from request
     let merchant_pubkey = payment_request
@@ -82,10 +79,7 @@ pub async fn handle_payment(
 
     // Extract signature from embedded PaymentACK signature field
     // The PaymentACK is already signed by PaymentProtocolServer::process_payment() if merchant_key was provided
-    let merchant_signature = payment_ack
-        .signature
-        .clone()
-        .unwrap_or_default();
+    let merchant_signature = payment_ack.signature.clone().unwrap_or_default();
 
     // Convert to P2P message format
     Ok(PaymentACKMessage {

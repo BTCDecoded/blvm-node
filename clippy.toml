@@ -1,4 +1,4 @@
-# Clippy configuration for bllvm-node
+# Clippy configuration for blvm-node
 # See: https://rust-lang.github.io/rust-clippy/master/index.html
 
 # Allow breaking changes in exported API (we're pre-1.0)
