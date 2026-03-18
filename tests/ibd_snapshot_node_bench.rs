@@ -130,14 +130,19 @@ fn node_hot_path_once(
     // 6. connect_block_ibd (the actual validation)
     let owned_utxo = std::mem::take(utxo_base_buf);
     let t_validate = Instant::now();
+    let ctx = blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
+        None::<&[blvm_consensus::types::BlockHeader]>,
+        0u64,
+        Network::Mainnet,
+        None,
+        None,
+    );
     let (result, new_utxo, _tx_ids_out, utxo_delta) = connect_block_ibd(
         block,
         witnesses_to_use,
         owned_utxo,
         height,
-        None::<&[blvm_consensus::types::BlockHeader]>,
-        0u64,
-        Network::Mainnet,
+        &ctx,
         Some(bip30_index),
         Some(&tx_ids),
         Some(Arc::clone(block_arc)),

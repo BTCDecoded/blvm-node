@@ -37,14 +37,18 @@ pub enum EvictionStrategy {
 
 #[cfg(feature = "production")]
 impl EvictionStrategy {
-    fn from_env() -> Self {
-        let s = std::env::var("BLVM_IBD_EVICTION").unwrap_or_default();
-        let s = s.trim().to_lowercase();
-        match s.as_str() {
+    /// Parse from config string: "dynamic" | "fifo" | "lifo". Default: fifo.
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
             "dynamic" => Self::Dynamic,
             "lifo" => Self::Lifo,
             _ => Self::Fifo,
         }
+    }
+
+    fn from_env() -> Self {
+        let s = std::env::var("BLVM_IBD_EVICTION").unwrap_or_default();
+        Self::from_str(&s)
     }
 }
 
@@ -88,7 +92,7 @@ pub struct IbdUtxoStore {
 #[cfg(feature = "production")]
 impl IbdUtxoStore {
     pub fn new(disk: Arc<dyn Tree>, flush_threshold: usize) -> Self {
-        Self::new_with_options(disk, flush_threshold, false, usize::MAX)
+        Self::new_with_options(disk, flush_threshold, false, usize::MAX, EvictionStrategy::from_env())
     }
 
     /// Memory-only store for benchmarks and tests. No disk backing.
@@ -131,7 +135,13 @@ impl IbdUtxoStore {
                 Box::new(NullBatch)
             }
         }
-        Self::new_with_options(Arc::new(NullTree), usize::MAX, true, usize::MAX)
+        Self::new_with_options(
+            Arc::new(NullTree),
+            usize::MAX,
+            true,
+            usize::MAX,
+            EvictionStrategy::from_env(),
+        )
     }
 
     #[inline]
@@ -144,8 +154,8 @@ impl IbdUtxoStore {
         flush_threshold: usize,
         memory_only: bool,
         max_entries: usize,
+        eviction_strategy: EvictionStrategy,
     ) -> Self {
-        let eviction_strategy = EvictionStrategy::from_env();
         // Par-4: 128 shards reduce contention with 8–24 prefetch workers hitting cache concurrently.
         Self {
             cache: DashMap::with_shard_amount(128),
@@ -301,7 +311,7 @@ impl IbdUtxoStore {
                 continue;
             }
             if let Some(ref r) = self.cache.get(&key) {
-                if let Some(arc) = r.as_ref() {
+                if let Some(arc) = (**r).as_ref() {
                     let utxo = arc.as_ref();
                     if utxo.height > min_evictable_height {
                         q.push_back(key);
@@ -417,7 +427,7 @@ impl IbdUtxoStore {
     pub fn get(&self, key: &OutPointKey) -> Option<UTXO> {
         let r = self.cache.get(key);
         if let Some(ref v) = r {
-            if v.is_some() {
+            if (*v).is_some() {
                 self.stats_cache_hits.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -497,7 +507,7 @@ impl IbdUtxoStore {
                 continue;
             }
             if let Some(ref r) = self.cache.get(key) {
-                if let Some(arc) = r.as_ref() {
+                if let Some(arc) = (**r).as_ref() {
                     self.stats_cache_hits.fetch_add(1, Ordering::Relaxed);
                     map.insert(op, Arc::clone(arc));
                     continue;

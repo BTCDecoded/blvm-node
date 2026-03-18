@@ -45,7 +45,7 @@ impl ModuleDiscovery {
                 self.modules_dir
             );
             fs::create_dir_all(&self.modules_dir).map_err(|e| {
-                ModuleError::OperationError(format!("Failed to create modules directory: {e}"))
+                ModuleError::op_err("Failed to create modules directory", e)
             })?;
             return Ok(Vec::new());
         }
@@ -54,12 +54,12 @@ impl ModuleDiscovery {
 
         // Scan directory for module subdirectories
         let entries = fs::read_dir(&self.modules_dir).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to read modules directory: {e}"))
+            ModuleError::op_err("Failed to read modules directory", e)
         })?;
 
         for entry in entries {
             let entry = entry.map_err(|e| {
-                ModuleError::OperationError(format!("Failed to read directory entry: {e}"))
+                ModuleError::op_err("Failed to read directory entry", e)
             })?;
 
             let path = entry.path();
@@ -113,11 +113,21 @@ impl ModuleDiscovery {
     }
 
     /// Find module binary path
+    ///
+    /// Security: Validates resolved path stays within modules_dir to prevent path traversal
+    /// (e.g. entry_point = "../../../etc/passwd").
     fn find_module_binary(
         &self,
         module_dir: &Path,
         entry_point: &str,
     ) -> Result<PathBuf, ModuleError> {
+        // Reject entry_point with path traversal components
+        if entry_point.contains("..") {
+            return Err(ModuleError::OperationError(format!(
+                "Invalid entry_point: path traversal not allowed (entry_point: {entry_point})"
+            )));
+        }
+
         // Try different possible locations
         let candidates = vec![
             module_dir.join(entry_point),
@@ -126,23 +136,52 @@ impl ModuleDiscovery {
             self.modules_dir.join(entry_point),
         ];
 
+        let canonical_modules_dir = self.modules_dir.canonicalize().map_err(|e| {
+            ModuleError::OperationError(format!(
+                "Failed to canonicalize modules_dir {:?}: {e}",
+                self.modules_dir
+            ))
+        })?;
+
         for candidate in candidates {
             if candidate.exists() && candidate.is_file() {
-                // Check if executable (on Unix)
+                // Security: Ensure resolved path stays within modules_dir (prevents path traversal)
+                let canonical_binary = candidate.canonicalize().map_err(|e| {
+                    ModuleError::OperationError(format!(
+                        "Failed to canonicalize binary path {:?}: {e}",
+                        candidate
+                    ))
+                })?;
+
+                if !canonical_binary.starts_with(&canonical_modules_dir) {
+                    warn!(
+                        "Rejected module binary outside modules_dir: {:?} (allowed: {:?})",
+                        canonical_binary, canonical_modules_dir
+                    );
+                    continue;
+                }
+
+                // Check if executable (on Unix) — skip for .wasm (loaded by wasmtime, not exec'd)
+                let is_wasm = candidate
+                    .extension()
+                    .map(|e| e == "wasm")
+                    .unwrap_or(false);
+                if is_wasm {
+                    return Ok(canonical_binary);
+                }
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     if let Ok(metadata) = candidate.metadata() {
                         let perms = metadata.permissions();
                         if perms.mode() & 0o111 != 0 {
-                            return Ok(candidate);
+                            return Ok(canonical_binary);
                         }
                     }
                 }
                 #[cfg(not(unix))]
                 {
-                    // On Windows, just check if file exists
-                    return Ok(candidate);
+                    return Ok(canonical_binary);
                 }
             }
         }

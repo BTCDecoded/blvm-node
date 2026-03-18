@@ -36,8 +36,7 @@ fn test_transaction_selector_with_params() {
     assert_eq!(selector.min_fee_rate(), 10);
 }
 
-// Note: TransactionSelector.select_transactions() requires a real MempoolManager
-// These tests are covered in integration tests or through MiningCoordinator tests
+// Test strategy: select_transactions() requires a real MempoolManager; we test constructors and config only here.
 
 #[test]
 fn test_mining_engine_new() {

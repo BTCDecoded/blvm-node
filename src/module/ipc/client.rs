@@ -9,7 +9,9 @@ use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::{debug, warn};
 
-use crate::module::ipc::protocol::{CorrelationId, ModuleMessage, RequestMessage, ResponseMessage};
+use crate::module::ipc::protocol::{
+    CorrelationId, InvocationResultMessage, ModuleMessage, RequestMessage, ResponseMessage,
+};
 use crate::module::traits::ModuleError;
 
 /// IPC client for modules to communicate with node
@@ -102,17 +104,14 @@ impl ModuleIpcClient {
         target: Option<&str>,
     ) -> Result<(), ModuleError> {
         use crate::module::ipc::protocol::{LogMessage, ModuleMessage};
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use crate::utils::current_timestamp;
 
         let log_message = LogMessage {
             level,
             module_id: module_id.to_string(),
             message: message.to_string(),
             target: target.unwrap_or("module").to_string(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: current_timestamp(),
         };
 
         let bytes = bincode::serialize(&ModuleMessage::Log(log_message))
@@ -123,6 +122,34 @@ impl ModuleIpcClient {
             .await
             .map_err(|e| ModuleError::IpcError(format!("Failed to send log: {e}")))?;
 
+        Ok(())
+    }
+
+    /// Receive the next message (blocking). Returns Event, Invocation, or other message types.
+    pub async fn receive_message(&mut self) -> Result<Option<ModuleMessage>, ModuleError> {
+        let result = self.reader.next().await;
+        match result {
+            Some(Ok(bytes)) => {
+                let message: ModuleMessage = bincode::deserialize(&bytes)
+                    .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+                Ok(Some(message))
+            }
+            Some(Err(e)) => Err(ModuleError::IpcError(format!("Failed to read message: {e}"))),
+            None => Ok(None),
+        }
+    }
+
+    /// Send invocation result back to the node
+    pub async fn send_invocation_result(
+        &mut self,
+        result: InvocationResultMessage,
+    ) -> Result<(), ModuleError> {
+        let bytes = bincode::serialize(&ModuleMessage::InvocationResult(result))
+            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+        self.writer
+            .send(bytes::Bytes::from(bytes))
+            .await
+            .map_err(|e| ModuleError::IpcError(format!("Failed to send invocation result: {e}")))?;
         Ok(())
     }
 

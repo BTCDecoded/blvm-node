@@ -4,6 +4,7 @@
 
 use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
+use crate::utils::MEMPOOL_LOOP_SLEEP;
 use anyhow::Result;
 use blvm_protocol::mempool::{has_conflict_with_tx, replacement_checks, signals_rbf, Mempool};
 use blvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
@@ -201,7 +202,7 @@ impl MempoolManager {
             self.cleanup_old_transactions().await?;
 
             // Small delay to prevent busy waiting
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(MEMPOOL_LOOP_SLEEP).await;
         }
     }
 
@@ -273,10 +274,25 @@ impl MempoolManager {
             return Ok(());
         }
 
+        // Publish MempoolThresholdExceeded for module event subscribers
+        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+            let threshold = policy.max_mempool_txs;
+            let current = current_tx_count;
+            let event_pub_clone = Arc::clone(event_pub);
+            tokio::spawn(async move {
+                event_pub_clone
+                    .publish_mempool_threshold_exceeded(current, threshold)
+                    .await;
+            });
+        }
+
         debug!(
             "Mempool size limit exceeded: {} MB / {} MB, {} txs / {} txs. Evicting transactions...",
             current_size_mb, policy.max_mempool_mb, current_tx_count, policy.max_mempool_txs
         );
+
+        // Capture min fee rate before eviction (for FeeRateChanged event)
+        let old_min_fee_rate = self.get_min_fee_rate_sat_per_vb();
 
         // Evict transactions based on strategy
         let target_size_mb = policy.max_mempool_mb;
@@ -309,7 +325,33 @@ impl MempoolManager {
             }
         }
 
+        // Publish FeeRateChanged when min fee rate increased due to eviction
+        let new_min_fee_rate = self.get_min_fee_rate_sat_per_vb();
+        if new_min_fee_rate != old_min_fee_rate {
+            if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+                let old_f64 = old_min_fee_rate as f64;
+                let new_f64 = new_min_fee_rate as f64;
+                let mempool_size = self.pool_lock().transactions.len();
+                let event_pub_clone = Arc::clone(event_pub);
+                tokio::spawn(async move {
+                    event_pub_clone
+                        .publish_fee_rate_changed(old_f64, new_f64, mempool_size)
+                        .await;
+                });
+            }
+        }
+
         Ok(())
+    }
+
+    /// Get the minimum fee rate (sat/vB) in the mempool, or 0 if empty.
+    fn get_min_fee_rate_sat_per_vb(&self) -> u64 {
+        let fee_index = self.fee_index.read().unwrap();
+        fee_index
+            .iter()
+            .last()
+            .map(|(Reverse(r), _)| *r)
+            .unwrap_or(0)
     }
 
     /// Calculate current mempool size in MB
@@ -634,7 +676,7 @@ impl MempoolManager {
         target_size_mb: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use blvm_consensus::spam_filter::SpamFilter;
+        use blvm_protocol::spam_filter::SpamFilter;
         use blvm_protocol::serialization::transaction::serialize_transaction;
 
         // Get all transactions, classify as spam or not
@@ -1214,6 +1256,19 @@ impl MempoolManager {
             tokio::spawn(async move {
                 event_pub_clone
                     .publish_mempool_transaction_added(&tx_hash_clone, fee_rate_f64, mempool_size)
+                    .await;
+            });
+            // NewTransaction (use publish_event to avoid ZMQ Send issues in spawn)
+            let tx_hash_ev = tx_hash;
+            let ep_clone = Arc::clone(event_pub);
+            tokio::spawn(async move {
+                let _ = ep_clone
+                    .publish_event(
+                        crate::module::traits::EventType::NewTransaction,
+                        crate::module::ipc::protocol::EventPayload::NewTransaction {
+                            tx_hash: tx_hash_ev,
+                        },
+                    )
                     .await;
             });
         }

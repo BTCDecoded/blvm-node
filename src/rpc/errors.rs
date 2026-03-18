@@ -5,6 +5,51 @@
 use serde_json::{json, Value};
 use std::fmt;
 
+/// User-facing message when an RPC or operation requires storage and it is not initialized.
+/// Use for RPC errors and JSON "note"/"warnings" so wording stays consistent.
+pub const STORAGE_NOT_AVAILABLE_MSG: &str =
+    "Storage not available. This operation requires storage to be initialized.";
+
+/// Standard "not found" and required-param messages (single place for wording/i18n).
+pub const BLOCK_NOT_FOUND_MSG: &str = "Block not found";
+pub const TX_NOT_FOUND_MSG: &str = "Transaction not found";
+pub const HEIGHT_PARAM_REQUIRED_MSG: &str = "Height parameter required";
+pub const BLOCK_HASH_PARAM_REQUIRED_MSG: &str = "Block hash parameter required";
+/// Tip block not found (e.g. when resolving chain tip for mining/difficulty).
+pub const TIP_BLOCK_NOT_FOUND_MSG: &str = "Tip block not found";
+
+/// Sentinel error for "block not found". Handlers return this via anyhow so the server
+/// can downcast and convert to `RpcError::block_not_found()` (code -5) instead of generic internal error.
+#[derive(Debug)]
+pub struct BlockNotFoundError(pub String);
+
+impl BlockNotFoundError {
+    pub fn new(context: impl Into<String>) -> Self {
+        Self(context.into())
+    }
+}
+
+impl std::fmt::Display for BlockNotFoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            write!(f, "{}", BLOCK_NOT_FOUND_MSG)
+        } else {
+            write!(f, "{}: {}", BLOCK_NOT_FOUND_MSG, self.0)
+        }
+    }
+}
+
+impl std::error::Error for BlockNotFoundError {}
+
+/// Convert blockchain handler anyhow::Error to RpcError; downcasts BlockNotFoundError to code -5.
+pub fn rpc_error_from_blockchain_result(e: anyhow::Error) -> RpcError {
+    if let Some(b) = e.downcast_ref::<BlockNotFoundError>() {
+        RpcError::block_not_found(&b.0)
+    } else {
+        RpcError::internal_error(e.to_string())
+    }
+}
+
 /// JSON-RPC error codes (standard compatible)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcErrorCode {
@@ -132,19 +177,32 @@ impl RpcError {
         Self::new(RpcErrorCode::InternalError, message)
     }
 
-    /// Block not found
+    /// Storage required but not available (use with require_storage() in handlers)
+    pub fn storage_not_available() -> Self {
+        Self::internal_error(STORAGE_NOT_AVAILABLE_MSG)
+    }
+
+    /// Block not found (with optional hash context)
     pub fn block_not_found(hash: &str) -> Self {
         Self::new(
             RpcErrorCode::BlockNotFound,
-            format!("Block not found: {hash}"),
+            if hash.is_empty() {
+                BLOCK_NOT_FOUND_MSG.to_string()
+            } else {
+                format!("{}: {}", BLOCK_NOT_FOUND_MSG, hash)
+            },
         )
     }
 
-    /// Transaction not found
+    /// Transaction not found (with optional txid context)
     pub fn tx_not_found(txid: &str) -> Self {
         Self::new(
             RpcErrorCode::TxNotFound,
-            format!("Transaction not found: {txid}"),
+            if txid.is_empty() {
+                TX_NOT_FOUND_MSG.to_string()
+            } else {
+                format!("{}: {}", TX_NOT_FOUND_MSG, txid)
+            },
         )
     }
 

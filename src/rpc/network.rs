@@ -4,6 +4,9 @@
 
 use crate::network::NetworkManager;
 use crate::rpc::errors::{RpcError, RpcResult};
+use crate::rpc::params::{
+    param_bool, param_bool_default, param_str, param_str_required, param_u64_default,
+};
 use crate::utils::current_timestamp;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -203,12 +206,9 @@ impl NetworkRpc {
     pub async fn add_node(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: addnode");
 
-        let node = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::missing_parameter("node", Some("string (IP:port)")))?;
+        let node = param_str_required(params, 0, "addnode")?;
 
-        let command = params.get(1).and_then(|p| p.as_str()).unwrap_or("add");
+        let command = param_str(params, 1).unwrap_or("add");
 
         // Parse node address
         let addr: SocketAddr = node.parse().map_err(|_| {
@@ -393,12 +393,9 @@ impl NetworkRpc {
     pub async fn set_ban(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: setban");
 
-        let subnet = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::missing_parameter("subnet", Some("string (IP:port)")))?;
+        let subnet = param_str_required(params, 0, "setban")?;
 
-        let command = params.get(1).and_then(|p| p.as_str()).unwrap_or("add");
+        let command = param_str(params, 1).unwrap_or("add");
 
         // Parse address/subnet
         let addr: SocketAddr = subnet.parse().map_err(|_| {
@@ -416,10 +413,10 @@ impl NetworkRpc {
         })?;
 
         // Parse bantime (seconds) - 0 = permanent
-        let bantime = params.get(2).and_then(|p| p.as_u64()).unwrap_or(86400); // Default 24 hours
+        let bantime = param_u64_default(params, 2, 86400); // Default 24 hours
 
         // Parse absolute (whether bantime is absolute timestamp or relative)
-        let absolute = params.get(3).and_then(|p| p.as_bool()).unwrap_or(false);
+        let absolute = param_bool_default(params, 3, false);
 
         if let Some(ref network) = self.network_manager {
             let now = current_timestamp();
@@ -491,12 +488,10 @@ impl NetworkRpc {
     pub async fn getaddednodeinfo(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getaddednodeinfo");
 
-        let node = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Node address required".to_string()))?;
+        let node =
+            param_str_required(params, 0, "getaddednodeinfo")?;
 
-        let dns = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+        let dns = param_bool_default(params, 1, false);
 
         if let Some(ref network) = self.network_manager {
             // Parse node address
@@ -542,7 +537,7 @@ impl NetworkRpc {
     pub async fn getnodeaddresses(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getnodeaddresses");
 
-        let count = params.get(0).and_then(|p| p.as_u64()).unwrap_or(1).min(100) as usize; // Limit to 100
+        let count = param_u64_default(params, 0, 1).min(100) as usize; // Limit to 100
 
         if let Some(ref network) = self.network_manager {
             // Get peer addresses
@@ -590,7 +585,7 @@ impl NetworkRpc {
     pub async fn setnetworkactive(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: setnetworkactive");
 
-        let state = params.get(0).and_then(|p| p.as_bool()).ok_or_else(|| {
+        let state = param_bool(params, 0).ok_or_else(|| {
             RpcError::invalid_params("State parameter required (true/false)".to_string())
         })?;
 

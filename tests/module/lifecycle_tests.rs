@@ -2,7 +2,7 @@
 //!
 //! Tests for module loading, unloading, reloading, and crash recovery.
 
-use blvm_node::tests::module::test_utils::*;
+use crate::test_utils::*;
 
 #[tokio::test]
 async fn test_module_manager_creation() {

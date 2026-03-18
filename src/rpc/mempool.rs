@@ -7,6 +7,7 @@
 
 use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::RpcResult;
+use crate::rpc::params::{param_bool_default, param_str, param_str_required};
 use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use blvm_protocol::Hash;
@@ -91,7 +92,7 @@ impl MempoolRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getrawmempool");
 
-        let verbose = params.get(0).and_then(|p| p.as_bool()).unwrap_or(false);
+        let verbose = param_bool_default(params, 0, false);
 
         if let Some(ref mempool) = self.mempool {
             let transactions = mempool.get_transactions();
@@ -218,15 +219,13 @@ impl MempoolRpc {
     pub async fn getmempoolancestors(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmempoolancestors");
 
-        let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
-            crate::rpc::errors::RpcError::missing_parameter("txid", Some("string (hex)"))
-        })?;
+        let txid = param_str_required(params, 0, "getmempoolancestors")?;
 
-        let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+        let verbose = param_bool_default(params, 1, false);
 
-        let hash_bytes = hex::decode(txid).map_err(|e| {
+        let hash_bytes = hex::decode(&txid).map_err(|e| {
             crate::rpc::errors::RpcError::invalid_hash_format(
-                txid,
+                &txid,
                 Some(32),
                 Some(&format!("Invalid hex encoding: {e}")),
             )
@@ -303,15 +302,13 @@ impl MempoolRpc {
     pub async fn getmempooldescendants(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmempooldescendants");
 
-        let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
-            crate::rpc::errors::RpcError::missing_parameter("txid", Some("string (hex)"))
-        })?;
+        let txid = param_str_required(params, 0, "getmempooldescendants")?;
 
-        let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+        let verbose = param_bool_default(params, 1, false);
 
-        let hash_bytes = hex::decode(txid).map_err(|e| {
+        let hash_bytes = hex::decode(&txid).map_err(|e| {
             crate::rpc::errors::RpcError::invalid_hash_format(
-                txid,
+                &txid,
                 Some(32),
                 Some(&format!("Invalid hex encoding: {e}")),
             )
@@ -325,7 +322,7 @@ impl MempoolRpc {
         hash.copy_from_slice(&hash_bytes);
 
         if let Some(ref mempool) = self.mempool {
-            // Find descendants by checking which transactions spend outputs created by this transaction
+            // Find descendants by checking which transactions spend outputs created by this transaction which transactions spend outputs created by this transaction which transactions spend outputs created by this transaction
             let mut descendants = Vec::new();
 
             if let Some(tx) = mempool.get_transaction(&hash) {
@@ -412,13 +409,11 @@ impl MempoolRpc {
     pub async fn getmempoolentry(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmempoolentry");
 
-        let txid = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
-            crate::rpc::errors::RpcError::missing_parameter("txid", Some("string (hex)"))
-        })?;
+        let txid = param_str_required(params, 0, "getmempoolentry")?;
 
-        let hash_bytes = hex::decode(txid).map_err(|e| {
+        let hash_bytes = hex::decode(&txid).map_err(|e| {
             crate::rpc::errors::RpcError::invalid_hash_format(
-                txid,
+                &txid,
                 Some(32),
                 Some(&format!("Invalid hex encoding: {e}")),
             )

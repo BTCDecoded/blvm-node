@@ -7,7 +7,10 @@
 //! - Settlement monitoring
 
 use crate::payment::state_machine::{PaymentState, PaymentStateMachine};
-use crate::rpc::rest::types::{ApiError, ApiResponse, ErrorDetails, ResponseMeta};
+use crate::rpc::payment::DEFAULT_SAFE_DEPTH;
+use crate::rpc::rest::types::{
+    rest_error_failed, rest_error_invalid, ApiError, ApiResponse, ErrorDetails, ResponseMeta,
+};
 use blvm_protocol::payment::PaymentOutput;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -33,6 +36,7 @@ pub async fn handle_payment_request(
             create_payment_request(state_machine, body, request_id).await
         }
         // POST /api/v1/payments/{id}/covenant - Create CTV covenant proof
+        #[cfg(feature = "ctv")]
         (method, path)
             if method == Method::POST
                 && path.starts_with("/api/v1/payments/")
@@ -40,6 +44,19 @@ pub async fn handle_payment_request(
         {
             let payment_id = extract_payment_id(path, "/api/v1/payments/", "/covenant");
             create_covenant_proof(state_machine, &payment_id, request_id).await
+        }
+        #[cfg(not(feature = "ctv"))]
+        (method, path)
+            if method == Method::POST
+                && path.starts_with("/api/v1/payments/")
+                && path.ends_with("/covenant") =>
+        {
+            error_response(
+                StatusCode::NOT_IMPLEMENTED,
+                "NOT_IMPLEMENTED",
+                "CTV feature required for covenant endpoint",
+                request_id,
+            )
         }
         // GET /api/v1/payments/{id} - Get payment state
         (&Method::GET, path)
@@ -95,7 +112,7 @@ async fn create_payment_request(
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "INVALID_OUTPUTS",
-                    &format!("Invalid outputs format: {}", e),
+                    &rest_error_invalid("outputs format", e),
                     request_id,
                 );
             }
@@ -147,7 +164,7 @@ async fn create_payment_request(
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "PAYMENT_CREATION_FAILED",
-                &format!("Failed to create payment request: {}", e),
+                &rest_error_failed("create payment request", e),
                 request_id,
             )
         }
@@ -183,7 +200,7 @@ async fn create_covenant_proof(
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "COVENANT_CREATION_FAILED",
-                &format!("Failed to create covenant proof: {}", e),
+                &rest_error_failed("create covenant proof", e),
                 request_id,
             )
         }
@@ -242,6 +259,10 @@ async fn list_payments(
                 PaymentState::ProofCreated { .. } => "proof_created",
                 #[cfg(feature = "ctv")]
                 PaymentState::ProofBroadcast { .. } => "proof_broadcast",
+                #[cfg(not(feature = "ctv"))]
+                PaymentState::ProofCreated { .. } | PaymentState::ProofBroadcast { .. } => {
+                    "proof_pending"
+                }
                 PaymentState::InMempool { .. } => "in_mempool",
                 PaymentState::Settled { .. } => "settled",
                 PaymentState::ReorgPending { .. } => "reorg_pending",
@@ -315,14 +336,13 @@ fn payment_state_to_json(state: &PaymentState) -> Value {
             confirmation_count,
             ..
         } => {
-            const DEFAULT_SAFE_DEPTH: u32 = 6;
             json!({
                 "state": "settled",
                 "request_id": request_id,
                 "tx_hash": hex::encode(tx_hash),
                 "block_hash": hex::encode(block_hash),
                 "confirmation_count": confirmation_count,
-                "safe_for_release": confirmation_count >= DEFAULT_SAFE_DEPTH,
+                "safe_for_release": *confirmation_count >= DEFAULT_SAFE_DEPTH,
             })
         }
         PaymentState::ReorgPending {
@@ -344,6 +364,10 @@ fn payment_state_to_json(state: &PaymentState) -> Value {
                 "request_id": request_id,
                 "reason": reason,
             })
+        }
+        #[cfg(not(feature = "ctv"))]
+        PaymentState::ProofCreated { request_id, .. } | PaymentState::ProofBroadcast { request_id, .. } => {
+            json!({ "state": "proof_pending", "request_id": request_id })
         }
     }
 }

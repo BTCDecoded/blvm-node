@@ -1,0 +1,37 @@
+;; Minimal WASM module for Phase 4 pipeline proof.
+;; Exports module_name, module_version, cli_spec, dispatch_cli, dispatch_rpc.
+;; Host calls these to verify load + instantiate + call.
+(module
+  (memory (export "memory") 1)
+  (data (i32.const 0) "demo")
+  (data (i32.const 4) "0.1")
+  (func (export "module_name") (result i32 i32)
+    (i32.const 0)
+    (i32.const 4)
+  )
+  (func (export "module_version") (result i32 i32)
+    (i32.const 4)
+    (i32.const 3)
+  )
+  (data (i32.const 7) "{}")
+  (func (export "cli_spec") (result i32 i32)
+    (i32.const 7)
+    (i32.const 2)
+  )
+  ;; Stub: return {"stdout":"","stderr":"","exit_code":0} for any CLI
+  (data (i32.const 64) "{\"stdout\":\"\",\"stderr\":\"\",\"exit_code\":0}")
+  (func (export "dispatch_cli")
+    (param $sub_ptr i32) (param $sub_len i32) (param $args_ptr i32) (param $args_len i32) (param $ctx i32)
+    (result i32 i32)
+    (i32.const 64)
+    (i32.const 38)
+  )
+  ;; Stub: return null for any RPC
+  (data (i32.const 128) "null")
+  (func (export "dispatch_rpc")
+    (param $method_ptr i32) (param $method_len i32) (param $params_ptr i32) (param $params_len i32) (param $ctx i32)
+    (result i32 i32)
+    (i32.const 128)
+    (i32.const 4)
+  )
+)

@@ -1,20 +1,20 @@
 //! IPC (Inter-Process Communication) layer for modules
 //!
-//! Handles communication between module processes and the base node using
-//! Unix domain sockets and length-delimited binary messages.
-//!
-//! NOTE: This module is Unix-only (uses Unix domain sockets)
+//! Handles communication between module processes and the base node.
+//! Unix: domain sockets. Windows: named pipes.
 
 #[cfg(unix)]
 pub mod client;
+#[cfg(windows)]
+pub mod client_windows;
 pub mod protocol;
-#[cfg(unix)]
 pub mod server;
 
 #[cfg(unix)]
 pub use client::ModuleIpcClient;
+#[cfg(windows)]
+pub use client_windows::ModuleIpcClient;
 pub use protocol::{
     EventMessage, EventPayload, MessageType, ModuleMessage, RequestMessage, ResponseMessage,
 };
-#[cfg(unix)]
 pub use server::ModuleIpcServer;

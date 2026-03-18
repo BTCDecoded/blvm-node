@@ -14,7 +14,6 @@ use crate::storage::blockstore::BlockStore;
 use crate::storage::commitment_store::CommitmentStore;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::utxostore::UtxoStore;
-use crate::utils::current_timestamp;
 use anyhow::{anyhow, Result};
 #[cfg(feature = "utxo-commitments")]
 use blvm_protocol::Hash;
@@ -580,9 +579,8 @@ impl PruningManager {
                 // Note: Filtered blocks are lightweight versions of blocks used for SPV clients
                 // If keep_filtered_blocks is false, we can remove them to save space
                 if !keep_filtered_blocks {
-                    // Filtered blocks are typically stored separately from full blocks
-                    // This is a placeholder for future filtered block storage implementation
-                    debug!("Filtered blocks pruning not yet implemented for custom_prune");
+                    // Filtered block storage not implemented; FilteredBlock is generated on-demand.
+                    // No-op until we add persistent filtered block cache.
                 }
             }
         }
@@ -758,17 +756,11 @@ impl PruningManager {
 
                     // Apply block to UTXO set using connect_block
                     // This properly handles coinbase transactions and input/output processing
-                    let network_time = current_timestamp();
+                    let ctx = blvm_consensus::block::BlockValidationContext::for_network(
+                        blvm_protocol::types::Network::Mainnet,
+                    );
                     let (validation_result, new_utxo_set, _undo_log) =
-                        connect_block::<blvm_protocol::BlockHeader>(
-                            &block,
-                            &witnesses,
-                            utxo_set,
-                            height,
-                            None, // No recent headers needed for historical replay
-                            network_time,
-                            blvm_protocol::types::Network::Mainnet,
-                        )?;
+                        connect_block(&block, &witnesses, utxo_set, height, &ctx)?;
 
                     // Check validation result
                     if !matches!(validation_result, blvm_protocol::ValidationResult::Valid) {

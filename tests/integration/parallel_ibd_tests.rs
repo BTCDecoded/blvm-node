@@ -136,6 +136,7 @@ async fn test_parallel_ibd_empty_peer_list() {
         &protocol,
         &mut utxo_set,
         None, // No network manager
+        None, // No event publisher
     ).await;
     
     assert!(result.is_err());
@@ -171,6 +172,7 @@ async fn test_parallel_ibd_invalid_height_range() {
         &protocol,
         &mut utxo_set,
         None,
+        None, // No event publisher
     ).await;
     
     // Should either fail or handle gracefully (implementation dependent)
@@ -210,5 +212,57 @@ async fn test_ibd_utxo_commitments_storage_wiring() {
     // Verify UtxoMerkleTree can be created (used in parallel_ibd validation loop)
     let tree = blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree::new();
     assert!(tree.is_ok(), "UtxoMerkleTree must be creatable for IBD commitments");
+}
+
+/// Integration test: Node startup with IBD + utxo-commitments
+///
+/// Verifies that a node starts successfully with aggressive pruning and utxo-commitments.
+/// The node will enter IBD (height 0); we verify startup completes without panic.
+#[cfg(all(feature = "utxo-commitments", feature = "production"))]
+#[tokio::test]
+async fn test_ibd_utxo_commitments_node_startup() {
+    use blvm_node::config::{PruningConfig, PruningMode, StorageConfig};
+    use blvm_node::node::Node;
+    use std::net::SocketAddr;
+    use tokio::time::{timeout, Duration};
+
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().to_str().unwrap();
+    let network_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let rpc_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let pruning_config = PruningConfig {
+        mode: PruningMode::Aggressive {
+            keep_from_height: 0,
+            keep_commitments: true,
+            keep_filtered_blocks: false,
+            min_blocks: 144,
+        },
+        incremental_prune_during_ibd: true,
+        min_blocks_for_incremental_prune: 288,
+        ..Default::default()
+    };
+    let storage_config = StorageConfig {
+        pruning: Some(pruning_config),
+        ..Default::default()
+    };
+
+    let mut node = Node::with_storage_config(
+        data_dir,
+        network_addr,
+        rpc_addr,
+        None,
+        Some(&storage_config),
+    )
+    .expect("node with utxo-commitments storage");
+
+    // Start node; it will enter IBD. Timeout after 15s (startup should complete quickly)
+    let start_result = timeout(Duration::from_secs(15), node.start()).await;
+    // Node runs indefinitely in IBD, so timeout is expected (Ok(Err)) or it may complete
+    assert!(
+        start_result.is_err() || start_result.unwrap().is_ok(),
+        "Node startup with utxo-commitments should not panic"
+    );
+    let _ = node.shutdown();
 }
 

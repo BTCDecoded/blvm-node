@@ -29,6 +29,10 @@ pub mod security;
 pub mod timers;
 pub mod traits;
 pub mod validation;
+#[cfg(feature = "wasm-modules")]
+pub mod wasm;
+#[cfg(feature = "module-watcher")]
+pub mod watcher;
 
 pub use security::{Permission, PermissionChecker, PermissionSet, RequestValidator};
 

@@ -161,7 +161,7 @@ Returns UTXO set statistics.
   "transactions": 1234567,
   "txouts": 2345678,
   "bogosize": 123456789,
-  "hash_serialized_2": "0000...",
+  "muhash": "0000...",
   "disk_size": 1234567890,
   "total_amount": 21000000.0
 }

@@ -40,17 +40,21 @@ const SNAPSHOT_VERSION: u32 = 1;
 
 /// Known AssumeUTXO snapshot hashes for mainnet
 ///
-/// These are the SHA256 hash of the serialized UTXO set at each height.
+/// These are the MuHash3072 (muhash) of the UTXO set at each height.
+/// Hashes from Bitcoin Core chainparams.cpp; same format as gettxoutsetinfo muhash.
 /// Add new entries as snapshots are created and verified.
 pub const MAINNET_ASSUMEUTXO_SNAPSHOTS: &[(u64, &str)] = &[
-    // Format: (height, muhash_hex)
-    // Block 840,000 (4th halving) - TODO: Add verified hash
-    // (840_000, "..."),
+    // Format: (height, muhash_hex) — from Bitcoin Core src/kernel/chainparams.cpp
+    (840_000, "a2a5521b1b5ab65f67818e5e8eccabb7171a517f9e2382208f77687310768f96"),
+    (880_000, "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9"),
+    (910_000, "4daf8a17b4902498c5787966a2b51c613acdab5df5db73f196fa59a4da2f1568"),
 ];
 
 /// Known AssumeUTXO snapshot hashes for testnet
+///
+/// MuHash3072 hashes from Bitcoin Core chainparams.cpp.
 pub const TESTNET_ASSUMEUTXO_SNAPSHOTS: &[(u64, &str)] = &[
-    // TODO: Add testnet snapshots
+    (2_500_000, "f841584909f68e47897952345234e37fcd9128cd818f41ee6c3ca68db8071be7"),
 ];
 
 const CHAINSTATE_SNAPSHOT_DIR: &str = "chainstate_snapshot";

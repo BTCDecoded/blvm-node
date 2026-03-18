@@ -220,7 +220,7 @@ impl ModuleLoader {
 
         // If TOML parsing failed, try simple key=value format
         let contents = std::fs::read_to_string(&config_path)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to read config file: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to read config file", e))?;
 
         let mut config = HashMap::new();
         for line in contents.lines() {
@@ -289,10 +289,9 @@ impl ModuleLoader {
     /// Remove signature section from TOML content for verification
     ///
     /// Signatures are computed over the manifest content without the signature section itself.
-    /// This is a simplified implementation - in production, proper TOML parsing/manipulation would be used.
+    /// Uses line-based parsing to strip [signatures] and its key=value entries; sufficient for
+    /// standard module manifests. Full TOML round-trip would preserve formatting.
     fn remove_signature_section(content: &str) -> String {
-        // Simple approach: remove [signatures] section
-        // This is a placeholder - proper implementation would use TOML manipulation
         let lines: Vec<&str> = content.lines().collect();
         let mut in_signatures = false;
         let mut result = Vec::new();

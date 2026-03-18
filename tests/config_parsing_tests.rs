@@ -22,7 +22,7 @@ fn test_module_config_default() {
 #[test]
 fn test_network_timing_config_default() {
     let config = NetworkTimingConfig::default();
-    assert_eq!(config.target_peer_count, 8);
+    assert_eq!(config.target_outbound_peers, 8);
     assert_eq!(config.peer_connection_delay_seconds, 2);
     assert_eq!(config.addr_relay_min_interval_seconds, 8640);
     assert_eq!(config.max_addresses_per_addr_message, 1000);
@@ -57,7 +57,7 @@ fn test_node_config_default() {
     // TransportPreferenceConfig doesn't implement PartialEq, check via conversion
     let pref = config.get_transport_preference();
     assert!(pref.allows_tcp());
-    assert_eq!(config.max_peers, Some(100));
+    assert_eq!(config.max_outbound_peers, Some(100));
     assert_eq!(config.protocol_version, Some("BitcoinV1".to_string()));
     assert!(config.modules.is_some());
     assert!(config.persistent_peers.is_empty());
@@ -71,7 +71,7 @@ fn test_node_config_from_json_file() {
 
     let mut config = NodeConfig::default();
     config.listen_addr = Some("127.0.0.1:8334".parse().unwrap());
-    config.max_peers = Some(50);
+    config.max_outbound_peers = Some(50);
 
     // Save to JSON
     config.to_json_file(&config_path).unwrap();
@@ -79,7 +79,7 @@ fn test_node_config_from_json_file() {
     // Load from JSON
     let loaded = NodeConfig::from_json_file(&config_path).unwrap();
     assert_eq!(loaded.listen_addr, config.listen_addr);
-    assert_eq!(loaded.max_peers, config.max_peers);
+    assert_eq!(loaded.max_outbound_peers, config.max_outbound_peers);
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn test_node_config_from_toml_file() {
 
     let mut config = NodeConfig::default();
     config.listen_addr = Some("127.0.0.1:8335".parse().unwrap());
-    config.max_peers = Some(75);
+    config.max_outbound_peers = Some(75);
 
     // Save to TOML
     config.to_toml_file(&config_path).unwrap();
@@ -97,7 +97,7 @@ fn test_node_config_from_toml_file() {
     // Load from TOML
     let loaded = NodeConfig::from_toml_file(&config_path).unwrap();
     assert_eq!(loaded.listen_addr, config.listen_addr);
-    assert_eq!(loaded.max_peers, config.max_peers);
+    assert_eq!(loaded.max_outbound_peers, config.max_outbound_peers);
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn test_node_config_with_persistent_peers() {
 #[test]
 fn test_node_config_serialization_roundtrip_json() {
     let mut config = NodeConfig::default();
-    config.max_peers = Some(150);
+    config.max_outbound_peers = Some(150);
     config.enable_self_advertisement = false;
 
     let temp_dir = TempDir::new().unwrap();
@@ -360,7 +360,7 @@ fn test_node_config_serialization_roundtrip_json() {
     config.to_json_file(&config_path).unwrap();
     let loaded = NodeConfig::from_json_file(&config_path).unwrap();
 
-    assert_eq!(loaded.max_peers, config.max_peers);
+    assert_eq!(loaded.max_outbound_peers, config.max_outbound_peers);
     assert_eq!(
         loaded.enable_self_advertisement,
         config.enable_self_advertisement
@@ -370,7 +370,7 @@ fn test_node_config_serialization_roundtrip_json() {
 #[test]
 fn test_node_config_serialization_roundtrip_toml() {
     let mut config = NodeConfig::default();
-    config.max_peers = Some(200);
+    config.max_outbound_peers = Some(200);
     config.enable_self_advertisement = true;
 
     let temp_dir = TempDir::new().unwrap();
@@ -379,7 +379,7 @@ fn test_node_config_serialization_roundtrip_toml() {
     config.to_toml_file(&config_path).unwrap();
     let loaded = NodeConfig::from_toml_file(&config_path).unwrap();
 
-    assert_eq!(loaded.max_peers, config.max_peers);
+    assert_eq!(loaded.max_outbound_peers, config.max_outbound_peers);
     assert_eq!(
         loaded.enable_self_advertisement,
         config.enable_self_advertisement

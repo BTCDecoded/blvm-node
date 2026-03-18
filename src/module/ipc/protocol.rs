@@ -24,6 +24,10 @@ pub enum ModuleMessage {
     Event(EventMessage),
     /// Log message from module to node
     Log(LogMessage),
+    /// Invocation from node to module (CLI or RPC dispatch)
+    Invocation(InvocationMessage),
+    /// Invocation result from module to node
+    InvocationResult(InvocationResultMessage),
 }
 
 impl ModuleMessage {
@@ -34,6 +38,8 @@ impl ModuleMessage {
             ModuleMessage::Response(resp) => Some(resp.correlation_id),
             ModuleMessage::Event(_) => None,
             ModuleMessage::Log(_) => None,
+            ModuleMessage::Invocation(inv) => Some(inv.correlation_id),
+            ModuleMessage::InvocationResult(res) => Some(res.correlation_id),
         }
     }
 
@@ -44,6 +50,8 @@ impl ModuleMessage {
             ModuleMessage::Response(_resp) => MessageType::Response,
             ModuleMessage::Event(_) => MessageType::Event,
             ModuleMessage::Log(_) => MessageType::Log,
+            ModuleMessage::Invocation(_) => MessageType::Invocation,
+            ModuleMessage::InvocationResult(_) => MessageType::InvocationResult,
         }
     }
 }
@@ -86,14 +94,6 @@ pub enum MessageType {
     ListDirectory,
     CreateDirectory,
     GetFileMetadata,
-    // Storage API
-    StorageOpenTree,
-    StorageInsert,
-    StorageGet,
-    StorageRemove,
-    StorageContainsKey,
-    StorageIter,
-    StorageTransaction,
     // Module RPC Endpoint Registration
     RegisterRpcEndpoint,
     UnregisterRpcEndpoint,
@@ -125,6 +125,12 @@ pub enum MessageType {
     // Mining API
     GetBlockTemplate,
     SubmitBlock,
+    /// CLI spec registration (module → node on connect)
+    RegisterCliSpec,
+    /// Invocation (node → module)
+    Invocation,
+    /// Invocation result (module → node)
+    InvocationResult,
     /// Log message from module
     Log,
     /// Response messages
@@ -220,34 +226,6 @@ pub enum RequestPayload {
     GetFileMetadata {
         path: String,
     },
-    // Storage API
-    StorageOpenTree {
-        name: String,
-    },
-    StorageInsert {
-        tree_id: String,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    },
-    StorageGet {
-        tree_id: String,
-        key: Vec<u8>,
-    },
-    StorageRemove {
-        tree_id: String,
-        key: Vec<u8>,
-    },
-    StorageContainsKey {
-        tree_id: String,
-        key: Vec<u8>,
-    },
-    StorageIter {
-        tree_id: String,
-    },
-    StorageTransaction {
-        tree_id: String,
-        operations: Vec<StorageOperation>,
-    },
     // Module RPC Endpoint Registration
     RegisterRpcEndpoint {
         method: String,
@@ -324,6 +302,89 @@ pub enum RequestPayload {
     SubmitBlock {
         block: Block,
     },
+    /// Register CLI spec (module → node on connect)
+    RegisterCliSpec {
+        spec: CliSpec,
+    },
+}
+
+/// CLI spec for module commands (JSON-serializable structure)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliSpec {
+    pub version: u32,
+    pub name: String,
+    pub about: Option<String>,
+    pub subcommands: Vec<CliSubcommandSpec>,
+}
+
+/// CLI subcommand spec
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliSubcommandSpec {
+    pub name: String,
+    pub about: Option<String>,
+    pub args: Vec<CliArgSpec>,
+}
+
+/// CLI argument spec
+///
+/// Supports named args: `--long_name value` and `-short value`.
+/// - `name`: param name for injection
+/// - `long_name`: e.g. "option" for --option (None = infer from name)
+/// - `short_name`: e.g. "o" for -o
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliArgSpec {
+    pub name: String,
+    /// Long form: "option" for --option. None = use `name`.
+    #[serde(default)]
+    pub long_name: Option<String>,
+    /// Short form: "o" for -o
+    #[serde(default)]
+    pub short_name: Option<String>,
+    pub required: Option<bool>,
+    pub takes_value: Option<bool>,
+    pub default: Option<String>,
+}
+
+/// Invocation from node to module (CLI or RPC dispatch)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationMessage {
+    pub correlation_id: CorrelationId,
+    pub invocation_type: InvocationType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum InvocationType {
+    /// CLI: run subcommand with args
+    Cli {
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// RPC: call method with params
+    Rpc {
+        method: String,
+        params: serde_json::Value,
+    },
+}
+
+/// Invocation result from module to node
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationResultMessage {
+    pub correlation_id: CorrelationId,
+    pub success: bool,
+    pub payload: Option<InvocationResultPayload>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum InvocationResultPayload {
+    /// CLI result: stdout, stderr, exit_code
+    Cli {
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+    },
+    /// RPC result: JSON value
+    Rpc(serde_json::Value),
 }
 
 /// Response message from node to module
@@ -372,10 +433,6 @@ pub enum ResponsePayload {
     FileData(Vec<u8>),
     DirectoryListing(Vec<String>),
     FileMetadata(FileMetadata),
-    // Storage API responses
-    StorageTreeId(String),
-    StorageValue(Option<Vec<u8>>),
-    StorageKeyValuePairs(Vec<(Vec<u8>, Vec<u8>)>),
     // Module RPC Endpoint Registration responses
     RpcEndpointRegistered,
     RpcEndpointUnregistered,
@@ -829,6 +886,10 @@ pub enum EventPayload {
         packet_data: Vec<u8>,
         peer_addr: String, // Serialized SocketAddr as string
     },
+    StratumV2MessageReceived {
+        message_data: Vec<u8>,
+        peer_addr: String, // Serialized SocketAddr as string
+    },
     ModuleCrashed {
         module_name: String,
         error: String,
@@ -1020,6 +1081,36 @@ pub enum EventPayload {
         ban_count: usize,
     },
 
+    // === §6.4 New Event Types ===
+    SelectiveSyncPolicyApplied {
+        policy_source: String, // "subscribe", "refresh", "config"
+        registry_count: usize,
+    },
+    ActionExecuted {
+        action_id: String,
+        action_type: String,
+        target: String, // miner_id or "all"
+        success: bool,
+    },
+    ModulePurchaseCompleted {
+        module_id: String,
+        payment_id: String,
+        amount_sats: u64,
+    },
+    StratumClientConnected {
+        endpoint: String,
+        protocol_version: u32,
+    },
+    StratumClientDisconnected {
+        endpoint: String,
+        reason: String,
+    },
+    IBDBlockFiltered {
+        block_hash: Hash,
+        height: u64,
+        reason: String, // "selective_sync", "prune", etc.
+    },
+
     // === Module Registry Events ===
     ModuleDiscovered {
         module_name: String,
@@ -1039,6 +1130,47 @@ pub enum EventPayload {
         module_name: String,
         version: String,
     },
+}
+
+/// Typed payload extraction for event handlers.
+///
+/// Use these helpers in #[on_event] handlers to get event-specific data without manual matching.
+/// Example: `if let Some((hash, height)) = event.payload.as_new_block() { ... }`
+impl EventPayload {
+    pub fn as_new_block(&self) -> Option<(&Hash, u64)> {
+        match self {
+            Self::NewBlock { block_hash, height } => Some((block_hash, *height)),
+            _ => None,
+        }
+    }
+
+    pub fn as_new_transaction(&self) -> Option<&Hash> {
+        match self {
+            Self::NewTransaction { tx_hash } => Some(tx_hash),
+            _ => None,
+        }
+    }
+
+    pub fn as_module_loaded(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::ModuleLoaded { module_name, version } => Some((module_name.as_str(), version.as_str())),
+            _ => None,
+        }
+    }
+
+    pub fn as_block_disconnected(&self) -> Option<(&Hash, u64)> {
+        match self {
+            Self::BlockDisconnected { hash, height } => Some((hash, *height)),
+            _ => None,
+        }
+    }
+
+    pub fn as_chain_reorg(&self) -> Option<(&Hash, &Hash)> {
+        match self {
+            Self::ChainReorg { old_tip, new_tip } => Some((old_tip, new_tip)),
+            _ => None,
+        }
+    }
 }
 
 /// Helper to create request messages
@@ -1117,13 +1249,6 @@ pub struct FileMetadata {
     pub is_directory: bool,
     pub modified: Option<u64>, // Unix timestamp
     pub created: Option<u64>,  // Unix timestamp
-}
-
-/// Storage operation for transactions
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum StorageOperation {
-    Insert { key: Vec<u8>, value: Vec<u8> },
-    Remove { key: Vec<u8> },
 }
 
 /// Helper to create response messages

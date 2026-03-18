@@ -7,6 +7,8 @@ pub mod assumeutxo;
 pub mod bitcoin_core_blocks;
 pub mod bitcoin_core_detection;
 pub mod bitcoin_core_format;
+#[cfg(feature = "rocksdb")]
+pub mod bitcoin_core_migrate;
 pub mod bitcoin_core_storage;
 pub mod blockstore;
 pub mod buffered_store;
@@ -359,7 +361,7 @@ impl Storage {
     }
 
     /// Load AssumeUTXO snapshot into storage.
-    /// Requires `tip_header` for chain state; when None, returns Err (header fetch not yet implemented).
+    /// Uses `tip_header` when provided; otherwise fetches header from blockstore by metadata.block_hash.
     pub fn load_assumeutxo_snapshot(
         &self,
         utxo_set: &blvm_protocol::UtxoSet,
@@ -367,14 +369,21 @@ impl Storage {
         tip_header: Option<&blvm_protocol::BlockHeader>,
     ) -> Result<()> {
         self.utxostore.store_utxo_set(utxo_set)?;
-        let header = tip_header.ok_or_else(|| {
-            anyhow::anyhow!(
-                "AssumeUTXO chain state requires block header. Implement header fetch (getdata) or add header to snapshot format."
-            )
-        })?;
+        let header = match tip_header {
+            Some(h) => h.clone(),
+            None => self
+                .blockstore
+                .get_header(&metadata.block_hash)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "AssumeUTXO requires block header. Block {} not in store. Run IBD first or include header in snapshot.",
+                        hex::encode(metadata.block_hash)
+                    )
+                })?,
+        };
         let chain_info = chainstate::ChainInfo {
             tip_hash: metadata.block_hash,
-            tip_header: header.clone(),
+            tip_header: header,
             height: metadata.block_height,
             total_work: 0, // Would need chainwork from header chain
             chain_params: chainstate::ChainParams::default(),

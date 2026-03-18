@@ -13,13 +13,14 @@ thread_local! {
 }
 
 use crate::module::api::events::EventManager;
+use hex;
 use crate::module::hooks::HookManager;
 use crate::module::ipc::protocol::EventPayload;
 use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::metrics::manager::{Metric, MetricsManager};
 use crate::module::traits::{
-    ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError, ModuleInfo, ModuleState,
-    NetworkStats, NodeAPI, PaymentState, PeerInfo, SubmitBlockResult,
+    module_error_msg, ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError, ModuleInfo,
+    ModuleState, NetworkStats, NodeAPI, PaymentState, PeerInfo, SubmitBlockResult,
 };
 use crate::network::{transport::TransportAddr, NetworkManager};
 use crate::node::mempool::MempoolManager;
@@ -54,14 +55,6 @@ pub struct NodeApiImpl {
     filesystem_sandbox: Option<Arc<crate::module::sandbox::filesystem::FileSystemSandbox>>,
     /// Module data directory path
     module_data_dir: Option<std::path::PathBuf>,
-    /// Storage database for module storage API (isolated per module)
-    module_storage: Option<
-        Arc<
-            tokio::sync::RwLock<
-                std::collections::HashMap<String, Arc<dyn crate::storage::database::Tree>>,
-            >,
-        >,
-    >,
     /// Per-module filesystem sandboxes (module_id -> sandbox)
     module_filesystem_sandboxes: Arc<
         tokio::sync::RwLock<
@@ -74,17 +67,6 @@ pub struct NodeApiImpl {
     /// Per-module data directories (module_id -> path)
     module_data_dirs:
         Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::path::PathBuf>>>,
-    /// Per-module storage trees (module_id -> tree_id -> tree)
-    module_storage_trees: Arc<
-        tokio::sync::RwLock<
-            std::collections::HashMap<
-                String,
-                std::collections::HashMap<String, Arc<dyn crate::storage::database::Tree>>,
-            >,
-        >,
-    >,
-    /// Node storage for opening module storage trees
-    node_storage: Option<Arc<Storage>>,
     /// IPC server reference (for RPC endpoint registration)
     ipc_server: Option<Arc<tokio::sync::Mutex<crate::module::ipc::server::ModuleIpcServer>>>,
     /// Sync coordinator (optional, for sync status checking)
@@ -119,15 +101,10 @@ impl NodeApiImpl {
             module_id_for_metrics: None,
             filesystem_sandbox: None,
             module_data_dir: None,
-            module_storage: None,
             module_filesystem_sandboxes: Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
             module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            module_storage_trees: Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            node_storage: Some(storage_clone),
             ipc_server: None,
             sync_coordinator: None,
             payment_state_machine: None,
@@ -158,15 +135,10 @@ impl NodeApiImpl {
             module_id_for_metrics: None,
             filesystem_sandbox: None,
             module_data_dir: None,
-            module_storage: None,
             module_filesystem_sandboxes: Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
             module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            module_storage_trees: Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            node_storage: None,
             ipc_server: None,
             sync_coordinator: None,
             payment_state_machine: None,
@@ -201,15 +173,10 @@ impl NodeApiImpl {
             module_id_for_metrics: None,
             filesystem_sandbox: None,
             module_data_dir: None,
-            module_storage: None,
             module_filesystem_sandboxes: Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
             module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            module_storage_trees: Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            node_storage: Some(storage_clone),
             sync_coordinator: None,
             payment_state_machine: None,
             module_manager: None,
@@ -265,12 +232,6 @@ impl NodeApiImpl {
             dirs.insert(module_id.clone(), module_data_dir);
         }
 
-        // Initialize storage trees map for this module
-        {
-            let mut trees = self.module_storage_trees.write().await;
-            trees.insert(module_id, std::collections::HashMap::new());
-        }
-
         Ok(())
     }
 
@@ -304,18 +265,6 @@ impl NodeApiImpl {
     ) {
         self.filesystem_sandbox = Some(sandbox);
         self.module_data_dir = Some(data_dir);
-    }
-
-    /// Set module storage (for late initialization)
-    pub fn set_module_storage(
-        &mut self,
-        storage: Arc<
-            tokio::sync::RwLock<
-                std::collections::HashMap<String, Arc<dyn crate::storage::database::Tree>>,
-            >,
-        >,
-    ) {
-        self.module_storage = Some(storage);
     }
 
     /// Set hook manager (for late initialization)
@@ -370,32 +319,10 @@ impl NodeApiImpl {
         self.payment_state_machine = Some(payment_state_machine);
     }
 
-    /// Set node storage (for module storage API)
-    pub fn set_node_storage(&mut self, storage: Arc<Storage>) {
-        self.node_storage = Some(storage);
-    }
-
-    /// Helper to calculate difficulty from bits (private helper, not part of trait)
+    /// Helper to calculate difficulty from bits (private helper, not part of trait).
+    /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty_from_bits_helper(&self, bits: u64) -> f64 {
-        const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
-        let exponent = (bits >> 24) as u8;
-        let mantissa = bits & 0x00ffffff;
-
-        if mantissa == 0 {
-            return 1.0;
-        }
-
-        let target = if exponent <= 3 {
-            mantissa >> (8 * (3 - exponent))
-        } else {
-            mantissa << (8 * (exponent - 3))
-        };
-
-        if target == 0 {
-            return 1.0;
-        }
-
-        MAX_TARGET as f64 / target as f64
+        blvm_consensus::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 }
 
@@ -410,11 +337,11 @@ impl NodeAPI for NodeApiImpl {
                 storage
                     .blocks()
                     .get_block(&hash)
-                    .map_err(|e| ModuleError::OperationError(format!("Failed to get block: {e}")))
+                    .map_err(|e| ModuleError::op_err("Failed to get block", e))
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     async fn get_block_header(&self, hash: &Hash) -> Result<Option<BlockHeader>, ModuleError> {
@@ -424,12 +351,12 @@ impl NodeAPI for NodeApiImpl {
             let hash = *hash;
             move || {
                 storage.blocks().get_header(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get block header: {e}"))
+                    ModuleError::op_err("Failed to get block header", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     async fn get_transaction(&self, hash: &Hash) -> Result<Option<Transaction>, ModuleError> {
@@ -439,12 +366,12 @@ impl NodeAPI for NodeApiImpl {
             let hash = *hash;
             move || {
                 storage.transactions().get_transaction(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get transaction: {e}"))
+                    ModuleError::op_err("Failed to get transaction", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     async fn has_transaction(&self, hash: &Hash) -> Result<bool, ModuleError> {
@@ -454,14 +381,12 @@ impl NodeAPI for NodeApiImpl {
             let hash = *hash;
             move || {
                 storage.transactions().has_transaction(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!(
-                        "Failed to check transaction existence: {e}"
-                    ))
+                    ModuleError::op_err("Failed to check transaction existence", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     async fn get_block_height(&self) -> Result<u64, ModuleError> {
@@ -473,15 +398,15 @@ impl NodeAPI for NodeApiImpl {
                     .chain()
                     .get_height()
                     .map_err(|e| {
-                        ModuleError::OperationError(format!("Failed to get block height: {e}"))
+                        ModuleError::op_err("Failed to get block height", e)
                     })?
                     .ok_or_else(|| {
-                        ModuleError::OperationError("Chain not yet initialized".to_string())
+                        ModuleError::OperationError(module_error_msg::CHAIN_NOT_YET_INITIALIZED.to_string())
                     })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     async fn get_chain_tip(&self) -> Result<Hash, ModuleError> {
@@ -493,15 +418,15 @@ impl NodeAPI for NodeApiImpl {
                     .chain()
                     .get_tip_hash()
                     .map_err(|e| {
-                        ModuleError::OperationError(format!("Failed to get chain tip: {e}"))
+                        ModuleError::op_err("Failed to get chain tip", e)
                     })?
                     .ok_or_else(|| {
-                        ModuleError::OperationError("Chain not yet initialized".to_string())
+                        ModuleError::OperationError(module_error_msg::CHAIN_NOT_YET_INITIALIZED.to_string())
                     })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     async fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
@@ -514,11 +439,11 @@ impl NodeAPI for NodeApiImpl {
                 storage
                     .utxos()
                     .get_utxo(&outpoint_clone)
-                    .map_err(|e| ModuleError::OperationError(format!("Failed to get UTXO: {e}")))
+                    .map_err(|e| ModuleError::op_err("Failed to get UTXO", e))
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     async fn subscribe_events(
@@ -549,7 +474,7 @@ impl NodeAPI for NodeApiImpl {
     // === Mempool API Methods ===
     async fn get_mempool_transactions(&self) -> Result<Vec<Hash>, ModuleError> {
         let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("MempoolManager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         // Get all transaction hashes from mempool
@@ -561,7 +486,7 @@ impl NodeAPI for NodeApiImpl {
         tx_hash: &Hash,
     ) -> Result<Option<Transaction>, ModuleError> {
         let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("MempoolManager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         Ok(mempool.get_transaction(tx_hash))
@@ -578,7 +503,7 @@ impl NodeAPI for NodeApiImpl {
 
         // Fall back to normal calculation
         let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("MempoolManager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let transaction_count = mempool.size();
@@ -621,7 +546,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?;
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
 
         Ok(MempoolSize {
             transaction_count,
@@ -633,7 +558,7 @@ impl NodeAPI for NodeApiImpl {
     // === Network API Methods ===
     async fn get_network_stats(&self) -> Result<NetworkStats, ModuleError> {
         let network = self.network_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("NetworkManager not available".to_string())
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let peer_count = network.peer_count();
@@ -641,34 +566,14 @@ impl NodeAPI for NodeApiImpl {
         // Get network hash rate from storage (if available)
         let hash_rate = tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
-            // Helper function for difficulty calculation (static, doesn't need self)
-            fn calculate_difficulty_from_bits(bits: u64) -> f64 {
-                const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
-                let exponent = (bits >> 24) as u8;
-                let mantissa = bits & 0x00ffffff;
-
-                if mantissa == 0 {
-                    return 1.0;
-                }
-
-                let target = if exponent <= 3 {
-                    mantissa >> (8 * (3 - exponent))
-                } else {
-                    mantissa << (8 * (exponent - 3))
-                };
-
-                if target == 0 {
-                    return 1.0;
-                }
-
-                MAX_TARGET as f64 / target as f64
-            }
             move || {
                 // Try to get network hashrate from chain state cache
                 if let Ok(Some(chain_info)) = storage.chain().load_chain_info() {
                     // Calculate approximate hash rate from difficulty
                     // Hash rate = difficulty * 2^32 / 600 (seconds per block)
-                    let difficulty = calculate_difficulty_from_bits(chain_info.tip_header.bits);
+                    let difficulty =
+                        blvm_consensus::pow::difficulty_from_bits(chain_info.tip_header.bits)
+                            .unwrap_or(1.0);
                     difficulty * 4294967296.0 / 600.0
                 } else {
                     0.0
@@ -676,7 +581,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?;
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
 
         // Network stats don't track bytes sent/received at this level
         // These would need to be tracked by NetworkManager
@@ -690,7 +595,7 @@ impl NodeAPI for NodeApiImpl {
 
     async fn get_network_peers(&self) -> Result<Vec<PeerInfo>, ModuleError> {
         let network = self.network_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("NetworkManager not available".to_string())
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let peer_manager_guard = network.peer_manager().await;
@@ -741,32 +646,11 @@ impl NodeAPI for NodeApiImpl {
         let (difficulty, chain_work, is_synced) = tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
             let tip_clone = tip;
-            // Helper function for difficulty calculation (static, doesn't need self)
-            fn calculate_difficulty_from_bits(bits: u64) -> f64 {
-                const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
-                let exponent = (bits >> 24) as u8;
-                let mantissa = bits & 0x00ffffff;
-
-                if mantissa == 0 {
-                    return 1.0;
-                }
-
-                let target = if exponent <= 3 {
-                    mantissa >> (8 * (3 - exponent))
-                } else {
-                    mantissa << (8 * (exponent - 3))
-                };
-
-                if target == 0 {
-                    return 1.0;
-                }
-
-                MAX_TARGET as f64 / target as f64
-            }
             move || {
                 // Get tip header to calculate difficulty
                 let difficulty = if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
-                    calculate_difficulty_from_bits(tip_header.bits) as u32
+                    blvm_consensus::pow::difficulty_from_bits(tip_header.bits)
+                        .unwrap_or(1.0) as u32
                 } else {
                     0
                 };
@@ -783,7 +667,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?;
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
 
         // Check sync status from sync coordinator
         let is_synced = if let Some(ref sync_coord) = self.sync_coordinator {
@@ -811,118 +695,30 @@ impl NodeAPI for NodeApiImpl {
                 storage
                     .blocks()
                     .get_hash_by_height(height)
-                    .map_err(|e| {
-                        ModuleError::OperationError(format!("Failed to get hash by height: {e}"))
-                    })?
+                    .map_err(|e| ModuleError::op_err("Failed to get hash by height", e))?
                     .and_then(|hash| {
                         storage
                             .blocks()
                             .get_block(&hash)
-                            .map_err(|e| {
-                                ModuleError::OperationError(format!("Failed to get block: {e}"))
-                            })
+                            .map_err(|e| ModuleError::op_err("Failed to get block", e))
                             .transpose()
                     })
                     .transpose()
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     // === Lightning API Methods ===
     async fn get_lightning_node_url(&self) -> Result<Option<String>, ModuleError> {
         // Query Lightning module storage for node URL
-        // Lightning module stores its URL in module storage tree "lightning_config" with key "node_url"
-        let lightning_module_id = "blvm-lightning";
-
-        // Check if Lightning module storage tree exists
-        let trees = self.module_storage_trees.read().await;
-        if let Some(module_trees) = trees.get(lightning_module_id) {
-            // Look for lightning_config tree
-            let tree_name = format!("module_{lightning_module_id}_lightning_config");
-            if let Some(tree) = module_trees.get(&tree_name) {
-                // Get node_url from storage
-                if let Ok(Some(url_bytes)) = tree.get(b"node_url") {
-                    if let Ok(url) = String::from_utf8(url_bytes) {
-                        return Ok(Some(url));
-                    }
-                }
-            }
-        }
-
+        // Module storage has been removed. Lightning module should use RPC or its own DB.
         Ok(None)
     }
 
     async fn get_lightning_info(&self) -> Result<Option<LightningInfo>, ModuleError> {
-        // Query Lightning module storage for info
-        // Lightning module stores its info in module storage tree "lightning_config"
-        let lightning_module_id = "blvm-lightning";
-
-        // Check if Lightning module storage tree exists
-        let trees = self.module_storage_trees.read().await;
-        if let Some(module_trees) = trees.get(lightning_module_id) {
-            // Look for lightning_config tree
-            let tree_name = format!("module_{lightning_module_id}_lightning_config");
-            if let Some(tree) = module_trees.get(&tree_name) {
-                // Get node_url (required field)
-                let node_url = match tree.get(b"node_url") {
-                    Ok(Some(bytes)) => String::from_utf8(bytes).unwrap_or_default(),
-                    _ => String::new(),
-                };
-
-                // Return None if node_url is not available
-                if node_url.is_empty() {
-                    return Ok(None);
-                }
-
-                // Get node_pubkey
-                let node_pubkey: Vec<u8> =
-                    tree.get(b"node_pubkey").ok().flatten().unwrap_or_default();
-
-                // Get channel_count
-                let channel_count = tree
-                    .get(b"channel_count")
-                    .ok()
-                    .flatten()
-                    .and_then(|bytes| {
-                        if bytes.len() >= 8 {
-                            Some(u64::from_be_bytes([
-                                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                                bytes[6], bytes[7],
-                            ]) as usize)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0);
-
-                // Get total_capacity_sats
-                let total_capacity_sats = tree
-                    .get(b"total_capacity_sats")
-                    .ok()
-                    .flatten()
-                    .and_then(|bytes| {
-                        if bytes.len() >= 8 {
-                            Some(u64::from_be_bytes([
-                                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                                bytes[6], bytes[7],
-                            ]))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0);
-
-                return Ok(Some(LightningInfo {
-                    node_url,
-                    node_pubkey,
-                    channel_count,
-                    total_capacity_sats,
-                }));
-            }
-        }
-
+        // Module storage has been removed. Lightning module should use RPC or its own DB.
         Ok(None)
     }
 
@@ -932,7 +728,7 @@ impl NodeAPI for NodeApiImpl {
         payment_id: &str,
     ) -> Result<Option<PaymentState>, ModuleError> {
         let payment_state_machine = self.payment_state_machine.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Payment state machine not available".to_string())
+            ModuleError::OperationError(module_error_msg::PAYMENT_STATE_MACHINE_NOT_AVAILABLE.to_string())
         })?;
 
         match payment_state_machine.get_payment_state(payment_id).await {
@@ -1014,7 +810,7 @@ impl NodeAPI for NodeApiImpl {
     // === Additional Mempool API Methods ===
     async fn check_transaction_in_mempool(&self, tx_hash: &Hash) -> Result<bool, ModuleError> {
         let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("MempoolManager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         Ok(mempool.get_transaction(tx_hash).is_some())
@@ -1031,7 +827,7 @@ impl NodeAPI for NodeApiImpl {
 
         // Fall back to normal calculation
         let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("MempoolManager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         // Implement fee estimation algorithm
@@ -1085,7 +881,7 @@ impl NodeAPI for NodeApiImpl {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?;
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
 
         let mut fee_rates = fee_rates;
         if fee_rates.is_empty() {
@@ -1119,16 +915,16 @@ impl NodeAPI for NodeApiImpl {
         let rpc_server = self
             .rpc_server
             .as_ref()
-            .ok_or_else(|| ModuleError::OperationError("RPC server not available".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string()))?;
 
         let ipc_server = self
             .ipc_server
             .as_ref()
-            .ok_or_else(|| ModuleError::OperationError("IPC server not available".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::IPC_SERVER_NOT_AVAILABLE.to_string()))?;
 
         let module_id = self
             .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
 
         // Get RPC request channel for this module
         let ipc_server_guard = ipc_server.lock().await;
@@ -1152,7 +948,7 @@ impl NodeAPI for NodeApiImpl {
             .register_module_endpoint(method.clone(), handler)
             .await
             .map_err(|e| {
-                ModuleError::OperationError(format!("Failed to register RPC endpoint: {e}"))
+                ModuleError::op_err("Failed to register RPC endpoint", e)
             })?;
 
         Ok(())
@@ -1162,7 +958,7 @@ impl NodeAPI for NodeApiImpl {
         let rpc_server = self
             .rpc_server
             .as_ref()
-            .ok_or_else(|| ModuleError::OperationError("RPC server not available".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string()))?;
 
         rpc_server
             .unregister_module_endpoint(method)
@@ -1176,11 +972,11 @@ impl NodeAPI for NodeApiImpl {
         callback: Arc<dyn crate::module::timers::manager::TimerCallback>,
     ) -> Result<crate::module::timers::manager::TimerId, ModuleError> {
         let timer_manager = self.timer_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Timer manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::TIMER_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let module_id = self.module_id_for_timers.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module ID not set for timer registration".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET_FOR_TIMER.to_string())
         })?;
 
         timer_manager
@@ -1194,7 +990,7 @@ impl NodeAPI for NodeApiImpl {
         timer_id: crate::module::timers::manager::TimerId,
     ) -> Result<(), ModuleError> {
         let timer_manager = self.timer_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Timer manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::TIMER_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         timer_manager
@@ -1209,11 +1005,11 @@ impl NodeAPI for NodeApiImpl {
         callback: Arc<dyn crate::module::timers::manager::TaskCallback>,
     ) -> Result<crate::module::timers::manager::TaskId, ModuleError> {
         let timer_manager = self.timer_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Timer manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::TIMER_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let module_id = self.module_id_for_timers.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module ID not set for task scheduling".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET_FOR_TASK.to_string())
         })?;
 
         timer_manager
@@ -1224,11 +1020,11 @@ impl NodeAPI for NodeApiImpl {
 
     async fn report_metric(&self, metric: Metric) -> Result<(), ModuleError> {
         let metrics_manager = self.metrics_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Metrics manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::METRICS_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let module_id = self.module_id_for_metrics.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module ID not set for metrics reporting".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET_FOR_METRICS.to_string())
         })?;
 
         metrics_manager
@@ -1239,7 +1035,7 @@ impl NodeAPI for NodeApiImpl {
 
     async fn get_module_metrics(&self, module_id: &str) -> Result<Vec<Metric>, ModuleError> {
         let metrics_manager = self.metrics_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Metrics manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::METRICS_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         Ok(metrics_manager.get_module_metrics(module_id).await)
@@ -1249,7 +1045,7 @@ impl NodeAPI for NodeApiImpl {
         &self,
     ) -> Result<std::collections::HashMap<String, Vec<Metric>>, ModuleError> {
         let metrics_manager = self.metrics_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Metrics manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::METRICS_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         Ok(metrics_manager.get_all_metrics().await)
@@ -1259,7 +1055,7 @@ impl NodeAPI for NodeApiImpl {
     async fn read_file(&self, path: String) -> Result<Vec<u8>, ModuleError> {
         let module_id = self
             .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1296,13 +1092,13 @@ impl NodeAPI for NodeApiImpl {
 
         tokio::fs::read(&full_path)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to read file: {e}")))
+            .map_err(|e| ModuleError::op_err("Failed to read file", e))
     }
 
     async fn write_file(&self, path: String, data: Vec<u8>) -> Result<(), ModuleError> {
         let module_id = self
             .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1338,19 +1134,19 @@ impl NodeAPI for NodeApiImpl {
         // Create parent directory if needed
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                ModuleError::OperationError(format!("Failed to create directory: {e}"))
+                ModuleError::op_err("Failed to create directory", e)
             })?;
         }
 
         tokio::fs::write(&full_path, data)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to write file: {e}")))
+            .map_err(|e| ModuleError::op_err("Failed to write file", e))
     }
 
     async fn delete_file(&self, path: String) -> Result<(), ModuleError> {
         let module_id = self
             .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1385,13 +1181,13 @@ impl NodeAPI for NodeApiImpl {
 
         tokio::fs::remove_file(&full_path)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to delete file: {e}")))
+            .map_err(|e| ModuleError::op_err("Failed to delete file", e))
     }
 
     async fn list_directory(&self, path: String) -> Result<Vec<String>, ModuleError> {
         let module_id = self
             .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1427,10 +1223,10 @@ impl NodeAPI for NodeApiImpl {
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&full_path)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to read directory: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to read directory", e))?;
 
         while let Some(entry) = dir.next_entry().await.map_err(|e| {
-            ModuleError::OperationError(format!("Failed to read directory entry: {e}"))
+            ModuleError::op_err("Failed to read directory entry", e)
         })? {
             if let Some(name) = entry.file_name().to_str() {
                 entries.push(name.to_string());
@@ -1443,7 +1239,7 @@ impl NodeAPI for NodeApiImpl {
     async fn create_directory(&self, path: String) -> Result<(), ModuleError> {
         let module_id = self
             .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1478,7 +1274,7 @@ impl NodeAPI for NodeApiImpl {
 
         tokio::fs::create_dir_all(&full_path)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to create directory: {e}")))
+            .map_err(|e| ModuleError::op_err("Failed to create directory", e))
     }
 
     async fn get_file_metadata(
@@ -1487,7 +1283,7 @@ impl NodeAPI for NodeApiImpl {
     ) -> Result<crate::module::ipc::protocol::FileMetadata, ModuleError> {
         let module_id = self
             .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1521,7 +1317,7 @@ impl NodeAPI for NodeApiImpl {
         };
 
         let metadata = tokio::fs::metadata(&full_path).await.map_err(|e| {
-            ModuleError::OperationError(format!("Failed to get file metadata: {e}"))
+            ModuleError::op_err("Failed to get file metadata", e)
         })?;
 
         let modified = metadata
@@ -1546,259 +1342,6 @@ impl NodeAPI for NodeApiImpl {
         })
     }
 
-    // === Storage API Methods ===
-    async fn storage_open_tree(&self, name: String) -> Result<String, ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
-
-        // Validate tree name format - prevent conflicts with our naming scheme
-        if name.starts_with("module_") {
-            return Err(ModuleError::OperationError(
-                "Tree name cannot start with 'module_'".to_string(),
-            ));
-        }
-        if name.contains("__") {
-            return Err(ModuleError::OperationError(
-                "Tree name cannot contain consecutive underscores".to_string(),
-            ));
-        }
-
-        // Use node's storage to create an isolated tree for this module
-        // Tree name format: module_{module_id}_{name}
-        let tree_name = format!("module_{module_id}_{name}");
-
-        // Check if tree already exists
-        {
-            let trees = self.module_storage_trees.read().await;
-            if let Some(module_trees) = trees.get(&module_id) {
-                if module_trees.contains_key(&tree_name) {
-                    return Ok(tree_name);
-                }
-            }
-        }
-
-        // Open the tree in the node's database
-        let node_storage = self
-            .node_storage
-            .as_ref()
-            .ok_or_else(|| ModuleError::OperationError("Node storage not available".to_string()))?;
-
-        // Access the database and open the tree
-        let tree = tokio::task::spawn_blocking({
-            let storage = Arc::clone(node_storage);
-            let tree_name_clone = tree_name.clone();
-            move || {
-                storage.open_tree(&tree_name_clone).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to open storage tree: {e}"))
-                })
-            }
-        })
-        .await
-        .map_err(|e| {
-            ModuleError::OperationError(format!("Failed to spawn blocking task: {e}"))
-        })??;
-
-        // Store the tree
-        {
-            let mut trees = self.module_storage_trees.write().await;
-            let module_trees = trees
-                .entry(module_id)
-                .or_insert_with(std::collections::HashMap::new);
-            module_trees.insert(tree_name.clone(), tree);
-        }
-
-        Ok(tree_name)
-    }
-
-    async fn storage_insert(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> Result<(), ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
-
-        let tree = {
-            let trees = self.module_storage_trees.read().await;
-            let module_trees = trees.get(&module_id).ok_or_else(|| {
-                ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {module_id}"
-                ))
-            })?;
-            module_trees
-                .get(&tree_id)
-                .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
-                })?
-                .clone()
-        };
-
-        tree.insert(&key, &value)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to insert into storage: {e}")))
-    }
-
-    async fn storage_get(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
-
-        let tree = {
-            let trees = self.module_storage_trees.read().await;
-            let module_trees = trees.get(&module_id).ok_or_else(|| {
-                ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {module_id}"
-                ))
-            })?;
-            module_trees
-                .get(&tree_id)
-                .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
-                })?
-                .clone()
-        };
-
-        tree.get(&key)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to get from storage: {e}")))
-    }
-
-    async fn storage_remove(&self, tree_id: String, key: Vec<u8>) -> Result<(), ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
-
-        let tree = {
-            let trees = self.module_storage_trees.read().await;
-            let module_trees = trees.get(&module_id).ok_or_else(|| {
-                ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {module_id}"
-                ))
-            })?;
-            module_trees
-                .get(&tree_id)
-                .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
-                })?
-                .clone()
-        };
-
-        tree.remove(&key)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to remove from storage: {e}")))
-    }
-
-    async fn storage_contains_key(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-    ) -> Result<bool, ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
-
-        let tree = {
-            let trees = self.module_storage_trees.read().await;
-            let module_trees = trees.get(&module_id).ok_or_else(|| {
-                ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {module_id}"
-                ))
-            })?;
-            module_trees
-                .get(&tree_id)
-                .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
-                })?
-                .clone()
-        };
-
-        tree.contains_key(&key).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to check key in storage: {e}"))
-        })
-    }
-
-    async fn storage_iter(&self, tree_id: String) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
-
-        let tree = {
-            let trees = self.module_storage_trees.read().await;
-            let module_trees = trees.get(&module_id).ok_or_else(|| {
-                ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {module_id}"
-                ))
-            })?;
-            module_trees
-                .get(&tree_id)
-                .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
-                })?
-                .clone()
-        };
-
-        let mut result = Vec::new();
-        for item in tree.iter() {
-            match item {
-                Ok((key, value)) => result.push((key, value)),
-                Err(e) => {
-                    return Err(ModuleError::OperationError(format!(
-                        "Failed to iterate storage: {e}"
-                    )))
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    async fn storage_transaction(
-        &self,
-        tree_id: String,
-        operations: Vec<crate::module::ipc::protocol::StorageOperation>,
-    ) -> Result<(), ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError("Module ID not set".to_string()))?;
-
-        let tree = {
-            let trees = self.module_storage_trees.read().await;
-            let module_trees = trees.get(&module_id).ok_or_else(|| {
-                ModuleError::OperationError(format!(
-                    "Module storage not initialized for module {module_id}"
-                ))
-            })?;
-            module_trees
-                .get(&tree_id)
-                .ok_or_else(|| {
-                    ModuleError::OperationError(format!("Storage tree not found: {tree_id}"))
-                })?
-                .clone()
-        };
-
-        // Execute operations sequentially (atomicity depends on database backend)
-        for op in operations {
-            match op {
-                crate::module::ipc::protocol::StorageOperation::Insert { key, value } => {
-                    tree.insert(&key, &value).map_err(|e| {
-                        ModuleError::OperationError(format!("Failed to insert in transaction: {e}"))
-                    })?;
-                }
-                crate::module::ipc::protocol::StorageOperation::Remove { key } => {
-                    tree.remove(&key).map_err(|e| {
-                        ModuleError::OperationError(format!("Failed to remove in transaction: {e}"))
-                    })?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     async fn initialize_module(
         &self,
         module_id: String,
@@ -1813,7 +1356,7 @@ impl NodeAPI for NodeApiImpl {
         &self,
     ) -> Result<Vec<crate::module::traits::ModuleInfo>, ModuleError> {
         let module_manager = self.module_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let manager = module_manager.lock().await;
@@ -1846,7 +1389,7 @@ impl NodeAPI for NodeApiImpl {
         module_id: &str,
     ) -> Result<Option<crate::module::traits::ModuleInfo>, ModuleError> {
         let module_manager = self.module_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let manager = module_manager.lock().await;
@@ -1902,7 +1445,7 @@ impl NodeAPI for NodeApiImpl {
 
     async fn is_module_available(&self, module_id: &str) -> Result<bool, ModuleError> {
         let module_manager = self.module_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let manager = module_manager.lock().await;
@@ -1923,7 +1466,7 @@ impl NodeAPI for NodeApiImpl {
         payload: EventPayload,
     ) -> Result<(), ModuleError> {
         let event_manager = self.event_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Event manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::EVENT_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         event_manager.publish_event(event_type, payload).await
@@ -1936,7 +1479,7 @@ impl NodeAPI for NodeApiImpl {
         params: Vec<u8>,
     ) -> Result<Vec<u8>, ModuleError> {
         let router = self.module_router.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module router not available".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_ROUTER_NOT_AVAILABLE.to_string())
         })?;
 
         // Get caller module ID from instance
@@ -1957,7 +1500,7 @@ impl NodeAPI for NodeApiImpl {
         api: Arc<dyn crate::module::inter_module::api::ModuleAPI>,
     ) -> Result<(), ModuleError> {
         let registry = self.module_api_registry.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module API registry not available".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string())
         })?;
 
         let module_id = self
@@ -1976,7 +1519,7 @@ impl NodeAPI for NodeApiImpl {
 
     async fn unregister_module_api(&self) -> Result<(), ModuleError> {
         let registry = self.module_api_registry.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module API registry not available".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string())
         })?;
 
         let module_id = self
@@ -2015,7 +1558,7 @@ impl NodeAPI for NodeApiImpl {
         packet_data: Vec<u8>,
     ) -> Result<(), ModuleError> {
         let network_manager = self.network_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Network manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         // Parse peer address (can be SocketAddr string or TransportAddr)
@@ -2026,7 +1569,7 @@ impl NodeAPI for NodeApiImpl {
                 .send_to_peer(socket_addr, packet_data)
                 .await
                 .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to send mesh packet: {e}"))
+                    ModuleError::op_err("Failed to send mesh packet", e)
                 })?;
         } else {
             // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
@@ -2035,7 +1578,7 @@ impl NodeAPI for NodeApiImpl {
                 addr_str
                     .parse::<std::net::SocketAddr>()
                     .map(TransportAddr::Tcp)
-                    .map_err(|e| ModuleError::OperationError(format!("Invalid TCP address: {e}")))?
+                    .map_err(|e| ModuleError::op_err("Invalid TCP address", e))?
             } else if peer_addr.starts_with("quinn:") {
                 #[cfg(feature = "quinn")]
                 {
@@ -2044,7 +1587,7 @@ impl NodeAPI for NodeApiImpl {
                         .parse::<std::net::SocketAddr>()
                         .map(TransportAddr::Quinn)
                         .map_err(|e| {
-                            ModuleError::OperationError(format!("Invalid Quinn address: {}", e))
+                            ModuleError::op_err("Invalid Quinn address", e)
                         })?
                 }
                 #[cfg(not(feature = "quinn"))]
@@ -2057,7 +1600,7 @@ impl NodeAPI for NodeApiImpl {
                     use iroh::net::NodeId;
                     let node_id_str = &peer_addr[5..];
                     let node_id_bytes = hex::decode(node_id_str).map_err(|e| {
-                        ModuleError::OperationError(format!("Invalid Iroh node ID hex: {}", e))
+                        ModuleError::op_err("Invalid Iroh node ID hex", e)
                     })?;
                     if node_id_bytes.len() != 32 {
                         return Err(ModuleError::OperationError(
@@ -2083,7 +1626,7 @@ impl NodeAPI for NodeApiImpl {
                 .send_to_peer_by_transport(transport_addr, packet_data)
                 .await
                 .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to send mesh packet: {e}"))
+                    ModuleError::op_err("Failed to send mesh packet", e)
                 })?;
         }
 
@@ -2096,19 +1639,20 @@ impl NodeAPI for NodeApiImpl {
         message_data: Vec<u8>,
     ) -> Result<(), ModuleError> {
         let network_manager = self.network_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Network manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         // Parse peer address (can be SocketAddr string or TransportAddr)
         // Try parsing as SocketAddr first
         if let Ok(socket_addr) = peer_addr.parse::<std::net::SocketAddr>() {
-            // Send via SocketAddr
-            network_manager
-                .send_to_peer(socket_addr, message_data)
-                .await
-                .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to send Stratum V2 message: {e}"))
-                })?;
+            // Send via SocketAddr (checks stratum_connections first, then P2P peers)
+            #[cfg(feature = "stratum-v2")]
+            let result = network_manager.send_stratum_v2_to_peer(socket_addr, message_data).await;
+            #[cfg(not(feature = "stratum-v2"))]
+            let result = network_manager.send_to_peer(socket_addr, message_data).await;
+            result.map_err(|e| {
+                ModuleError::op_err("Failed to send Stratum V2 message", e)
+            })?;
         } else {
             // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
             use crate::network::transport::TransportAddr;
@@ -2116,7 +1660,7 @@ impl NodeAPI for NodeApiImpl {
                 addr_str
                     .parse::<std::net::SocketAddr>()
                     .map(TransportAddr::Tcp)
-                    .map_err(|e| ModuleError::OperationError(format!("Invalid TCP address: {e}")))?
+                    .map_err(|e| ModuleError::op_err("Invalid TCP address", e))?
             } else if peer_addr.starts_with("quinn:") {
                 #[cfg(feature = "quinn")]
                 {
@@ -2125,7 +1669,7 @@ impl NodeAPI for NodeApiImpl {
                         .parse::<std::net::SocketAddr>()
                         .map(TransportAddr::Quinn)
                         .map_err(|e| {
-                            ModuleError::OperationError(format!("Invalid Quinn address: {}", e))
+                            ModuleError::op_err("Invalid Quinn address", e)
                         })?
                 }
                 #[cfg(not(feature = "quinn"))]
@@ -2138,7 +1682,7 @@ impl NodeAPI for NodeApiImpl {
                     use iroh::net::NodeId;
                     let node_id_str = &peer_addr[5..];
                     let node_id_bytes = hex::decode(node_id_str).map_err(|e| {
-                        ModuleError::OperationError(format!("Invalid Iroh node ID hex: {}", e))
+                        ModuleError::op_err("Invalid Iroh node ID hex", e)
                     })?;
                     if node_id_bytes.len() != 32 {
                         return Err(ModuleError::OperationError(
@@ -2164,7 +1708,7 @@ impl NodeAPI for NodeApiImpl {
                 .send_to_peer_by_transport(transport_addr, message_data)
                 .await
                 .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to send Stratum V2 message: {e}"))
+                    ModuleError::op_err("Failed to send Stratum V2 message", e)
                 })?;
         }
 
@@ -2176,7 +1720,7 @@ impl NodeAPI for NodeApiImpl {
         module_id: &str,
     ) -> Result<Option<crate::module::process::monitor::ModuleHealth>, ModuleError> {
         let module_manager = self.module_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let manager = module_manager.lock().await;
@@ -2211,7 +1755,7 @@ impl NodeAPI for NodeApiImpl {
         &self,
     ) -> Result<Vec<(String, crate::module::process::monitor::ModuleHealth)>, ModuleError> {
         let module_manager = self.module_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let manager = module_manager.lock().await;
@@ -2254,16 +1798,16 @@ impl NodeAPI for NodeApiImpl {
             .storage
             .chain()
             .get_height()
-            .map_err(|e| ModuleError::OperationError(format!("Failed to get height: {e}")))?
-            .ok_or_else(|| ModuleError::OperationError("Chain not initialized".to_string()))?;
+            .map_err(|e| ModuleError::op_err("Failed to get height", e))?
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string()))?;
 
         // Get tip header
         let prev_header = self
             .storage
             .chain()
             .get_tip_header()
-            .map_err(|e| ModuleError::OperationError(format!("Failed to get tip header: {e}")))?
-            .ok_or_else(|| ModuleError::OperationError("No chain tip".to_string()))?;
+            .map_err(|e| ModuleError::op_err("Failed to get tip header", e))?
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::NO_CHAIN_TIP.to_string()))?;
 
         // Get headers for difficulty adjustment
         let prev_headers = if let Ok(recent) = self.storage.blocks().get_recent_headers(2016) {
@@ -2289,7 +1833,7 @@ impl NodeAPI for NodeApiImpl {
 
         // Get mempool transactions
         let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Mempool manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
         let mempool_txs = mempool_manager.get_transactions();
 
@@ -2298,11 +1842,20 @@ impl NodeAPI for NodeApiImpl {
             .storage
             .utxos()
             .get_all_utxos()
-            .map_err(|e| ModuleError::OperationError(format!("Failed to get UTXO set: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to get UTXO set", e))?;
 
         // Convert coinbase script/address to ByteString
+        // Support "hex:" prefix for raw script bytes (e.g. from DATUM pool payout)
         let coinbase_script_bytes = coinbase_script.unwrap_or_default();
-        let coinbase_address_bytes = coinbase_address.map(|a| a.into_bytes()).unwrap_or_default();
+        let coinbase_address_bytes = coinbase_address
+            .map(|a| {
+                if a.starts_with("hex:") {
+                    hex::decode(&a[4..]).unwrap_or_default()
+                } else {
+                    a.into_bytes()
+                }
+            })
+            .unwrap_or_default();
 
         // Use formally verified consensus function (same as RPC getblocktemplate)
         let template = blvm_consensus::mining::create_block_template(
@@ -2314,7 +1867,7 @@ impl NodeAPI for NodeApiImpl {
             &coinbase_script_bytes,
             &coinbase_address_bytes,
         )
-        .map_err(|e| ModuleError::OperationError(format!("Template creation failed: {e}")))?;
+        .map_err(|e| ModuleError::op_err("Template creation failed", e))?;
 
         Ok(template)
     }
@@ -2326,7 +1879,7 @@ impl NodeAPI for NodeApiImpl {
         // Create MiningRpc instance
         let storage = self.storage.clone();
         let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Mempool manager not available".to_string())
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
         let mining_rpc = MiningRpc::with_dependencies(storage, mempool_manager.clone());
@@ -2343,7 +1896,7 @@ impl NodeAPI for NodeApiImpl {
         let result = mining_rpc
             .submit_block(&params)
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to submit block: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to submit block", e))?;
 
         // Parse result
         let result_str = result.as_str().unwrap_or("");

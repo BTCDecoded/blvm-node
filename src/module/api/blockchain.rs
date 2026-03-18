@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::module::traits::ModuleError;
+use crate::module::traits::{module_error_msg, ModuleError};
 use crate::storage::chainstate::{ChainInfo, ChainParams};
 use crate::storage::{blockstore::BlockMetadata, Storage};
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
@@ -35,11 +35,11 @@ impl BlockchainApi {
                 storage
                     .blocks()
                     .get_block(&hash)
-                    .map_err(|e| ModuleError::OperationError(format!("Failed to get block: {e}")))
+                    .map_err(|e| ModuleError::op_err("Failed to get block", e))
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get a block header by hash
@@ -49,12 +49,12 @@ impl BlockchainApi {
             let hash = *hash;
             move || {
                 storage.blocks().get_header(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get block header: {e}"))
+                    ModuleError::op_err("Failed to get block header", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get a block by height
@@ -64,13 +64,13 @@ impl BlockchainApi {
             move || {
                 // First get hash by height
                 let hash = storage.blocks().get_hash_by_height(height).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get hash by height: {e}"))
+                    ModuleError::op_err("Failed to get hash by height", e)
                 })?;
 
                 if let Some(hash) = hash {
                     // Then get block by hash
                     storage.blocks().get_block(&hash).map_err(|e| {
-                        ModuleError::OperationError(format!("Failed to get block: {e}"))
+                        ModuleError::op_err("Failed to get block", e)
                     })
                 } else {
                     Ok(None)
@@ -78,7 +78,7 @@ impl BlockchainApi {
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get block hash by height
@@ -87,12 +87,12 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             move || {
                 storage.blocks().get_hash_by_height(height).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get hash by height: {e}"))
+                    ModuleError::op_err("Failed to get hash by height", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get block height by hash
@@ -102,12 +102,12 @@ impl BlockchainApi {
             let hash = *hash;
             move || {
                 storage.blocks().get_height_by_hash(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get height by hash: {e}"))
+                    ModuleError::op_err("Failed to get height by hash", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get blocks in a height range
@@ -122,15 +122,11 @@ impl BlockchainApi {
                 storage
                     .blocks()
                     .get_blocks_by_height_range(start, end)
-                    .map_err(|e| {
-                        ModuleError::OperationError(format!(
-                            "Failed to get blocks by height range: {e}"
-                        ))
-                    })
+                    .map_err(|e| ModuleError::op_err("Failed to get blocks by height range", e))
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get block metadata (TX count, etc.) without loading full block
@@ -143,12 +139,12 @@ impl BlockchainApi {
             let hash = *hash;
             move || {
                 storage.blocks().get_block_metadata(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get block metadata: {e}"))
+                    ModuleError::op_err("Failed to get block metadata", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Check if a block exists
@@ -158,12 +154,12 @@ impl BlockchainApi {
             let hash = *hash;
             move || {
                 storage.blocks().has_block(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to check block existence: {e}"))
+                    ModuleError::op_err("Failed to check block existence", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get total number of blocks stored
@@ -172,12 +168,12 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             move || {
                 storage.blocks().block_count().map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get block count: {e}"))
+                    ModuleError::op_err("Failed to get block count", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get recent headers for median time-past calculation
@@ -186,12 +182,12 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             move || {
                 storage.blocks().get_recent_headers(count).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get recent headers: {e}"))
+                    ModuleError::op_err("Failed to get recent headers", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get a transaction by hash
@@ -201,12 +197,12 @@ impl BlockchainApi {
             let hash = *hash;
             move || {
                 storage.transactions().get_transaction(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get transaction: {e}"))
+                    ModuleError::op_err("Failed to get transaction", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Check if a transaction exists
@@ -216,14 +212,12 @@ impl BlockchainApi {
             let hash = *hash;
             move || {
                 storage.transactions().has_transaction(&hash).map_err(|e| {
-                    ModuleError::OperationError(format!(
-                        "Failed to check transaction existence: {e}"
-                    ))
+                    ModuleError::op_err("Failed to check transaction existence", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get UTXO by outpoint
@@ -235,11 +229,11 @@ impl BlockchainApi {
                 storage
                     .utxos()
                     .get_utxo(&outpoint)
-                    .map_err(|e| ModuleError::OperationError(format!("Failed to get UTXO: {e}")))
+                    .map_err(|e| ModuleError::op_err("Failed to get UTXO", e))
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Check if a UTXO exists
@@ -249,12 +243,12 @@ impl BlockchainApi {
             let outpoint = *outpoint;
             move || {
                 storage.utxos().has_utxo(&outpoint).map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to check UTXO existence: {e}"))
+                    ModuleError::op_err("Failed to check UTXO existence", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get current chain information
@@ -263,12 +257,12 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             move || {
                 storage.chain().load_chain_info().map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get chain info: {e}"))
+                    ModuleError::op_err("Failed to get chain info", e)
                 })
             }
         })
         .await
-        .map_err(|e| ModuleError::OperationError(format!("Task join error: {e}")))?
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
     /// Get current chain tip (highest block hash)
@@ -276,7 +270,7 @@ impl BlockchainApi {
         let chain_info = self.get_chain_info().await?;
         chain_info
             .map(|info| info.tip_hash)
-            .ok_or_else(|| ModuleError::OperationError("Chain not initialized".to_string()))
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string()))
     }
 
     /// Get current block height
@@ -284,7 +278,7 @@ impl BlockchainApi {
         let chain_info = self.get_chain_info().await?;
         chain_info
             .map(|info| info.height)
-            .ok_or_else(|| ModuleError::OperationError("Chain not initialized".to_string()))
+            .ok_or_else(|| ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string()))
     }
 
     /// Get chain parameters

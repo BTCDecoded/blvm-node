@@ -10,6 +10,9 @@
 //!
 //! Reference: parallel block validation for IBD
 
+#[cfg(feature = "production")]
+use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use blvm_protocol::block::connect_block;
@@ -61,14 +64,19 @@ impl ParallelBlockValidator {
             .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
             .collect();
         let network_time = current_timestamp();
+        let consensus_ctx = blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
+            None::<&[BlockHeader]>,
+            network_time,
+            network,
+            None,
+            None,
+        );
         let (result, new_utxo_set, _undo_log) = connect_block(
             &context.block,
             &witnesses,
             context.prev_utxo_set.clone(),
             context.height,
-            None::<&[BlockHeader]>, // No recent headers for single block validation
-            network_time,
-            network,
+            &consensus_ctx,
         )?;
         Ok((result, new_utxo_set))
     }
@@ -97,7 +105,8 @@ impl ParallelBlockValidator {
         // Note: Each block uses its own UTXO set, so they're independent
         #[cfg(feature = "production")]
         let results: Vec<_> = {
-            use rayon::prelude::*;
+            use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+            use blvm_protocol::rayon::prelude::*;
             contexts
                 .par_iter()
                 .map(|context| {
@@ -110,14 +119,19 @@ impl ParallelBlockValidator {
                         .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
                         .collect();
                     let network_time = current_timestamp();
+                    let consensus_ctx = blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
+                        None::<&[BlockHeader]>,
+                        network_time,
+                        network,
+                        None,
+                        None,
+                    );
                     let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
                         witnesses.as_slice(),
                         context.prev_utxo_set.clone(),
                         context.height,
-                        None::<&[BlockHeader]>, // No recent headers for parallel validation
-                        network_time,
-                        network,
+                        &consensus_ctx,
                     )?;
                     Ok::<_, anyhow::Error>((result, new_utxo_set))
                 })
@@ -130,8 +144,6 @@ impl ParallelBlockValidator {
             contexts
                 .iter()
                 .map(|context| {
-                    // Create empty witnesses for each transaction
-                    // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
                     let witnesses: Vec<Vec<Witness>> = context
                         .block
                         .transactions
@@ -139,14 +151,19 @@ impl ParallelBlockValidator {
                         .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
                         .collect();
                     let network_time = current_timestamp();
+                    let consensus_ctx = blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
+                        None::<&[BlockHeader]>,
+                        network_time,
+                        network,
+                        None,
+                        None,
+                    );
                     let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
                         witnesses.as_slice(),
                         context.prev_utxo_set.clone(),
                         context.height,
-                        None::<&[BlockHeader]>, // No recent headers for parallel validation
-                        network_time,
-                        network,
+                        &consensus_ctx,
                     )?;
                     Ok::<_, anyhow::Error>((result, new_utxo_set))
                 })
@@ -179,14 +196,19 @@ impl ParallelBlockValidator {
                 .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
                 .collect();
             let network_time = current_timestamp();
+            let consensus_ctx = blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
+                None::<&[BlockHeader]>,
+                network_time,
+                network,
+                None,
+                None,
+            );
             let (result, new_utxo_set, _undo_log) = connect_block(
                 &context.block,
                 &witnesses,
                 context.prev_utxo_set.clone(),
                 context.height,
-                None::<&[BlockHeader]>, // No recent headers for sequential validation
-                network_time,
-                network,
+                &consensus_ctx,
             )?;
             results.push((result, new_utxo_set));
         }

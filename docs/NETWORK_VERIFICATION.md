@@ -9,7 +9,7 @@ This document describes formal verification of Bitcoin P2P protocol message pars
 ### blvm-spec-lock (Orange Paper)
 
 - **Dandelion (10.6)** – ✅ Verified in `src/network/dandelion.rs` via `#[spec_locked("10.6")]`
-- **Protocol parsing (10.1)** – Gap: Node protocol parser not yet spec-locked (see SPEC_LOCK_COVERAGE.md in blvm-spec-lock)
+- **Protocol parsing (10.1)** – ✅ Covered: parse_message, calculate_checksum (protocol-verification feature, enabled by default)
 
 ### Planned spec-lock coverage
 

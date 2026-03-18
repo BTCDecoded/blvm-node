@@ -2,6 +2,9 @@
 //!
 //! Implements Bitcoin P2P protocol message serialization and deserialization.
 
+#[cfg(feature = "protocol-verification")]
+use blvm_spec_lock::spec_locked;
+
 use crate::network::transport::TransportType;
 use anyhow::Result;
 use blvm_protocol::segwit::Witness;
@@ -45,78 +48,140 @@ pub const NODE_GOVERNANCE: u64 = 1 << 29;
 #[cfg(feature = "erlay")]
 pub const NODE_ERLAY: u64 = 1 << 30;
 
+/// Wire command strings (single source for parse + serialize). Use these in both
+/// [ProtocolParser::parse_message] and [ProtocolParser::serialize_message].
+pub mod cmd {
+    pub const ADDR: &str = "addr";
+    pub const BANLIST: &str = "banlist";
+    pub const BLOCK: &str = "block";
+    pub const BLOCKTXN: &str = "blocktxn";
+    pub const CFCHECKPT: &str = "cfcheckpt";
+    pub const CFHEADERS: &str = "cfheaders";
+    pub const CFILTER: &str = "cfilter";
+    pub const CMPCTBLOCK: &str = "cmpctblock";
+    pub const ECONFORK: &str = "econfork";
+    pub const ECONREG: &str = "econreg";
+    pub const ECONSTATUS: &str = "econstatus";
+    pub const ECONVETO: &str = "econveto";
+    pub const FEEFILTER: &str = "feefilter";
+    pub const FILTEREDBLOCK: &str = "filteredblock";
+    pub const GETADDR: &str = "getaddr";
+    pub const GETBANLIST: &str = "getbanlist";
+    pub const GETBLOCKTXN: &str = "getblocktxn";
+    pub const GETCFCHECKPT: &str = "getcfcheckpt";
+    pub const GETCFHEADERS: &str = "getcfheaders";
+    pub const GETCFILTERS: &str = "getcfilters";
+    pub const GETDATA: &str = "getdata";
+    pub const GETFILTEREDBLOCK: &str = "getfilteredblock";
+    pub const GETHEADERS: &str = "getheaders";
+    pub const GETMODULE: &str = "getmodule";
+    pub const GETMODULEBYHASH: &str = "getmodulebyhash";
+    pub const GETMODULELIST: &str = "getmodulelist";
+    pub const GETPAYMENTREQUEST: &str = "getpaymentrequest";
+    pub const GETUTXOPROOF: &str = "getutxoproof";
+    pub const GETUTXOSET: &str = "getutxoset";
+    pub const GETBLOCKS: &str = "getblocks";
+    pub const HEADERS: &str = "headers";
+    pub const INV: &str = "inv";
+    pub const MESH: &str = "mesh";
+    pub const MODULE: &str = "module";
+    pub const MODULEBYHASH: &str = "modulebyhash";
+    pub const MODULEINV: &str = "moduleinv";
+    pub const MODULELIST: &str = "modulelist";
+    pub const NOTFOUND: &str = "notfound";
+    pub const PAYMENT: &str = "payment";
+    pub const PAYMENTACK: &str = "paymentack";
+    pub const PAYMENTPROOF: &str = "paymentproof";
+    pub const PAYMENTREQUEST: &str = "paymentrequest";
+    pub const PING: &str = "ping";
+    pub const PKGTXN: &str = "pkgtxn";
+    pub const PKGTXNREJECT: &str = "pkgtxnreject";
+    pub const PONG: &str = "pong";
+    pub const REQRECON: &str = "reqrecon";
+    pub const REQSKT: &str = "reqskt";
+    pub const SENDCMPCT: &str = "sendcmpct";
+    pub const SENDPKGTXN: &str = "sendpkgtxn";
+    pub const SENDTXRCNCL: &str = "sendtxrcncl";
+    pub const SETTLEMENTNOTIFICATION: &str = "settlementnotification";
+    pub const SKETCH: &str = "sketch";
+    pub const TX: &str = "tx";
+    pub const UTXOPROOF: &str = "utxoproof";
+    pub const UTXOSET: &str = "utxoset";
+    pub const VERACK: &str = "verack";
+    pub const VERSION: &str = "version";
+}
+
 /// Allowed Bitcoin protocol commands
 pub const ALLOWED_COMMANDS: &[&str] = &[
-    "version",
-    "verack",
-    "ping",
-    "pong",
-    "getheaders",
-    "headers",
-    "getblocks",
-    "block",
-    "getdata",
-    "inv",
-    "tx",
-    "notfound",
-    "getaddr",
-    "addr",
+    cmd::VERSION,
+    cmd::VERACK,
+    cmd::PING,
+    cmd::PONG,
+    cmd::GETHEADERS,
+    cmd::HEADERS,
+    cmd::GETBLOCKS,
+    cmd::BLOCK,
+    cmd::GETDATA,
+    cmd::INV,
+    cmd::TX,
+    cmd::NOTFOUND,
+    cmd::GETADDR,
+    cmd::ADDR,
     "mempool",
     "reject",
-    "feefilter",
-    "sendcmpct",
-    "cmpctblock",
-    "getblocktxn",
-    "blocktxn",
-    "getblocktxn",
+    cmd::FEEFILTER,
+    cmd::SENDCMPCT,
+    cmd::CMPCTBLOCK,
+    cmd::GETBLOCKTXN,
+    cmd::BLOCKTXN,
     // UTXO commitment protocol extensions
-    "getutxoset",
-    "utxoset",
-    "getfilteredblock",
-    "filteredblock",
+    cmd::GETUTXOSET,
+    cmd::UTXOSET,
+    cmd::GETFILTEREDBLOCK,
+    cmd::FILTEREDBLOCK,
     // Block Filtering (BIP157)
-    "getcfilters",
-    "cfilter",
-    "getcfheaders",
-    "cfheaders",
-    "getcfcheckpt",
-    "cfcheckpt",
+    cmd::GETCFILTERS,
+    cmd::CFILTER,
+    cmd::GETCFHEADERS,
+    cmd::CFHEADERS,
+    cmd::GETCFCHECKPT,
+    cmd::CFCHECKPT,
     // Payment Protocol (BIP70) - P2P variant
-    "getpaymentrequest",
-    "paymentrequest",
-    "payment",
-    "paymentack",
+    cmd::GETPAYMENTREQUEST,
+    cmd::PAYMENTREQUEST,
+    cmd::PAYMENT,
+    cmd::PAYMENTACK,
     // Package Relay (BIP 331)
-    "sendpkgtxn",
-    "pkgtxn",
-    "pkgtxnreject",
+    cmd::SENDPKGTXN,
+    cmd::PKGTXN,
+    cmd::PKGTXNREJECT,
     // Ban List Sharing
-    "getbanlist",
-    "banlist",
+    cmd::GETBANLIST,
+    cmd::BANLIST,
     // Governance messages
-    "econreg",
-    "econveto",
-    "econstatus",
-    "econfork",
+    cmd::ECONREG,
+    cmd::ECONVETO,
+    cmd::ECONSTATUS,
+    cmd::ECONFORK,
     // Module Registry
-    "getmodule",
-    "module",
-    "getmodulebyhash",
-    "modulebyhash",
-    "moduleinv",
-    "getmodulelist",
-    "modulelist",
+    cmd::GETMODULE,
+    cmd::MODULE,
+    cmd::GETMODULEBYHASH,
+    cmd::MODULEBYHASH,
+    cmd::MODULEINV,
+    cmd::GETMODULELIST,
+    cmd::MODULELIST,
     // Mesh networking
-    "mesh",
+    cmd::MESH,
     // Erlay (BIP330) transaction relay
     #[cfg(feature = "erlay")]
-    "sendtxrcncl",
+    cmd::SENDTXRCNCL,
     #[cfg(feature = "erlay")]
-    "reqrecon",
+    cmd::REQRECON,
     #[cfg(feature = "erlay")]
-    "reqskt",
+    cmd::REQSKT,
     #[cfg(feature = "erlay")]
-    "sketch",
+    cmd::SKETCH,
 ];
 
 /// Bitcoin protocol message types
@@ -874,6 +939,8 @@ pub struct ProtocolParser;
 
 impl ProtocolParser {
     /// Parse a raw message into a protocol message
+    /// Orange Paper 10.1.1: ParseMessage, size bounds, checksum rejection
+    #[cfg_attr(feature = "protocol-verification", spec_locked("10.1.1"))]
     pub fn parse_message(data: &[u8]) -> Result<ProtocolMessage> {
         use tracing::{debug, warn};
 
@@ -937,7 +1004,7 @@ impl ProtocolParser {
 
         // Parse payload based on command
         match command.as_str() {
-            "version" => {
+            cmd::VERSION => {
                 // Use proper Bitcoin wire format deserialization for version messages
                 use blvm_protocol::wire::deserialize_version;
 
@@ -964,8 +1031,8 @@ impl ProtocolParser {
                     relay: version_msg.relay,
                 }))
             }
-            "verack" => Ok(ProtocolMessage::Verack),
-            "ping" => {
+            cmd::VERACK => Ok(ProtocolMessage::Verack),
+            cmd::PING => {
                 // Use proper Bitcoin wire format (8-byte nonce)
                 let wire_msg = blvm_protocol::wire::deserialize_ping(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize ping: {}", e))?;
@@ -973,7 +1040,7 @@ impl ProtocolParser {
                     nonce: wire_msg.nonce,
                 }))
             }
-            "pong" => {
+            cmd::PONG => {
                 // Use proper Bitcoin wire format (8-byte nonce)
                 let wire_msg = blvm_protocol::wire::deserialize_pong(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize pong: {}", e))?;
@@ -981,7 +1048,7 @@ impl ProtocolParser {
                     nonce: wire_msg.nonce,
                 }))
             }
-            "getheaders" => {
+            cmd::GETHEADERS => {
                 // Use proper Bitcoin wire format deserialization
                 let wire_msg = blvm_protocol::wire::deserialize_getheaders(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize getheaders: {}", e))?;
@@ -991,7 +1058,7 @@ impl ProtocolParser {
                     hash_stop: wire_msg.hash_stop,
                 }))
             }
-            "headers" => {
+            cmd::HEADERS => {
                 // Use proper Bitcoin wire format deserialization
                 let wire_msg = deserialize_headers(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize headers: {}", e))?;
@@ -999,31 +1066,31 @@ impl ProtocolParser {
                     headers: wire_msg.headers,
                 }))
             }
-            "getblocks" => Ok(ProtocolMessage::GetBlocks(bincode::deserialize(payload)?)),
-            "block" => {
+            cmd::GETBLOCKS => Ok(ProtocolMessage::GetBlocks(bincode::deserialize(payload)?)),
+            cmd::BLOCK => {
                 // Use consensus wire format (Bitcoin block + witness structure)
                 let (block, witnesses) =
                     blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
                 Ok(ProtocolMessage::Block(BlockMessage { block, witnesses }))
             }
-            "getdata" => {
+            cmd::GETDATA => {
                 let msg = deserialize_getdata(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize getdata: {}", e))?;
                 Ok(ProtocolMessage::GetData(msg))
             }
-            "inv" => {
+            cmd::INV => {
                 let msg = deserialize_inv(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize inv: {}", e))?;
                 Ok(ProtocolMessage::Inv(msg))
             }
-            "notfound" => {
+            cmd::NOTFOUND => {
                 let msg = deserialize_notfound(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize notfound: {}", e))?;
                 Ok(ProtocolMessage::NotFound(msg))
             }
-            "tx" => Ok(ProtocolMessage::Tx(bincode::deserialize(payload)?)),
-            "feefilter" => {
+            cmd::TX => Ok(ProtocolMessage::Tx(bincode::deserialize(payload)?)),
+            cmd::FEEFILTER => {
                 // BIP133: 8-byte feerate (satoshis per KB) in little-endian
                 if payload.len() < 8 {
                     return Err(anyhow::anyhow!("FeeFilter message too short"));
@@ -1032,91 +1099,91 @@ impl ProtocolParser {
                 Ok(ProtocolMessage::FeeFilter(FeeFilterMessage { feerate }))
             }
             // Compact Block Relay (BIP152)
-            "sendcmpct" => Ok(ProtocolMessage::SendCmpct(bincode::deserialize(payload)?)),
-            "cmpctblock" => Ok(ProtocolMessage::CmpctBlock(bincode::deserialize(payload)?)),
-            "getblocktxn" => Ok(ProtocolMessage::GetBlockTxn(bincode::deserialize(payload)?)),
-            "blocktxn" => Ok(ProtocolMessage::BlockTxn(bincode::deserialize(payload)?)),
+            cmd::SENDCMPCT => Ok(ProtocolMessage::SendCmpct(bincode::deserialize(payload)?)),
+            cmd::CMPCTBLOCK => Ok(ProtocolMessage::CmpctBlock(bincode::deserialize(payload)?)),
+            cmd::GETBLOCKTXN => Ok(ProtocolMessage::GetBlockTxn(bincode::deserialize(payload)?)),
+            cmd::BLOCKTXN => Ok(ProtocolMessage::BlockTxn(bincode::deserialize(payload)?)),
             // UTXO commitment protocol extensions
-            "getutxoset" => Ok(ProtocolMessage::GetUTXOSet(bincode::deserialize(payload)?)),
-            "utxoset" => Ok(ProtocolMessage::UTXOSet(bincode::deserialize(payload)?)),
-            "getutxoproof" => Ok(ProtocolMessage::GetUTXOProof(bincode::deserialize(
+            cmd::GETUTXOSET => Ok(ProtocolMessage::GetUTXOSet(bincode::deserialize(payload)?)),
+            cmd::UTXOSET => Ok(ProtocolMessage::UTXOSet(bincode::deserialize(payload)?)),
+            cmd::GETUTXOPROOF => Ok(ProtocolMessage::GetUTXOProof(bincode::deserialize(
                 payload,
             )?)),
-            "utxoproof" => Ok(ProtocolMessage::UTXOProof(bincode::deserialize(payload)?)),
-            "getfilteredblock" => Ok(ProtocolMessage::GetFilteredBlock(bincode::deserialize(
+            cmd::UTXOPROOF => Ok(ProtocolMessage::UTXOProof(bincode::deserialize(payload)?)),
+            cmd::GETFILTEREDBLOCK => Ok(ProtocolMessage::GetFilteredBlock(bincode::deserialize(
                 payload,
             )?)),
-            "filteredblock" => Ok(ProtocolMessage::FilteredBlock(bincode::deserialize(
+            cmd::FILTEREDBLOCK => Ok(ProtocolMessage::FilteredBlock(bincode::deserialize(
                 payload,
             )?)),
             // Block Filtering (BIP157)
-            "getcfilters" => Ok(ProtocolMessage::GetCfilters(bincode::deserialize(payload)?)),
-            "cfilter" => Ok(ProtocolMessage::Cfilter(bincode::deserialize(payload)?)),
-            "getcfheaders" => Ok(ProtocolMessage::GetCfheaders(bincode::deserialize(
+            cmd::GETCFILTERS => Ok(ProtocolMessage::GetCfilters(bincode::deserialize(payload)?)),
+            cmd::CFILTER => Ok(ProtocolMessage::Cfilter(bincode::deserialize(payload)?)),
+            cmd::GETCFHEADERS => Ok(ProtocolMessage::GetCfheaders(bincode::deserialize(
                 payload,
             )?)),
-            "cfheaders" => Ok(ProtocolMessage::Cfheaders(bincode::deserialize(payload)?)),
-            "getcfcheckpt" => Ok(ProtocolMessage::GetCfcheckpt(bincode::deserialize(
+            cmd::CFHEADERS => Ok(ProtocolMessage::Cfheaders(bincode::deserialize(payload)?)),
+            cmd::GETCFCHECKPT => Ok(ProtocolMessage::GetCfcheckpt(bincode::deserialize(
                 payload,
             )?)),
-            "cfcheckpt" => Ok(ProtocolMessage::Cfcheckpt(bincode::deserialize(payload)?)),
+            cmd::CFCHECKPT => Ok(ProtocolMessage::Cfcheckpt(bincode::deserialize(payload)?)),
             // Payment Protocol (BIP70) - P2P variant
-            "getpaymentrequest" => Ok(ProtocolMessage::GetPaymentRequest(bincode::deserialize(
+            cmd::GETPAYMENTREQUEST => Ok(ProtocolMessage::GetPaymentRequest(bincode::deserialize(
                 payload,
             )?)),
-            "paymentrequest" => Ok(ProtocolMessage::PaymentRequest(bincode::deserialize(
+            cmd::PAYMENTREQUEST => Ok(ProtocolMessage::PaymentRequest(bincode::deserialize(
                 payload,
             )?)),
-            "payment" => Ok(ProtocolMessage::Payment(bincode::deserialize(payload)?)),
-            "paymentack" => Ok(ProtocolMessage::PaymentACK(bincode::deserialize(payload)?)),
+            cmd::PAYMENT => Ok(ProtocolMessage::Payment(bincode::deserialize(payload)?)),
+            cmd::PAYMENTACK => Ok(ProtocolMessage::PaymentACK(bincode::deserialize(payload)?)),
             // Package Relay (BIP 331)
-            "sendpkgtxn" => Ok(ProtocolMessage::SendPkgTxn(bincode::deserialize(payload)?)),
-            "pkgtxn" => Ok(ProtocolMessage::PkgTxn(bincode::deserialize(payload)?)),
-            "pkgtxnreject" => Ok(ProtocolMessage::PkgTxnReject(bincode::deserialize(
+            cmd::SENDPKGTXN => Ok(ProtocolMessage::SendPkgTxn(bincode::deserialize(payload)?)),
+            cmd::PKGTXN => Ok(ProtocolMessage::PkgTxn(bincode::deserialize(payload)?)),
+            cmd::PKGTXNREJECT => Ok(ProtocolMessage::PkgTxnReject(bincode::deserialize(
                 payload,
             )?)),
             // Ban List Sharing
-            "getbanlist" => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
-            "banlist" => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
+            cmd::GETBANLIST => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
+            cmd::BANLIST => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
             // Governance messages
-            "econreg" => Ok(ProtocolMessage::EconomicNodeRegistration(
+            cmd::ECONREG => Ok(ProtocolMessage::EconomicNodeRegistration(
                 bincode::deserialize(payload)?,
             )),
-            "econveto" => Ok(ProtocolMessage::EconomicNodeVeto(bincode::deserialize(
+            cmd::ECONVETO => Ok(ProtocolMessage::EconomicNodeVeto(bincode::deserialize(
                 payload,
             )?)),
-            "econstatus" => Ok(ProtocolMessage::EconomicNodeStatus(bincode::deserialize(
+            cmd::ECONSTATUS => Ok(ProtocolMessage::EconomicNodeStatus(bincode::deserialize(
                 payload,
             )?)),
-            "econfork" => Ok(ProtocolMessage::EconomicNodeForkDecision(
+            cmd::ECONFORK => Ok(ProtocolMessage::EconomicNodeForkDecision(
                 bincode::deserialize(payload)?,
             )),
-            "getaddr" => Ok(ProtocolMessage::GetAddr),
-            "addr" => Ok(ProtocolMessage::Addr(bincode::deserialize(payload)?)),
+            cmd::GETADDR => Ok(ProtocolMessage::GetAddr),
+            cmd::ADDR => Ok(ProtocolMessage::Addr(bincode::deserialize(payload)?)),
             // Module Registry
-            "getmodule" => Ok(ProtocolMessage::GetModule(bincode::deserialize(payload)?)),
-            "module" => Ok(ProtocolMessage::Module(bincode::deserialize(payload)?)),
-            "getmodulebyhash" => Ok(ProtocolMessage::GetModuleByHash(bincode::deserialize(
+            cmd::GETMODULE => Ok(ProtocolMessage::GetModule(bincode::deserialize(payload)?)),
+            cmd::MODULE => Ok(ProtocolMessage::Module(bincode::deserialize(payload)?)),
+            cmd::GETMODULEBYHASH => Ok(ProtocolMessage::GetModuleByHash(bincode::deserialize(
                 payload,
             )?)),
-            "modulebyhash" => Ok(ProtocolMessage::ModuleByHash(bincode::deserialize(
+            cmd::MODULEBYHASH => Ok(ProtocolMessage::ModuleByHash(bincode::deserialize(
                 payload,
             )?)),
-            "moduleinv" => Ok(ProtocolMessage::ModuleInv(bincode::deserialize(payload)?)),
-            "getmodulelist" => Ok(ProtocolMessage::GetModuleList(bincode::deserialize(
+            cmd::MODULEINV => Ok(ProtocolMessage::ModuleInv(bincode::deserialize(payload)?)),
+            cmd::GETMODULELIST => Ok(ProtocolMessage::GetModuleList(bincode::deserialize(
                 payload,
             )?)),
-            "modulelist" => Ok(ProtocolMessage::ModuleList(bincode::deserialize(payload)?)),
+            cmd::MODULELIST => Ok(ProtocolMessage::ModuleList(bincode::deserialize(payload)?)),
             // Mesh networking packets
-            "mesh" => Ok(ProtocolMessage::MeshPacket(payload.to_vec())),
+            cmd::MESH => Ok(ProtocolMessage::MeshPacket(payload.to_vec())),
             #[cfg(feature = "erlay")]
-            "sendtxrcncl" => Ok(ProtocolMessage::SendTxRcncl(bincode::deserialize(payload)?)),
+            cmd::SENDTXRCNCL => Ok(ProtocolMessage::SendTxRcncl(bincode::deserialize(payload)?)),
             #[cfg(feature = "erlay")]
-            "reqrecon" => Ok(ProtocolMessage::ReqRecon(bincode::deserialize(payload)?)),
+            cmd::REQRECON => Ok(ProtocolMessage::ReqRecon(bincode::deserialize(payload)?)),
             #[cfg(feature = "erlay")]
-            "reqskt" => Ok(ProtocolMessage::ReqSkt(bincode::deserialize(payload)?)),
+            cmd::REQSKT => Ok(ProtocolMessage::ReqSkt(bincode::deserialize(payload)?)),
             #[cfg(feature = "erlay")]
-            "sketch" => Ok(ProtocolMessage::Sketch(bincode::deserialize(payload)?)),
+            cmd::SKETCH => Ok(ProtocolMessage::Sketch(bincode::deserialize(payload)?)),
             _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
         }
     }
@@ -1154,11 +1221,11 @@ impl ProtocolParser {
                 // This uses the serialize_version function from blvm-protocol wire.rs
                 // which implements the exact Bitcoin protocol format
                 let payload = serialize_version(&version_msg)?;
-                ("version", payload)
+                (cmd::VERSION, payload)
             }
-            ProtocolMessage::Verack => ("verack", vec![]),
-            ProtocolMessage::Ping(msg) => ("ping", bincode::serialize(msg)?),
-            ProtocolMessage::Pong(msg) => ("pong", bincode::serialize(msg)?),
+            ProtocolMessage::Verack => (cmd::VERACK, vec![]),
+            ProtocolMessage::Ping(msg) => (cmd::PING, bincode::serialize(msg)?),
+            ProtocolMessage::Pong(msg) => (cmd::PONG, bincode::serialize(msg)?),
             ProtocolMessage::GetHeaders(msg) => {
                 // Use proper Bitcoin wire format for getheaders
                 let wire_msg = blvm_protocol::network::GetHeadersMessage {
@@ -1167,7 +1234,7 @@ impl ProtocolParser {
                     hash_stop: msg.hash_stop,
                 };
                 (
-                    "getheaders",
+                    cmd::GETHEADERS,
                     serialize_getheaders(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?,
                 )
             }
@@ -1177,97 +1244,97 @@ impl ProtocolParser {
                     headers: msg.headers.clone(),
                 };
                 (
-                    "headers",
+                    cmd::HEADERS,
                     blvm_protocol::wire::serialize_headers(&wire_msg)
                         .map_err(|e| anyhow::anyhow!("{}", e))?,
                 )
             }
-            ProtocolMessage::GetBlocks(msg) => ("getblocks", bincode::serialize(msg)?),
-            ProtocolMessage::Block(msg) => ("block", bincode::serialize(msg)?),
+            ProtocolMessage::GetBlocks(msg) => (cmd::GETBLOCKS, bincode::serialize(msg)?),
+            ProtocolMessage::Block(msg) => (cmd::BLOCK, bincode::serialize(msg)?),
             ProtocolMessage::GetData(msg) => (
-                "getdata",
+                cmd::GETDATA,
                 serialize_getdata(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
             ),
             ProtocolMessage::Inv(msg) => (
-                "inv",
+                cmd::INV,
                 serialize_inv(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
             ),
             ProtocolMessage::NotFound(msg) => (
-                "notfound",
+                cmd::NOTFOUND,
                 serialize_notfound(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
             ),
-            ProtocolMessage::Tx(msg) => ("tx", bincode::serialize(msg)?),
-            ProtocolMessage::FeeFilter(msg) => ("feefilter", msg.feerate.to_le_bytes().to_vec()),
+            ProtocolMessage::Tx(msg) => (cmd::TX, bincode::serialize(msg)?),
+            ProtocolMessage::FeeFilter(msg) => (cmd::FEEFILTER, msg.feerate.to_le_bytes().to_vec()),
             // Compact Block Relay (BIP152)
-            ProtocolMessage::SendCmpct(msg) => ("sendcmpct", bincode::serialize(msg)?),
-            ProtocolMessage::CmpctBlock(msg) => ("cmpctblock", bincode::serialize(msg)?),
-            ProtocolMessage::GetBlockTxn(msg) => ("getblocktxn", bincode::serialize(msg)?),
-            ProtocolMessage::BlockTxn(msg) => ("blocktxn", bincode::serialize(msg)?),
+            ProtocolMessage::SendCmpct(msg) => (cmd::SENDCMPCT, bincode::serialize(msg)?),
+            ProtocolMessage::CmpctBlock(msg) => (cmd::CMPCTBLOCK, bincode::serialize(msg)?),
+            ProtocolMessage::GetBlockTxn(msg) => (cmd::GETBLOCKTXN, bincode::serialize(msg)?),
+            ProtocolMessage::BlockTxn(msg) => (cmd::BLOCKTXN, bincode::serialize(msg)?),
             // UTXO commitment protocol extensions
-            ProtocolMessage::GetUTXOSet(msg) => ("getutxoset", bincode::serialize(msg)?),
-            ProtocolMessage::UTXOSet(msg) => ("utxoset", bincode::serialize(msg)?),
-            ProtocolMessage::GetUTXOProof(msg) => ("getutxoproof", bincode::serialize(msg)?),
-            ProtocolMessage::UTXOProof(msg) => ("utxoproof", bincode::serialize(msg)?),
+            ProtocolMessage::GetUTXOSet(msg) => (cmd::GETUTXOSET, bincode::serialize(msg)?),
+            ProtocolMessage::UTXOSet(msg) => (cmd::UTXOSET, bincode::serialize(msg)?),
+            ProtocolMessage::GetUTXOProof(msg) => (cmd::GETUTXOPROOF, bincode::serialize(msg)?),
+            ProtocolMessage::UTXOProof(msg) => (cmd::UTXOPROOF, bincode::serialize(msg)?),
             ProtocolMessage::GetFilteredBlock(msg) => {
-                ("getfilteredblock", bincode::serialize(msg)?)
+                (cmd::GETFILTEREDBLOCK, bincode::serialize(msg)?)
             }
-            ProtocolMessage::FilteredBlock(msg) => ("filteredblock", bincode::serialize(msg)?),
+            ProtocolMessage::FilteredBlock(msg) => (cmd::FILTEREDBLOCK, bincode::serialize(msg)?),
             // Block Filtering (BIP157)
-            ProtocolMessage::GetCfilters(msg) => ("getcfilters", bincode::serialize(msg)?),
-            ProtocolMessage::Cfilter(msg) => ("cfilter", bincode::serialize(msg)?),
-            ProtocolMessage::GetCfheaders(msg) => ("getcfheaders", bincode::serialize(msg)?),
-            ProtocolMessage::Cfheaders(msg) => ("cfheaders", bincode::serialize(msg)?),
-            ProtocolMessage::GetCfcheckpt(msg) => ("getcfcheckpt", bincode::serialize(msg)?),
-            ProtocolMessage::Cfcheckpt(msg) => ("cfcheckpt", bincode::serialize(msg)?),
+            ProtocolMessage::GetCfilters(msg) => (cmd::GETCFILTERS, bincode::serialize(msg)?),
+            ProtocolMessage::Cfilter(msg) => (cmd::CFILTER, bincode::serialize(msg)?),
+            ProtocolMessage::GetCfheaders(msg) => (cmd::GETCFHEADERS, bincode::serialize(msg)?),
+            ProtocolMessage::Cfheaders(msg) => (cmd::CFHEADERS, bincode::serialize(msg)?),
+            ProtocolMessage::GetCfcheckpt(msg) => (cmd::GETCFCHECKPT, bincode::serialize(msg)?),
+            ProtocolMessage::Cfcheckpt(msg) => (cmd::CFCHECKPT, bincode::serialize(msg)?),
             // Payment Protocol (BIP70) - P2P variant
             ProtocolMessage::GetPaymentRequest(msg) => {
-                ("getpaymentrequest", bincode::serialize(msg)?)
+                (cmd::GETPAYMENTREQUEST, bincode::serialize(msg)?)
             }
-            ProtocolMessage::PaymentRequest(msg) => ("paymentrequest", bincode::serialize(msg)?),
-            ProtocolMessage::Payment(msg) => ("payment", bincode::serialize(msg)?),
-            ProtocolMessage::PaymentACK(msg) => ("paymentack", bincode::serialize(msg)?),
+            ProtocolMessage::PaymentRequest(msg) => (cmd::PAYMENTREQUEST, bincode::serialize(msg)?),
+            ProtocolMessage::Payment(msg) => (cmd::PAYMENT, bincode::serialize(msg)?),
+            ProtocolMessage::PaymentACK(msg) => (cmd::PAYMENTACK, bincode::serialize(msg)?),
             // CTV Payment Proof messages
             #[cfg(feature = "ctv")]
-            ProtocolMessage::PaymentProof(msg) => ("paymentproof", bincode::serialize(msg)?),
+            ProtocolMessage::PaymentProof(msg) => (cmd::PAYMENTPROOF, bincode::serialize(msg)?),
             ProtocolMessage::SettlementNotification(msg) => {
-                ("settlementnotification", bincode::serialize(msg)?)
+                (cmd::SETTLEMENTNOTIFICATION, bincode::serialize(msg)?)
             }
             // Package Relay (BIP 331)
-            ProtocolMessage::SendPkgTxn(msg) => ("sendpkgtxn", bincode::serialize(msg)?),
-            ProtocolMessage::PkgTxn(msg) => ("pkgtxn", bincode::serialize(msg)?),
-            ProtocolMessage::PkgTxnReject(msg) => ("pkgtxnreject", bincode::serialize(msg)?),
+            ProtocolMessage::SendPkgTxn(msg) => (cmd::SENDPKGTXN, bincode::serialize(msg)?),
+            ProtocolMessage::PkgTxn(msg) => (cmd::PKGTXN, bincode::serialize(msg)?),
+            ProtocolMessage::PkgTxnReject(msg) => (cmd::PKGTXNREJECT, bincode::serialize(msg)?),
             // Ban List Sharing
-            ProtocolMessage::GetBanList(msg) => ("getbanlist", bincode::serialize(msg)?),
-            ProtocolMessage::BanList(msg) => ("banlist", bincode::serialize(msg)?),
+            ProtocolMessage::GetBanList(msg) => (cmd::GETBANLIST, bincode::serialize(msg)?),
+            ProtocolMessage::BanList(msg) => (cmd::BANLIST, bincode::serialize(msg)?),
             // Governance messages
-            ProtocolMessage::EconomicNodeRegistration(msg) => ("econreg", bincode::serialize(msg)?),
-            ProtocolMessage::EconomicNodeVeto(msg) => ("econveto", bincode::serialize(msg)?),
-            ProtocolMessage::EconomicNodeStatus(msg) => ("econstatus", bincode::serialize(msg)?),
+            ProtocolMessage::EconomicNodeRegistration(msg) => (cmd::ECONREG, bincode::serialize(msg)?),
+            ProtocolMessage::EconomicNodeVeto(msg) => (cmd::ECONVETO, bincode::serialize(msg)?),
+            ProtocolMessage::EconomicNodeStatus(msg) => (cmd::ECONSTATUS, bincode::serialize(msg)?),
             ProtocolMessage::EconomicNodeForkDecision(msg) => {
-                ("econfork", bincode::serialize(msg)?)
+                (cmd::ECONFORK, bincode::serialize(msg)?)
             }
             // Address relay
-            ProtocolMessage::GetAddr => ("getaddr", vec![]),
-            ProtocolMessage::Addr(msg) => ("addr", bincode::serialize(msg)?),
+            ProtocolMessage::GetAddr => (cmd::GETADDR, vec![]),
+            ProtocolMessage::Addr(msg) => (cmd::ADDR, bincode::serialize(msg)?),
             // Module Registry
-            ProtocolMessage::GetModule(msg) => ("getmodule", bincode::serialize(msg)?),
-            ProtocolMessage::Module(msg) => ("module", bincode::serialize(msg)?),
-            ProtocolMessage::GetModuleByHash(msg) => ("getmodulebyhash", bincode::serialize(msg)?),
-            ProtocolMessage::ModuleByHash(msg) => ("modulebyhash", bincode::serialize(msg)?),
-            ProtocolMessage::ModuleInv(msg) => ("moduleinv", bincode::serialize(msg)?),
-            ProtocolMessage::GetModuleList(msg) => ("getmodulelist", bincode::serialize(msg)?),
-            ProtocolMessage::ModuleList(msg) => ("modulelist", bincode::serialize(msg)?),
+            ProtocolMessage::GetModule(msg) => (cmd::GETMODULE, bincode::serialize(msg)?),
+            ProtocolMessage::Module(msg) => (cmd::MODULE, bincode::serialize(msg)?),
+            ProtocolMessage::GetModuleByHash(msg) => (cmd::GETMODULEBYHASH, bincode::serialize(msg)?),
+            ProtocolMessage::ModuleByHash(msg) => (cmd::MODULEBYHASH, bincode::serialize(msg)?),
+            ProtocolMessage::ModuleInv(msg) => (cmd::MODULEINV, bincode::serialize(msg)?),
+            ProtocolMessage::GetModuleList(msg) => (cmd::GETMODULELIST, bincode::serialize(msg)?),
+            ProtocolMessage::ModuleList(msg) => (cmd::MODULELIST, bincode::serialize(msg)?),
             ProtocolMessage::MeshPacket(_) => {
                 return Err(anyhow::anyhow!("MeshPacket handled separately"))
             }
             #[cfg(feature = "erlay")]
-            ProtocolMessage::SendTxRcncl(msg) => ("sendtxrcncl", bincode::serialize(msg)?),
+            ProtocolMessage::SendTxRcncl(msg) => (cmd::SENDTXRCNCL, bincode::serialize(msg)?),
             #[cfg(feature = "erlay")]
-            ProtocolMessage::ReqRecon(msg) => ("reqrecon", bincode::serialize(msg)?),
+            ProtocolMessage::ReqRecon(msg) => (cmd::REQRECON, bincode::serialize(msg)?),
             #[cfg(feature = "erlay")]
-            ProtocolMessage::ReqSkt(msg) => ("reqskt", bincode::serialize(msg)?),
+            ProtocolMessage::ReqSkt(msg) => (cmd::REQSKT, bincode::serialize(msg)?),
             #[cfg(feature = "erlay")]
-            ProtocolMessage::Sketch(msg) => ("sketch", bincode::serialize(msg)?),
+            ProtocolMessage::Sketch(msg) => (cmd::SKETCH, bincode::serialize(msg)?),
         };
 
         let mut message = Vec::new();
@@ -1296,7 +1363,8 @@ impl ProtocolParser {
     /// Calculate message checksum
     ///
     /// Computes double SHA256 of payload and returns first 4 bytes.
-    /// Made public for formal verification purposes.
+    /// Orange Paper 10.1.1: CalculateChecksum, |result| = 4
+    #[cfg_attr(feature = "protocol-verification", spec_locked("10.1.1"))]
     pub fn calculate_checksum(payload: &[u8]) -> [u8; 4] {
         use sha2::{Digest, Sha256};
 

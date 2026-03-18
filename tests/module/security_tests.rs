@@ -2,7 +2,7 @@
 //!
 //! Tests for sandboxing, permissions, and security boundaries.
 
-use blvm_node::tests::module::test_utils::*;
+use crate::test_utils::*;
 use blvm_node::module::sandbox::{FileSystemSandbox, NetworkSandbox};
 
 #[test]
@@ -47,10 +47,12 @@ fn test_manifest_validation() {
         author: Some("Test".to_string()),
         capabilities: vec![],
         dependencies: std::collections::HashMap::new(),
+        optional_dependencies: std::collections::HashMap::new(),
         entry_point: "my-module".to_string(),
         config_schema: std::collections::HashMap::new(),
         binary: None,
         signatures: None,
+        payment: None,
     };
     
     let invalid_manifest = ModuleManifest {
@@ -60,10 +62,12 @@ fn test_manifest_validation() {
         author: Some("Test".to_string()),
         capabilities: vec![],
         dependencies: std::collections::HashMap::new(),
+        optional_dependencies: std::collections::HashMap::new(),
         entry_point: "my-module".to_string(),
         config_schema: std::collections::HashMap::new(),
         binary: None,
         signatures: None,
+        payment: None,
     };
     
     // Validate manifests

@@ -4,7 +4,7 @@
 
 use blvm_node::config::PaymentConfig;
 use blvm_node::module::encryption::{
-    load_encrypted_module, EncryptedModuleMetadata, ModuleEncryption,
+    load_encrypted_module, store_encrypted_module, EncryptedModuleMetadata, ModuleEncryption,
 };
 use blvm_node::module::registry::client::ModuleRegistry;
 use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
@@ -62,6 +62,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         dependencies: HashMap::new(),
+        optional_dependencies: HashMap::new(),
         entry_point: format!("{}.so", name),
         config_schema: HashMap::new(),
         binary: None,
@@ -88,7 +89,7 @@ async fn create_test_registry(
         ContentAddressableStorage::new(&cas_dir).unwrap(),
     ));
     let cache = Arc::new(tokio::sync::RwLock::new(
-        LocalCache::new(&cache_dir).unwrap(),
+        LocalCache::new(),
     ));
 
     let manifest = create_test_manifest_with_payment(module_name);
@@ -107,9 +108,12 @@ async fn create_test_registry(
         hash,
         manifest_hash,
         binary_hash,
+        verified_at: 0,
+        verified_by: Vec::new(),
         local_path: temp_dir.path().join(format!("{}.so", module_name)),
+        expires_at: None,
     };
-    cache.write().await.add_module(cached).unwrap();
+    cache.write().await.cache(cached);
 
     Arc::new(ModuleRegistry::new(&cache_dir, &cas_dir, Vec::new()).unwrap())
 }
@@ -209,7 +213,7 @@ async fn test_full_encrypted_module_purchase_flow() {
 
         // Step 8: Verify decryption works
         let decrypted = encryption
-            .decrypt_module(&encrypted_binary, &metadata.nonce, payment_id, &module_hash)
+            .decrypt_module(&encrypted_binary, &metadata.nonce, &payment_id, &module_hash)
             .unwrap();
         assert_eq!(decrypted, module_binary);
     }

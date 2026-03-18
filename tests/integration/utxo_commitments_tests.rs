@@ -41,7 +41,7 @@ async fn test_handle_get_utxo_set_without_storage() {
     
     let response = handle_get_utxo_set(message, None).await.unwrap();
     
-    // Should return placeholder response
+    // Handler returns commitment structure (merkle_root zero when utxo-commitments disabled)
     assert_eq!(response.request_id, 2);
     assert_eq!(response.commitment.block_height, 100);
     assert_eq!(response.commitment.block_hash, [1; 32]);
@@ -117,7 +117,7 @@ async fn test_handle_get_filtered_block_without_storage() {
     
     let response = handle_get_filtered_block(message, None, None).await.unwrap();
     
-    // Should return placeholder response
+    // Handler returns empty transactions when storage unavailable
     assert_eq!(response.request_id, 3);
     assert_eq!(response.transactions.len(), 0);
     assert_eq!(response.commitment.block_hash, [2; 32]);

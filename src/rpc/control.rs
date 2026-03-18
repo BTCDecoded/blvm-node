@@ -7,13 +7,61 @@
 //! - getrpcinfo: RPC server information
 //! - help: List available RPC methods
 //! - logging: Control logging levels
+//! - loadmodule, unloadmodule, reloadmodule: Hot reload module lifecycle
 
+use crate::module::manager::ModuleManager;
+use crate::module::registry::discovery::ModuleDiscovery;
+use crate::rpc::cache::ThreadLocalTimedCache;
+use crate::utils::{CACHE_REFRESH_MEMORY, CACHE_REFRESH_UPTIME};
 use crate::rpc::errors::{RpcError, RpcResult};
+use crate::rpc::params::param_str;
 use serde_json::{json, Number, Value};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::debug;
+
+thread_local! {
+    static CACHED_UPTIME: ThreadLocalTimedCache<u64> = ThreadLocalTimedCache::new();
+}
+
+/// Memory stats from /proc/meminfo (Linux fallback when sysinfo not available)
+#[cfg(all(not(feature = "sysinfo"), target_os = "linux"))]
+struct ProcMemStats {
+    total: u64,
+    free: u64,
+    available: u64,
+    used: u64,
+}
+
+#[cfg(all(not(feature = "sysinfo"), target_os = "linux"))]
+fn read_proc_meminfo() -> Result<ProcMemStats, std::io::Error> {
+    let content = std::fs::read_to_string("/proc/meminfo")?;
+    let mut mem_total_kb: Option<u64> = None;
+    let mut mem_free_kb: Option<u64> = None;
+    let mut mem_available_kb: Option<u64> = None;
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        let key = parts.next().unwrap_or("");
+        let val: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        match key {
+            "MemTotal:" => mem_total_kb = Some(val),
+            "MemFree:" => mem_free_kb = Some(val),
+            "MemAvailable:" => mem_available_kb = Some(val),
+            _ => {}
+        }
+    }
+    let total = mem_total_kb.unwrap_or(0) * 1024;
+    let free = mem_free_kb.unwrap_or(0) * 1024;
+    let available = mem_available_kb.unwrap_or(free);
+    let used = total.saturating_sub(available);
+    Ok(ProcMemStats {
+        total,
+        free,
+        available,
+        used,
+    })
+}
 
 /// Control RPC methods
 pub struct ControlRpc {
@@ -26,6 +74,8 @@ pub struct ControlRpc {
     /// Cached memory info (refreshed periodically, not every call)
     #[cfg(feature = "sysinfo")]
     cached_memory_info: Option<(Instant, Value)>,
+    /// Module manager for load/unload/reload (optional)
+    module_manager: Option<Arc<tokio::sync::Mutex<ModuleManager>>>,
 }
 
 impl ControlRpc {
@@ -37,6 +87,7 @@ impl ControlRpc {
             node_shutdown: None,
             #[cfg(feature = "sysinfo")]
             cached_memory_info: None,
+            module_manager: None,
         }
     }
 
@@ -51,7 +102,17 @@ impl ControlRpc {
             node_shutdown,
             #[cfg(feature = "sysinfo")]
             cached_memory_info: None,
+            module_manager: None,
         }
+    }
+
+    /// Add module manager for load/unload/reload RPC methods
+    pub fn with_module_manager(
+        mut self,
+        module_manager: Arc<tokio::sync::Mutex<ModuleManager>>,
+    ) -> Self {
+        self.module_manager = Some(module_manager);
+        self
     }
 
     /// Stop the node gracefully
@@ -85,26 +146,14 @@ impl ControlRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: uptime");
 
-        use std::time::Duration;
-
-        // Avoids repeated elapsed() calls and reduces JSON serialization overhead
-        thread_local! {
-            static CACHED_UPTIME: std::cell::Cell<(u64, Instant)> =
-                std::cell::Cell::new((0, Instant::now()));
-        }
-
         let start_time = self.start_time;
-        let cached = CACHED_UPTIME.with(|c| c.get());
-
-        // Update cache if >100ms old
-        if cached.1.elapsed() >= Duration::from_millis(100) {
-            let uptime = start_time.elapsed().as_secs();
-            CACHED_UPTIME.with(|c| c.set((uptime, Instant::now())));
-
-            Ok(Value::Number(Number::from(uptime)))
-        } else {
-            Ok(Value::Number(Number::from(cached.0)))
-        }
+        let uptime = CACHED_UPTIME.with(|c| {
+            c.get_or_refresh(
+                CACHE_REFRESH_UPTIME,
+                || start_time.elapsed().as_secs(),
+            )
+        });
+        Ok(Value::Number(Number::from(uptime)))
     }
 
     /// Get memory usage information
@@ -114,14 +163,13 @@ impl ControlRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getmemoryinfo");
 
-        let mode = params.get(0).and_then(|p| p.as_str()).unwrap_or("stats");
+        let mode = param_str(params, 0).unwrap_or("stats");
 
         match mode {
             "stats" => {
                 // Get system memory information
                 #[cfg(feature = "sysinfo")]
                 {
-                    use std::time::Duration;
                     use sysinfo::System;
 
                     // Use thread_local for better performance (no mutex contention)
@@ -154,7 +202,7 @@ impl ControlRpc {
                         let cached_value: &mut Value = &mut tuple_ref.2;
 
                         // Memory stats don't need millisecond accuracy, 5s is fine
-                        if last_refresh.elapsed() >= Duration::from_secs(5) {
+                        if last_refresh.elapsed() >= CACHE_REFRESH_MEMORY {
                             system.refresh_memory();
                             let total_memory = system.total_memory();
                             let used_memory = system.used_memory();
@@ -180,9 +228,21 @@ impl ControlRpc {
 
                 #[cfg(not(feature = "sysinfo"))]
                 {
-                    // Graceful degradation: return placeholder if sysinfo not available
-                    // This allows the RPC method to work even without sysinfo feature
-                    tracing::debug!("getmemoryinfo called but sysinfo feature not enabled, returning placeholder");
+                    // Fallback: parse /proc/meminfo on Linux when sysinfo not available
+                    #[cfg(target_os = "linux")]
+                    {
+                        if let Ok(stats) = read_proc_meminfo() {
+                            return Ok(json!({
+                                "locked": {
+                                    "used": stats.used,
+                                    "free": stats.free,
+                                    "total": stats.total,
+                                    "available": stats.available,
+                                    "locked": 0,
+                                }
+                            }));
+                        }
+                    }
                     Ok(json!({
                         "locked": {
                             "used": 0,
@@ -213,60 +273,198 @@ impl ControlRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getrpcinfo");
 
-        // Zero allocation on hot path
-        const ACTIVE_COMMANDS: &[&str] = &[
-            "getblockchaininfo",
-            "getblock",
-            "getblockhash",
-            "getblockheader",
-            "getbestblockhash",
-            "getblockcount",
-            "getdifficulty",
-            "gettxoutsetinfo",
-            "loadtxoutset",
-            "verifychain",
-            "getrawtransaction",
-            "sendrawtransaction",
-            "testmempoolaccept",
-            "decoderawtransaction",
-            "gettxout",
-            "gettxoutproof",
-            "verifytxoutproof",
-            "getmempoolinfo",
-            "getrawmempool",
-            "savemempool",
-            "getnetworkinfo",
-            "getpeerinfo",
-            "getconnectioncount",
-            "ping",
-            "addnode",
-            "disconnectnode",
-            "getnettotals",
-            "clearbanned",
-            "setban",
-            "listbanned",
-            "getmininginfo",
-            "getblocktemplate",
-            "submitblock",
-            "estimatesmartfee",
-            "stop",
-            "uptime",
-            "getmemoryinfo",
-            "getrpcinfo",
-            "help",
-            "logging",
-        ];
-
         use std::sync::OnceLock;
         static RPC_INFO_VALUE: OnceLock<Value> = OnceLock::new();
         Ok(RPC_INFO_VALUE
             .get_or_init(|| {
                 json!({
-                    "active_commands": ACTIVE_COMMANDS,
+                    "active_commands": crate::rpc::methods::CORE_RPC_METHODS,
                     "logpath": ""
                 })
             })
             .clone())
+    }
+
+    /// Load a module at runtime (hot load)
+    ///
+    /// Params: ["name"] (module name)
+    pub async fn loadmodule(&self, params: &Value) -> RpcResult<Value> {
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+        let name = params
+            .get(0)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError::invalid_params("loadmodule requires module name".to_string()))?;
+        let mut manager = mgr.lock().await;
+        let discovery = ModuleDiscovery::new(manager.modules_dir());
+        let discovered = discovery
+            .discover_module(name)
+            .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        let config = crate::module::loader::ModuleLoader::load_module_config(
+            name,
+            &discovered.directory.join("config.toml"),
+        )
+        .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        manager
+            .load_module(
+                name,
+                &discovered.binary_path,
+                discovered.manifest.to_metadata(),
+                config,
+            )
+            .await
+            .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        Ok(json!("Module loaded"))
+    }
+
+    /// Unload a module at runtime (hot unload)
+    ///
+    /// Params: ["name"] (module name)
+    pub async fn unloadmodule(&self, params: &Value) -> RpcResult<Value> {
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+        let name = params
+            .get(0)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError::invalid_params("unloadmodule requires module name".to_string()))?;
+        let mut manager = mgr.lock().await;
+        manager
+            .unload_module(name)
+            .await
+            .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        Ok(json!("Module unloaded"))
+    }
+
+    /// Reload a module at runtime (hot reload)
+    ///
+    /// Params: ["name"] (module name)
+    pub async fn reloadmodule(&self, params: &Value) -> RpcResult<Value> {
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+        let name = params
+            .get(0)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError::invalid_params("reloadmodule requires module name".to_string()))?;
+        let mut manager = mgr.lock().await;
+        let discovery = ModuleDiscovery::new(manager.modules_dir());
+        let discovered = discovery
+            .discover_module(name)
+            .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        let config = crate::module::loader::ModuleLoader::load_module_config(
+            name,
+            &discovered.directory.join("config.toml"),
+        )
+        .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        manager
+            .reload_module(
+                name,
+                &discovered.binary_path,
+                discovered.manifest.to_metadata(),
+                config,
+            )
+            .await
+            .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        Ok(json!("Module reloaded"))
+    }
+
+    /// List loaded modules
+    ///
+    /// Params: [] (no parameters)
+    pub async fn listmodules(&self, _params: &Value) -> RpcResult<Value> {
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+        let manager = mgr.lock().await;
+        let modules = manager.list_modules().await;
+        Ok(json!(modules))
+    }
+
+    /// Get CLI specs from all loaded modules
+    ///
+    /// Returns { "sync-policy": {...}, "hello": {...} } for blvm to build dynamic CLI.
+    /// Params: [] (no parameters)
+    pub async fn getmoduleclispecs(&self, _params: &Value) -> RpcResult<Value> {
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+        let manager = mgr.lock().await;
+        let ipc_server = manager
+            .ipc_server()
+            .ok_or_else(|| RpcError::internal_error("IPC server not available".to_string()))?;
+        let specs = ipc_server.lock().await.get_cli_specs().await;
+        // Convert to JSON: use spec.name as key for blvm CLI building
+        let mut result = serde_json::Map::new();
+        for (_module_id, spec) in specs {
+            if let Ok(v) = serde_json::to_value(&spec) {
+                result.insert(spec.name.clone(), v);
+            }
+        }
+        Ok(Value::Object(result))
+    }
+
+    #[cfg(not(unix))]
+    pub async fn getmoduleclispecs(&self, _params: &Value) -> RpcResult<Value> {
+        Ok(json!({}))
+    }
+
+    /// Run a module CLI subcommand
+    ///
+    /// Params: ["module_name", "subcommand", ...args]
+    /// Returns: { "stdout": "...", "stderr": "...", "exit_code": 0 }
+    pub async fn runmodulecli(&self, params: &Value) -> RpcResult<Value> {
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+        let manager = mgr.lock().await;
+        let ipc_server = manager
+            .ipc_server()
+            .ok_or_else(|| RpcError::internal_error("IPC server not available".to_string()))?;
+        let module_name = params
+            .get(0)
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| RpcError::invalid_params("runmodulecli requires module_name".to_string()))?;
+        let subcommand = params
+            .get(1)
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| RpcError::invalid_params("runmodulecli requires subcommand".to_string()))?;
+        let args: Vec<String> = params
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .skip(2)
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let payload = ipc_server
+            .lock()
+            .await
+            .invoke_cli(module_name, subcommand, args)
+            .await
+            .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        match payload {
+            crate::module::ipc::protocol::InvocationResultPayload::Cli {
+                stdout,
+                stderr,
+                exit_code,
+            } => Ok(json!({
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code
+            })),
+            _ => Err(RpcError::internal_error(
+                "Expected CLI result from module".to_string(),
+            )),
+        }
     }
 
     /// List available RPC methods
@@ -276,7 +474,7 @@ impl ControlRpc {
         debug!("RPC: help");
 
         // If specific command requested, return detailed help
-        if let Some(command) = params.get(0).and_then(|p| p.as_str()) {
+        if let Some(command) = param_str(params, 0) {
             let help_text = match command {
                 "stop" => "Stop Bitcoin node.\n\nResult:\n\"Bitcoin node stopping\" (string)\n\nExamples:\n> bitcoin-cli stop",
                 "uptime" => "Returns the total uptime of the server.\n\nResult:\nuptime (numeric) The number of seconds that the server has been running\n\nExamples:\n> bitcoin-cli uptime",
@@ -284,6 +482,12 @@ impl ControlRpc {
                 "getrpcinfo" => "Returns details about the RPC server.\n\nResult:\n{\n  \"active_commands\" (array) All active commands\n  \"logpath\" (string) The complete file path to the debug log\n}\n\nExamples:\n> bitcoin-cli getrpcinfo",
                 "help" => "List all commands, or get help for a specified command.\n\nArguments:\n1. \"command\"     (string, optional) The command to get help on\n\nResult:\n\"text\"     (string) The help text\n\nExamples:\n> bitcoin-cli help\n> bitcoin-cli help getblock",
                 "logging" => "Gets and sets the logging configuration.\n\nArguments:\n1. \"include\" (array of strings, optional) A list of categories to add debug logging\n2. \"exclude\" (array of strings, optional) A list of categories to remove debug logging\n\nResult:\n{ (json object)\n  \"active\" (boolean) Whether debug logging is active\n}\n\nExamples:\n> bitcoin-cli logging [\"all\"]\n> bitcoin-cli logging [\"http\"] [\"net\"]",
+                "loadmodule" => "Load a module at runtime (hot load).\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module loaded\" (string)\n\nExamples:\n> bitcoin-cli loadmodule \"simple-module\"",
+                "unloadmodule" => "Unload a module at runtime (hot unload).\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module unloaded\" (string)\n\nExamples:\n> bitcoin-cli unloadmodule \"simple-module\"",
+                "reloadmodule" => "Reload a module at runtime (hot reload). Picks up new binary/config.\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module reloaded\" (string)\n\nExamples:\n> bitcoin-cli reloadmodule \"simple-module\"",
+                "listmodules" => "List loaded modules.\n\nResult:\n[\"module1\", \"module2\", ...] (array of strings)\n\nExamples:\n> bitcoin-cli listmodules",
+                "getmoduleclispecs" => "Get CLI specs from all loaded modules for dynamic CLI building.\n\nResult:\n{ \"sync-policy\": {...}, \"hello\": {...} } (object mapping CLI name to spec)\n\nExamples:\n> bitcoin-cli getmoduleclispecs",
+                "runmodulecli" => "Run a module CLI subcommand.\n\nArguments:\n1. module_name (string, required) CLI name from getmoduleclispecs\n2. subcommand (string, required) Subcommand name\n3. ...args (strings, optional) Arguments for the subcommand\n\nResult:\n{ \"stdout\": \"...\", \"stderr\": \"...\", \"exit_code\": 0 }\n\nExamples:\n> bitcoin-cli runmodulecli \"sync-policy\" \"list\"",
                 _ => return Err(RpcError::invalid_params(format!("Unknown command: {command}"))),
             };
             Ok(json!(help_text.to_string()))
@@ -330,6 +534,12 @@ impl ControlRpc {
                 "getrpcinfo",
                 "help",
                 "logging",
+                "loadmodule",
+                "unloadmodule",
+                "reloadmodule",
+                "listmodules",
+                "getmoduleclispecs",
+                "runmodulecli",
             ];
 
             Ok(json!(commands.join("\n")))

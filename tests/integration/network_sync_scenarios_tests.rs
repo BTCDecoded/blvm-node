@@ -7,6 +7,7 @@
 //! - Sync error handling
 //! - Chain reorganization scenarios
 
+use blvm_consensus::test_utils::create_test_header;
 use blvm_node::node::Node;
 use blvm_node::node::sync::{SyncCoordinator, SyncState, SyncStateMachine};
 use blvm_node::ProtocolVersion;
@@ -14,17 +15,6 @@ use blvm_protocol::BlockHeader;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::timeout;
-
-fn create_test_header() -> BlockHeader {
-    BlockHeader {
-        version: 1,
-        prev_block_hash: [0u8; 32],
-        merkle_root: [0u8; 32],
-        timestamp: 1231006505,
-        bits: 0x1d00ffff,
-        nonce: 0,
-    }
-}
 
 #[test]
 fn test_sync_state_machine_initial_to_synced() {
@@ -52,7 +42,7 @@ fn test_sync_state_machine_initial_to_synced() {
 #[test]
 fn test_sync_state_machine_with_headers() {
     let mut machine = SyncStateMachine::new();
-    let header = create_test_header();
+    let header = create_test_header(1231006505, [0u8; 32]);
     
     // Update best header
     machine.update_best_header(header.clone());
@@ -224,7 +214,7 @@ fn test_sync_state_machine_progress_calculation() {
 #[test]
 fn test_sync_state_machine_header_tracking() {
     let mut machine = SyncStateMachine::new();
-    let header1 = create_test_header();
+    let header1 = create_test_header(1231006505, [0u8; 32]);
     
     // Update best header
     machine.update_best_header(header1.clone());

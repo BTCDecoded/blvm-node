@@ -33,6 +33,26 @@ fn test_connection_rate_limiter_allows_connections() {
 }
 
 #[test]
+fn test_connection_rate_limiter_flood_rejection() {
+    // RPC connection limit: 10 per IP per minute
+    let mut limiter = ConnectionRateLimiter::new(10, 60);
+    let ip = create_test_ip(42);
+
+    let mut allowed = 0u32;
+    let mut rejected = 0u32;
+    for _ in 0..15 {
+        if limiter.check_connection(ip) {
+            allowed += 1;
+        } else {
+            rejected += 1;
+        }
+    }
+
+    assert_eq!(allowed, 10, "First 10 connections should be allowed");
+    assert_eq!(rejected, 5, "Connections 11-15 should be rejected");
+}
+
+#[test]
 fn test_connection_rate_limiter_per_ip_tracking() {
     let mut limiter = ConnectionRateLimiter::new(3, 60);
     let ip1 = create_test_ip(1);

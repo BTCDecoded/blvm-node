@@ -63,6 +63,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         dependencies: HashMap::new(),
+        optional_dependencies: HashMap::new(),
         entry_point: format!("{}.so", name),
         config_schema: HashMap::new(),
         binary: None,
@@ -90,9 +91,7 @@ async fn create_mock_registry(
     let cas = Arc::new(tokio::sync::RwLock::new(
         ContentAddressableStorage::new(&cas_dir).unwrap(),
     ));
-    let cache = Arc::new(tokio::sync::RwLock::new(
-        LocalCache::new(&cache_dir).unwrap(),
-    ));
+    let cache = Arc::new(tokio::sync::RwLock::new(LocalCache::new()));
 
     let manifest = create_test_manifest_with_payment(module_name);
     let manifest_toml = toml::to_string(&manifest).unwrap();
@@ -110,9 +109,16 @@ async fn create_mock_registry(
         hash,
         manifest_hash,
         binary_hash,
+        verified_at: 0,
+        verified_by: Vec::new(),
         local_path: temp_dir.path().join(format!("{}.so", module_name)),
+        expires_at: None,
     };
-    cache.write().await.add_module(cached).unwrap();
+    {
+        let mut guard = cache.write().await;
+        guard.cache(cached);
+        guard.save(&cache_dir).unwrap();
+    }
 
     Arc::new(ModuleRegistry::new(&cache_dir, &cas_dir, Vec::new()).unwrap())
 }
@@ -149,6 +155,7 @@ async fn test_handle_get_module_free_module() {
         author: None,
         capabilities: Vec::new(),
         dependencies: HashMap::new(),
+        optional_dependencies: HashMap::new(),
         entry_point: "free-module.so".to_string(),
         config_schema: HashMap::new(),
         binary: None,

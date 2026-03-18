@@ -7,7 +7,7 @@
 //! - Get pool state
 
 use crate::payment::state_machine::PaymentStateMachine;
-use crate::rpc::rest::types::{error_response, success_response};
+use crate::rpc::rest::types::{rest_error_failed, rest_error_invalid, error_response, success_response};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};
@@ -188,7 +188,7 @@ async fn create_pool(
                 Err(e) => error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "POOL_CREATION_FAILED",
-                    &format!("Failed to create pool: {}", e),
+                    &rest_error_failed("create pool", e),
                     request_id,
                 ),
             }
@@ -239,7 +239,7 @@ async fn join_pool(
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
-                &format!("Failed to get pool state: {}", e),
+                &rest_error_failed("get pool state", e),
                 request_id,
             );
         }
@@ -321,7 +321,7 @@ async fn distribute_pool(
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
-                &format!("Failed to get pool state: {}", e),
+                &rest_error_failed("get pool state", e),
                 request_id,
             );
         }
@@ -409,7 +409,7 @@ async fn get_pool_state(
                 Err(e) => error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "POOL_LOAD_FAILED",
-                    &format!("Failed to load pool: {}", e),
+                    &rest_error_failed("load pool", e),
                     request_id,
                 ),
             },

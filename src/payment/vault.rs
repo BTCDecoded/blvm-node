@@ -8,10 +8,11 @@
 
 use crate::payment::covenant::{CovenantEngine, CovenantProof};
 use crate::payment::processor::PaymentError;
+use crate::rpc::errors::STORAGE_NOT_AVAILABLE_MSG;
 use crate::Hash;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::current_timestamp;
 use tracing::info;
 
 /// Vault configuration
@@ -114,7 +115,7 @@ impl VaultEngine {
         let storage = self
             .storage
             .as_ref()
-            .ok_or_else(|| PaymentError::ProcessingError("Storage not available".to_string()))?;
+            .ok_or_else(|| PaymentError::ProcessingError(STORAGE_NOT_AVAILABLE_MSG.to_string()))?;
 
         let vaults_tree = storage.open_tree("vaults").map_err(|e| {
             PaymentError::ProcessingError(format!("Failed to open vaults tree: {}", e))
@@ -223,12 +224,9 @@ impl VaultEngine {
 
             // Create deposit covenant that commits to unvaulting transaction
             let deposit_outputs = if config.require_unvault {
-                // If unvaulting required, deposit goes to unvault script
-                // For now, we'll create a placeholder - actual unvault script would be generated
-                vec![PaymentOutput {
-                    script: withdrawal_script.clone(), // Placeholder - would be unvault script
-                    amount: Some(deposit_amount),
-                }]
+                return Err(PaymentError::FeatureNotEnabled(
+                    "Unvault script not yet implemented. Use require_unvault: false for direct withdrawal.".to_string(),
+                ));
             } else {
                 // Direct withdrawal (no unvault step)
                 vec![PaymentOutput {
@@ -241,10 +239,7 @@ impl VaultEngine {
                 self.covenant_engine
                     .create_payment_covenant(vault_id, &deposit_outputs, None)?;
 
-            let created_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let created_at = current_timestamp();
 
             let vault_state = VaultState {
                 vault_id: vault_id.to_string(),

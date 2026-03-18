@@ -1107,6 +1107,128 @@ impl EventPublisher {
         }
     }
 
+    // === §6.4 New Event Types ===
+
+    /// Publish selective sync policy applied event
+    pub async fn publish_selective_sync_policy_applied(
+        &self,
+        policy_source: &str,
+        registry_count: usize,
+    ) {
+        let payload = EventPayload::SelectiveSyncPolicyApplied {
+            policy_source: policy_source.to_string(),
+            registry_count,
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::SelectiveSyncPolicyApplied, payload)
+            .await
+        {
+            warn!("Failed to publish SelectiveSyncPolicyApplied event: {}", e);
+        }
+    }
+
+    /// Publish action executed event (miningos)
+    pub async fn publish_action_executed(
+        &self,
+        action_id: &str,
+        action_type: &str,
+        target: &str,
+        success: bool,
+    ) {
+        let payload = EventPayload::ActionExecuted {
+            action_id: action_id.to_string(),
+            action_type: action_type.to_string(),
+            target: target.to_string(),
+            success,
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::ActionExecuted, payload)
+            .await
+        {
+            warn!("Failed to publish ActionExecuted event: {}", e);
+        }
+    }
+
+    /// Publish module purchase completed event
+    pub async fn publish_module_purchase_completed(
+        &self,
+        module_id: &str,
+        payment_id: &str,
+        amount_sats: u64,
+    ) {
+        let payload = EventPayload::ModulePurchaseCompleted {
+            module_id: module_id.to_string(),
+            payment_id: payment_id.to_string(),
+            amount_sats,
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::ModulePurchaseCompleted, payload)
+            .await
+        {
+            warn!("Failed to publish ModulePurchaseCompleted event: {}", e);
+        }
+    }
+
+    /// Publish stratum client connected event
+    pub async fn publish_stratum_client_connected(&self, endpoint: &str, protocol_version: u32) {
+        let payload = EventPayload::StratumClientConnected {
+            endpoint: endpoint.to_string(),
+            protocol_version,
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::StratumClientConnected, payload)
+            .await
+        {
+            warn!("Failed to publish StratumClientConnected event: {}", e);
+        }
+    }
+
+    /// Publish stratum client disconnected event
+    pub async fn publish_stratum_client_disconnected(&self, endpoint: &str, reason: &str) {
+        let payload = EventPayload::StratumClientDisconnected {
+            endpoint: endpoint.to_string(),
+            reason: reason.to_string(),
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::StratumClientDisconnected, payload)
+            .await
+        {
+            warn!("Failed to publish StratumClientDisconnected event: {}", e);
+        }
+    }
+
+    /// Publish IBD block filtered event
+    pub async fn publish_ibd_block_filtered(
+        &self,
+        block_hash: &Hash,
+        height: u64,
+        reason: &str,
+    ) {
+        let payload = EventPayload::IBDBlockFiltered {
+            block_hash: *block_hash,
+            height,
+            reason: reason.to_string(),
+        };
+
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::IBDBlockFiltered, payload)
+            .await
+        {
+            warn!("Failed to publish IBDBlockFiltered event: {}", e);
+        }
+    }
+
     /// Generic event publishing method (for any event type)
     /// Publish configuration loaded/changed event
     ///

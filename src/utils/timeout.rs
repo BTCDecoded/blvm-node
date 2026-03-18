@@ -4,19 +4,12 @@
 //!
 //! **Default Timeouts**: These utilities use hardcoded default timeouts:
 //! - Network: 30 seconds
-//! - Storage: 10 seconds  
+//! - Storage: 10 seconds
 //! - RPC: 60 seconds
 //!
-//! **Configurable Timeouts**: For configurable timeouts, use `RequestTimeoutConfig`
-//! from `crate::config::RequestTimeoutConfig` and pass values to `with_custom_timeout()`:
-//!
-//! ```rust
-//! use crate::utils::with_custom_timeout;
-//! use std::time::Duration;
-//!
-//! let config_timeout = Duration::from_secs(config.storage_timeout_seconds);
-//! with_custom_timeout(operation, config_timeout).await
-//! ```
+//! **Configurable Timeouts**: Use `storage_timeout_from_config()` etc. to get
+//! `Duration` from `RequestTimeoutConfig`, then pass to `with_custom_timeout()`.
+//! RPC handlers receive config via `with_request_timeouts()` and use these helpers.
 
 use std::time::Duration;
 use tokio::time::{timeout, Timeout};
@@ -80,4 +73,72 @@ where
     F: std::future::Future<Output = T>,
 {
     timeout(duration, operation).await
+}
+
+/// Storage timeout duration from config, or default when config is None.
+/// Use with `with_custom_timeout(operation, storage_timeout_from_config(config)).await`.
+#[inline]
+pub fn storage_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+    config
+        .map(|c| Duration::from_secs(c.storage_timeout_seconds))
+        .unwrap_or(DEFAULT_STORAGE_TIMEOUT)
+}
+
+/// Network timeout duration from config, or default when config is None.
+#[inline]
+pub fn network_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+    config
+        .map(|c| Duration::from_secs(c.network_timeout_seconds))
+        .unwrap_or(DEFAULT_NETWORK_TIMEOUT)
+}
+
+/// RPC timeout duration from config, or default when config is None.
+#[inline]
+pub fn rpc_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+    config
+        .map(|c| Duration::from_secs(c.rpc_timeout_seconds))
+        .unwrap_or(DEFAULT_RPC_TIMEOUT)
+}
+
+/// Handshake timeout from config (default 10s).
+#[inline]
+pub fn handshake_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+    config
+        .map(|c| Duration::from_secs(c.handshake_timeout_secs))
+        .unwrap_or(Duration::from_secs(10))
+}
+
+/// Checkpoint request timeout from config (default 5s). For lan_security.
+#[inline]
+pub fn checkpoint_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+    config
+        .map(|c| Duration::from_secs(c.checkpoint_request_timeout_secs))
+        .unwrap_or(Duration::from_secs(5))
+}
+
+/// Protocol verify timeout from config (default 5s). For lan_security DiscoveryVerifier.
+#[inline]
+pub fn protocol_verify_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+    config
+        .map(|c| Duration::from_secs(c.protocol_verify_timeout_secs))
+        .unwrap_or(Duration::from_secs(5))
+}
+
+/// Headers verify timeout from config (default 10s). For lan_security.
+#[inline]
+pub fn headers_verify_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+    config
+        .map(|c| Duration::from_secs(c.headers_verify_timeout_secs))
+        .unwrap_or(Duration::from_secs(10))
+}
+
+/// LAN security timeouts from config: (protocol_verify, headers_verify) for DiscoveryVerifier.
+/// Use with `verify_lan_peer(..., timeouts: Some(result))`.
+#[inline]
+pub fn lan_security_timeouts_from_config(
+    config: Option<&crate::config::RequestTimeoutConfig>,
+) -> (Duration, Duration) {
+    let proto = protocol_verify_timeout_from_config(config);
+    let headers = headers_verify_timeout_from_config(config);
+    (proto, headers)
 }

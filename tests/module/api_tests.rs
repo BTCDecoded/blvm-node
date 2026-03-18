@@ -2,7 +2,7 @@
 //!
 //! Tests for module API access, permissions, and request validation.
 
-use blvm_node::tests::module::test_utils::*;
+use crate::test_utils::*;
 use blvm_node::module::security::permissions::{Permission, PermissionSet};
 use blvm_node::module::api::hub::ModuleApiHub;
 use blvm_node::module::ipc::protocol::{RequestMessage, RequestPayload};
@@ -50,7 +50,7 @@ async fn test_api_hub_creation() {
     
     let hub = ModuleApiHub::new(fixture.node_api);
     
-    // Hub should be created successfully
-    assert!(true); // Placeholder - hub creation doesn't have visible state yet
+    // Hub created; verify it responds (audit log empty for new hub)
+    assert!(hub.get_audit_log(0).is_empty());
 }
 

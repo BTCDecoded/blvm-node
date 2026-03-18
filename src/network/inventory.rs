@@ -79,10 +79,7 @@ impl InventoryManager {
         let request = InventoryRequest {
             inv_type,
             hash,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: crate::utils::current_timestamp(),
             peer: peer.to_string(),
         };
 
@@ -106,10 +103,7 @@ impl InventoryManager {
 
     /// Clean up old pending requests
     pub fn cleanup_old_requests(&mut self, max_age_seconds: u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = crate::utils::current_timestamp();
 
         let old_requests: Vec<Hash> = self
             .pending_requests

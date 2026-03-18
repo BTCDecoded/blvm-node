@@ -3,7 +3,9 @@
 //! Prevents cascading failures by stopping requests to failing services.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+use crate::utils::current_timestamp;
 
 /// Circuit breaker state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,10 +84,7 @@ impl CircuitBreaker {
             CircuitState::Open => {
                 // Check if timeout has elapsed
                 let last_failure = self.last_failure_time.load(Ordering::Acquire);
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                let now = crate::utils::current_timestamp();
 
                 if now.saturating_sub(last_failure) >= self.timeout.as_secs() {
                     // Timeout elapsed - transition to half-open
@@ -124,13 +123,7 @@ impl CircuitBreaker {
 
     /// Record failure
     pub fn record_failure(&self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| {
-                // Fallback to 0 if system time is before epoch (should never happen)
-                std::time::Duration::from_secs(0)
-            })
-            .as_secs();
+        let now = crate::utils::current_timestamp();
 
         match self.state() {
             CircuitState::Closed => {

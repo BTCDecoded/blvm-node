@@ -306,7 +306,7 @@ async fn test_blockchain_rpc_gettxoutsetinfo() {
     // assert!(info.get("transactions").is_some());
     // assert!(info.get("txouts").is_some());
     // assert!(info.get("bogosize").is_some());
-    // assert!(info.get("hash_serialized_2").is_some());
+    // assert!(info.get("muhash").is_some());
     // assert!(info.get("disk_size").is_some());
     // assert!(info.get("total_amount").is_some());
 }

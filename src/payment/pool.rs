@@ -9,10 +9,11 @@
 
 use crate::payment::covenant::{CovenantEngine, CovenantProof};
 use crate::payment::processor::PaymentError;
+use crate::rpc::errors::STORAGE_NOT_AVAILABLE_MSG;
 use crate::{Hash, Transaction};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::current_timestamp;
 use tracing::info;
 
 /// Pool configuration
@@ -122,7 +123,7 @@ impl PoolEngine {
         let storage = self
             .storage
             .as_ref()
-            .ok_or_else(|| PaymentError::ProcessingError("Storage not available".to_string()))?;
+            .ok_or_else(|| PaymentError::ProcessingError(STORAGE_NOT_AVAILABLE_MSG.to_string()))?;
 
         let pools_tree = storage.open_tree("pools").map_err(|e| {
             PaymentError::ProcessingError(format!("Failed to open pools tree: {}", e))
@@ -240,10 +241,7 @@ impl PoolEngine {
                 )));
             }
 
-            let created_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let created_at = current_timestamp();
 
             let mut participants = Vec::new();
             let mut total_balance = 0u64;
@@ -342,10 +340,7 @@ impl PoolEngine {
                 )));
             }
 
-            let joined_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let joined_at = current_timestamp();
 
             let mut new_participants = pool_state.participants.clone();
             new_participants.push(PoolParticipant {
@@ -428,10 +423,7 @@ impl PoolEngine {
         let mut new_state = pool_state.clone();
         new_state.participants = new_participants;
         new_state.total_balance = new_total;
-        new_state.last_updated = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        new_state.last_updated = current_timestamp();
 
         Ok(new_state)
     }
@@ -518,10 +510,7 @@ impl PoolEngine {
                 }
             }
             new_state.total_balance = new_state.participants.iter().map(|p| p.balance).sum();
-            new_state.last_updated = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            new_state.last_updated = crate::utils::current_timestamp();
 
             // Save pool state
             self.save_pool(&new_state)?;
@@ -619,10 +608,7 @@ impl PoolEngine {
             let mut new_state = pool_state.clone();
             new_state.participants = new_participants;
             new_state.total_balance = new_state.participants.iter().map(|p| p.balance).sum();
-            new_state.last_updated = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            new_state.last_updated = crate::utils::current_timestamp();
 
             // Save pool state
             self.save_pool(&new_state)?;

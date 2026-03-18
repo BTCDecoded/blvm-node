@@ -103,6 +103,17 @@ impl ModuleApiRegistry {
         apis.get(module_id).cloned()
     }
 
+    /// Resolve module_id: exact match first, then prefix match (module_name_uuid).
+    /// Callers can pass "blvm-lightning" and get "blvm-lightning_<uuid>" when needed.
+    pub async fn resolve_module_id(&self, target: &str) -> Option<String> {
+        let apis = self.apis.read().await;
+        if apis.contains_key(target) {
+            return Some(target.to_string());
+        }
+        let prefix = format!("{target}_");
+        apis.keys().find(|k| k.starts_with(&prefix)).cloned()
+    }
+
     /// Route a method call to the appropriate module
     ///
     /// # Arguments

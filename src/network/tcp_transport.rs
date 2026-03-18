@@ -16,11 +16,20 @@ use tracing::{debug, error, info};
 /// Implements the Transport trait for traditional TCP connections,
 /// providing Bitcoin P2P protocol compatibility.
 #[derive(Debug, Clone)]
-pub struct TcpTransport;
+pub struct TcpTransport {
+    max_message_length: usize,
+}
 
 impl TcpTransport {
     pub fn new() -> Self {
-        Self
+        Self {
+            max_message_length: crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH,
+        }
+    }
+
+    /// Create with configurable max message length (for constrained networks).
+    pub fn with_max_message_length(max_message_length: usize) -> Self {
+        Self { max_message_length }
     }
 }
 
@@ -41,7 +50,10 @@ impl Transport for TcpTransport {
 
     async fn listen(&self, addr: SocketAddr) -> Result<Self::Listener> {
         let listener = TokioTcpListener::bind(addr).await?;
-        Ok(TcpListener { listener })
+        Ok(TcpListener {
+            listener,
+            max_message_length: self.max_message_length,
+        })
     }
 
     async fn connect(&self, addr: TransportAddr) -> Result<Self::Connection> {
@@ -56,28 +68,39 @@ impl Transport for TcpTransport {
         let stream = TcpStream::connect(socket_addr).await?;
         let peer_addr = stream.peer_addr()?;
 
-        Ok(TcpConnection::new(stream, TransportAddr::Tcp(peer_addr)))
+        Ok(TcpConnection::new(
+            stream,
+            TransportAddr::Tcp(peer_addr),
+            self.max_message_length,
+        ))
     }
 }
 
 impl TcpTransport {
     /// Connect and return raw TcpStream (for use with Peer::from_tcp_stream_split)
     ///
-    /// Includes a 10-second connection timeout to prevent blocking on unresponsive peers.
+    /// Includes connection timeout to prevent blocking on unresponsive peers.
+    /// Default 10 seconds when `timeout_secs` is None.
     pub async fn connect_stream(&self, addr: SocketAddr) -> Result<TcpStream> {
+        self.connect_stream_with_timeout(addr, 10).await
+    }
+
+    /// Connect with configurable timeout.
+    pub async fn connect_stream_with_timeout(
+        &self,
+        addr: SocketAddr,
+        timeout_secs: u64,
+    ) -> Result<TcpStream> {
         use tokio::time::{timeout, Duration};
 
-        info!("Connecting to peer at {}", addr);
-
-        // 10 second connection timeout - prevents blocking on unresponsive peers
-        const CONNECT_TIMEOUT_SECS: u64 = 10;
+        info!("Connecting to peer at {} (timeout {}s)", addr, timeout_secs);
 
         let stream = timeout(
-            Duration::from_secs(CONNECT_TIMEOUT_SECS),
+            Duration::from_secs(timeout_secs),
             TcpStream::connect(addr),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Connection timeout to {}", addr))?
+        .map_err(|_| anyhow::anyhow!("Connection timeout ({}s) to {}", timeout_secs, addr))?
         .map_err(|e| anyhow::anyhow!("Connection failed to {}: {}", addr, e))?;
 
         Ok(stream)
@@ -87,6 +110,7 @@ impl TcpTransport {
 /// TCP listener implementation
 pub struct TcpListener {
     listener: TokioTcpListener,
+    max_message_length: usize,
 }
 
 impl TcpListener {
@@ -115,7 +139,11 @@ impl TransportListener for TcpListener {
                 debug!("Accepted TCP connection from {}", addr);
                 let peer_addr = stream.peer_addr()?;
                 Ok((
-                    TcpConnection::new(stream, TransportAddr::Tcp(peer_addr)),
+                    TcpConnection::new(
+                        stream,
+                        TransportAddr::Tcp(peer_addr),
+                        self.max_message_length,
+                    ),
                     TransportAddr::Tcp(addr),
                 ))
             }
@@ -142,17 +170,19 @@ pub struct TcpConnection {
     pub(crate) writer: std::sync::Arc<tokio::sync::Mutex<tokio::io::WriteHalf<TcpStream>>>,
     pub(crate) peer_addr: TransportAddr,
     pub(crate) connected: std::sync::atomic::AtomicBool,
+    max_message_length: usize,
 }
 
 impl TcpConnection {
     /// Create a new TCP connection from a stream
-    pub fn new(stream: TcpStream, peer_addr: TransportAddr) -> Self {
+    pub fn new(stream: TcpStream, peer_addr: TransportAddr, max_message_length: usize) -> Self {
         let (reader, writer) = tokio::io::split(stream);
         Self {
             reader: std::sync::Arc::new(tokio::sync::Mutex::new(reader)),
             writer: std::sync::Arc::new(tokio::sync::Mutex::new(writer)),
             peer_addr,
             connected: std::sync::atomic::AtomicBool::new(true),
+            max_message_length,
         }
     }
 }
@@ -220,12 +250,12 @@ impl TransportConnection for TcpConnection {
         }
 
         // Validate message size before allocation (DoS protection)
-        use crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH;
-        if payload_len > MAX_PROTOCOL_MESSAGE_LENGTH - 24 {
+        let max_payload = self.max_message_length.saturating_sub(24);
+        if payload_len > max_payload {
             return Err(anyhow::anyhow!(
                 "Message payload too large: {} bytes (max: {} bytes)",
                 payload_len,
-                MAX_PROTOCOL_MESSAGE_LENGTH - 24
+                max_payload
             ));
         }
 

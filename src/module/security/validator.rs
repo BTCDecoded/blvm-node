@@ -6,7 +6,6 @@ use crate::module::ipc::protocol::RequestPayload;
 use crate::module::traits::ModuleError;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 /// Result of request validation
@@ -54,10 +53,7 @@ impl RateLimiter {
 
     /// Check if a request is allowed (rate limit not exceeded)
     fn check_rate_limit(&mut self, max_requests: u64, window_seconds: u64) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = crate::utils::current_timestamp();
 
         // Remove timestamps outside the time window
         let cutoff = now.saturating_sub(window_seconds);
@@ -144,14 +140,6 @@ impl RequestValidator {
             | RequestPayload::ListDirectory { .. }
             | RequestPayload::CreateDirectory { .. }
             | RequestPayload::GetFileMetadata { .. }
-            // Storage API - validated by permissions
-            | RequestPayload::StorageOpenTree { .. }
-            | RequestPayload::StorageInsert { .. }
-            | RequestPayload::StorageGet { .. }
-            | RequestPayload::StorageRemove { .. }
-            | RequestPayload::StorageContainsKey { .. }
-            | RequestPayload::StorageIter { .. }
-            | RequestPayload::StorageTransaction { .. }
             // Module RPC Endpoint Registration - validated by permissions
             | RequestPayload::RegisterRpcEndpoint { .. }
             | RequestPayload::UnregisterRpcEndpoint { .. }
@@ -182,6 +170,7 @@ impl RequestValidator {
             | RequestPayload::SendStratumV2MessageToPeer { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::GetBlockTemplate { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::SubmitBlock { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::RegisterCliSpec { .. } => Ok(ValidationResult::Allowed),
         }
     }
 

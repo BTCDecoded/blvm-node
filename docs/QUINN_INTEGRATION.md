@@ -145,4 +145,5 @@ All existing code continues to work:
 ## See Also
 
 - [Transport Abstraction](transport/README_TRANSPORT_ABSTRACTION.md)
+- [QUIC RPC](QUIC_RPC.md) — Quinn RPC uses the same auth and rate-limit model as HTTP RPC
 

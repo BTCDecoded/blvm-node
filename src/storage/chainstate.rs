@@ -14,7 +14,8 @@ pub struct UTXOStats {
     pub height: u64,
     pub txouts: u64,
     pub total_amount: u128, // Total in satoshis
-    pub hash_serialized_2: [u8; 32],
+    /// MuHash3072 of UTXO set (Core gettxoutsetinfo muhash)
+    pub muhash: [u8; 32],
     pub transactions: u64,
 }
 
@@ -115,33 +116,10 @@ impl ChainState {
         }
     }
 
-    /// Calculate difficulty from block bits (compact target format)
-    /// Difficulty = MAX_TARGET / target
-    /// For display purposes, normalized to genesis difficulty = 1.0
+    /// Calculate difficulty from block bits (compact target format).
+    /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty(bits: u64) -> f64 {
-        const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
-
-        // Expand target from compact format
-        let exponent = (bits >> 24) as u8;
-        let mantissa = bits & 0x00ffffff;
-
-        if mantissa == 0 {
-            return 1.0;
-        }
-
-        // Calculate target: target = mantissa * 2^(8*(exponent-3))
-        let target = if exponent <= 3 {
-            mantissa >> (8 * (3 - exponent))
-        } else {
-            mantissa << (8 * (exponent - 3))
-        };
-
-        if target == 0 {
-            return 1.0;
-        }
-
-        // Difficulty = MAX_TARGET / target
-        MAX_TARGET as f64 / target as f64
+        blvm_consensus::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 
     /// Calculate work from block bits (compact target format)
@@ -237,6 +215,16 @@ impl ChainState {
             Ok(Some(info.tip_hash))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Get tip hash and height, or (zero hash, 0) when chain is not initialized.
+    /// Use when callers would otherwise do get_tip_hash()?.unwrap_or([0u8;32]) and get_height()?.unwrap_or(0).
+    pub fn get_tip_hash_and_height(&self) -> Result<(Hash, u64)> {
+        if let Some(info) = self.load_chain_info()? {
+            Ok((info.tip_hash, info.height))
+        } else {
+            Ok((Hash::default(), 0))
         }
     }
 
@@ -338,8 +326,7 @@ impl ChainState {
     pub fn get_utxo_stats(&self, block_hash: &Hash) -> Result<Option<UTXOStats>> {
         let key = block_hash.as_slice();
         if let Some(data) = self.utxo_stats_cache.get(key)? {
-            let stats: UTXOStats = bincode::deserialize(&data)?;
-            Ok(Some(stats))
+            bincode::deserialize(&data).map(Some).or(Ok(None))
         } else {
             Ok(None)
         }
@@ -402,38 +389,18 @@ impl ChainState {
         utxo_set: &blvm_protocol::UtxoSet,
         transaction_count: u64,
     ) -> Result<()> {
-        use crate::storage::hashing::double_sha256;
+        use crate::storage::assumeutxo::AssumeUtxoManager;
 
-        // Calculate UTXO set statistics
         let txouts = utxo_set.len() as u64;
         let total_amount: u128 = utxo_set.values().map(|utxo| utxo.value as u128).sum();
+        let muhash = AssumeUtxoManager::calculate_utxo_hash(utxo_set)
+            .unwrap_or_else(|_| [0u8; 32]);
 
-        // Calculate hash_serialized_2 (double SHA256 of serialized UTXO set)
-        // Sort UTXOs for deterministic hashing
-        let mut entries: Vec<_> = utxo_set.iter().collect();
-        entries.sort_by(|(a, _), (b, _)| match a.hash.cmp(&b.hash) {
-            std::cmp::Ordering::Equal => a.index.cmp(&b.index),
-            other => other,
-        });
-
-        // Serialize each UTXO entry
-        let mut serialized = Vec::new();
-        for (outpoint, utxo) in entries {
-            serialized.extend_from_slice(&outpoint.hash);
-            serialized.extend_from_slice(&outpoint.index.to_le_bytes());
-            serialized.extend_from_slice(&utxo.value.to_le_bytes());
-            serialized.extend_from_slice(&utxo.script_pubkey);
-            serialized.extend_from_slice(&utxo.height.to_le_bytes());
-        }
-
-        let hash_serialized_2 = double_sha256(&serialized);
-
-        // Store in cache
         let stats = UTXOStats {
             height,
             txouts,
             total_amount,
-            hash_serialized_2,
+            muhash,
             transactions: transaction_count,
         };
 

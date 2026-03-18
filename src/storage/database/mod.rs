@@ -3,47 +3,16 @@
 //! Provides a unified interface for different database backends (tidesdb, redb, sled, rocksdb).
 //! Allows switching between storage engines via feature flags.
 //!
-//! All backends must support the same set of tree names. Module trees (module_{id}_{name})
-//! use a shared "modules" storage with key prefixes for isolation.
+//! All backends must support the same set of tree names.
+//! Module storage has been removed; modules use their own DB at {data_dir}/db/.
 
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 
-/// All known tree names (excluding dynamic module_* which use shared "modules").
-/// Used by RocksDB for open_cf_descriptors and for backend parity validation.
-pub const KNOWN_TREE_NAMES: &[&str] = &[
-    "blocks",
-    "headers",
-    "height_index",
-    "hash_to_height",
-    "witnesses",
-    "recent_headers",
-    "utxos",
-    "ibd_utxos",
-    "spent_outputs",
-    "chain_info",
-    "work_cache",
-    "chainwork_cache",
-    "utxo_stats_cache",
-    "network_hashrate_cache",
-    "invalid_blocks",
-    "chain_tips",
-    "block_metadata",
-    "tx_by_hash",
-    "tx_by_block",
-    "tx_metadata",
-    "address_tx_index",
-    "address_output_index",
-    "address_input_index",
-    "value_index",
-    "utxo_commitments",
-    "commitment_height_index",
-    "vaults",
-    "pools",
-    "batches",
-    "modules",
-];
+mod known_trees;
+pub use known_trees::KNOWN_TREE_NAMES;
+
 
 /// Database abstraction trait
 ///
@@ -145,109 +114,6 @@ pub trait BatchWriter {
     /// Check if the batch is empty
     fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-}
-
-/// Shared namespace tree for module_* isolation. Wraps any Tree with a key prefix.
-/// All backends use this for module storage (shared "modules" tree + prefix).
-fn open_module_tree(inner: Arc<dyn Tree>, module_id: &str, tree_name: &str) -> Box<dyn Tree> {
-    Box::new(NamespaceTree {
-        inner,
-        key_prefix: format!("module_{module_id}_{tree_name}_").into_bytes(),
-    })
-}
-
-struct NamespaceTree {
-    inner: Arc<dyn Tree>,
-    key_prefix: Vec<u8>,
-}
-
-impl NamespaceTree {
-    fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
-        let mut k = self.key_prefix.clone();
-        k.extend_from_slice(key);
-        k
-    }
-}
-
-impl Tree for NamespaceTree {
-    fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.inner.insert(&self.namespace_key(key), value)
-    }
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.inner.get(&self.namespace_key(key))
-    }
-    fn remove(&self, key: &[u8]) -> Result<()> {
-        self.inner.remove(&self.namespace_key(key))
-    }
-    fn contains_key(&self, key: &[u8]) -> Result<bool> {
-        self.inner.contains_key(&self.namespace_key(key))
-    }
-    fn clear(&self) -> Result<()> {
-        let prefix = &self.key_prefix;
-        let keys: Vec<Vec<u8>> = self
-            .inner
-            .iter()
-            .filter_map(|r| match r {
-                Ok((k, _)) if k.starts_with(prefix) => Some(Ok(k)),
-                Ok(_) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<_>>()?;
-        for k in keys {
-            self.inner.remove(&k)?;
-        }
-        Ok(())
-    }
-    fn len(&self) -> Result<usize> {
-        let prefix = &self.key_prefix;
-        let mut count = 0;
-        for item in self.inner.iter() {
-            match item {
-                Ok((k, _)) if k.starts_with(prefix) => count += 1,
-                Ok(_) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(count)
-    }
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-        let prefix = self.key_prefix.clone();
-        Box::new(self.inner.iter().filter_map(move |item| match item {
-            Ok((k, v)) if k.starts_with(&prefix) => Some(Ok((k[prefix.len()..].to_vec(), v))),
-            Ok(_) => None,
-            Err(e) => Some(Err(e)),
-        }))
-    }
-    fn batch(&self) -> Box<dyn BatchWriter + '_> {
-        Box::new(NamespaceBatchWriter {
-            inner: self.inner.batch(),
-            key_prefix: self.key_prefix.clone(),
-        })
-    }
-}
-
-struct NamespaceBatchWriter<'a> {
-    inner: Box<dyn BatchWriter + 'a>,
-    key_prefix: Vec<u8>,
-}
-
-impl<'a> BatchWriter for NamespaceBatchWriter<'a> {
-    fn put(&mut self, key: &[u8], value: &[u8]) {
-        let mut k = self.key_prefix.clone();
-        k.extend_from_slice(key);
-        self.inner.put(&k, value);
-    }
-    fn delete(&mut self, key: &[u8]) {
-        let mut k = self.key_prefix.clone();
-        k.extend_from_slice(key);
-        self.inner.delete(&k);
-    }
-    fn commit(self: Box<Self>) -> Result<()> {
-        self.inner.commit()
-    }
-    fn len(&self) -> usize {
-        self.inner.len()
     }
 }
 
@@ -461,7 +327,7 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
 // Sled implementation
 #[cfg(feature = "sled")]
 mod sled_impl {
-    use super::{open_module_tree, BatchWriter, Database, Tree};
+    use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use sled::Db;
     use std::path::Path;
@@ -480,15 +346,10 @@ mod sled_impl {
 
     impl Database for SledDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            if name.starts_with("module_") {
-                let parts: Vec<&str> = name.splitn(3, '_').collect();
-                if parts.len() == 3 && parts[0] == "module" {
-                    let modules_tree = self.db.open_tree("modules")?;
-                    let inner = Arc::new(SledTree {
-                        tree: Arc::new(modules_tree),
-                    });
-                    return Ok(open_module_tree(inner, parts[1], parts[2]));
-                }
+            if name.starts_with("module_") || name == "modules" {
+                return Err(anyhow::anyhow!(
+                    "Module storage has been removed. Use blvm_sdk::module::open_module_db."
+                ));
             }
 
             let tree = self.db.open_tree(name)?;
@@ -583,7 +444,7 @@ mod sled_impl {
 // Redb implementation
 #[cfg(feature = "redb")]
 mod redb_impl {
-    use super::{open_module_tree, BatchWriter, Database, Tree};
+    use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use redb::{Database as RedbDb, ReadableTable, TableDefinition};
     use std::path::Path;
@@ -634,9 +495,9 @@ mod redb_impl {
     static VAULTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vaults");
     static POOLS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pools");
     static BATCHES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("batches");
-    // Module storage table (shared table for all modules with namespaced keys)
-    static MODULES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("modules");
-
+    // Module DB tables (used by blvm-sdk open_module_db)
+    static SCHEMA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("schema");
+    static ITEMS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("items");
     pub struct RedbDatabase {
         db: Arc<RedbDb>,
     }
@@ -653,14 +514,11 @@ mod redb_impl {
             let _guard = DB_CREATE_MUTEX.lock().unwrap();
             tracing::info!("[REDB] DB_CREATE_MUTEX acquired");
 
-            // redb cache size: config > env BLVM_DBCACHE_MB > default 450 (matches Core -dbcache)
-            let dbcache_mb: usize = storage_config
-                .map(|s| s.dbcache_mb)
-                .or_else(|| {
-                    std::env::var("BLVM_DBCACHE_MB")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                })
+            // redb cache size: ENV > config > default 450 (matches Core -dbcache, 12-factor)
+            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| storage_config.map(|s| s.dbcache_mb))
                 .unwrap_or(450);
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let mut builder = RedbDb::builder();
@@ -741,7 +599,6 @@ mod redb_impl {
                             let _ = write_txn.open_table(POOLS_TABLE)?;
                             let _ = write_txn.open_table(BATCHES_TABLE)?;
                             // Module storage table
-                            let _ = write_txn.open_table(MODULES_TABLE)?;
                             let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
                             let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
                             let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
@@ -750,6 +607,9 @@ mod redb_impl {
                             let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
                             let _ = write_txn.open_table(UTXO_COMMITMENTS_TABLE)?;
                             let _ = write_txn.open_table(COMMITMENT_HEIGHT_INDEX_TABLE)?;
+                            // Module DB tables (blvm-sdk open_module_db)
+                            let _ = write_txn.open_table(SCHEMA_TABLE)?;
+                            let _ = write_txn.open_table(ITEMS_TABLE)?;
                         }
                         write_txn.commit()?;
                         let table_elapsed = table_start.elapsed();
@@ -810,8 +670,9 @@ mod redb_impl {
                 let _ = write_txn.open_table(VAULTS_TABLE)?;
                 let _ = write_txn.open_table(POOLS_TABLE)?;
                 let _ = write_txn.open_table(BATCHES_TABLE)?;
-                // Module storage table
-                let _ = write_txn.open_table(MODULES_TABLE)?;
+                // Module DB tables (blvm-sdk open_module_db)
+                let _ = write_txn.open_table(SCHEMA_TABLE)?;
+                let _ = write_txn.open_table(ITEMS_TABLE)?;
             }
             write_txn.commit()?;
 
@@ -853,10 +714,9 @@ mod redb_impl {
                 "vaults" => Some(&VAULTS_TABLE),
                 "pools" => Some(&POOLS_TABLE),
                 "batches" => Some(&BATCHES_TABLE),
-                // Module storage table
-                "modules" => Some(&MODULES_TABLE),
-                // Module trees (dynamic names) use MODULES_TABLE with namespaced keys
-                name if name.starts_with("module_") => Some(&MODULES_TABLE),
+                // Module DB tables (blvm-sdk open_module_db)
+                "schema" => Some(&SCHEMA_TABLE),
+                "items" => Some(&ITEMS_TABLE),
                 _ => None,
             }
         }
@@ -864,19 +724,10 @@ mod redb_impl {
 
     impl Database for RedbDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            if name.starts_with("module_") {
-                let parts: Vec<&str> = name.splitn(3, '_').collect();
-                if parts.len() == 3 && parts[0] == "module" {
-                    let table_def = self
-                        .get_table_def("modules")
-                        .ok_or_else(|| anyhow::anyhow!("MODULES_TABLE not defined"))?;
-                    let inner_tree = Arc::new(RedbTree {
-                        db: Arc::clone(&self.db),
-                        table_def,
-                        name: "modules".to_string(),
-                    });
-                    return Ok(open_module_tree(inner_tree, parts[1], parts[2]));
-                }
+            if name.starts_with("module_") || name == "modules" {
+                return Err(anyhow::anyhow!(
+                    "Module storage has been removed. Use blvm_sdk::module::open_module_db."
+                ));
             }
 
             // Existing static table logic
@@ -1106,7 +957,7 @@ mod redb_impl {
 // RocksDB implementation
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb_impl {
-    use super::{open_module_tree, BatchWriter, Database, Tree};
+    use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use rocksdb::{BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, DB};
     use std::path::Path;
@@ -1130,14 +981,15 @@ pub mod rocksdb_impl {
             opts.create_missing_column_families(true);
 
             // IBD tuning: more background threads for flush/compaction (read-heavy workloads benefit)
-            let parallelism: i32 = std::env::var("BLVM_ROCKSDB_PARALLELISM")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| {
-                    std::thread::available_parallelism()
-                        .map(|p| p.get().max(4) as i32)
-                        .unwrap_or(4)
-                });
+            // Precedence: config > ENV > default
+            let default_parallelism = std::thread::available_parallelism()
+                .map(|p| p.get().max(4) as i32)
+                .unwrap_or(4);
+            let parallelism: i32 = storage_config
+                .and_then(|s| s.rocksdb.as_ref())
+                .and_then(|r| r.parallelism)
+                .or_else(|| std::env::var("BLVM_ROCKSDB_PARALLELISM").ok().and_then(|s| s.parse().ok()))
+                .unwrap_or(default_parallelism);
             opts.increase_parallelism(parallelism);
             // Each open SST file has a table reader loaded in memory (~64KB+).
             // At 10000, this is a hidden ~640MB+ RSS contributor. 256 is sufficient
@@ -1171,19 +1023,21 @@ pub mod rocksdb_impl {
 
             // Each compaction thread holds ~64MB of input/output buffers in memory.
             // Scale by RAM: 2 threads on <=16GB, 4 on 32GB+.
+            // Precedence: config > ENV > default
             let default_compactions = if total_ram_gb >= 32 { 4 } else { 2 };
             let default_flushes = if total_ram_gb >= 32 { 4 } else { 2 };
-            let max_compactions: i32 = std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS")
-                .ok()
-                .and_then(|s| s.parse().ok())
+            let rocksdb_cfg = storage_config.and_then(|s| s.rocksdb.as_ref());
+            let max_compactions: i32 = rocksdb_cfg
+                .and_then(|r| r.max_background_compactions)
+                .or_else(|| std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS").ok().and_then(|s| s.parse().ok()))
                 .unwrap_or(default_compactions);
-            let max_flushes: i32 = std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES")
-                .ok()
-                .and_then(|s| s.parse().ok())
+            let max_flushes: i32 = rocksdb_cfg
+                .and_then(|r| r.max_background_flushes)
+                .or_else(|| std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES").ok().and_then(|s| s.parse().ok()))
                 .unwrap_or(default_flushes);
-            let level0_trigger: i32 = std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER")
-                .ok()
-                .and_then(|s| s.parse().ok())
+            let level0_trigger: i32 = rocksdb_cfg
+                .map(|r| r.level0_compaction_trigger)
+                .or_else(|| std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER").ok().and_then(|s| s.parse().ok()))
                 .unwrap_or(8);
             // RocksDB uses max_background_jobs; it allocates between flushes and compactions
             opts.set_max_background_jobs(max_compactions + max_flushes);
@@ -1203,22 +1057,21 @@ pub mod rocksdb_impl {
                 200
             };
 
-            let db_write_buffer_mb: usize = std::env::var("BLVM_ROCKSDB_WRITE_BUFFER_MB")
-                .ok()
-                .and_then(|s| s.parse().ok())
+            // Precedence: config > ENV > default
+            let db_write_buffer_mb: usize = rocksdb_cfg
+                .and_then(|r| r.write_buffer_mb)
+                .or_else(|| std::env::var("BLVM_ROCKSDB_WRITE_BUFFER_MB").ok().and_then(|s| s.parse().ok()))
                 .unwrap_or(default_write_buffer);
             opts.set_db_write_buffer_size(db_write_buffer_mb * 1024 * 1024);
 
             tracing::info!("[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={} write_buffer={}MB (ram={}GB)",
                 parallelism, max_compactions, max_flushes, level0_trigger, db_write_buffer_mb, total_ram_gb);
 
-            let dbcache_mb: usize = storage_config
-                .map(|s| s.dbcache_mb)
-                .or_else(|| {
-                    std::env::var("BLVM_DBCACHE_MB")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                })
+            // RocksDB block cache: ENV > config > default (12-factor)
+            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| storage_config.map(|s| s.dbcache_mb))
                 .unwrap_or(default_block_cache);
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let cache = Cache::new_lru_cache(dbcache_bytes);
@@ -1290,19 +1143,10 @@ pub mod rocksdb_impl {
 
     impl Database for RocksDBDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            if name.starts_with("module_") {
-                let parts: Vec<&str> = name.splitn(3, '_').collect();
-                if parts.len() == 3 && parts[0] == "module" {
-                    let _ = self
-                        .db
-                        .cf_handle("modules")
-                        .ok_or_else(|| anyhow::anyhow!("modules column family not found"))?;
-                    let inner = Arc::new(RocksDBTree {
-                        db: Arc::clone(&self.db),
-                        cf_name: "modules".to_string(),
-                    });
-                    return Ok(open_module_tree(inner, parts[1], parts[2]));
-                }
+            if name.starts_with("module_") || name == "modules" {
+                return Err(anyhow::anyhow!(
+                    "Module storage has been removed. Use blvm_sdk::module::open_module_db."
+                ));
             }
 
             // Known trees use pre-created CF. Arc<DB> can't provide &mut for create_cf.
@@ -1411,9 +1255,15 @@ pub mod rocksdb_impl {
         }
 
         fn batch(&self) -> Box<dyn BatchWriter + '_> {
+            let cf = self.cf().unwrap_or_else(|e| {
+                panic!(
+                    "Column family '{}' not found; RocksDB schema may be corrupted or mismatched: {}",
+                    self.cf_name, e
+                )
+            });
             Box::new(RocksDBBatchWriter {
                 db: Arc::clone(&self.db),
-                cf_name: self.cf_name.clone(),
+                cf,
                 batch: rocksdb::WriteBatch::default(),
                 op_count: 0,
             })
@@ -1423,29 +1273,22 @@ pub mod rocksdb_impl {
     /// RocksDB batch writer using native WriteBatch
     ///
     /// RocksDB's WriteBatch is highly optimized for bulk operations.
-    struct RocksDBBatchWriter {
+    /// CF handle is cached at batch creation to avoid repeated lookups and panic-on-missing.
+    struct RocksDBBatchWriter<'a> {
         db: Arc<DB>,
-        cf_name: String,
+        cf: &'a ColumnFamily,
         batch: rocksdb::WriteBatch,
         op_count: usize,
     }
 
-    impl BatchWriter for RocksDBBatchWriter {
+    impl BatchWriter for RocksDBBatchWriter<'_> {
         fn put(&mut self, key: &[u8], value: &[u8]) {
-            let cf = self
-                .db
-                .cf_handle(&self.cf_name)
-                .expect("column family must exist");
-            self.batch.put_cf(cf, key, value);
+            self.batch.put_cf(self.cf, key, value);
             self.op_count += 1;
         }
 
         fn delete(&mut self, key: &[u8]) {
-            let cf = self
-                .db
-                .cf_handle(&self.cf_name)
-                .expect("column family must exist");
-            self.batch.delete_cf(cf, key);
+            self.batch.delete_cf(self.cf, key);
             self.op_count += 1;
         }
 
@@ -1463,7 +1306,7 @@ pub mod rocksdb_impl {
 // TidesDB implementation
 #[cfg(feature = "tidesdb")]
 mod tidesdb_impl {
-    use super::{open_module_tree, BatchWriter, Database, Tree};
+    use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use std::path::Path;
     use std::sync::Arc;
@@ -1488,13 +1331,16 @@ mod tidesdb_impl {
                 .unwrap_or(450);
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
 
+            // ENV > config > defaults
             let flush_threads: i32 = std::env::var("BLVM_TIDESDB_FLUSH_THREADS")
                 .ok()
                 .and_then(|s| s.parse().ok())
+                .or_else(|| tidesdb_config.map(|c| c.flush_threads))
                 .unwrap_or(4);
             let compact_threads: i32 = std::env::var("BLVM_TIDESDB_COMPACT_THREADS")
                 .ok()
                 .and_then(|s| s.parse().ok())
+                .or_else(|| tidesdb_config.map(|c| c.compact_threads))
                 .unwrap_or(4);
             let config = Config::new(&db_path)
                 .block_cache_size(dbcache_bytes)
@@ -1559,17 +1405,10 @@ mod tidesdb_impl {
 
     impl Database for TidesDBDatabase {
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            if name.starts_with("module_") {
-                let parts: Vec<&str> = name.splitn(3, '_').collect();
-                if parts.len() == 3 && parts[0] == "module" {
-                    let modules_cf = self.get_or_create_cf("modules")?;
-                    let inner = Arc::new(TidesDBTree {
-                        db: Arc::clone(&self.db),
-                        cf: Arc::new(modules_cf),
-                        name: "modules".to_string(),
-                    });
-                    return Ok(open_module_tree(inner, parts[1], parts[2]));
-                }
+            if name.starts_with("module_") || name == "modules" {
+                return Err(anyhow::anyhow!(
+                    "Module storage has been removed. Use blvm_sdk::module::open_module_db."
+                ));
             }
 
             let cf = self.get_or_create_cf(name)?;

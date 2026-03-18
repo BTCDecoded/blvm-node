@@ -12,6 +12,7 @@ fn create_valid_manifest() -> ModuleManifest {
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         dependencies: HashMap::new(),
+        optional_dependencies: HashMap::new(),
         entry_point: "test-module.so".to_string(),
         config_schema: HashMap::new(),
         binary: None,

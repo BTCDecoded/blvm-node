@@ -2,6 +2,7 @@
 //!
 //! Standardized response format for all REST API endpoints
 
+use crate::utils::current_timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -60,11 +61,7 @@ impl ApiResponse<Value> {
         Self {
             data,
             meta: ResponseMeta {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    .to_string(),
+                timestamp: current_timestamp().to_string(),
                 version: "1.0".to_string(),
                 request_id,
             },
@@ -96,16 +93,24 @@ impl ApiError {
                 suggestions,
             },
             meta: ResponseMeta {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    .to_string(),
+                timestamp: current_timestamp().to_string(),
                 version: "1.0".to_string(),
                 request_id,
             },
         }
     }
+}
+
+/// Build "Failed to {context}: {e}" for REST error messages. Use instead of ad hoc format!.
+#[inline]
+pub fn rest_error_failed(context: &str, e: &impl std::fmt::Display) -> String {
+    format!("Failed to {}: {}", context, e)
+}
+
+/// Build "Invalid {context}: {e}" for REST error messages. Use instead of ad hoc format!.
+#[inline]
+pub fn rest_error_invalid(context: &str, e: &impl std::fmt::Display) -> String {
+    format!("Invalid {}: {}", context, e)
 }
 
 // Helper functions for REST responses
@@ -114,26 +119,19 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
-/// Maximum request body size (1MB) - matches RPC server
-const MAX_REQUEST_SIZE: usize = 1_048_576;
+/// Maximum request body size (1MB) - matches RPC server. Single source: server::DEFAULT_MAX_REQUEST_SIZE.
+pub use crate::rpc::server::DEFAULT_MAX_REQUEST_SIZE as MAX_REQUEST_SIZE;
 
 /// Read and parse JSON request body with size limit enforcement
 pub async fn read_json_body(req: Request<Incoming>) -> Result<Option<Value>, String> {
+    use http_body_util::Limited;
     use http_body_util::BodyExt;
     let (_, body) = req.into_parts();
-    let body_bytes = match body.collect().await {
+    let limited = Limited::new(body, MAX_REQUEST_SIZE);
+    let body_bytes = match limited.collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(e) => return Err(format!("Failed to read request body: {}", e)),
+        Err(e) => return Err(format!("Request body too large or read error: {}", e)),
     };
-
-    // Enforce maximum request size
-    if body_bytes.len() > MAX_REQUEST_SIZE {
-        return Err(format!(
-            "Request body too large: {} bytes (max: {} bytes)",
-            body_bytes.len(),
-            MAX_REQUEST_SIZE
-        ));
-    }
 
     if body_bytes.is_empty() {
         Ok(None)

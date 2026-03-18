@@ -1,19 +1,9 @@
 //! Tests for sync coordinator and state machine
 
+use blvm_consensus::test_utils::create_test_header;
 use blvm_node::node::sync::{SyncState, SyncStateMachine};
 use blvm_node::{BlockHeader, Hash};
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
-
-fn create_test_header() -> BlockHeader {
-    BlockHeader {
-        version: 1,
-        prev_block_hash: [0u8; 32],
-        merkle_root: [0u8; 32],
-        timestamp: 1231006505,
-        bits: 0x1d00ffff,
-        nonce: 0,
-    }
-}
 
 #[test]
 fn test_sync_state_machine_initial_state() {
@@ -52,7 +42,7 @@ fn test_sync_state_machine_error_state() {
 #[test]
 fn test_sync_state_machine_update_best_header() {
     let mut machine = SyncStateMachine::new();
-    let header = create_test_header();
+    let header = create_test_header(1231006505, [0u8; 32]);
 
     machine.update_best_header(header.clone());
     assert!(machine.best_header().is_some());
@@ -62,7 +52,7 @@ fn test_sync_state_machine_update_best_header() {
 #[test]
 fn test_sync_state_machine_update_chain_tip() {
     let mut machine = SyncStateMachine::new();
-    let header = create_test_header();
+    let header = create_test_header(1231006505, [0u8; 32]);
 
     machine.update_chain_tip(header.clone());
     assert!(machine.chain_tip().is_some());

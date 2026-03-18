@@ -1,7 +1,74 @@
 #![cfg(feature = "quinn")]
 
+use blvm_node::rpc::auth::RpcAuthManager;
 use blvm_node::rpc::quinn_server::QuinnRpcServer;
 use std::net::SocketAddr;
+use std::sync::Arc;
+
+#[tokio::test]
+#[ignore]
+async fn quic_rpc_rate_limit_rejection() {
+    // Server with strict rate limit: burst=2, rate=1
+    let quinn_addr: SocketAddr = "127.0.0.1:18333".parse().unwrap();
+    let auth_manager = Arc::new(RpcAuthManager::with_rate_limits(false, 2, 1));
+    let server = QuinnRpcServer::new(quinn_addr).with_auth_manager(auth_manager);
+
+    let _server_handle = tokio::spawn(async move {
+        let _ = server.start().await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let client_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let endpoint = quinn::Endpoint::client(client_addr).expect("client endpoint");
+
+    let connection = endpoint
+        .connect(quinn_addr, "localhost")
+        .expect("connect")
+        .await
+        .expect("connection");
+
+    let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
+
+    // First 2 requests should succeed
+    for i in 0..2 {
+        let (mut send, mut recv) = connection.open_bi().await.expect("open_bi");
+        send.write_all(request.as_bytes()).await.expect("write");
+        send.finish().expect("finish");
+
+        let mut response_bytes = Vec::new();
+        let mut temp_buf = [0u8; 4096];
+        loop {
+            match recv.read(&mut temp_buf).await {
+                Ok(Some(0)) | Ok(None) => break,
+                Ok(Some(n)) => response_bytes.extend_from_slice(&temp_buf[..n]),
+                Err(_) => break,
+            }
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(response_bytes).expect("utf8")).expect("json");
+        assert!(v["result"].is_object(), "Request {} should succeed", i + 1);
+    }
+
+    // 3rd request should be rate limited (JSON-RPC error -32002)
+    let (mut send, mut recv) = connection.open_bi().await.expect("open_bi");
+    send.write_all(request.as_bytes()).await.expect("write");
+    send.finish().expect("finish");
+
+    let mut response_bytes = Vec::new();
+    let mut temp_buf = [0u8; 4096];
+    loop {
+        match recv.read(&mut temp_buf).await {
+            Ok(Some(0)) | Ok(None) => break,
+            Ok(Some(n)) => response_bytes.extend_from_slice(&temp_buf[..n]),
+            Err(_) => break,
+        }
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(response_bytes).expect("utf8")).expect("json");
+    assert!(v["error"].is_object(), "Should get error response");
+    assert_eq!(v["error"]["code"], -32002, "Should be rate limit error");
+}
 
 #[tokio::test]
 #[ignore]

@@ -19,6 +19,28 @@ pub fn current_timestamp() -> u64 {
         .as_secs()
 }
 
+/// Get current Unix timestamp in milliseconds
+pub fn current_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| {
+            warn!("System time is before UNIX epoch, using 0");
+            std::time::Duration::from_secs(0)
+        })
+        .as_millis() as u64
+}
+
+/// Get current Unix timestamp in nanoseconds (for nonces, uniqueness)
+pub fn current_timestamp_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| {
+            warn!("System time is before UNIX epoch, using 0");
+            std::time::Duration::from_secs(0)
+        })
+        .as_nanos() as u64
+}
+
 /// Get current Unix timestamp as Duration
 ///
 /// Returns zero duration if system time is before epoch.

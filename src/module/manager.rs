@@ -13,6 +13,8 @@ use crate::module::api::events::EventManager;
 use crate::module::api::hub::ModuleApiHub;
 #[cfg(unix)]
 use crate::module::ipc::server::ModuleIpcServer;
+#[cfg(all(unix, feature = "wasm-modules"))]
+use crate::module::ipc::server::WasmInvoker;
 use crate::module::loader::ModuleLoader;
 use crate::module::process::{
     monitor::ModuleProcessMonitor,
@@ -21,6 +23,9 @@ use crate::module::process::{
 use crate::module::registry::{ModuleDependencies, ModuleDiscovery};
 use crate::module::security::permissions::PermissionSet;
 use crate::module::traits::{ModuleContext, ModuleError, ModuleMetadata, ModuleState};
+#[cfg(feature = "wasm-modules")]
+use crate::module::wasm::{WasmModuleInstance, WasmModuleLoader};
+use crate::utils::MODULE_RELOAD_CLEANUP_DELAY;
 use uuid::Uuid;
 
 /// Module manager coordinates all loaded modules
@@ -31,32 +36,129 @@ pub struct ModuleManager {
     modules: Arc<Mutex<HashMap<String, ManagedModule>>>,
     /// IPC server handle
     ipc_server_handle: Option<JoinHandle<Result<(), ModuleError>>>,
+    /// IPC server reference (for getmoduleclispecs, etc.)
+    #[cfg(unix)]
+    ipc_server: Option<Arc<tokio::sync::Mutex<ModuleIpcServer>>>,
     /// Crash notification receiver (mutable so it can be moved to handler)
     crash_rx: Option<mpsc::UnboundedReceiver<(String, ModuleError)>>,
     /// Crash notification sender
     crash_tx: mpsc::UnboundedSender<(String, ModuleError)>,
     /// Base directory for module binaries
     modules_dir: PathBuf,
+    /// Node config overrides per module ([modules.<name>] from config.toml). Merged over module config.
+    module_config_overrides: std::sync::RwLock<HashMap<String, HashMap<String, String>>>,
+    /// Default database backend for modules (inherited from node when not set per-module).
+    /// Values: "redb", "rocksdb", "sled", "tidesdb".
+    default_database_backend: std::sync::RwLock<Option<String>>,
     /// Event manager for module event subscriptions
     event_manager: Arc<EventManager>,
     /// API hub for request routing
     api_hub: Option<Arc<tokio::sync::Mutex<crate::module::api::hub::ModuleApiHub>>>,
     /// Module registry for fetching modules via P2P
     module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
+    /// WASM loader (injected by binary; e.g. from blvm-sdk)
+    #[cfg(feature = "wasm-modules")]
+    wasm_loader: Option<Arc<dyn WasmModuleLoader>>,
+    /// Node IPC socket path (where node listens; modules connect here)
+    node_socket_path: Option<PathBuf>,
 }
 
 /// Managed module instance
 struct ManagedModule {
     /// Module metadata
     metadata: ModuleMetadata,
-    /// Module process (shared with monitor via Arc<Mutex<>>)
+    /// Module process (native subprocess; None for WASM modules)
     process: Option<Arc<tokio::sync::Mutex<ModuleProcess>>>,
     /// Module state
     state: ModuleState,
-    /// Monitoring handle
+    /// Monitoring handle (native only)
     monitor_handle: Option<JoinHandle<()>>,
-    /// Process ID for tracking
+    /// Process ID for tracking (native only)
     process_id: Option<u32>,
+    /// WASM instance (in-process; None for native modules)
+    #[cfg(feature = "wasm-modules")]
+    wasm_instance: Option<Arc<tokio::sync::Mutex<Arc<dyn WasmModuleInstance>>>>,
+}
+
+/// In-process WASM invoker for the IPC server.
+#[cfg(all(unix, feature = "wasm-modules"))]
+struct ManagerWasmInvoker {
+    modules: Arc<Mutex<HashMap<String, ManagedModule>>>,
+}
+
+#[cfg(all(unix, feature = "wasm-modules"))]
+#[async_trait::async_trait]
+impl WasmInvoker for ManagerWasmInvoker {
+    async fn invoke_cli(
+        &self,
+        module_name: &str,
+        subcommand: &str,
+        args: Vec<String>,
+    ) -> Result<
+        crate::module::ipc::protocol::InvocationResultPayload,
+        ModuleError,
+    > {
+        let wasm_guard = {
+            let modules = self.modules.lock().await;
+            let managed = modules
+                .get(module_name)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "No WASM module '{}' is loaded",
+                        module_name
+                    ))
+                })?;
+            #[cfg(feature = "wasm-modules")]
+            match &managed.wasm_instance {
+                Some(inst) => inst.clone(),
+                None => {
+                    return Err(ModuleError::OperationError(format!(
+                        "Module '{}' is not a WASM module",
+                        module_name
+                    )));
+                }
+            }
+        };
+        let instance_guard = wasm_guard.lock().await;
+        let result = tokio::task::block_in_place(|| {
+            (**instance_guard).invoke_cli(subcommand, args)
+        });
+        result
+    }
+
+    async fn invoke_rpc(
+        &self,
+        module_name: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ModuleError> {
+        let wasm_guard = {
+            let modules = self.modules.lock().await;
+            let managed = modules
+                .get(module_name)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "No WASM module '{}' is loaded",
+                        module_name
+                    ))
+                })?;
+            #[cfg(feature = "wasm-modules")]
+            match &managed.wasm_instance {
+                Some(inst) => inst.clone(),
+                None => {
+                    return Err(ModuleError::OperationError(format!(
+                        "Module '{}' is not a WASM module",
+                        module_name
+                    )));
+                }
+            }
+        };
+        let instance_guard = wasm_guard.lock().await;
+        let result = tokio::task::block_in_place(|| {
+            (**instance_guard).invoke_rpc(method, params)
+        });
+        result
+    }
 }
 
 impl ModuleManager {
@@ -83,13 +185,70 @@ impl ModuleManager {
             ),
             modules: Arc::new(Mutex::new(HashMap::new())),
             ipc_server_handle: None,
+            #[cfg(unix)]
+            ipc_server: None,
             crash_rx: Some(crash_rx),
             crash_tx,
             modules_dir: modules_dir.as_ref().to_path_buf(),
+            module_config_overrides: std::sync::RwLock::new(HashMap::new()),
+            default_database_backend: std::sync::RwLock::new(None),
             event_manager: Arc::new(EventManager::new()),
             api_hub: None,
             module_registry: None,
+            #[cfg(feature = "wasm-modules")]
+            wasm_loader: None,
+            node_socket_path: None,
         }
+    }
+
+    /// Set the WASM module loader (injected by binary; e.g. from blvm-sdk).
+    #[cfg(feature = "wasm-modules")]
+    pub fn set_wasm_loader(&mut self, loader: Arc<dyn WasmModuleLoader>) {
+        self.wasm_loader = Some(loader);
+    }
+
+    /// Set node config overrides for modules ([modules.<name>] from config.toml).
+    /// Merged over module's config.toml when loading. Node values take precedence.
+    pub fn set_module_config_overrides(
+        &self,
+        overrides: HashMap<String, HashMap<String, String>>,
+    ) {
+        if let Ok(mut guard) = self.module_config_overrides.write() {
+            *guard = overrides;
+        }
+    }
+
+    /// Set default database backend for modules (inherited from node when not set per-module).
+    /// Values: "redb", "rocksdb", "sled", "tidesdb". Modules use same format as node by default.
+    pub fn set_default_database_backend(&self, backend: String) {
+        if let Ok(mut guard) = self.default_database_backend.write() {
+            *guard = Some(backend);
+        }
+    }
+
+    /// Merge base config with node overrides for a module.
+    fn merge_module_config(
+        &self,
+        module_name: &str,
+        base: HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut merged = base;
+        if let Ok(guard) = self.module_config_overrides.read() {
+            if let Some(overrides) = guard.get(module_name) {
+                for (k, v) in overrides {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        // Inherit node's database backend when module doesn't specify one
+        if !merged.contains_key("database_backend") {
+            if let Ok(guard) = self.default_database_backend.read() {
+                if let Some(ref backend) = *guard {
+                    merged.insert("database_backend".to_string(), backend.clone());
+                }
+            }
+        }
+        merged
     }
 
     /// Set module registry for fetching modules via P2P
@@ -109,6 +268,17 @@ impl ModuleManager {
         self.module_registry = Some(module_registry);
     }
 
+    /// Get modules directory path (for discovery)
+    pub fn modules_dir(&self) -> &Path {
+        &self.modules_dir
+    }
+
+    /// Get IPC server reference (for getmoduleclispecs; Unix only)
+    #[cfg(unix)]
+    pub fn ipc_server(&self) -> Option<Arc<tokio::sync::Mutex<ModuleIpcServer>>> {
+        self.ipc_server.clone()
+    }
+
     /// Start the module manager
     pub async fn start<
         P: AsRef<Path>,
@@ -126,24 +296,31 @@ impl ModuleManager {
         ))));
         self.api_hub = Some(Arc::clone(&api_hub));
 
-        // Start IPC server in background task (Unix only)
-        #[cfg(unix)]
-        {
-            let mut ipc_server = ModuleIpcServer::new(&socket_path)
-                .with_event_manager(Arc::clone(&self.event_manager))
-                .with_api_hub(Arc::clone(&api_hub));
-            let node_api_clone = Arc::clone(&node_api);
-            let server_handle = tokio::spawn(async move { ipc_server.start(node_api_clone).await });
-            self.ipc_server_handle = Some(server_handle);
+        // Start IPC server in background task (Unix: domain sockets, Windows: named pipes)
+        let mut ipc_server = ModuleIpcServer::new(&socket_path)
+            .with_event_manager(Arc::clone(&self.event_manager))
+            .with_api_hub(Arc::clone(&api_hub));
+        #[cfg(all(unix, feature = "wasm-modules"))]
+        if self.wasm_loader.is_some() {
+            let invoker = Arc::new(ManagerWasmInvoker {
+                modules: Arc::clone(&self.modules),
+            });
+            ipc_server = ipc_server.with_wasm_invoker(invoker);
         }
-        #[cfg(not(unix))]
-        {
-            warn!("IPC server not available on Windows - module communication disabled");
-        }
+        let ipc_server = Arc::new(tokio::sync::Mutex::new(ipc_server));
+        self.ipc_server = Some(Arc::clone(&ipc_server));
+        self.node_socket_path = Some(socket_path.as_ref().to_path_buf());
+        let node_api_clone = Arc::clone(&node_api);
+        let server_handle =
+            tokio::spawn(async move { ipc_server.lock().await.start(node_api_clone).await });
+        self.ipc_server_handle = Some(server_handle);
 
         // Start crash handler
         let modules = Arc::clone(&self.modules);
         let event_manager = Arc::clone(&self.event_manager);
+        let api_hub = self.api_hub.clone();
+        #[cfg(unix)]
+        let ipc_server = self.ipc_server.clone();
         let mut crash_rx = self.crash_rx.take().expect("Crash receiver already taken");
         let modules_dir = self.modules_dir.clone();
         tokio::spawn(async move {
@@ -178,9 +355,66 @@ impl ModuleManager {
                     }
                 }
 
-                // Publish ModuleUnloaded event (crashed modules are effectively unloaded)
+                // Clean up: loaded_modules, CLI spec, API hub (same as explicit unload)
+                event_manager.remove_loaded_module(&module_name).await;
+                #[cfg(unix)]
+                if let Some(ref ipc) = ipc_server {
+                    ipc.lock()
+                        .await
+                        .unregister_cli_spec_by_name(&module_name)
+                        .await;
+                }
+                if let Some(ref hub) = api_hub {
+                    let mut h = hub.lock().await;
+                    h.unregister_module(&module_name).await;
+                }
+
+                // Publish ModuleStateChanged and ModuleHealthChanged (Running -> Error)
                 use crate::module::ipc::protocol::EventPayload;
-                use crate::module::traits::EventType;
+                use crate::module::traits::{EventType, ModuleError};
+                let payload = EventPayload::ModuleStateChanged {
+                    module_name: module_name.clone(),
+                    old_state: "Running".to_string(),
+                    new_state: "Error".to_string(),
+                };
+                if let Err(e) = event_manager
+                    .publish_event(EventType::ModuleStateChanged, payload)
+                    .await
+                {
+                    warn!("Failed to publish ModuleStateChanged for crashed module: {}", e);
+                }
+                let payload = EventPayload::ModuleHealthChanged {
+                    module_name: module_name.clone(),
+                    old_health: "healthy".to_string(),
+                    new_health: "unhealthy".to_string(),
+                };
+                if let Err(e) = event_manager
+                    .publish_event(EventType::ModuleHealthChanged, payload)
+                    .await
+                {
+                    warn!("Failed to publish ModuleHealthChanged for crashed module: {}", e);
+                }
+
+                // Publish ModuleCrashed event (specific to abnormal exit)
+                let error_msg = match &error {
+                    ModuleError::ModuleCrashed(msg) => msg.clone(),
+                    _ => error.to_string(),
+                };
+                let payload = EventPayload::ModuleCrashed {
+                    module_name: module_name.clone(),
+                    error: error_msg,
+                };
+                if let Err(e) = event_manager
+                    .publish_event(EventType::ModuleCrashed, payload)
+                    .await
+                {
+                    warn!(
+                        "Failed to publish ModuleCrashed event for {}: {}",
+                        module_name, e
+                    );
+                }
+
+                // Publish ModuleUnloaded event (crashed modules are effectively unloaded)
                 let payload = EventPayload::ModuleUnloaded {
                     module_name: module_name.clone(),
                     version: String::new(), // Version unknown for crashed modules
@@ -204,20 +438,41 @@ impl ModuleManager {
                         dependents.len(),
                         module_name
                     );
-                    let mut modules = modules.lock().await;
-                    for dependent in dependents {
-                        if let Some(mut managed) = modules.remove(&dependent) {
-                            // Stop monitoring
-                            if let Some(handle) = managed.monitor_handle.take() {
-                                handle.abort();
-                            }
-                            // Update state
-                            managed.state =
-                                ModuleState::Error(format!("Dependency '{module_name}' crashed"));
-                            warn!(
-                                "Dependent module '{}' unloaded due to crashed dependency",
-                                dependent
-                            );
+                    let removed: Vec<String> = {
+                        let mut modules = modules.lock().await;
+                        dependents
+                            .into_iter()
+                            .filter_map(|dependent| {
+                                if let Some(mut managed) = modules.remove(&dependent) {
+                                    if let Some(handle) = managed.monitor_handle.take() {
+                                        handle.abort();
+                                    }
+                                    managed.state = ModuleState::Error(format!(
+                                        "Dependency '{module_name}' crashed"
+                                    ));
+                                    warn!(
+                                        "Dependent module '{}' unloaded due to crashed dependency",
+                                        dependent
+                                    );
+                                    Some(dependent)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    };
+                    for dependent in removed {
+                        event_manager.remove_loaded_module(&dependent).await;
+                        #[cfg(unix)]
+                        if let Some(ref ipc) = ipc_server {
+                            ipc.lock()
+                                .await
+                                .unregister_cli_spec_by_name(&dependent)
+                                .await;
+                        }
+                        if let Some(ref hub) = api_hub {
+                            let mut h = hub.lock().await;
+                            h.unregister_module(&dependent).await;
                         }
                     }
                 }
@@ -277,7 +532,11 @@ impl ModuleManager {
 
         // Create module context
         let module_id = format!("{module_name}_{}", uuid::Uuid::new_v4());
-        let socket_path = self.spawner.socket_dir.join(format!("{module_name}.sock"));
+        let socket_path = self
+            .node_socket_path
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| self.spawner.socket_dir.join(format!("{module_name}.sock")));
         let data_dir = self.spawner.data_dir.join(module_name);
 
         // Ensure module data directory exists
@@ -285,26 +544,99 @@ impl ModuleManager {
             ModuleError::InitializationError(format!("Failed to create module data directory: {e}"))
         })?;
 
+        let mut merged_config = self.merge_module_config(module_name, config);
+        merged_config.insert("version".to_string(), metadata.version.clone());
+        let config_for_wasm = merged_config.clone();
         let context = ModuleContext::new(
             module_id,
             socket_path.to_string_lossy().to_string(),
             data_dir.to_string_lossy().to_string(),
-            config,
+            merged_config,
         );
 
-        // Spawn module process
+        use std::sync::Arc;
+
+        let is_wasm = binary_path
+            .extension()
+            .map(|e| e == "wasm")
+            .unwrap_or(false);
+
+        // WASM path: load in-process via injected loader
+        if is_wasm {
+            #[cfg(feature = "wasm-modules")]
+            {
+                let loader = self
+                    .wasm_loader
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ModuleError::InitializationError(
+                            "WASM loader not configured. Pass WasmModuleLoader when creating the node.".to_string(),
+                        )
+                    })?;
+                let data_dir = data_dir.to_path_buf();
+                let instance = loader
+                    .load(binary_path, &data_dir, config_for_wasm)
+                    .map_err(|e| {
+                        ModuleError::InitializationError(format!(
+                            "Failed to load WASM module: {e}"
+                        ))
+                    })?;
+                let cli_spec = instance.cli_spec().unwrap_or_else(|| {
+                    crate::module::ipc::protocol::CliSpec {
+                        version: 1,
+                        name: module_name.to_string(),
+                        about: None,
+                        subcommands: vec![],
+                    }
+                });
+                let wasm_instance =
+                    Some(Arc::new(tokio::sync::Mutex::new(instance)));
+
+                if let Some(ref api_hub) = self.api_hub {
+                    let permissions = Self::parse_permissions_from_metadata(&metadata);
+                    let mut hub_guard = api_hub.lock().await;
+                    hub_guard.register_module_permissions(module_name.to_string(), permissions);
+                }
+
+                let module_version = metadata.version.clone();
+                let managed = ManagedModule {
+                    metadata,
+                    process: None,
+                    state: ModuleState::Running,
+                    monitor_handle: None,
+                    process_id: None,
+                    wasm_instance,
+                };
+                modules.insert(module_name.to_string(), managed);
+                drop(modules);
+                if let Some(ref ipc) = self.ipc_server {
+                    ipc.lock()
+                        .await
+                        .register_cli_spec(module_name.to_string(), cli_spec)
+                        .await;
+                }
+                let loaded_modules = self.event_manager.loaded_modules();
+                let mut loaded = loaded_modules.lock().await;
+                let timestamp = crate::utils::current_timestamp();
+                loaded.insert(module_name.to_string(), (module_version, timestamp));
+                info!("Module {} loaded successfully (WASM)", module_name);
+                return Ok(());
+            }
+            #[cfg(not(feature = "wasm-modules"))]
+            {
+                return Err(ModuleError::InitializationError(
+                    "WASM modules require --features wasm-modules".to_string(),
+                ));
+            }
+        }
+
+        // Native path: spawn subprocess
         let process = self
             .spawner
             .spawn(module_name, binary_path, context)
             .await?;
         let process_id = process.id();
-
-        // Share process between manager and monitor using Arc<Mutex<>>
-        // This allows both to access the process for different purposes
-        use std::sync::Arc;
         let shared_process = Arc::new(tokio::sync::Mutex::new(process));
-
-        // Create monitor with shared process
         let monitor = ModuleProcessMonitor::new(self.crash_tx.clone());
         let module_name_clone = module_name.to_string();
         let shared_process_for_monitor = Arc::clone(&shared_process);
@@ -317,15 +649,12 @@ impl ModuleManager {
             }
         });
 
-        // Register module permissions in API hub
         if let Some(ref api_hub) = self.api_hub {
             let permissions = Self::parse_permissions_from_metadata(&metadata);
             let mut hub_guard = api_hub.lock().await;
             hub_guard.register_module_permissions(module_name.to_string(), permissions);
         }
 
-        // Store module with shared process
-        // Clone version before moving metadata
         let module_version = metadata.version.clone();
         let managed = ManagedModule {
             metadata,
@@ -333,11 +662,30 @@ impl ModuleManager {
             state: ModuleState::Running,
             monitor_handle: Some(monitor_handle),
             process_id,
+            #[cfg(feature = "wasm-modules")]
+            wasm_instance: None,
         };
 
         modules.insert(module_name.to_string(), managed);
 
         info!("Module {} loaded successfully", module_name);
+
+        // Publish ModuleInstalled for registry/marketplace sync
+        {
+            use crate::module::ipc::protocol::EventPayload;
+            use crate::module::traits::EventType;
+            let payload = EventPayload::ModuleInstalled {
+                module_name: module_name.to_string(),
+                version: module_version.clone(),
+            };
+            if let Err(e) = self
+                .event_manager
+                .publish_event(EventType::ModuleInstalled, payload)
+                .await
+            {
+                warn!("Failed to publish ModuleInstalled: {}", e);
+            }
+        }
 
         // Record module as loaded (for sending to newly subscribing modules)
         // ModuleLoaded event will be published AFTER the module subscribes (in subscribe_module)
@@ -345,10 +693,7 @@ impl ModuleManager {
         {
             let loaded_modules = self.event_manager.loaded_modules();
             let mut loaded = loaded_modules.lock().await;
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let timestamp = crate::utils::current_timestamp();
             loaded.insert(module_name.to_string(), (module_version.clone(), timestamp));
         }
 
@@ -376,6 +721,43 @@ impl ModuleManager {
             .unwrap_or_else(|| module_name.to_string());
 
         if let Some(mut managed) = modules.remove(module_name) {
+            // Publish ModuleStateChanged and ModuleHealthChanged before teardown
+            let old_state = format!("{:?}", managed.state);
+            let old_health = match &managed.state {
+                ModuleState::Running | ModuleState::Initializing => "healthy",
+                ModuleState::Stopping => "degraded",
+                ModuleState::Stopped | ModuleState::Error(_) => "unhealthy",
+            };
+            drop(modules);
+            {
+                use crate::module::ipc::protocol::EventPayload;
+                use crate::module::traits::EventType;
+                let payload = EventPayload::ModuleStateChanged {
+                    module_name: module_name.to_string(),
+                    old_state: old_state.clone(),
+                    new_state: "Stopping".to_string(),
+                };
+                if let Err(e) = self
+                    .event_manager
+                    .publish_event(EventType::ModuleStateChanged, payload)
+                    .await
+                {
+                    warn!("Failed to publish ModuleStateChanged: {}", e);
+                }
+                let payload = EventPayload::ModuleHealthChanged {
+                    module_name: module_name.to_string(),
+                    old_health: old_health.to_string(),
+                    new_health: "degraded".to_string(),
+                };
+                if let Err(e) = self
+                    .event_manager
+                    .publish_event(EventType::ModuleHealthChanged, payload)
+                    .await
+                {
+                    warn!("Failed to publish ModuleHealthChanged: {}", e);
+                }
+            }
+
             // Stop monitoring
             if let Some(handle) = managed.monitor_handle.take() {
                 handle.abort();
@@ -400,24 +782,54 @@ impl ModuleManager {
 
             info!("Module {} unloaded", module_name);
 
+            // Unregister CLI spec (WASM modules register on load; native remove on disconnect, but we clean up here too)
+            #[cfg(unix)]
+            if let Some(ref ipc) = self.ipc_server {
+                ipc.lock()
+                    .await
+                    .unregister_cli_spec_by_name(module_name)
+                    .await;
+            }
+
+            // Remove from loaded_modules (event manager)
+            self.event_manager.remove_loaded_module(module_name).await;
+
+            // Unregister permissions and rate limiters (API hub)
+            if let Some(ref api_hub) = self.api_hub {
+                let mut hub = api_hub.lock().await;
+                hub.unregister_module(module_name).await;
+            }
+
             // Publish ModuleUnloaded event for dependent modules to react
-            use crate::module::ipc::protocol::EventPayload;
-            use crate::module::traits::EventType;
-            let payload = EventPayload::ModuleUnloaded {
-                module_name: module_name.to_string(),
-                version: String::new(), // Get version from metadata if available
-            };
-            if let Err(e) = self
-                .event_manager
-                .publish_event(EventType::ModuleUnloaded, payload)
-                .await
+            let version = managed.metadata.version.clone();
             {
-                warn!("Failed to publish ModuleUnloaded event: {}", e);
+                use crate::module::ipc::protocol::EventPayload;
+                use crate::module::traits::EventType;
+                let payload = EventPayload::ModuleUnloaded {
+                    module_name: module_name.to_string(),
+                    version: version.clone(),
+                };
+                if let Err(e) = self
+                    .event_manager
+                    .publish_event(EventType::ModuleUnloaded, payload)
+                    .await
+                {
+                    warn!("Failed to publish ModuleUnloaded event: {}", e);
+                }
+                let payload = EventPayload::ModuleRemoved {
+                    module_name: module_name.to_string(),
+                    version,
+                };
+                if let Err(e) = self
+                    .event_manager
+                    .publish_event(EventType::ModuleRemoved, payload)
+                    .await
+                {
+                    warn!("Failed to publish ModuleRemoved: {}", e);
+                }
             }
 
             // Automatically unload dependent modules (if they have hard dependencies)
-            // Note: We need to drop the lock first, then get dependents
-            drop(modules);
             for dependent in dependents {
                 // Check if it's a hard dependency (required) or soft (optional)
                 let is_required = {
@@ -506,20 +918,21 @@ impl ModuleManager {
         }
 
         // Small delay to ensure cleanup
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(MODULE_RELOAD_CLEANUP_DELAY).await;
 
         // Reload the module
         let reload_result = self
             .load_module(module_name, binary_path, metadata.clone(), config.clone())
             .await;
 
-        // Publish ModuleReloaded event
+        // Publish ModuleReloaded and ModuleUpdated events
         use crate::module::ipc::protocol::EventPayload;
         use crate::module::traits::EventType;
+        let new_version = metadata.version.clone();
         let payload = EventPayload::ModuleReloaded {
             module_name: module_name.to_string(),
             old_version: old_version.clone(),
-            new_version: metadata.version.clone(),
+            new_version: new_version.clone(),
         };
         if let Err(e) = self
             .event_manager
@@ -527,6 +940,20 @@ impl ModuleManager {
             .await
         {
             warn!("Failed to publish ModuleReloaded event: {}", e);
+        }
+        if reload_result.is_ok() {
+            let payload = EventPayload::ModuleUpdated {
+                module_name: module_name.to_string(),
+                old_version: old_version.clone(),
+                new_version: new_version.clone(),
+            };
+            if let Err(e) = self
+                .event_manager
+                .publish_event(EventType::ModuleUpdated, payload)
+                .await
+            {
+                warn!("Failed to publish ModuleUpdated event: {}", e);
+            }
         }
 
         // If reload succeeded, reload dependent modules using discovery
@@ -894,13 +1321,34 @@ impl ModuleManager {
             Err(e) => return Err(e),
         };
 
-        // Load module configurations
+        // Publish ModuleDiscovered for each module (for registry/marketplace sync)
+        {
+            use crate::module::ipc::protocol::EventPayload;
+            use crate::module::traits::EventType;
+            for module in &discovered_modules {
+                let payload = EventPayload::ModuleDiscovered {
+                module_name: module.manifest.name.clone(),
+                version: module.manifest.version.clone(),
+                source: "filesystem".to_string(),
+            };
+                if let Err(e) = self
+                    .event_manager
+                    .publish_event(EventType::ModuleDiscovered, payload)
+                    .await
+                {
+                    warn!("Failed to publish ModuleDiscovered for {}: {}", module.manifest.name, e);
+                }
+            }
+        }
+
+        // Load module configurations (merge module config.toml with node [modules.<name>] overrides)
         let mut module_configs = HashMap::new();
         for module in &discovered_modules {
             let config_path = module.directory.join("config.toml");
-            let config = ModuleLoader::load_module_config(&module.manifest.name, config_path)
+            let base = ModuleLoader::load_module_config(&module.manifest.name, config_path)
                 .unwrap_or_default();
-            module_configs.insert(module.manifest.name.clone(), config);
+            let merged = self.merge_module_config(&module.manifest.name, base);
+            module_configs.insert(module.manifest.name.clone(), merged);
         }
 
         // Load modules in dependency order
@@ -922,7 +1370,7 @@ impl ModuleManager {
         module_name: &str,
     ) -> Result<(), ModuleError> {
         let registry = self.module_registry.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Module registry not available".to_string())
+            ModuleError::OperationError(crate::module::traits::module_error_msg::MODULE_REGISTRY_NOT_AVAILABLE.to_string())
         })?;
 
         info!("Fetching module {} from registry", module_name);
@@ -944,26 +1392,23 @@ impl ModuleManager {
 
         // Create module directory
         let module_dir = self.modules_dir.join(&entry.name);
-        fs::create_dir_all(&module_dir).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to create module directory: {e}"))
-        })?;
+        fs::create_dir_all(&module_dir)
+            .map_err(|e| ModuleError::op_err("Failed to create module directory", e))?;
 
         // Write manifest
         let manifest_path = module_dir.join("module.toml");
-        let manifest_toml = toml::to_string_pretty(&entry.manifest).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to serialize manifest: {e}"))
-        })?;
+        let manifest_toml = toml::to_string_pretty(&entry.manifest)
+            .map_err(|e| ModuleError::op_err("Failed to serialize manifest", e))?;
         fs::write(&manifest_path, manifest_toml)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to write manifest: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to write manifest", e))?;
 
         // Write binary
         let binary_path = module_dir.join(&entry.name);
         if let Some(binary_data) = entry.binary {
-            let mut file = fs::File::create(&binary_path).map_err(|e| {
-                ModuleError::OperationError(format!("Failed to create binary file: {e}"))
-            })?;
+            let mut file = fs::File::create(&binary_path)
+                .map_err(|e| ModuleError::op_err("Failed to create binary file", e))?;
             file.write_all(&binary_data)
-                .map_err(|e| ModuleError::OperationError(format!("Failed to write binary: {e}")))?;
+                .map_err(|e| ModuleError::op_err("Failed to write binary", e))?;
         } else {
             // Binary not included, fetch separately if needed
             warn!(
@@ -977,14 +1422,11 @@ impl ModuleManager {
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&binary_path)
-                .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to get file metadata: {e}"))
-                })?
+                .map_err(|e| ModuleError::op_err("Failed to get file metadata", e))?
                 .permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&binary_path, perms).map_err(|e| {
-                ModuleError::OperationError(format!("Failed to set executable permissions: {e}"))
-            })?;
+            fs::set_permissions(&binary_path, perms)
+                .map_err(|e| ModuleError::op_err("Failed to set executable permissions", e))?;
         }
 
         // Create DiscoveredModule
@@ -1114,6 +1556,16 @@ impl ModuleManager {
         false
     }
 
+    #[cfg(test)]
+    /// Expose merge_module_config for testing database_backend inheritance
+    pub(crate) fn test_merge_module_config(
+        &self,
+        module_name: &str,
+        base: HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        self.merge_module_config(module_name, base)
+    }
+
     /// Compare two version strings
     /// Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
     fn compare_versions(v1: &str, v2: &str) -> i32 {
@@ -1134,5 +1586,78 @@ impl ModuleManager {
         }
 
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::traits::ModuleMetadata;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_database_backend_inheritance() {
+        let temp = std::env::temp_dir().join("blvm_module_test");
+        std::fs::create_dir_all(&temp).unwrap();
+        let manager = ModuleManager::new(&temp, &temp, &temp);
+        manager.set_default_database_backend("rocksdb".to_string());
+
+        let merged = manager.test_merge_module_config("my-module", HashMap::new());
+        assert_eq!(
+            merged.get("database_backend"),
+            Some(&"rocksdb".to_string()),
+            "module should inherit node's database_backend when not set"
+        );
+    }
+
+    #[test]
+    fn test_database_backend_no_override_when_module_sets() {
+        let temp = std::env::temp_dir().join("blvm_module_test2");
+        std::fs::create_dir_all(&temp).unwrap();
+        let manager = ModuleManager::new(&temp, &temp, &temp);
+        manager.set_default_database_backend("rocksdb".to_string());
+
+        let mut base = HashMap::new();
+        base.insert("database_backend".to_string(), "redb".to_string());
+        let merged = manager.test_merge_module_config("my-module", base);
+        assert_eq!(
+            merged.get("database_backend"),
+            Some(&"redb".to_string()),
+            "module's database_backend should not be overridden by node default"
+        );
+    }
+
+    /// When wasm-modules feature is disabled, loading a .wasm file must return a clear error.
+    #[cfg(not(feature = "wasm-modules"))]
+    #[tokio::test]
+    async fn test_wasm_load_requires_feature_when_disabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let temp_path = temp.path();
+        let wasm_path = temp_path.join("fake.wasm");
+        std::fs::write(&wasm_path, b"").unwrap();
+
+        let mut manager = ModuleManager::new(temp_path, temp_path, temp_path);
+        let metadata = ModuleMetadata {
+            name: "fake".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            author: String::new(),
+            capabilities: vec![],
+            dependencies: HashMap::new(),
+            optional_dependencies: HashMap::new(),
+            entry_point: "fake".to_string(),
+        };
+
+        let err = manager
+            .load_module("fake", &wasm_path, metadata, HashMap::new())
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wasm-modules"),
+            "expected error to mention wasm-modules, got: {}",
+            msg
+        );
     }
 }

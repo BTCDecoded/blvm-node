@@ -14,6 +14,8 @@ pub mod miner;
 #[cfg(feature = "production")]
 pub mod parallel_ibd;
 pub mod performance;
+pub mod run_loop;
+pub mod subsystems;
 pub mod sync;
 
 use anyhow::Result;
@@ -22,7 +24,7 @@ use secp256k1;
 use std::net::SocketAddr;
 use tracing::{debug, error, info, warn};
 
-use crate::config::NodeConfig;
+use crate::config::{NodeConfig, RpcAuthConfig};
 use crate::module::api::events::EventManager;
 use crate::module::ModuleManager;
 use crate::network::NetworkManager;
@@ -31,6 +33,7 @@ use crate::node::metrics::MetricsCollector;
 use crate::node::performance::PerformanceProfiler;
 use crate::rpc::RpcManager;
 use crate::storage::Storage;
+use crate::utils::{log_error_async, HANDSHAKE_POLL_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP};
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,28 +43,16 @@ pub struct Node {
     protocol: Arc<BitcoinProtocolEngine>,
     storage: Arc<Storage>,
     network: Arc<NetworkManager>,
-    /// Module registry (shared between network and module manager)
-    module_registry: Option<Arc<crate::module::registry::client::ModuleRegistry>>,
-    /// Payment processor for BIP70 payments (HTTP and P2P)
-    payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
-    /// Payment state machine for unified payment coordination
-    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
-    /// Payment reorg handler (subscribes to BlockDisconnected, downgrades Settled payments)
-    #[cfg(feature = "ctv")]
-    #[allow(dead_code)]
-    payment_reorg_handler: Option<crate::payment::PaymentReorgHandler>,
+    /// Module subsystem: registry, manager, event publisher
+    module_subsystem: Option<subsystems::ModuleSubsystem>,
+    /// Payment subsystem: processor, state machine, reorg handler
+    payment_subsystem: Option<subsystems::PaymentSubsystem>,
     rpc: RpcManager,
     #[allow(dead_code)]
     sync_coordinator: sync::SyncCoordinator,
     mempool_manager: Arc<mempool::MempoolManager>,
     #[allow(dead_code)]
     mining_coordinator: miner::MiningCoordinator,
-    /// Module manager for process-isolated modules
-    #[allow(dead_code)]
-    module_manager: Option<ModuleManager>,
-    /// Event publisher for module notifications
-    #[allow(dead_code)]
-    event_publisher: Option<Arc<EventPublisher>>,
     /// Metrics collector for monitoring
     metrics: Arc<MetricsCollector>,
     /// Performance profiler for critical path timing
@@ -76,11 +67,19 @@ pub struct Node {
     data_dir: PathBuf,
     /// Disk check counter (for periodic monitoring)
     disk_check_counter: std::sync::atomic::AtomicU64,
+    /// WASM loader (injected by binary; e.g. from blvm-sdk)
+    #[cfg(feature = "wasm-modules")]
+    wasm_loader: Option<std::sync::Arc<dyn crate::module::wasm::WasmModuleLoader>>,
     // Governance is handled via the module system (blvm-governance module)
     // The module subscribes to governance events and handles webhook delivery
 }
 
 impl Node {
+    /// Return a config subfield if config is present; avoids repeating `config.as_ref().and_then(|c| c.field.as_ref())`.
+    fn config_sub<T>(&self, f: impl FnOnce(&NodeConfig) -> Option<&T>) -> Option<&T> {
+        self.config.as_ref().and_then(f)
+    }
+
     /// Create a new node
     pub fn new(
         data_dir: &str,
@@ -163,19 +162,16 @@ impl Node {
             sync_coordinator,
             mempool_manager: mempool_manager_arc,
             mining_coordinator,
-            module_manager: None,
-            event_publisher: None,
+            module_subsystem: None,
+            payment_subsystem: None,
             metrics,
             profiler,
             protocol_version,
             network_addr,
             config: None,
             disk_check_counter: std::sync::atomic::AtomicU64::new(0),
-            module_registry: None,
-            payment_processor: None,
-            payment_state_machine: None,
-            #[cfg(feature = "ctv")]
-            payment_reorg_handler: None,
+            #[cfg(feature = "wasm-modules")]
+            wasm_loader: None,
             // Governance handled via module system
         })
     }
@@ -183,7 +179,7 @@ impl Node {
     /// Set node configuration
     pub fn with_config(mut self, config: NodeConfig) -> Result<Self> {
         // Initialize Rayon pool for script verification (uses BLVM_SCRIPT_THREADS)
-        #[cfg(all(feature = "production", feature = "rayon"))]
+        #[cfg(feature = "production")]
         blvm_consensus::config::init_rayon_for_script_verification();
 
         // Auto-detect governance server if configured (best-effort, non-blocking)
@@ -217,7 +213,7 @@ impl Node {
         }
 
         // Apply network configuration if available
-        let max_peers = config.max_peers.unwrap_or(100);
+        let max_peers = config.max_outbound_peers.unwrap_or(100);
         let transport_preference = config.get_transport_preference();
 
         // Recreate network manager with config
@@ -244,6 +240,15 @@ impl Node {
         self.network = network;
         self.config = Some(config.clone());
 
+        // Apply RPC config (max request size, request timeouts, connection limits)
+        self.rpc = self
+            .rpc
+            .with_max_request_size(config.max_request_size_bytes())
+            .with_max_connections_per_ip(config.max_connections_per_ip_per_minute())
+            .with_batch_rate_multiplier_cap(config.rpc_batch_rate_multiplier_cap())
+            .with_connection_rate_limit_window(config.rpc_connection_rate_limit_window_seconds())
+            .with_request_timeouts(config.request_timeouts.clone());
+
         // Apply RBF and mempool policy configurations to mempool manager
         // Uses interior mutability so we can set configs even when mempool is in an Arc
         if let Some(ref rbf_config) = config.rbf {
@@ -262,18 +267,35 @@ impl Node {
 
         // Wire block validation (assume-valid) to consensus config.
         // Must call init_consensus_config before any get_consensus_config() (e.g. block validation).
+        // Precedence: ENV (BLVM_ASSUME_VALID_HEIGHT) > config > defaults.
         #[cfg(feature = "production")]
         if let Some(ref bv) = config.block_validation {
             let mut consensus_config = blvm_consensus::config::ConsensusConfig::from_env();
-            consensus_config.block_validation.assume_valid_height = bv.assume_valid_height;
+            // Only apply config when ENV not set (ENV > config)
+            if std::env::var("BLVM_ASSUME_VALID_HEIGHT").is_err() {
+                consensus_config.block_validation.assume_valid_height = bv.assume_valid_height;
+                consensus_config.block_validation.assume_valid_hash = bv.assume_valid_hash;
+            }
+            let height = consensus_config.block_validation.assume_valid_height;
             blvm_consensus::config::init_consensus_config(consensus_config);
-            if bv.assume_valid_height > 0 {
-                info!("Assume-valid height set to {} (blocks before this skip signature verification)", bv.assume_valid_height);
+            if height > 0 {
+                info!("Assume-valid height set to {} (blocks before this skip signature verification)", height);
             }
         }
 
         // Governance handled via module system - no direct webhook client needed
         Ok(self)
+    }
+
+    /// Set WASM module loader (injected by binary; e.g. from blvm-sdk).
+    /// Call before with_modules_from_config when WASM support is desired.
+    #[cfg(feature = "wasm-modules")]
+    pub fn with_wasm_loader(
+        mut self,
+        loader: std::sync::Arc<dyn crate::module::wasm::WasmModuleLoader>,
+    ) -> Self {
+        self.wasm_loader = Some(loader);
+        self
     }
 
     /// Enable module system from configuration
@@ -285,17 +307,20 @@ impl Node {
             }
 
             // Get module resource limits config
-            let module_resource_limits = self
-                .config
-                .as_ref()
-                .and_then(|c| c.module_resource_limits.as_ref());
-            let module_manager = ModuleManager::with_config(
+            let module_resource_limits = self.config_sub(|c| c.module_resource_limits.as_ref());
+            let mut module_manager = ModuleManager::with_config(
                 &module_config.modules_dir,
                 &module_config.data_dir,
                 &module_config.socket_dir,
                 module_resource_limits,
             );
-            self.module_manager = Some(module_manager);
+            #[cfg(feature = "wasm-modules")]
+            if let Some(ref loader) = self.wasm_loader {
+                module_manager.set_wasm_loader(std::sync::Arc::clone(loader));
+            }
+            self.module_subsystem
+                .get_or_insert_with(Default::default)
+                .module_manager = Some(Arc::new(tokio::sync::Mutex::new(module_manager)));
             info!(
                 "Module system enabled: modules_dir={}, data_dir={}, socket_dir={}",
                 module_config.modules_dir, module_config.data_dir, module_config.socket_dir
@@ -314,12 +339,18 @@ impl Node {
         let data_dir = PathBuf::from(env_or_default("DATA_DIR", "data"));
         let modules_data_dir = data_dir.join("modules");
 
-        let module_manager = ModuleManager::new(
+        let mut module_manager = ModuleManager::new(
             modules_dir.as_ref(),
             modules_data_dir.as_ref(),
             socket_dir.as_ref(),
         );
-        self.module_manager = Some(module_manager);
+        #[cfg(feature = "wasm-modules")]
+        if let Some(ref loader) = self.wasm_loader {
+            module_manager.set_wasm_loader(std::sync::Arc::clone(loader));
+        }
+        self.module_subsystem
+            .get_or_insert_with(Default::default)
+            .module_manager = Some(Arc::new(tokio::sync::Mutex::new(module_manager)));
         Ok(self)
     }
 
@@ -364,19 +395,43 @@ impl Node {
 
         // Create early event publisher for RPC (BlockchainRpc needs it for invalidateblock → BlockDisconnected)
         // Must be done before rpc.start() so BlockchainRpc gets event_publisher
-        if let Some(ref module_manager) = self.module_manager {
-            let event_manager = Arc::clone(module_manager.event_manager());
+        if let Some(ref module_manager) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.module_manager.as_ref())
+        {
+            let event_manager = Arc::clone(module_manager.lock().await.event_manager());
             let early_publisher = Arc::new(EventPublisher::new(event_manager));
             self.rpc.set_event_publisher(Some(early_publisher));
-            info!("[START_COMPONENTS] Event publisher set on RPC for reorg notifications");
+            self.rpc.set_module_manager(Arc::clone(module_manager));
+            info!("[START_COMPONENTS] Event publisher and module manager set on RPC");
+        }
+
+        // Apply RPC auth config before starting RPC server
+        if let Some(ref config) = self.config {
+            if let Some(ref rpc_auth) = config.rpc_auth {
+                self.rpc.with_auth_config(rpc_auth.clone()).await;
+                info!("[START_COMPONENTS] RPC auth config applied (tokens/certs from rpc_auth)");
+            } else if config.rpc_rate_limit_when_auth_disabled()
+            {
+                let burst = config.rpc_ip_rate_limit_burst();
+                let rate = config.rpc_ip_rate_limit_rate();
+                self.rpc
+                    .with_auth_config(RpcAuthConfig::rate_limit_only(burst, rate))
+                    .await;
+                info!(
+                    "[START_COMPONENTS] RPC rate-limit-only mode applied (burst={}, rate={})",
+                    burst, rate
+                );
+            }
         }
 
         // Start RPC server
         info!("[START_COMPONENTS] Starting RPC server...");
-        if let Err(e) = self.rpc.start().await {
-            warn!("[START_COMPONENTS] Failed to start RPC server: {}", e);
-            // Continue anyway - RPC might be optional
-        } else {
+        if log_error_async(|| self.rpc.start(), "[START_COMPONENTS] Failed to start RPC server")
+            .await
+            .is_some()
+        {
             info!(
                 "[START_COMPONENTS] RPC server started on {}",
                 self.rpc.rpc_addr()
@@ -400,6 +455,30 @@ impl Node {
             info!("[START_COMPONENTS] network.start() completed successfully");
         }
 
+        // Start Stratum V2 listener on dedicated port when configured
+        #[cfg(feature = "stratum-v2")]
+        if let Some(ref stratum_config) = self.config_sub(|c| c.stratum_v2.as_ref())
+        {
+            if stratum_config.enabled {
+                if let Some(addr) = stratum_config.listen_addr {
+                    if let Err(e) =
+                        crate::network::stratum_v2_listener::start_stratum_v2_listener(
+                            &self.network,
+                            addr,
+                        )
+                        .await
+                    {
+                        warn!(
+                            "[START_COMPONENTS] Failed to start Stratum V2 listener on {}: {}",
+                            addr, e
+                        );
+                    } else {
+                        info!("[START_COMPONENTS] Stratum V2 listener started on {}", addr);
+                    }
+                }
+            }
+        }
+
         // Initialize peer connections automatically
         info!("[START_COMPONENTS] Initializing peer connections...");
         self.initialize_peer_connections().await?;
@@ -408,7 +487,11 @@ impl Node {
         // Wait for peer handshakes to complete (Version/VerAck exchange)
         // Process network messages during this time to handle Version/VerAck exchange
         info!("[START_COMPONENTS] Waiting for peer handshakes to complete...");
-        let handshake_timeout = tokio::time::Duration::from_secs(10);
+        let handshake_secs = self
+            .config_sub(|c| c.request_timeouts.as_ref())
+            .map(|t| t.handshake_timeout_secs)
+            .unwrap_or(10);
+        let handshake_timeout = tokio::time::Duration::from_secs(handshake_secs);
         let handshake_start = std::time::Instant::now();
         let mut total_processed = 0usize;
         while handshake_start.elapsed() < handshake_timeout {
@@ -424,7 +507,7 @@ impl Node {
                     warn!("Error processing network messages during handshake: {}", e);
                 }
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(HANDSHAKE_POLL_SLEEP).await;
         }
         info!(
             "[START_COMPONENTS] Handshake period complete, processed {} total messages",
@@ -440,7 +523,7 @@ impl Node {
                     tracing::warn!("Error in background message processing: {}", e);
                 }
                 // Small sleep to prevent busy-looping if no messages
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                tokio::time::sleep(MESSAGE_PROCESSOR_POLL_SLEEP).await;
             }
         });
         info!("[START_COMPONENTS] Background message processor spawned");
@@ -466,9 +549,7 @@ impl Node {
         let mut initial_utxo_set = blvm_protocol::UtxoSet::default();
         if current_height == 0 {
             if let Some(block_hash) = self
-                .config
-                .as_ref()
-                .and_then(|c| c.assumeutxo_blockhash.as_ref())
+                .config_sub(|c| c.assumeutxo_blockhash.as_ref())
             {
                 use crate::storage::assumeutxo::{
                     height_for_blockhash, write_base_blockhash_marker, AssumeUtxoManager,
@@ -565,10 +646,15 @@ impl Node {
                 peer_addresses
             );
 
-            // Allow 1 peer when BLVM_IBD_PEERS is set (e.g. LAN-only IBD)
-            let min_peers = if std::env::var("BLVM_IBD_PEERS")
-                .map(|s| !s.trim().is_empty())
+            // Allow 1 peer when preferred_peers is set (e.g. LAN-only IBD)
+            let ibd_config_owned = self.config_sub(|c| c.ibd.as_ref()).cloned();
+            let min_peers = if ibd_config_owned
+                .as_ref()
+                .map(|c| !c.preferred_peers.is_empty())
                 .unwrap_or(false)
+                || std::env::var("BLVM_IBD_PEERS")
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
             {
                 1
             } else {
@@ -603,6 +689,8 @@ impl Node {
                         &mut utxo_set,
                         Some(Arc::clone(&self.network)),
                         peer_addresses,
+                        ibd_config_owned.as_ref(),
+                        self.rpc.event_publisher(),
                     )
                     .await
                 {
@@ -708,44 +796,67 @@ impl Node {
             }
         }
 
-        // Start module manager if enabled
-        if let Some(ref mut module_manager) = self.module_manager {
-            use crate::utils::env_or_default;
+        // Initialize module registry before borrowing module_manager (avoids overlapping mutable borrows)
+        use crate::utils::env_or_default;
+        let registry_cache_dir = self.data_dir.join("modules").join("registry_cache");
+        let registry_cas_dir = self.data_dir.join("modules").join("registry_cas");
+        let registry_mirrors = Vec::new();
+        let module_registry_arc = if let Ok(mut module_registry) =
+            crate::module::registry::client::ModuleRegistry::new(
+                &registry_cache_dir,
+                &registry_cas_dir,
+                registry_mirrors.clone(),
+            ) {
+            module_registry.set_network_manager(Arc::clone(&self.network));
+            let arc = Arc::new(module_registry);
+            self.module_subsystem
+                .get_or_insert_with(Default::default)
+                .module_registry = Some(Arc::clone(&arc));
+            self.network
+                .set_module_registry(Arc::clone(&arc))
+                .await;
+            Some(arc)
+        } else {
+            None
+        };
 
+        // Start module manager if enabled
+        if let Some(ref module_manager) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.module_manager.as_ref())
+        {
             // Reuse the existing storage instance (Redb only allows one connection)
             let storage_arc = Arc::clone(&self.storage);
 
             // Get event manager from module manager
-            let event_manager = module_manager.event_manager();
+            let event_manager = Arc::clone(module_manager.lock().await.event_manager());
 
             // Create NodeApiImpl with all dependencies
             let mut node_api_impl = crate::module::api::node_api::NodeApiImpl::with_dependencies(
                 Arc::clone(&storage_arc),
-                Some(Arc::clone(event_manager)),
+                Some(Arc::clone(&event_manager)),
                 None, // module_id will be set per-module
                 Some(Arc::clone(&self.mempool_manager)),
                 Some(Arc::clone(&self.network)), // Now we can set it directly
             );
 
-            // Set node storage for module storage API (needed for opening storage trees)
-            node_api_impl.set_node_storage(Arc::clone(&storage_arc));
-
             // Set sync coordinator for sync status checking
             let sync_coord_arc = Arc::new(tokio::sync::Mutex::new(self.sync_coordinator.clone()));
             node_api_impl.set_sync_coordinator(sync_coord_arc);
 
-            // Set module manager for module discovery
-            // Note: We can't clone ModuleManager, so we'll set it later after it's been moved into an Arc
-            // For now, we skip this - the module manager can be accessed via other means if needed
+            // Set module manager for module discovery and RPC
+            node_api_impl.set_module_manager(Arc::clone(module_manager));
 
             // Set up module API registry and router for module-to-module communication
             let module_api_registry =
                 Arc::new(crate::module::inter_module::registry::ModuleApiRegistry::new());
-            // Note: ModuleManager doesn't implement Clone, so we can't pass it to the router here
-            // The router can access the module manager through other means if needed
-            let module_router = Arc::new(crate::module::inter_module::router::ModuleRouter::new(
-                Arc::clone(&module_api_registry),
-            ));
+            let module_router = Arc::new(
+                crate::module::inter_module::router::ModuleRouter::new(Arc::clone(
+                    &module_api_registry,
+                ))
+                .with_module_manager(Arc::clone(module_manager)),
+            );
             node_api_impl.set_module_api_registry(
                 Arc::clone(&module_api_registry),
                 Arc::clone(&module_router),
@@ -755,42 +866,21 @@ impl Node {
             // We'll update it via Arc::get_mut if possible, or store it separately
 
             let mut node_api = Arc::new(node_api_impl);
-            let socket_path = env_or_default("MODULE_SOCKET_DIR", "data/modules/socket");
+            let socket_path = self
+                .config_sub(|c| c.modules.as_ref())
+                .map(|mc| PathBuf::from(&mc.socket_dir).join("node.sock"))
+                .unwrap_or_else(|| PathBuf::from(env_or_default("MODULE_SOCKET_DIR", "data/modules/socket")));
 
-            // Initialize module registry if network is available
-            let registry_cache_dir = self.data_dir.join("modules").join("registry_cache");
-            let registry_cas_dir = self.data_dir.join("modules").join("registry_cas");
-            let registry_mirrors = Vec::new(); // Empty by default - can be configured later
-
-            if let Ok(mut module_registry) = crate::module::registry::client::ModuleRegistry::new(
-                &registry_cache_dir,
-                &registry_cas_dir,
-                registry_mirrors,
-            ) {
-                // Set network manager on registry (now simple since network is already Arc)
-                module_registry.set_network_manager(Arc::clone(&self.network));
-
-                let module_registry_arc = Arc::new(module_registry);
-
-                // Store registry in node for later use
-                self.module_registry = Some(Arc::clone(&module_registry_arc));
-
-                // Connect network manager to registry (using mutable reference)
-                // This allows the network to serve module requests
-                self.network
-                    .set_module_registry(Arc::clone(&module_registry_arc))
-                    .await;
-
-                // Connect module manager to registry (using mutable reference)
-                module_manager.set_module_registry(Arc::clone(&module_registry_arc));
-
+            if let Some(ref module_registry_arc) = module_registry_arc {
+                module_manager
+                    .lock()
+                    .await
+                    .set_module_registry(Arc::clone(module_registry_arc));
                 info!("Module registry initialized and connected to network and module manager");
 
                 // Initialize payment processor if payment is enabled
                 let payment_config = self
-                    .config
-                    .as_ref()
-                    .and_then(|c| c.payment.as_ref())
+                    .config_sub(|c| c.payment.as_ref())
                     .cloned()
                     .unwrap_or_default();
 
@@ -809,7 +899,7 @@ impl Node {
 
                             // Add modules directory for storing encrypted/decrypted modules
                             if let Some(module_config) =
-                                self.config.as_ref().and_then(|c| c.modules.as_ref())
+                                self.config_sub(|c| c.modules.as_ref())
                             {
                                 let modules_dir = PathBuf::from(&module_config.modules_dir);
                                 processor = processor.with_modules_dir(modules_dir);
@@ -818,7 +908,9 @@ impl Node {
                             let processor_arc = Arc::new(processor);
 
                             // Store processor in node
-                            self.payment_processor = Some(Arc::clone(&processor_arc));
+                            self.payment_subsystem
+                                .get_or_insert_with(Default::default)
+                                .payment_processor = Some(Arc::clone(&processor_arc));
 
                             // Create payment state machine for unified payment coordination
                             #[cfg(feature = "ctv")]
@@ -859,7 +951,9 @@ impl Node {
                                 }
                             }
 
-                            self.payment_state_machine = Some(Arc::clone(&state_machine_arc));
+                            self.payment_subsystem
+                                .get_or_insert_with(Default::default)
+                                .payment_state_machine = Some(Arc::clone(&state_machine_arc));
 
                             // Connect to network manager (for P2P payments)
                             self.network
@@ -912,7 +1006,7 @@ impl Node {
                                 .set_module_encryption(Arc::clone(&module_encryption))
                                 .await;
                             if let Some(module_config) =
-                                self.config.as_ref().and_then(|c| c.modules.as_ref())
+                                self.config_sub(|c| c.modules.as_ref())
                             {
                                 self.network
                                     .set_modules_dir(PathBuf::from(&module_config.modules_dir))
@@ -963,7 +1057,9 @@ impl Node {
                                     .with_storage(Arc::clone(&self.storage))
                                     .with_tx_cache(Arc::clone(&tx_cache)),
                                 );
-                                self.payment_reorg_handler =
+                                self.payment_subsystem
+                                    .get_or_insert_with(Default::default)
+                                    .payment_reorg_handler =
                                     Some(crate::payment::PaymentReorgHandler::new(
                                         Arc::clone(&state_machine_arc),
                                         Some(Arc::clone(&self.storage)),
@@ -984,33 +1080,93 @@ impl Node {
                         }
                     }
                 }
-            } else {
+            }
+            if module_registry_arc.is_none() {
                 warn!("Failed to initialize module registry - modules will only load from local directory");
             }
 
             module_manager
+                .lock()
+                .await
                 .start(&socket_path, node_api)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to start module manager: {}", e))?;
 
             info!("Module manager started");
 
+            // Set node config overrides ([modules.<name>] from config.toml) before loading
+            if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
+                module_manager
+                    .lock()
+                    .await
+                    .set_module_config_overrides(module_config.module_configs.clone());
+            }
+
+            // Set default database backend for modules (same format as node)
+            let backend = self
+                .config_sub(|c| c.storage.as_ref())
+                .and_then(|sc| {
+                    crate::storage::database::backend_from_config(sc.database_backend).ok()
+                })
+                .unwrap_or_else(crate::storage::database::default_backend);
+            let backend_str = match backend {
+                crate::storage::database::DatabaseBackend::Redb => "redb",
+                crate::storage::database::DatabaseBackend::RocksDB => "rocksdb",
+                crate::storage::database::DatabaseBackend::Sled => "sled",
+                crate::storage::database::DatabaseBackend::TidesDB => "tidesdb",
+            };
+            module_manager
+                .lock()
+                .await
+                .set_default_database_backend(backend_str.to_string());
+
             // Auto-discover and load modules
-            if let Err(e) = module_manager.auto_load_modules().await {
+            if let Err(e) = module_manager.lock().await.auto_load_modules().await {
                 warn!("Failed to auto-load modules: {}", e);
             }
 
+            // Start module file watcher for hot-reload (when feature enabled and watch_enabled)
+            #[cfg(feature = "module-watcher")]
+            {
+                let watch_enabled = self
+                    .config_sub(|c| c.modules.as_ref())
+                    .map_or(true, |m| m.watch_enabled);
+                if watch_enabled {
+                    let modules_dir = module_manager.lock().await.modules_dir().to_path_buf();
+                    let watcher_config = self
+                        .config_sub(|c| c.modules.as_ref())
+                        .map(|m| crate::module::watcher::WatcherConfig {
+                            auto_load: m.watch_auto_load,
+                            auto_unload: m.watch_auto_unload,
+                        })
+                        .unwrap_or_default();
+                    let watcher = Arc::new(crate::module::watcher::ModuleWatcher::with_config(
+                        modules_dir,
+                        Arc::clone(module_manager),
+                        watcher_config,
+                    ));
+                    if let Err(e) = watcher.clone().start() {
+                        warn!("Module watcher failed to start: {}", e);
+                    } else {
+                        info!("Module file watcher started (hot-reload on change)");
+                    }
+                }
+            }
+
             // Create event publisher for this node
-            let event_manager = module_manager.event_manager();
+            // Clone event_manager Arc while lock is held so we can use it after
+            let event_manager = Arc::clone(module_manager.lock().await.event_manager());
 
             // Initialize ZMQ publisher if configured
             // Note: ZMQ is enabled by default, but only initializes if endpoints are configured.
             // To disable: either don't configure endpoints, or build without --features zmq
-            self.event_publisher = {
+            self.module_subsystem
+                .get_or_insert_with(Default::default)
+                .event_publisher = {
                 #[cfg(feature = "zmq")]
                 {
                     let zmq_publisher = if let Some(zmq_config) =
-                        self.config.as_ref().and_then(|c| c.zmq.as_ref())
+                        self.config_sub(|c| c.zmq.as_ref())
                     {
                         if zmq_config.is_enabled() {
                             match crate::zmq::ZmqPublisher::new(zmq_config) {
@@ -1034,19 +1190,23 @@ impl Node {
                         None
                     };
                     Some(Arc::new(EventPublisher::with_zmq(
-                        Arc::clone(event_manager),
+                        event_manager,
                         zmq_publisher,
                     )))
                 }
                 #[cfg(not(feature = "zmq"))]
                 {
-                    Some(Arc::new(EventPublisher::new(Arc::clone(event_manager))))
+                    Some(Arc::new(EventPublisher::new(event_manager)))
                 }
             };
             info!("Event publisher initialized");
 
             // Set EventPublisher on MempoolManager for mempool event publishing
-            if let Some(ref event_publisher) = self.event_publisher {
+            if let Some(ref event_publisher) = self
+                .module_subsystem
+                .as_ref()
+                .and_then(|s| s.event_publisher.as_ref())
+            {
                 self.mempool_manager
                     .set_event_publisher(Some(Arc::clone(event_publisher)));
                 info!("Event publisher set on mempool manager");
@@ -1171,7 +1331,7 @@ impl Node {
         // Get target peer count from config
         let default_timing = crate::config::NetworkTimingConfig::default();
         let timing_config = config.network_timing.as_ref().unwrap_or(&default_timing);
-        let target_peer_count = timing_config.target_peer_count;
+        let target_peer_count = timing_config.target_outbound_peers;
 
         // Initialize peer connections
         if let Err(e) = self
@@ -1188,349 +1348,7 @@ impl Node {
 
     /// Main node run loop
     async fn run(&mut self) -> Result<()> {
-        info!("Node running - main loop started");
-
-        // Set up graceful shutdown signal handling
-        let shutdown_rx = crate::utils::create_shutdown_receiver();
-
-        // Get initial state for block processing
-        let mut current_height = self.storage.chain().get_height()?.unwrap_or(0);
-        let mut utxo_set = blvm_protocol::UtxoSet::default();
-
-        // Main node loop - coordinates between all components and handles shutdown signals
-        loop {
-            // Check for shutdown signal (non-blocking)
-            if *shutdown_rx.borrow() {
-                info!("Shutdown signal received, stopping node gracefully...");
-                break;
-            }
-            // Process any received blocks (non-blocking)
-            while let Some(block_data) = self.network.try_recv_block() {
-                info!("Processing block from network");
-                let blocks_arc = self.storage.blocks();
-
-                // Parse block to get hash for event publishing
-                use crate::node::block_processor::parse_block_from_wire;
-                let block_hash_for_validation =
-                    if let Ok((block, _)) = parse_block_from_wire(&block_data) {
-                        use crate::storage::blockstore::BlockStore;
-                        blocks_arc.get_block_hash(&block)
-                    } else {
-                        [0u8; 32]
-                    };
-
-                // Publish block validation started event
-                if let Some(ref event_publisher) = self.event_publisher {
-                    event_publisher
-                        .publish_block_validation_started(
-                            &block_hash_for_validation,
-                            current_height,
-                        )
-                        .await;
-                }
-
-                let validation_start_time = std::time::Instant::now();
-                match self.sync_coordinator.process_block(
-                    &blocks_arc,
-                    &self.protocol,
-                    Some(&self.storage),
-                    &block_data,
-                    current_height,
-                    &mut utxo_set,
-                    Some(Arc::clone(&self.metrics)),
-                    Some(Arc::clone(&self.profiler)),
-                ) {
-                    Ok(true) => {
-                        info!("Block accepted at height {}", current_height);
-
-                        let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
-
-                        // Publish block validation completed event (success)
-                        if let Some(ref event_publisher) = self.event_publisher {
-                            event_publisher
-                                .publish_block_validation_completed(
-                                    &block_hash_for_validation,
-                                    current_height,
-                                    true,
-                                    validation_time_ms,
-                                    None,
-                                )
-                                .await;
-                        }
-
-                        // Parse block for governance webhook (need block object, not just block_data)
-                        // We'll get it from storage after it's stored
-                        let blocks_arc = self.storage.blocks();
-                        let block_hash =
-                            if let Ok(Some(hash)) = blocks_arc.get_hash_by_height(current_height) {
-                                hash
-                            } else {
-                                warn!("Failed to get block hash for height {}", current_height);
-                                [0u8; 32]
-                            };
-
-                        // Update chain tip (for chainwork, etc.)
-                        if let Ok(Some(block)) = blocks_arc.get_block(&block_hash) {
-                            if let Err(e) = self.storage.chain().update_tip(
-                                &block_hash,
-                                &block.header,
-                                current_height,
-                            ) {
-                                warn!("Failed to update chain tip: {}", e);
-                            }
-
-                            // Update UTXO stats cache (for fast gettxoutsetinfo RPC)
-                            let transaction_count =
-                                self.storage.transaction_count().unwrap_or(0) as u64;
-                            if let Err(e) = self.storage.chain().update_utxo_stats_cache(
-                                &block_hash,
-                                current_height,
-                                &utxo_set,
-                                transaction_count,
-                            ) {
-                                warn!("Failed to update UTXO stats cache: {}", e);
-                            }
-
-                            // Update network hashrate cache (for fast getmininginfo RPC)
-                            if let Err(e) = self
-                                .storage
-                                .chain()
-                                .calculate_and_cache_network_hashrate(current_height, &blocks_arc)
-                            {
-                                warn!("Failed to update network hashrate cache: {}", e);
-                            }
-
-                            // Publish NewBlock event to modules
-                            if let Some(ref event_publisher) = self.event_publisher {
-                                event_publisher
-                                    .publish_new_block(&block, &block_hash, current_height)
-                                    .await;
-                            }
-
-                            // Governance module subscribes to NewBlock events and handles notifications
-                            // No direct webhook call needed - handled via event system
-                        }
-
-                        // Persist UTXO set to storage after block validation
-                        // This is critical for commitment generation and incremental pruning
-                        if let Err(e) = self.storage.utxos().store_utxo_set(&utxo_set) {
-                            warn!(
-                                "Failed to persist UTXO set after block {}: {}",
-                                current_height, e
-                            );
-                        }
-
-                        // Generate UTXO commitment from current state (if enabled)
-                        // Use current_height (the block that was just validated) before incrementing
-                        #[cfg(feature = "utxo-commitments")]
-                        {
-                            if let Some(pruning_manager) = self.storage.pruning() {
-                                if let (Some(commitment_store), Some(_utxostore)) = (
-                                    pruning_manager.commitment_store(),
-                                    pruning_manager.utxostore(),
-                                ) {
-                                    // Get block hash from storage (block was just stored at current_height)
-                                    let blocks_arc = self.storage.blocks();
-                                    if let Ok(Some(block_hash)) =
-                                        blocks_arc.get_hash_by_height(current_height)
-                                    {
-                                        // Generate commitment from current UTXO set state
-                                        if let Err(e) = pruning_manager
-                                            .generate_commitment_from_current_state(
-                                                &block_hash,
-                                                current_height,
-                                                &utxo_set,
-                                                &commitment_store,
-                                            )
-                                        {
-                                            warn!(
-                                                "Failed to generate commitment for block {}: {}",
-                                                current_height, e
-                                            );
-                                        } else {
-                                            debug!(
-                                                "Generated UTXO commitment for block {}",
-                                                current_height
-                                            );
-                                        }
-                                    } else {
-                                        warn!("Could not find block hash for height {} to generate commitment", current_height);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Increment height after processing
-                        current_height += 1;
-
-                        // Check for incremental pruning during IBD
-                        // Consider IBD if we're still syncing (height < tip or no recent blocks)
-                        let is_ibd = current_height < 1000; // Simple heuristic: consider IBD if < 1000 blocks
-                        if let Some(pruning_manager) = self.storage.pruning() {
-                            if let Ok(Some(prune_stats)) =
-                                pruning_manager.incremental_prune_during_ibd(current_height, is_ibd)
-                            {
-                                info!("Incremental pruning during IBD: {} blocks pruned, {} bytes freed", 
-                                      prune_stats.blocks_pruned, prune_stats.storage_freed);
-                                // Flush storage to persist pruning changes
-                                if let Err(e) = self.storage.flush() {
-                                    warn!(
-                                        "Failed to flush storage after incremental pruning: {}",
-                                        e
-                                    );
-                                }
-                            }
-                        }
-
-                        // Check for automatic pruning after block acceptance
-                        if let Some(pruning_manager) = self.storage.pruning() {
-                            let stats = pruning_manager.get_stats();
-                            let should_prune = pruning_manager
-                                .should_auto_prune(current_height, stats.last_prune_height);
-
-                            if should_prune {
-                                info!("Automatic pruning triggered at height {}", current_height);
-
-                                // Calculate prune height based on configuration
-                                let prune_height = match &pruning_manager.config.mode {
-                                    crate::config::PruningMode::Disabled => None,
-                                    crate::config::PruningMode::Normal {
-                                        keep_from_height, ..
-                                    } => {
-                                        // Prune to keep_from_height, but ensure we keep min_blocks
-                                        let min_keep = pruning_manager.config.min_blocks_to_keep;
-                                        let effective_keep = (*keep_from_height)
-                                            .max(current_height.saturating_sub(min_keep));
-                                        Some(effective_keep)
-                                    }
-                                    #[cfg(feature = "utxo-commitments")]
-                                    crate::config::PruningMode::Aggressive {
-                                        keep_from_height,
-                                        min_blocks,
-                                        ..
-                                    } => {
-                                        // Prune to keep_from_height, respecting min_blocks
-                                        let sub = current_height.saturating_sub(*min_blocks);
-                                        let effective_keep = (*keep_from_height).max(sub);
-                                        Some(effective_keep)
-                                    }
-                                    #[cfg(not(feature = "utxo-commitments"))]
-                                    crate::config::PruningMode::Aggressive { .. } => {
-                                        // Aggressive pruning requires utxo-commitments feature
-                                        // Fall back to no pruning if feature is disabled
-                                        None
-                                    }
-                                    crate::config::PruningMode::Custom {
-                                        keep_bodies_from_height,
-                                        ..
-                                    } => {
-                                        // Prune to keep_bodies_from_height, respecting min_blocks
-                                        let min_keep = pruning_manager.config.min_blocks_to_keep;
-                                        let effective_keep = (*keep_bodies_from_height)
-                                            .max(current_height.saturating_sub(min_keep));
-                                        Some(effective_keep)
-                                    }
-                                };
-
-                                if let Some(prune_to_height) = prune_height {
-                                    if prune_to_height < current_height {
-                                        match pruning_manager.prune_to_height(
-                                            prune_to_height,
-                                            current_height,
-                                            false,
-                                        ) {
-                                            Ok(prune_stats) => {
-                                                info!("Automatic pruning completed: {} blocks pruned, {} blocks kept", 
-                                                      prune_stats.blocks_pruned, prune_stats.blocks_kept);
-                                                // Flush storage to persist pruning changes
-                                                use crate::utils::log_error;
-                                                log_error(|| self.storage.flush(), "Failed to flush storage after automatic pruning");
-                                            }
-                                            Err(e) => {
-                                                warn!("Automatic pruning failed: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(false) => {
-                        warn!("Block rejected at height {}", current_height);
-                        let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
-
-                        // Publish block validation completed event (failure)
-                        if let Some(ref event_publisher) = self.event_publisher {
-                            event_publisher
-                                .publish_block_validation_completed(
-                                    &block_hash_for_validation,
-                                    current_height,
-                                    false,
-                                    validation_time_ms,
-                                    Some("Block validation failed"),
-                                )
-                                .await;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Error processing block: {}", e);
-                        let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
-
-                        // Publish block validation completed event (error)
-                        if let Some(ref event_publisher) = self.event_publisher {
-                            event_publisher
-                                .publish_block_validation_completed(
-                                    &block_hash_for_validation,
-                                    current_height,
-                                    false,
-                                    validation_time_ms,
-                                    Some(&format!("Block processing error: {e}")),
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
-
-            // Process other network messages (non-blocking, processes one message if available)
-            // Note: This is a simplified approach - in production, network processing
-            // would run in a separate task
-            if let Err(e) = self.network.process_messages().await {
-                warn!("Error processing network messages: {}", e);
-            }
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            // Check node health periodically
-            self.check_health().await?;
-
-            // Check disk space periodically (every 10 iterations = ~1 second)
-            // Use timeout to prevent hanging on slow disk operations
-            let counter = self
-                .disk_check_counter
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if counter % 10 == 0 {
-                use crate::utils::with_storage_timeout;
-                match with_storage_timeout(async { self.check_disk_space().await }).await {
-                    Ok(Ok(())) => {
-                        // Disk check succeeded
-                    }
-                    Ok(Err(e)) => {
-                        warn!("Disk space check failed: {}", e);
-                        // Continue - disk errors don't stop the node
-                    }
-                    Err(_) => {
-                        warn!("Disk space check timed out");
-                        // Continue - timeout doesn't stop the node
-                    }
-                }
-            }
-        }
-
-        // Graceful shutdown - stop all components
-        info!("Initiating graceful shutdown...");
-        self.stop().await?;
-        Ok(())
+        run_loop::run(self).await
     }
 
     /// Run node processing once (for testing)
@@ -1543,6 +1361,13 @@ impl Node {
         Ok(())
     }
 
+    /// Storage timeout from config or default
+    fn storage_timeout(&self) -> std::time::Duration {
+        crate::utils::storage_timeout_from_config(
+            self.config_sub(|c| c.request_timeouts.as_ref()),
+        )
+    }
+
     /// Check node health with graceful error handling
     async fn check_health(&self) -> Result<()> {
         // Check peer count (non-blocking, always succeeds)
@@ -1552,8 +1377,9 @@ impl Node {
         }
 
         // Check storage with timeout and graceful degradation
-        use crate::utils::with_storage_timeout;
-        match with_storage_timeout(async { self.storage.blocks().block_count() }).await {
+        let timeout_dur = self.storage_timeout();
+        use crate::utils::with_custom_timeout;
+        match with_custom_timeout(async { self.storage.blocks().block_count() }, timeout_dur).await {
             Ok(Ok(blocks)) => {
                 if blocks == 0 {
                     warn!("No blocks in storage");
@@ -1572,6 +1398,49 @@ impl Node {
         Ok(())
     }
 
+    /// Get disk space (total, available, percent_free) for the path's mount.
+    /// Uses sysinfo when available; fallback to placeholder otherwise.
+    fn get_disk_space_for_path(path: &Path) -> (u64, u64, f64) {
+        #[cfg(feature = "sysinfo")]
+        {
+            use sysinfo::Disks;
+            let canonical = match std::fs::canonicalize(path) {
+                Ok(p) => p,
+                Err(_) => path.to_path_buf(),
+            };
+            let disks = Disks::new_with_refreshed_list();
+            // Find disk whose mount point is the longest prefix of canonical path
+            let mut best: Option<&sysinfo::Disk> = None;
+            let mut best_len = 0usize;
+            for disk in disks.list() {
+                let mount = disk.mount_point();
+                if canonical.starts_with(mount) {
+                    let mount_len = mount.as_os_str().len();
+                    if mount_len > best_len {
+                        best_len = mount_len;
+                        best = Some(disk);
+                    }
+                }
+            }
+            if let Some(disk) = best {
+                let total = disk.total_space();
+                let available = disk.available_space();
+                let percent_free = if total > 0 {
+                    100.0 * (available as f64) / (total as f64)
+                } else {
+                    0.0
+                };
+                return (total, available, percent_free);
+            }
+        }
+        // Fallback when sysinfo unavailable or path not found on any disk
+        let _ = path;
+        let total_bytes = 1_000_000_000_000u64; // 1TB placeholder
+        let available_bytes = total_bytes / 5;  // 20% free
+        let percent_free = 20.0;
+        (total_bytes, available_bytes, percent_free)
+    }
+
     /// Check disk space and trigger pruning if needed
     async fn check_disk_space(&self) -> Result<()> {
         // Check storage bounds (80% threshold)
@@ -1581,11 +1450,13 @@ impl Node {
             warn!("Storage bounds exceeded - disk space may be low");
 
             // Publish DiskSpaceLow event to modules
-            if let Some(ref event_publisher) = self.event_publisher {
-                // Get disk space info (simplified - could get actual disk stats)
-                let total_bytes = 1_000_000_000_000; // 1TB placeholder
-                let available_bytes = total_bytes / 5; // 20% free (low threshold)
-                let percent_free = 20.0;
+            if let Some(ref event_publisher) = self
+                    .module_subsystem
+                    .as_ref()
+                    .and_then(|s| s.event_publisher.as_ref())
+                {
+                let (total_bytes, available_bytes, percent_free) =
+                    Self::get_disk_space_for_path(&self.data_dir);
                 let disk_path = self.data_dir.to_string_lossy().to_string();
 
                 event_publisher
@@ -1672,16 +1543,24 @@ impl Node {
         info!("Stopping node");
 
         // Publish NodeShutdown event to modules (give them time to clean up)
-        if let Some(ref event_publisher) = self.event_publisher {
+        if let Some(ref event_publisher) = self
+                    .module_subsystem
+                    .as_ref()
+                    .and_then(|s| s.event_publisher.as_ref())
+                {
             event_publisher
                 .publish_node_shutdown("graceful".to_string(), 30)
                 .await;
             // Give modules a moment to process shutdown event
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(HANDSHAKE_POLL_SLEEP).await;
         }
 
         // Publish DataMaintenance event to modules (high urgency flush for shutdown)
-        if let Some(ref event_publisher) = self.event_publisher {
+        if let Some(ref event_publisher) = self
+                    .module_subsystem
+                    .as_ref()
+                    .and_then(|s| s.event_publisher.as_ref())
+                {
             event_publisher
                 .publish_data_maintenance(
                     "flush".to_string(),    // Flush pending writes
@@ -1692,12 +1571,18 @@ impl Node {
                 )
                 .await;
             // Give modules a moment to flush
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(HANDSHAKE_POLL_SLEEP).await;
         }
 
         // Stop module manager
-        if let Some(ref mut module_manager) = self.module_manager {
+        if let Some(ref module_manager) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.module_manager.as_ref())
+        {
             module_manager
+                .lock()
+                .await
                 .shutdown()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to shutdown module manager: {}", e))?;
@@ -1713,7 +1598,11 @@ impl Node {
         self.storage.flush()?;
 
         // Publish shutdown completed event
-        if let Some(ref event_publisher) = self.event_publisher {
+        if let Some(ref event_publisher) = self
+                    .module_subsystem
+                    .as_ref()
+                    .and_then(|s| s.event_publisher.as_ref())
+                {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
             let payload = EventPayload::NodeShutdownCompleted {
@@ -1731,26 +1620,29 @@ impl Node {
         Ok(())
     }
 
-    /// Get module manager (mutable)
-    pub fn module_manager_mut(&mut self) -> Option<&mut ModuleManager> {
-        self.module_manager.as_mut()
-    }
-
-    /// Get module manager (immutable)
-    pub fn module_manager(&self) -> Option<&ModuleManager> {
-        self.module_manager.as_ref()
+    /// Get module manager (shared via Arc<Mutex<>> for RPC and other subsystems)
+    pub fn module_manager(&self) -> Option<Arc<tokio::sync::Mutex<ModuleManager>>> {
+        self.module_subsystem
+            .as_ref()
+            .and_then(|s| s.module_manager.as_ref())
+            .cloned()
     }
 
     /// Get event publisher (immutable)
     pub fn event_publisher(&self) -> Option<&EventPublisher> {
-        self.event_publisher.as_ref().map(|arc| arc.as_ref())
+        self.module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+            .map(|arc| arc.as_ref())
     }
 
     /// Get event publisher (mutable)
     /// Note: This returns a reference to the Arc, not the inner EventPublisher
     /// since Arc doesn't allow mutable access to the inner value
     pub fn event_publisher_arc(&self) -> Option<&Arc<EventPublisher>> {
-        self.event_publisher.as_ref()
+        self.module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
     }
 
     /// Get protocol engine
@@ -1775,7 +1667,7 @@ impl Node {
 
     /// Get health report
     pub fn health_check(&self) -> health::HealthReport {
-        use crate::node::health::HealthChecker;
+        use crate::node::health::{HealthChecker, HealthStatus};
 
         let checker = HealthChecker::new();
         let network_healthy = self.network.is_network_active();
@@ -1783,12 +1675,31 @@ impl Node {
         let rpc_healthy = true; // RPC is always healthy if node is running
 
         // Get metrics if available (simplified for now)
-        checker.check_health(
+        let report = checker.check_health(
             network_healthy,
             storage_healthy,
             rpc_healthy,
             None, // Network metrics - would need to be passed from NetworkManager
             None, // Storage metrics - would need to be collected
-        )
+        );
+
+        // Publish HealthCheck event for module subscribers
+        if let Some(ref ep) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+        {
+            let check_type = "on_demand".to_string();
+            let node_healthy = report.overall_status == HealthStatus::Healthy;
+            let health_report = serde_json::to_string(&report).ok();
+            let ep_clone = Arc::clone(ep);
+            let _ = tokio::spawn(async move {
+                ep_clone
+                    .publish_health_check(check_type, node_healthy, health_report)
+                    .await;
+            });
+        }
+
+        report
     }
 }

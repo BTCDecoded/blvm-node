@@ -3,11 +3,13 @@
 //! Modern REST API server that runs alongside the JSON-RPC server.
 //! Uses the existing hyper infrastructure for consistency.
 
+use crate::network::dos_protection::ConnectionRateLimiter;
 use crate::node::mempool::MempoolManager;
 use crate::rpc::{auth, blockchain, mempool, mining, network, rawtx};
 use crate::storage::Storage;
 use anyhow::Result;
 use bytes::Bytes;
+use http_body_util::Limited;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -28,8 +30,9 @@ use super::fees;
 use super::mempool as rest_mempool;
 use super::network as rest_network;
 use super::transactions;
-use super::types::{ApiError, ApiResponse};
+use super::types::{rest_error_failed, rest_error_invalid, ApiError, ApiResponse};
 use super::validation as rest_validation;
+use crate::rpc::errors::HEIGHT_PARAM_REQUIRED_MSG;
 
 /// REST API Server
 #[derive(Clone)]
@@ -48,6 +51,8 @@ pub struct RestApiServer {
     payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
     #[cfg(feature = "bip70-http")]
     payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
+    /// Connection rate limiter (per-IP per minute)
+    connection_limiter: Option<Arc<tokio::sync::Mutex<ConnectionRateLimiter>>>,
 }
 
 impl RestApiServer {
@@ -73,6 +78,7 @@ impl RestApiServer {
             payment_processor: None,
             #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
+            connection_limiter: None,
         }
     }
 
@@ -99,7 +105,17 @@ impl RestApiServer {
             payment_processor: None,
             #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
+            connection_limiter: None,
         }
+    }
+
+    /// Set connection rate limiter
+    pub fn with_connection_limiter(
+        mut self,
+        limiter: Arc<tokio::sync::Mutex<ConnectionRateLimiter>>,
+    ) -> Self {
+        self.connection_limiter = Some(limiter);
+        self
     }
 
     /// Set authentication manager
@@ -144,6 +160,16 @@ impl RestApiServer {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
+                    // Connection rate limit check
+                    if let Some(ref limiter) = server.connection_limiter {
+                        let mut guard = limiter.lock().await;
+                        if !guard.check_connection(addr.ip()) {
+                            debug!("REST API connection rejected (rate limit) from {}", addr);
+                            drop(stream);
+                            continue;
+                        }
+                    }
+
                     debug!("New REST API connection from {}", addr);
                     let server_clone = Arc::clone(&server);
                     tokio::spawn(async move {
@@ -282,22 +308,25 @@ impl RestApiServer {
         } else if path.starts_with("/api/v1/network") {
             Self::handle_network_request(server, method, path, request_id).await
         } else if path.starts_with("/api/v1/fees") {
-            Self::handle_fee_request(server, method, path, request_id).await
+            Self::handle_fee_request(server, method, path, &uri, request_id).await
         } else if path.starts_with("/api/v1/payments") {
             // CTV payment endpoints (requires bip70-http feature)
             #[cfg(feature = "bip70-http")]
             {
                 if let Some(ref state_machine) = server.payment_state_machine {
-                    // Parse request body if present
+                    // Parse request body if present (S-010: use read_json_body for 1MB limit)
                     let body = if method == Method::POST || method == Method::PUT {
-                        let (_, body_stream) = req.into_parts();
-                        let body_bytes = body_stream.collect().await?.to_bytes();
-                        if body_bytes.is_empty() {
-                            None
-                        } else {
-                            match serde_json::from_slice::<Value>(&body_bytes) {
-                                Ok(v) => Some(v),
-                                Err(_) => None,
+                        match crate::rpc::rest::types::read_json_body(req).await {
+                            Ok(opt) => opt,
+                            Err(e) => {
+                                return Ok(Self::error_response_with_headers(
+                                    security_headers,
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    "PAYLOAD_TOO_LARGE",
+                                    &e,
+                                    None,
+                                    request_id,
+                                ));
                             }
                         }
                     } else {
@@ -339,7 +368,19 @@ impl RestApiServer {
             #[cfg(feature = "ctv")]
             {
                 if let Some(ref state_machine) = server.payment_state_machine {
-                    let body = crate::rpc::rest::types::read_json_body(req).await?;
+                    let body = match crate::rpc::rest::types::read_json_body(req).await {
+                        Ok(opt) => opt,
+                        Err(e) => {
+                            return Ok(Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "PAYLOAD_TOO_LARGE",
+                                &e,
+                                None,
+                                request_id,
+                            ));
+                        }
+                    };
                     crate::rpc::rest::vault::handle_vault_request(
                         Arc::clone(state_machine),
                         &method,
@@ -375,7 +416,19 @@ impl RestApiServer {
             #[cfg(feature = "ctv")]
             {
                 if let Some(ref state_machine) = server.payment_state_machine {
-                    let body = crate::rpc::rest::types::read_json_body(req).await?;
+                    let body = match crate::rpc::rest::types::read_json_body(req).await {
+                        Ok(opt) => opt,
+                        Err(e) => {
+                            return Ok(Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "PAYLOAD_TOO_LARGE",
+                                &e,
+                                None,
+                                request_id,
+                            ));
+                        }
+                    };
                     crate::rpc::rest::pool::handle_pool_request(
                         Arc::clone(state_machine),
                         &method,
@@ -411,7 +464,19 @@ impl RestApiServer {
             #[cfg(feature = "ctv")]
             {
                 if let Some(ref state_machine) = server.payment_state_machine {
-                    let body = crate::rpc::rest::types::read_json_body(req).await?;
+                    let body = match crate::rpc::rest::types::read_json_body(req).await {
+                        Ok(opt) => opt,
+                        Err(e) => {
+                            return Ok(Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "PAYLOAD_TOO_LARGE",
+                                &e,
+                                None,
+                                request_id,
+                            ));
+                        }
+                    };
                     crate::rpc::rest::congestion::handle_congestion_request(
                         Arc::clone(state_machine),
                         &method,
@@ -579,7 +644,7 @@ impl RestApiServer {
                     security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
-                    &format!("Failed to get chain tip: {}", e),
+                    &rest_error_failed("get chain tip", e),
                     None,
                     request_id,
                 ),
@@ -590,7 +655,7 @@ impl RestApiServer {
                     security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
-                    &format!("Failed to get chain height: {}", e),
+                    &rest_error_failed("get chain height", e),
                     None,
                     request_id,
                 ),
@@ -601,7 +666,7 @@ impl RestApiServer {
                     security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
-                    &format!("Failed to get chain info: {}", e),
+                    &rest_error_failed("get chain info", e),
                     None,
                     request_id,
                 ),
@@ -670,7 +735,7 @@ impl RestApiServer {
                                             server.security_headers_enabled,
                                             StatusCode::BAD_REQUEST,
                                             "BAD_REQUEST",
-                                            &format!("Invalid block height: {}", e),
+                                            &rest_error_invalid("block height", e),
                                             None,
                                             request_id,
                                         );
@@ -688,7 +753,7 @@ impl RestApiServer {
                                     server.security_headers_enabled,
                                     StatusCode::INTERNAL_SERVER_ERROR,
                                     "INTERNAL_ERROR",
-                                    &format!("Failed to get block by height: {}", e),
+                                    &rest_error_failed("get block by height", e),
                                     None,
                                     request_id,
                                 ),
@@ -708,7 +773,7 @@ impl RestApiServer {
                         server.security_headers_enabled,
                         StatusCode::BAD_REQUEST,
                         "BAD_REQUEST",
-                        "Height parameter required",
+                        HEIGHT_PARAM_REQUIRED_MSG,
                         None,
                         request_id,
                     )
@@ -723,7 +788,7 @@ impl RestApiServer {
                             server.security_headers_enabled,
                             StatusCode::BAD_REQUEST,
                             "BAD_REQUEST",
-                            &format!("Invalid block hash: {}", e),
+                            &rest_error_invalid("block hash", e),
                             None,
                             request_id,
                         );
@@ -743,7 +808,7 @@ impl RestApiServer {
                             server.security_headers_enabled,
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "INTERNAL_ERROR",
-                            &format!("Failed to get block transactions: {}", e),
+                            &rest_error_failed("get block transactions", e),
                             None,
                             request_id,
                         ),
@@ -760,7 +825,7 @@ impl RestApiServer {
                             server.security_headers_enabled,
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "INTERNAL_ERROR",
-                            &format!("Failed to get block: {}", e),
+                            &rest_error_failed("get block", e),
                             None,
                             request_id,
                         ),
@@ -817,7 +882,7 @@ impl RestApiServer {
                                 server.security_headers_enabled,
                                 StatusCode::BAD_REQUEST,
                                 "BAD_REQUEST",
-                                &format!("Invalid transaction ID: {}", e),
+                                &rest_error_invalid("transaction ID", e),
                                 None,
                                 request_id,
                             );
@@ -841,7 +906,7 @@ impl RestApiServer {
                                 server.security_headers_enabled,
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "INTERNAL_ERROR",
-                                &format!("Failed to get transaction confirmations: {}", e),
+                                &rest_error_failed("get transaction confirmations", e),
                                 None,
                                 request_id,
                             ),
@@ -858,7 +923,7 @@ impl RestApiServer {
                                 server.security_headers_enabled,
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "INTERNAL_ERROR",
-                                &format!("Failed to get transaction: {}", e),
+                                &rest_error_failed("get transaction", e),
                                 None,
                                 request_id,
                             ),
@@ -876,17 +941,19 @@ impl RestApiServer {
                 }
             }
             Method::POST => {
-                // POST /api/v1/transactions (submit transaction)
+                // POST /api/v1/transactions (submit transaction) (S-011)
                 if path_parts.len() == 3 {
-                    // Read request body
-                    let body = match req.collect().await {
+                    // Read request body with 1MB limit
+                    let (_, body) = req.into_parts();
+                    let limited = Limited::new(body, crate::rpc::rest::types::MAX_REQUEST_SIZE);
+                    let body = match limited.collect().await {
                         Ok(b) => b.to_bytes(),
                         Err(e) => {
                             return Self::error_response_with_headers(
                                 security_headers,
-                                StatusCode::BAD_REQUEST,
-                                "BAD_REQUEST",
-                                &format!("Failed to read request body: {}", e),
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "PAYLOAD_TOO_LARGE",
+                                &format!("Request body too large or read error: {}", e),
                                 None,
                                 request_id,
                             );
@@ -909,7 +976,7 @@ impl RestApiServer {
                                 server.security_headers_enabled,
                                 StatusCode::BAD_REQUEST,
                                 "BAD_REQUEST",
-                                &format!("Invalid transaction hex: {}", e),
+                                &rest_error_invalid("transaction hex", e),
                                 None,
                                 request_id,
                             );
@@ -1000,7 +1067,7 @@ impl RestApiServer {
                     server.security_headers_enabled,
                     StatusCode::BAD_REQUEST,
                     "BAD_REQUEST",
-                    &format!("Invalid address: {}", e),
+                    &rest_error_invalid("address", e),
                     None,
                     request_id,
                 );
@@ -1021,7 +1088,7 @@ impl RestApiServer {
                         server.security_headers_enabled,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
-                        &format!("Failed to get address balance: {}", e),
+                        &rest_error_failed("get address balance", e),
                         None,
                         request_id,
                     ),
@@ -1040,7 +1107,7 @@ impl RestApiServer {
                         server.security_headers_enabled,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
-                        &format!("Failed to get address transactions: {}", e),
+                        &rest_error_failed("get address transactions", e),
                         None,
                         request_id,
                     ),
@@ -1057,7 +1124,7 @@ impl RestApiServer {
                         server.security_headers_enabled,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
-                        &format!("Failed to get address UTXOs: {}", e),
+                        &rest_error_failed("get address UTXOs", e),
                         None,
                         request_id,
                     ),
@@ -1117,7 +1184,7 @@ impl RestApiServer {
         match path_parts.get(3) {
             None => {
                 // /api/v1/mempool - list all transactions
-                match rest_mempool::get_mempool(&server.mempool).await {
+                match rest_mempool::get_mempool(&server.mempool, false).await {
                     Ok(data) => {
                         Self::success_response_with_headers(data, request_id, security_headers)
                     }
@@ -1125,7 +1192,7 @@ impl RestApiServer {
                         security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
-                        &format!("Failed to get mempool: {}", e),
+                        &rest_error_failed("get mempool", e),
                         None,
                         request_id,
                     ),
@@ -1142,7 +1209,7 @@ impl RestApiServer {
                                 security_headers,
                                 StatusCode::BAD_REQUEST,
                                 "BAD_REQUEST",
-                                &format!("Invalid transaction ID: {}", e),
+                                &rest_error_invalid("transaction ID", e),
                                 None,
                                 request_id,
                             );
@@ -1158,7 +1225,7 @@ impl RestApiServer {
                             security_headers,
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "INTERNAL_ERROR",
-                            &format!("Failed to get mempool transaction: {}", e),
+                            &rest_error_failed("get mempool transaction", e),
                             None,
                             request_id,
                         ),
@@ -1184,7 +1251,7 @@ impl RestApiServer {
                         security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
-                        &format!("Failed to get mempool stats: {}", e),
+                        &rest_error_failed("get mempool stats", e),
                         None,
                         request_id,
                     ),
@@ -1245,7 +1312,7 @@ impl RestApiServer {
                     security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
-                    &format!("Failed to get network info: {}", e),
+                    &rest_error_failed("get network info", e),
                     None,
                     request_id,
                 ),
@@ -1256,7 +1323,7 @@ impl RestApiServer {
                     security_headers,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
-                    &format!("Failed to get network peers: {}", e),
+                    &rest_error_failed("get network peers", e),
                     None,
                     request_id,
                 ),
@@ -1280,6 +1347,7 @@ impl RestApiServer {
         server: Arc<Self>,
         method: Method,
         path: &str,
+        uri: &Uri,
         request_id: String,
     ) -> Response<Full<Bytes>> {
         let security_headers = server.security_headers_enabled;
@@ -1316,8 +1384,7 @@ impl RestApiServer {
             Some(&"estimate") => {
                 // Parse query parameters for target blocks
                 // Format: /api/v1/fees/estimate?blocks=6
-                let target_blocks = request
-                    .uri()
+                let target_blocks = uri
                     .query()
                     .and_then(|q| {
                         q.split('&').find_map(|param| {
@@ -1339,7 +1406,7 @@ impl RestApiServer {
                         security_headers,
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "INTERNAL_ERROR",
-                        &format!("Failed to get fee estimate: {}", e),
+                        &rest_error_failed("get fee estimate", e),
                         None,
                         request_id,
                     ),

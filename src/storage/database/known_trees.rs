@@ -1,0 +1,35 @@
+//! Known tree/table names for the database.
+//! Used by RocksDB for open_cf_descriptors and for backend parity validation.
+
+/// All known tree names.
+pub const KNOWN_TREE_NAMES: &[&str] = &[
+    "blocks",
+    "headers",
+    "height_index",
+    "hash_to_height",
+    "witnesses",
+    "recent_headers",
+    "utxos",
+    "ibd_utxos",
+    "spent_outputs",
+    "chain_info",
+    "work_cache",
+    "chainwork_cache",
+    "utxo_stats_cache",
+    "network_hashrate_cache",
+    "invalid_blocks",
+    "chain_tips",
+    "block_metadata",
+    "tx_by_hash",
+    "tx_by_block",
+    "tx_metadata",
+    "address_tx_index",
+    "address_output_index",
+    "address_input_index",
+    "value_index",
+    "utxo_commitments",
+    "commitment_height_index",
+    "vaults",
+    "pools",
+    "batches",
+];

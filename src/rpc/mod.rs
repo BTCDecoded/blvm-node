@@ -5,9 +5,12 @@
 
 pub mod auth;
 pub mod blockchain;
+pub mod cache;
 pub mod control;
 pub mod errors;
 pub mod mempool;
+pub mod methods;
+pub mod params;
 pub mod mining;
 #[cfg(feature = "miniscript")]
 pub mod miniscript;
@@ -24,7 +27,10 @@ pub mod validation;
 #[cfg(feature = "quinn")]
 pub mod quinn_server;
 
-use crate::config::RpcAuthConfig;
+use crate::config::{RequestTimeoutConfig, RpcAuthConfig};
+use crate::network::dos_protection::ConnectionRateLimiter;
+use crate::utils::AUTH_RATE_LIMITER_CLEANUP_INTERVAL;
+use crate::module::manager::ModuleManager;
 use crate::node::mempool::MempoolManager;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::PerformanceProfiler;
@@ -74,6 +80,18 @@ pub struct RpcManager {
     payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
     /// Event publisher for module event notifications (optional)
     event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
+    /// Maximum request body size in bytes (default: 1MB)
+    max_request_size_bytes: usize,
+    /// Max connections per IP per minute (default: 10)
+    max_connections_per_ip_per_minute: u32,
+    /// Batch rate multiplier cap: min(batch_len, this) (default: 10)
+    batch_rate_multiplier_cap: u32,
+    /// Connection rate limit window in seconds (default: 60)
+    connection_rate_limit_window_seconds: u64,
+    /// Request timeout config (storage/network/rpc timeouts)
+    request_timeouts: Option<RequestTimeoutConfig>,
+    /// Module manager for load/unload/reload RPC (optional)
+    module_manager: Option<Arc<tokio::sync::Mutex<ModuleManager>>>,
 }
 
 impl RpcManager {
@@ -105,7 +123,51 @@ impl RpcManager {
             #[cfg(all(feature = "bip70-http", feature = "ctv"))]
             payment_state_machine: None,
             event_publisher: None,
+            max_request_size_bytes: 1_048_576,
+            max_connections_per_ip_per_minute: 10,
+            batch_rate_multiplier_cap: 10,
+            connection_rate_limit_window_seconds: 60,
+            request_timeouts: None,
+            module_manager: None,
         }
+    }
+
+    /// Set batch rate multiplier cap (from config or BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP)
+    pub fn with_batch_rate_multiplier_cap(mut self, cap: u32) -> Self {
+        self.batch_rate_multiplier_cap = cap;
+        self
+    }
+
+    /// Set connection rate limit window in seconds (from config or BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS)
+    pub fn with_connection_rate_limit_window(mut self, secs: u64) -> Self {
+        self.connection_rate_limit_window_seconds = secs;
+        self
+    }
+
+    /// Set max connections per IP per minute (from config rpc.max_connections_per_ip_per_minute)
+    pub fn with_max_connections_per_ip(mut self, n: u32) -> Self {
+        self.max_connections_per_ip_per_minute = n;
+        self
+    }
+
+    /// Set module manager for load/unload/reload RPC methods
+    pub fn set_module_manager(
+        &mut self,
+        module_manager: Arc<tokio::sync::Mutex<ModuleManager>>,
+    ) {
+        self.module_manager = Some(module_manager);
+    }
+
+    /// Set request timeout config (storage/network/rpc timeouts from config)
+    pub fn with_request_timeouts(mut self, config: Option<RequestTimeoutConfig>) -> Self {
+        self.request_timeouts = config;
+        self
+    }
+
+    /// Set maximum request body size (from config rpc.max_request_size_bytes)
+    pub fn with_max_request_size(mut self, bytes: usize) -> Self {
+        self.max_request_size_bytes = bytes;
+        self
     }
 
     /// Set node shutdown callback
@@ -118,7 +180,7 @@ impl RpcManager {
     }
 
     /// Set RPC authentication configuration
-    pub async fn with_auth_config(mut self, auth_config: RpcAuthConfig) -> Self {
+    pub async fn with_auth_config(&mut self, auth_config: RpcAuthConfig) {
         let auth_manager = Arc::new(auth::RpcAuthManager::with_rate_limits(
             auth_config.required,
             auth_config.rate_limit_burst,
@@ -166,7 +228,6 @@ impl RpcManager {
         }
 
         self.auth_manager = Some(auth_manager);
-        self
     }
 
     /// Set storage and mempool dependencies for RPC handlers
@@ -224,6 +285,11 @@ impl RpcManager {
         self.event_publisher = event_publisher;
     }
 
+    /// Get event publisher for IBD/sync event emission
+    pub fn event_publisher(&self) -> Option<Arc<crate::node::event_publisher::EventPublisher>> {
+        self.event_publisher.clone()
+    }
+
     /// Set network manager dependency
     pub fn with_network_manager(
         mut self,
@@ -260,6 +326,10 @@ impl RpcManager {
         Self {
             server_addr: tcp_addr,
             quinn_addr: Some(quinn_addr),
+            #[cfg(feature = "rest-api")]
+            rest_api_addr: None,
+            #[cfg(feature = "rest-api")]
+            rest_api_shutdown_tx: None,
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
             mining_rpc: mining::MiningRpc::new(),
@@ -278,6 +348,12 @@ impl RpcManager {
             #[cfg(all(feature = "bip70-http", feature = "ctv"))]
             payment_state_machine: None,
             event_publisher: None,
+            max_request_size_bytes: 1_048_576,
+            max_connections_per_ip_per_minute: 10,
+            batch_rate_multiplier_cap: 10,
+            connection_rate_limit_window_seconds: 60,
+            request_timeouts: None,
+            module_manager: None,
         }
     }
 
@@ -310,14 +386,23 @@ impl RpcManager {
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting TCP RPC server on {}", self.server_addr);
 
+        let connection_limiter = Arc::new(tokio::sync::Mutex::new(ConnectionRateLimiter::new(
+            self.max_connections_per_ip_per_minute as usize,
+            self.connection_rate_limit_window_seconds,
+        )));
+
         let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
         self.shutdown_tx = Some(shutdown_tx.clone());
 
-        // Create control RPC with shutdown capability
-        let control_rpc = Arc::new(control::ControlRpc::with_shutdown(
+        // Create control RPC with shutdown capability and optional module manager
+        let mut control_rpc = control::ControlRpc::with_shutdown(
             shutdown_tx.clone(),
             self.node_shutdown.clone(),
-        ));
+        );
+        if let Some(ref mgr) = self.module_manager {
+            control_rpc = control_rpc.with_module_manager(Arc::clone(mgr));
+        }
+        let control_rpc = Arc::new(control_rpc);
 
         // Create server with or without authentication
         let server = if let (Some(storage), Some(mempool)) =
@@ -325,22 +410,26 @@ impl RpcManager {
         {
             let blockchain = Arc::new(
                 blockchain::BlockchainRpc::with_dependencies(Arc::clone(storage))
-                    .with_event_publisher(self.event_publisher.clone()),
+                    .with_event_publisher(self.event_publisher.clone())
+                    .with_request_timeouts(self.request_timeouts.clone()),
             );
             let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(
                 Arc::clone(mempool),
                 Arc::clone(storage),
             ));
-            let rawtx_rpc = Arc::new(rawtx::RawTxRpc::with_dependencies(
-                Arc::clone(storage),
-                Arc::clone(mempool),
-                self.metrics.clone(),
-                self.profiler.clone(),
-            ));
-            let mining = Arc::new(mining::MiningRpc::with_dependencies(
-                Arc::clone(storage),
-                Arc::clone(mempool),
-            ));
+            let rawtx_rpc = Arc::new(
+                rawtx::RawTxRpc::with_dependencies(
+                    Arc::clone(storage),
+                    Arc::clone(mempool),
+                    self.metrics.clone(),
+                    self.profiler.clone(),
+                )
+                .with_request_timeouts(self.request_timeouts.clone()),
+            );
+            let mining = Arc::new(
+                mining::MiningRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool))
+                    .with_event_publisher(self.event_publisher.clone()),
+            );
             let network = if let Some(ref network_manager) = self.network_manager {
                 Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(
                     network_manager,
@@ -350,8 +439,13 @@ impl RpcManager {
             };
 
             // Use auth manager and/or metrics if configured
+            let max_request_size = self.max_request_size_bytes;
+            let add_limiter = |s: server::RpcServer| {
+                s.with_connection_limiter(Arc::clone(&connection_limiter))
+                    .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap)
+            };
             match (self.auth_manager.as_ref(), self.metrics.as_ref()) {
-                (Some(auth_manager), Some(metrics)) => {
+                (Some(auth_manager), Some(metrics)) => add_limiter(
                     server::RpcServer::with_dependencies_auth_and_metrics(
                         self.server_addr,
                         blockchain,
@@ -362,9 +456,10 @@ impl RpcManager {
                         Arc::clone(&control_rpc),
                         Arc::clone(auth_manager),
                         Arc::clone(metrics),
-                    )
-                }
-                (Some(auth_manager), None) => server::RpcServer::with_dependencies_and_auth(
+                        max_request_size,
+                    ),
+                ),
+                (Some(auth_manager), None) => add_limiter(server::RpcServer::with_dependencies_and_auth(
                     self.server_addr,
                     blockchain,
                     network,
@@ -373,8 +468,9 @@ impl RpcManager {
                     rawtx_rpc,
                     Arc::clone(&control_rpc),
                     Arc::clone(auth_manager),
-                ),
-                (None, Some(metrics)) => server::RpcServer::with_dependencies_and_metrics(
+                    max_request_size,
+                )),
+                (None, Some(metrics)) => add_limiter(server::RpcServer::with_dependencies_and_metrics(
                     self.server_addr,
                     blockchain,
                     network,
@@ -383,8 +479,9 @@ impl RpcManager {
                     rawtx_rpc,
                     Arc::clone(&control_rpc),
                     Arc::clone(metrics),
-                ),
-                (None, None) => server::RpcServer::with_dependencies(
+                    max_request_size,
+                )),
+                (None, None) => add_limiter(server::RpcServer::with_dependencies(
                     self.server_addr,
                     blockchain,
                     network,
@@ -392,15 +489,23 @@ impl RpcManager {
                     mining,
                     rawtx_rpc,
                     Arc::clone(&control_rpc),
-                ),
+                    max_request_size,
+                )),
             }
         } else {
             // No dependencies - use auth and/or metrics if configured
-            // Note: Without dependencies, metrics won't be very useful, but we support it
+            let connection_limiter = Arc::new(tokio::sync::Mutex::new(ConnectionRateLimiter::new(
+                self.max_connections_per_ip_per_minute as usize,
+                self.connection_rate_limit_window_seconds,
+            )));
             if let Some(ref auth_manager) = self.auth_manager {
                 server::RpcServer::with_auth(self.server_addr, Arc::clone(auth_manager))
+                    .with_connection_limiter(connection_limiter)
+                    .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap)
             } else {
                 server::RpcServer::new(self.server_addr)
+                    .with_connection_limiter(connection_limiter)
+                    .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap)
             }
         };
 
@@ -411,6 +516,19 @@ impl RpcManager {
             }
         });
 
+        // Start periodic rate limiter cleanup when auth is enabled
+        if let Some(ref auth_manager) = self.auth_manager {
+            let auth_manager = Arc::clone(auth_manager);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(AUTH_RATE_LIMITER_CLEANUP_INTERVAL);
+                interval.tick().await; // skip immediate first tick
+                loop {
+                    interval.tick().await;
+                    auth_manager.cleanup_stale_limiters().await;
+                }
+            });
+        }
+
         // Start QUIC server if enabled
         #[cfg(feature = "quinn")]
         let quinn_handle = if let Some(quinn_addr) = self.quinn_addr {
@@ -419,7 +537,12 @@ impl RpcManager {
             let (quinn_shutdown_tx, mut quinn_shutdown_rx) = mpsc::unbounded_channel();
             self.quinn_shutdown_tx = Some(quinn_shutdown_tx);
 
-            let quinn_server = quinn_server::QuinnRpcServer::new(quinn_addr);
+            let mut quinn_server = quinn_server::QuinnRpcServer::new(quinn_addr)
+                .with_max_request_size(self.max_request_size_bytes)
+                .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap);
+            if let Some(ref auth_manager) = self.auth_manager {
+                quinn_server = quinn_server.with_auth_manager(Arc::clone(auth_manager));
+            }
 
             Some(tokio::spawn(async move {
                 tokio::select! {
@@ -460,10 +583,13 @@ impl RpcManager {
                     None,
                     None,
                 ));
-                let mining = Arc::new(mining::MiningRpc::with_dependencies(
-                    Arc::clone(storage),
-                    Arc::clone(mempool),
-                ));
+                let mining = Arc::new(
+                    mining::MiningRpc::with_dependencies(
+                        Arc::clone(storage),
+                        Arc::clone(mempool),
+                    )
+                    .with_event_publisher(self.event_publisher.clone()),
+                );
                 let network = if let Some(ref network_manager) = self.network_manager {
                     Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(
                         network_manager,
@@ -493,6 +619,7 @@ impl RpcManager {
                         rawtx_rpc,
                     )
                 };
+                rest_server = rest_server.with_connection_limiter(Arc::clone(&connection_limiter));
 
                 // Set payment processor if available
                 #[cfg(feature = "bip70-http")]

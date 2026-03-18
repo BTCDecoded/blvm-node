@@ -60,6 +60,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         dependencies: HashMap::new(),
+        optional_dependencies: HashMap::new(),
         entry_point: format!("{}.so", name),
         config_schema: HashMap::new(),
         binary: None,
@@ -86,7 +87,7 @@ async fn create_test_registry_with_module(
         ContentAddressableStorage::new(&cas_dir).unwrap(),
     ));
     let cache = Arc::new(tokio::sync::RwLock::new(
-        LocalCache::new(&cache_dir).unwrap(),
+        LocalCache::new(),
     ));
 
     let manifest = create_test_manifest_with_payment(module_name);
@@ -108,9 +109,12 @@ async fn create_test_registry_with_module(
         hash,
         manifest_hash,
         binary_hash,
+        verified_at: 0,
+        verified_by: Vec::new(),
         local_path: temp_dir.path().join(format!("{}.so", module_name)),
+        expires_at: None,
     };
-    cache.write().await.add_module(cached).unwrap();
+    cache.write().await.cache(cached);
 
     Arc::new(ModuleRegistry::new(&cache_dir, &cas_dir, Vec::new()).unwrap())
 }

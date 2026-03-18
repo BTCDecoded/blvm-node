@@ -8,23 +8,10 @@
 use crate::network::protocol::NetworkAddress;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::current_timestamp;
 
 #[cfg(feature = "iroh")]
 use iroh::PublicKey;
-
-/// Get current Unix timestamp in seconds
-///
-/// Helper function to avoid code duplication of time calculation.
-fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| {
-            tracing::warn!("System time error, using fallback timestamp");
-            std::time::Duration::from_secs(0)
-        })
-        .as_secs()
-}
 
 /// Address entry with metadata
 #[derive(Debug, Clone)]
@@ -579,21 +566,13 @@ mod tests {
 
         // Banned (temporary, not expired)
         ban_list.clear();
-        let future_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 3600;
+        let future_time = crate::utils::current_timestamp() + 3600;
         ban_list.insert(socket, future_time);
         assert!(db.is_banned(&addr, &ban_list));
 
         // Banned (expired)
         ban_list.clear();
-        let past_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - 3600;
+        let past_time = crate::utils::current_timestamp().saturating_sub(3600);
         ban_list.insert(socket, past_time);
         assert!(!db.is_banned(&addr, &ban_list));
     }

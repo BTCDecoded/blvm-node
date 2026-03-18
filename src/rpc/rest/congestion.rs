@@ -8,14 +8,14 @@
 //! - Get congestion metrics
 
 use crate::payment::state_machine::PaymentStateMachine;
-use crate::rpc::rest::types::{error_response, success_response};
+use crate::rpc::rest::types::{rest_error_failed, error_response, success_response};
+use crate::utils::current_timestamp;
 use blvm_protocol::payment::PaymentOutput;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 /// Handle congestion REST API requests
@@ -141,7 +141,6 @@ async fn add_to_batch(
     use crate::payment::congestion::{PendingTransaction, TransactionPriority};
     use blvm_protocol::payment::PaymentOutput;
     use serde_json::json;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     let congestion_manager = match state_machine.congestion_manager() {
         Some(manager) => manager,
@@ -193,10 +192,7 @@ async fn add_to_batch(
         .unwrap_or("unknown")
         .to_string();
 
-    let created_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let created_at = current_timestamp();
 
     let pending_tx = PendingTransaction {
         tx_id,
@@ -225,7 +221,7 @@ async fn add_to_batch(
         Err(e) => error_response(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            &format!("Failed to add to batch: {}", e),
+            &rest_error_failed("add to batch", e),
             request_id,
         ),
     }
@@ -288,7 +284,7 @@ async fn broadcast_batch(
                 Err(e) => error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "BROADCAST_FAILED",
-                    &format!("Failed to broadcast batch: {}", e),
+                    &rest_error_failed("broadcast batch", e),
                     request_id,
                 ),
             }
@@ -324,7 +320,7 @@ async fn get_congestion_metrics(
                 Err(e) => error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "CONGESTION_METRICS_FAILED",
-                    &format!("Failed to get congestion metrics: {}", e),
+                    &rest_error_failed("get congestion metrics", e),
                     request_id,
                 ),
             }

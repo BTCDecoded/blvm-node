@@ -7,12 +7,16 @@
 //! - Settlement monitoring
 
 use crate::payment::processor::PaymentError;
+use crate::rpc::params::{param_bool_default, param_str};
 use crate::payment::state_machine::{PaymentState, PaymentStateMachine};
 use blvm_protocol::payment::PaymentOutput;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::current_timestamp;
 use tracing::{debug, error};
+
+/// Default number of confirmations before considering a payment "safe for release" (RPC and REST).
+pub const DEFAULT_SAFE_DEPTH: u32 = 6;
 
 /// Payment RPC handler
 #[derive(Clone)]
@@ -73,7 +77,7 @@ impl PaymentRpc {
             .and_then(|s| hex::decode(s).ok());
 
         // Parse create_covenant (optional, default: false)
-        let create_covenant = params.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+        let create_covenant = param_bool_default(params, 2, false);
 
         // Create payment request
         let (payment_id, covenant_proof) = state_machine
@@ -136,9 +140,11 @@ impl PaymentRpc {
 
         let state_machine = self.get_state_machine()?;
 
-        let payment_request_id = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
-            PaymentError::ProcessingError("Missing 'payment_request_id' parameter".to_string())
-        })?;
+        let payment_request_id = param_str(params, 0)
+            .map(String::from)
+            .ok_or_else(|| {
+                PaymentError::ProcessingError("Missing 'payment_request_id' parameter".to_string())
+            })?;
 
         let state = state_machine.get_payment_state(payment_request_id).await?;
 
@@ -197,14 +203,13 @@ impl PaymentRpc {
                 confirmation_count,
                 ..
             } => {
-                const DEFAULT_SAFE_DEPTH: u32 = 6;
                 json!({
                     "state": "settled",
                     "request_id": request_id,
                     "tx_hash": hex::encode(tx_hash),
                     "block_hash": hex::encode(block_hash),
                     "confirmation_count": confirmation_count,
-                    "safe_for_release": confirmation_count >= DEFAULT_SAFE_DEPTH,
+                    "safe_for_release": *confirmation_count >= DEFAULT_SAFE_DEPTH,
                 })
             }
             PaymentState::ReorgPending {
@@ -296,6 +301,12 @@ impl PaymentRpc {
     pub async fn create_vault(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: createvault");
 
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
+
         let state_machine = self.get_state_machine()?;
         let vault_engine = state_machine.vault_engine().ok_or_else(|| {
             PaymentError::ProcessingError("Vault engine not available".to_string())
@@ -345,6 +356,12 @@ impl PaymentRpc {
     pub async fn unvault(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: unvault");
 
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
+
         let state_machine = self.get_state_machine()?;
         let vault_engine = state_machine.vault_engine().ok_or_else(|| {
             PaymentError::ProcessingError("Vault engine not available".to_string())
@@ -385,6 +402,12 @@ impl PaymentRpc {
     #[cfg(feature = "ctv")]
     pub async fn withdraw_from_vault(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: withdrawfromvault");
+
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
 
         let state_machine = self.get_state_machine()?;
         let vault_engine = state_machine.vault_engine().ok_or_else(|| {
@@ -431,6 +454,12 @@ impl PaymentRpc {
     pub async fn get_vault_state(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: getvaultstate");
 
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
+
         let state_machine = self.get_state_machine()?;
         let vault_engine = state_machine.vault_engine().ok_or_else(|| {
             PaymentError::ProcessingError("Vault engine not available".to_string())
@@ -466,6 +495,12 @@ impl PaymentRpc {
     pub async fn create_pool(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: createpool");
 
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
+
         let state_machine = self.get_state_machine()?;
         let pool_engine = state_machine.pool_engine().ok_or_else(|| {
             PaymentError::ProcessingError("Pool engine not available".to_string())
@@ -482,16 +517,25 @@ impl PaymentRpc {
 
         let mut initial_participants = Vec::new();
         for p in participants_array {
-            let participant_id = p[0]
+            let p_arr = p.as_array().ok_or_else(|| {
+                PaymentError::ProcessingError("Each participant must be an array".to_string())
+            })?;
+            if p_arr.len() < 3 {
+                return Err(PaymentError::ProcessingError(
+                    "Each participant must have [participant_id, contribution, script_pubkey]"
+                        .to_string(),
+                ));
+            }
+            let participant_id = p_arr[0]
                 .as_str()
                 .ok_or_else(|| {
                     PaymentError::ProcessingError("participant_id required".to_string())
                 })?
                 .to_string();
-            let contribution = p[1].as_u64().ok_or_else(|| {
+            let contribution = p_arr[1].as_u64().ok_or_else(|| {
                 PaymentError::ProcessingError("contribution required".to_string())
             })?;
-            let script_hex = p[2].as_str().ok_or_else(|| {
+            let script_hex = p_arr[2].as_str().ok_or_else(|| {
                 PaymentError::ProcessingError("script_pubkey required".to_string())
             })?;
             let script = hex::decode(script_hex).map_err(|e| {
@@ -529,6 +573,12 @@ impl PaymentRpc {
     #[cfg(feature = "ctv")]
     pub async fn join_pool(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: joinpool");
+
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
 
         let state_machine = self.get_state_machine()?;
         let pool_engine = state_machine.pool_engine().ok_or_else(|| {
@@ -580,6 +630,12 @@ impl PaymentRpc {
     pub async fn distribute_pool(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: distributepool");
 
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
+
         let state_machine = self.get_state_machine()?;
         let pool_engine = state_machine.pool_engine().ok_or_else(|| {
             PaymentError::ProcessingError("Pool engine not available".to_string())
@@ -596,13 +652,21 @@ impl PaymentRpc {
 
         let mut distribution = Vec::new();
         for d in distribution_array {
-            let participant_id = d[0]
+            let d_arr = d.as_array().ok_or_else(|| {
+                PaymentError::ProcessingError("Each distribution entry must be an array".to_string())
+            })?;
+            if d_arr.len() < 2 {
+                return Err(PaymentError::ProcessingError(
+                    "Each distribution entry must have [participant_id, amount]".to_string(),
+                ));
+            }
+            let participant_id = d_arr[0]
                 .as_str()
                 .ok_or_else(|| {
                     PaymentError::ProcessingError("participant_id required".to_string())
                 })?
                 .to_string();
-            let amount = d[1]
+            let amount = d_arr[1]
                 .as_u64()
                 .ok_or_else(|| PaymentError::ProcessingError("amount required".to_string()))?;
             distribution.push((participant_id, amount));
@@ -633,6 +697,12 @@ impl PaymentRpc {
     #[cfg(feature = "ctv")]
     pub async fn get_pool_state(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: getpoolstate");
+
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
 
         let state_machine = self.get_state_machine()?;
         let pool_engine = state_machine.pool_engine().ok_or_else(|| {
@@ -668,6 +738,12 @@ impl PaymentRpc {
     pub async fn create_batch(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: createbatch");
 
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
+
         let state_machine = self.get_state_machine()?;
         let congestion_manager = state_machine.congestion_manager().ok_or_else(|| {
             PaymentError::ProcessingError("Congestion manager not available".to_string())
@@ -701,6 +777,12 @@ impl PaymentRpc {
     #[cfg(feature = "ctv")]
     pub async fn add_to_batch(&self, params: &Value) -> Result<Value, PaymentError> {
         debug!("RPC: addtobatch");
+
+        if !params.is_object() {
+            return Err(PaymentError::ProcessingError(
+                "Params must be a JSON object".to_string(),
+            ));
+        }
 
         let state_machine = self.get_state_machine()?;
         let congestion_manager = state_machine.congestion_manager().ok_or_else(|| {
@@ -753,10 +835,7 @@ impl PaymentRpc {
             tx_id,
             outputs,
             priority,
-            created_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            created_at: current_timestamp(),
             deadline,
         };
 

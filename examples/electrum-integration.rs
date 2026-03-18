@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     // Network configuration
     config.protocol_version = Some("testnet3".to_string()); // Use "bitcoin-v1" for mainnet
     config.listen_addr = Some("127.0.0.1:18333".parse().unwrap()); // Testnet P2P port
-    config.max_peers = Some(8);
+    config.max_outbound_peers = Some(8);
 
     // RPC configuration
     // Note: RPC port is set via command line (--rpc-port) or defaults

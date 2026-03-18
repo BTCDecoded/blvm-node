@@ -70,10 +70,10 @@ impl LocalCache {
         }
 
         let contents = std::fs::read_to_string(&cache_file)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to read cache file: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to read cache file", e))?;
 
         let cache: LocalCache = serde_json::from_str(&contents)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to parse cache file: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to parse cache file", e))?;
 
         Ok(cache)
     }
@@ -84,15 +84,15 @@ impl LocalCache {
 
         // Create cache directory if it doesn't exist
         std::fs::create_dir_all(cache_dir).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to create cache directory: {e}"))
+            ModuleError::op_err("Failed to create cache directory", e)
         })?;
 
         let cache_file = cache_dir.join("registry_cache.json");
         let contents = serde_json::to_string_pretty(self)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to serialize cache: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to serialize cache", e))?;
 
         std::fs::write(&cache_file, contents)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to write cache file: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to write cache file", e))?;
 
         Ok(())
     }
@@ -116,10 +116,7 @@ impl LocalCache {
     pub fn is_valid(&self, name: &str) -> bool {
         if let Some(cached) = self.modules.get(name) {
             if let Some(expires_at) = cached.expires_at {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                let now = crate::utils::current_timestamp();
                 return now < expires_at;
             }
             return true;
@@ -134,10 +131,7 @@ impl LocalCache {
 
     /// Clear expired entries
     pub fn clear_expired(&mut self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = crate::utils::current_timestamp();
 
         self.modules.retain(|_, cached| {
             if let Some(expires_at) = cached.expires_at {
@@ -150,10 +144,7 @@ impl LocalCache {
 
     /// Update last sync timestamp
     pub fn update_sync_time(&mut self) {
-        self.last_sync = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.last_sync = crate::utils::current_timestamp();
     }
 
     /// Get last sync timestamp

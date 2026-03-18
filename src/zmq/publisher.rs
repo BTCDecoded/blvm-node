@@ -14,7 +14,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "zmq")]
-use zmq::{Context as ZmqContext, Socket, PUB};
+use zeromq::{Context as ZmqContext, Socket, PUB};
 
 /// ZMQ notification publisher
 ///
@@ -114,7 +114,7 @@ impl ZmqPublisher {
     /// Message format: [topic: "hashblock", block_hash: 32 bytes]
     pub async fn publish_hashblock(&self, block_hash: &Hash) -> Result<()> {
         if let Some(ref socket) = self.hashblock_socket {
-            socket.send("hashblock", zmq::SNDMORE)?;
+            socket.send("hashblock", zeromq::SNDMORE)?;
             socket.send(block_hash.as_slice(), 0)?;
             debug!("Published hashblock notification: {:?}", block_hash);
         }
@@ -126,7 +126,7 @@ impl ZmqPublisher {
     /// Message format: [topic: "hashtx", tx_hash: 32 bytes]
     pub async fn publish_hashtx(&self, tx_hash: &Hash) -> Result<()> {
         if let Some(ref socket) = self.hashtx_socket {
-            socket.send("hashtx", zmq::SNDMORE)?;
+            socket.send("hashtx", zeromq::SNDMORE)?;
             socket.send(tx_hash.as_slice(), 0)?;
             debug!("Published hashtx notification: {:?}", tx_hash);
         }
@@ -142,7 +142,7 @@ impl ZmqPublisher {
             // Note: For full compatibility, this should use Bitcoin P2P wire format
             // For now, using bincode serialization (can be enhanced later)
             let block_data = bincode::serialize(block)?;
-            socket.send("rawblock", zmq::SNDMORE)?;
+            socket.send("rawblock", zeromq::SNDMORE)?;
             socket.send(&block_data, 0)?;
             debug!(
                 "Published rawblock notification: {} bytes",
@@ -161,7 +161,7 @@ impl ZmqPublisher {
             // Note: For full compatibility, this should use Bitcoin P2P wire format
             // For now, using bincode serialization (can be enhanced later)
             let tx_data = bincode::serialize(tx)?;
-            socket.send("rawtx", zmq::SNDMORE)?;
+            socket.send("rawtx", zeromq::SNDMORE)?;
             socket.send(&tx_data, 0)?;
             debug!("Published rawtx notification: {} bytes", tx_data.len());
         }
@@ -190,7 +190,7 @@ impl ZmqPublisher {
             data.push(if is_mempool_entry { 0x01 } else { 0x02 });
             data.extend_from_slice(tx_hash.as_slice());
 
-            socket.send("sequence", zmq::SNDMORE)?;
+            socket.send("sequence", zeromq::SNDMORE)?;
             socket.send(&data, 0)?;
             debug!(
                 "Published sequence notification: seq={}, tx={:?}, entry={}",

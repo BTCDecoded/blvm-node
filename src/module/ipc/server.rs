@@ -2,54 +2,107 @@
 //!
 //! Server-side IPC implementation that the node uses to communicate with modules.
 //! Handles incoming connections from module processes.
+//! Unix: Unix domain sockets. Windows: named pipes.
 
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::{debug, error, info, warn};
 
+use async_trait::async_trait;
+
 use crate::module::api::events::EventManager;
 use crate::module::api::hub::ModuleApiHub;
 use crate::module::ipc::protocol::{
-    ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
+    CliSpec, InvocationMessage, InvocationResultMessage, InvocationResultPayload,
+    InvocationType, ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
-use crate::module::traits::{EventType, ModuleError, NodeAPI};
+use crate::module::traits::{module_error_msg, EventType, ModuleError, NodeAPI};
+use tokio::sync::oneshot;
+
+/// Async invoker for in-process WASM modules. Used when a module has no IPC connection.
+#[cfg(feature = "wasm-modules")]
+#[async_trait]
+pub trait WasmInvoker: Send + Sync {
+    async fn invoke_cli(
+        &self,
+        module_name: &str,
+        subcommand: &str,
+        args: Vec<String>,
+    ) -> Result<InvocationResultPayload, ModuleError>;
+
+    async fn invoke_rpc(
+        &self,
+        module_name: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ModuleError>;
+}
 
 /// IPC server that handles module connections
 pub struct ModuleIpcServer {
-    /// Socket path where server listens
+    /// Socket/pipe path where server listens
     socket_path: PathBuf,
-    /// Active connections from modules
-    connections: HashMap<String, ModuleConnection>,
+    /// Connection count (for fallback module IDs)
+    connection_count: std::sync::atomic::AtomicUsize,
     /// Event manager for publishing events
     event_manager: Option<Arc<crate::module::api::events::EventManager>>,
     /// API hub for request routing
     api_hub: Option<Arc<tokio::sync::Mutex<ModuleApiHub>>>,
     /// RPC request channels (module_id -> channel) for RPC endpoint registration
+    /// Channel: (correlation_id, method, params, response_tx)
     rpc_channels: Arc<
         tokio::sync::RwLock<
             HashMap<
                 String,
                 mpsc::UnboundedSender<(
                     u64,
+                    String,
                     serde_json::Value,
                     mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
                 )>,
             >,
         >,
     >,
+    /// CLI specs (module_id -> spec) registered by modules on connect
+    cli_registry: Arc<tokio::sync::RwLock<HashMap<String, CliSpec>>>,
+    /// Outgoing channel per module (for invoke_cli; module_id -> tx)
+    outgoing_tx_by_module: Arc<tokio::sync::RwLock<HashMap<String, mpsc::UnboundedSender<bytes::Bytes>>>>,
+    /// Pending CLI/RPC invocations (correlation_id -> response sender)
+    pending_invocations: Arc<
+        tokio::sync::Mutex<
+            HashMap<u64, oneshot::Sender<InvocationResultMessage>>,
+        >,
+    >,
+    /// Pending RPC responses from IpcRpcHandler (correlation_id -> response sender)
+    rpc_pending: Arc<
+        tokio::sync::Mutex<
+            HashMap<
+                u64,
+                mpsc::UnboundedSender<
+                    Result<serde_json::Value, crate::rpc::errors::RpcError>,
+                >,
+            >,
+        >,
+    >,
+    /// Next correlation ID for invocations
+    next_invocation_id: Arc<AtomicU64>,
+    /// In-process WASM invoker (when module has no IPC connection)
+    #[cfg(feature = "wasm-modules")]
+    wasm_invoker: Option<Arc<dyn WasmInvoker>>,
 }
 
-/// Active connection to a module
-struct ModuleConnection {
+/// Active connection to a module (generic over stream read half)
+struct ModuleConnection<R: tokio::io::AsyncRead> {
     /// Module ID
     module_id: String,
     /// Framed reader for receiving messages
-    reader: FramedRead<tokio::io::ReadHalf<UnixStream>, LengthDelimitedCodec>,
+    reader: FramedRead<R, LengthDelimitedCodec>,
     /// Channel for sending outgoing messages (responses and events)
     outgoing_tx: Option<mpsc::UnboundedSender<bytes::Bytes>>,
     /// Event subscriptions for this module
@@ -59,9 +112,11 @@ struct ModuleConnection {
     /// Handle to the unified writer task
     writer_task_handle: Option<tokio::task::JoinHandle<()>>,
     /// Channel for RPC requests to this module (for module RPC endpoints)
+    /// (correlation_id, method, params, response_tx)
     rpc_request_tx: Option<
         mpsc::UnboundedSender<(
             u64,
+            String,
             serde_json::Value,
             mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
         )>,
@@ -73,11 +128,25 @@ impl ModuleIpcServer {
     pub fn new<P: AsRef<Path>>(socket_path: P) -> Self {
         Self {
             socket_path: socket_path.as_ref().to_path_buf(),
-            connections: HashMap::new(),
+            connection_count: std::sync::atomic::AtomicUsize::new(0),
             event_manager: None,
             api_hub: None,
             rpc_channels: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            cli_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            outgoing_tx_by_module: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            pending_invocations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            rpc_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            next_invocation_id: Arc::new(AtomicU64::new(1)),
+            #[cfg(feature = "wasm-modules")]
+            wasm_invoker: None,
         }
+    }
+
+    /// Set the WASM invoker for in-process module dispatch
+    #[cfg(feature = "wasm-modules")]
+    pub fn with_wasm_invoker(mut self, invoker: Arc<dyn WasmInvoker>) -> Self {
+        self.wasm_invoker = Some(invoker);
+        self
     }
 
     /// Get RPC request channel for a module (for RPC endpoint registration)
@@ -87,12 +156,222 @@ impl ModuleIpcServer {
     ) -> Option<
         mpsc::UnboundedSender<(
             u64,
+            String,
             serde_json::Value,
             mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
         )>,
     > {
         let channels = self.rpc_channels.read().await;
         channels.get(module_id).cloned()
+    }
+
+    /// Get all registered CLI specs (module_id -> spec)
+    pub async fn get_cli_specs(&self) -> HashMap<String, CliSpec> {
+        let registry = self.cli_registry.read().await;
+        registry.clone()
+    }
+
+    /// Register CLI spec for a module (e.g. WASM modules that don't connect via IPC).
+    pub async fn register_cli_spec(&self, module_id: String, spec: CliSpec) {
+        let mut registry = self.cli_registry.write().await;
+        registry.insert(module_id, spec);
+    }
+
+    /// Unregister CLI spec when a module is unloaded.
+    pub async fn unregister_cli_spec(&self, module_id: &str) {
+        let mut registry = self.cli_registry.write().await;
+        registry.remove(module_id);
+    }
+
+    /// Unregister CLI spec by module name (for WASM and native; removes any entry with matching spec.name).
+    pub async fn unregister_cli_spec_by_name(&self, module_name: &str) {
+        let mut registry = self.cli_registry.write().await;
+        let to_remove: Vec<String> = registry
+            .iter()
+            .filter(|(_, spec)| spec.name == module_name)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in to_remove {
+            registry.remove(&id);
+        }
+    }
+
+    /// Invoke a module CLI subcommand (node → module)
+    ///
+    /// Returns the invocation result or an error if the module is not found or does not respond.
+    /// Tries IPC first for native modules; falls back to in-process WASM if configured.
+    pub async fn invoke_cli(
+        &self,
+        module_name: &str,
+        subcommand: &str,
+        args: Vec<String>,
+    ) -> Result<InvocationResultPayload, ModuleError> {
+        // Try IPC path: find module_id by CLI spec name and get outgoing channel
+        let maybe_ipc = {
+            let registry = self.cli_registry.read().await;
+            let module_id = registry
+                .iter()
+                .find(|(_, spec)| spec.name == module_name)
+                .map(|(id, _)| id.clone());
+            let by_module = self.outgoing_tx_by_module.read().await;
+            module_id.and_then(|id| by_module.get(&id).cloned())
+        };
+
+        if let Some(outgoing_tx) = maybe_ipc {
+            let correlation_id = self.next_invocation_id.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = oneshot::channel();
+
+            {
+                let mut pending = self.pending_invocations.lock().await;
+                pending.insert(correlation_id, tx);
+            }
+
+            let invocation = InvocationMessage {
+                correlation_id,
+                invocation_type: InvocationType::Cli {
+                    subcommand: subcommand.to_string(),
+                    args,
+                },
+            };
+            let bytes = bincode::serialize(&ModuleMessage::Invocation(invocation))
+                .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+
+            outgoing_tx.send(bytes::Bytes::from(bytes)).map_err(|_| {
+                ModuleError::OperationError(module_error_msg::MODULE_CONNECTION_CLOSED.to_string())
+            })?;
+
+            let result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(60),
+                rx,
+            )
+            .await
+            .map_err(|_| {
+                ModuleError::OperationError(
+                    module_error_msg::MODULE_DID_NOT_RESPOND_CLI_60S.to_string(),
+                )
+            })?
+            .map_err(|_| {
+                ModuleError::OperationError(
+                    module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
+                )
+            })?;
+
+            if !result.success {
+                return Err(ModuleError::Cli(
+                    result.error.unwrap_or_else(|| "Unknown error".to_string()),
+                ));
+            }
+
+            return result.payload.ok_or_else(|| {
+                ModuleError::OperationError(
+                    module_error_msg::MODULE_RETURNED_SUCCESS_BUT_NO_PAYLOAD.to_string(),
+                )
+            });
+        }
+
+        // Fallback: in-process WASM invocation
+        #[cfg(feature = "wasm-modules")]
+        if let Some(ref invoker) = self.wasm_invoker {
+            return invoker.invoke_cli(module_name, subcommand, args).await;
+        }
+
+        Err(ModuleError::OperationError(format!(
+            "No module with CLI name '{}' is loaded",
+            module_name
+        )))
+    }
+
+    /// Invoke a module RPC method (node → module).
+    ///
+    /// Finds module by CLI spec name (same as invoke_cli). Returns the JSON result or an error.
+    /// Tries IPC first for native modules; falls back to in-process WASM if configured.
+    pub async fn invoke_rpc(
+        &self,
+        module_name: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ModuleError> {
+        // Try IPC path
+        let maybe_ipc = {
+            let registry = self.cli_registry.read().await;
+            let module_id = registry
+                .iter()
+                .find(|(_, spec)| spec.name == module_name)
+                .map(|(id, _)| id.clone());
+            let by_module = self.outgoing_tx_by_module.read().await;
+            module_id.and_then(|id| by_module.get(&id).cloned())
+        };
+
+        if let Some(outgoing_tx) = maybe_ipc {
+            let correlation_id = self.next_invocation_id.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = oneshot::channel();
+
+            {
+                let mut pending = self.pending_invocations.lock().await;
+                pending.insert(correlation_id, tx);
+            }
+
+            let invocation = InvocationMessage {
+                correlation_id,
+                invocation_type: InvocationType::Rpc {
+                    method: method.to_string(),
+                    params,
+                },
+            };
+            let bytes = bincode::serialize(&ModuleMessage::Invocation(invocation))
+                .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+
+            outgoing_tx.send(bytes::Bytes::from(bytes)).map_err(|_| {
+                ModuleError::OperationError(module_error_msg::MODULE_CONNECTION_CLOSED.to_string())
+            })?;
+
+            let result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(60),
+                rx,
+            )
+            .await
+            .map_err(|_| {
+                ModuleError::OperationError(
+                    module_error_msg::MODULE_DID_NOT_RESPOND_RPC_60S.to_string(),
+                )
+            })?
+            .map_err(|_| {
+                ModuleError::OperationError(
+                    module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
+                )
+            })?;
+
+            if !result.success {
+                return Err(ModuleError::OperationError(
+                    result.error.unwrap_or_else(|| "Unknown error".to_string()),
+                ));
+            }
+
+            match result.payload {
+                Some(InvocationResultPayload::Rpc(value)) => return Ok(value),
+                Some(_) => {
+                    return Err(ModuleError::OperationError(
+                        module_error_msg::MODULE_RETURNED_WRONG_PAYLOAD_TYPE_RPC.to_string(),
+                    ));
+                }
+                None => {
+                    return Err(ModuleError::OperationError(
+                        module_error_msg::MODULE_RETURNED_SUCCESS_BUT_NO_PAYLOAD.to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Fallback: in-process WASM invocation
+        #[cfg(feature = "wasm-modules")]
+        if let Some(ref invoker) = self.wasm_invoker {
+            return invoker.invoke_rpc(module_name, method, params).await;
+        }
+
+        Err(ModuleError::OperationError(format!(
+            "No module with CLI name '{}' is loaded",
+            module_name
+        )))
     }
 
     /// Set event manager for publishing events
@@ -112,61 +391,83 @@ impl ModuleIpcServer {
         &mut self,
         node_api: Arc<A>,
     ) -> Result<(), ModuleError> {
-        // Remove existing socket file if it exists
+        #[cfg(unix)]
+        return self.start_unix(node_api).await;
+        #[cfg(windows)]
+        return self.start_windows(node_api).await;
+    }
+
+    #[cfg(unix)]
+    async fn start_unix<A: NodeAPI + Send + Sync + 'static>(
+        &mut self,
+        node_api: Arc<A>,
+    ) -> Result<(), ModuleError> {
+        use tokio::net::{UnixListener, UnixStream};
+
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)
                 .map_err(|e| ModuleError::IpcError(format!("Failed to remove old socket: {e}")))?;
         }
-
-        // Create parent directory if needed
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 ModuleError::IpcError(format!("Failed to create socket directory: {e}"))
             })?;
         }
-
         let listener = UnixListener::bind(&self.socket_path)
             .map_err(|e| ModuleError::IpcError(format!("Failed to bind socket: {e}")))?;
-
-        // Set restrictive permissions on Unix socket (owner read/write only)
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600); // rw------- owner only
+            let perms = std::fs::Permissions::from_mode(0o600);
             if let Err(e) = std::fs::set_permissions(&self.socket_path, perms) {
-                warn!(
-                    "Failed to set restrictive permissions on IPC socket {:?}: {}. \
-                     Socket may be accessible by other users.",
-                    self.socket_path, e
-                );
-            } else {
-                debug!("Set IPC socket permissions to 600 (owner read/write only)");
+                warn!("Failed to set IPC socket permissions: {}", e);
             }
         }
-
         info!("Module IPC server listening on {:?}", self.socket_path);
-
-        // Accept connections
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     debug!("New module connection");
-                    let node_api_clone = Arc::clone(&node_api);
-                    self.handle_connection(stream, node_api_clone).await?;
+                    self.handle_connection(stream, Arc::clone(&node_api)).await?;
                 }
-                Err(e) => {
-                    error!("Failed to accept module connection: {}", e);
-                }
+                Err(e) => error!("Failed to accept module connection: {}", e),
             }
         }
     }
 
-    /// Handle a new module connection
-    async fn handle_connection<A: NodeAPI + Send + Sync>(
+    #[cfg(windows)]
+    async fn start_windows<A: NodeAPI + Send + Sync + 'static>(
         &mut self,
-        stream: UnixStream,
         node_api: Arc<A>,
     ) -> Result<(), ModuleError> {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe_name = path_to_pipe_name(&self.socket_path);
+        if let Some(parent) = self.socket_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ModuleError::IpcError(format!("Failed to create socket directory: {e}"))
+            })?;
+        }
+        info!("Module IPC server listening on pipe {}", pipe_name);
+        loop {
+            let server = ServerOptions::new()
+                .first_pipe_instance(false)
+                .create(&pipe_name)
+                .map_err(|e| ModuleError::IpcError(format!("Failed to create named pipe: {e}")))?;
+            server
+                .connect()
+                .await
+                .map_err(|e| ModuleError::IpcError(format!("Failed to connect pipe: {e}")))?;
+            debug!("New module connection (named pipe)");
+            self.handle_connection(server, Arc::clone(&node_api)).await?;
+        }
+    }
+
+    /// Handle a new module connection (generic over stream type)
+    async fn handle_connection<S, A>(&mut self, stream: S, node_api: Arc<A>) -> Result<(), ModuleError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        A: NodeAPI + Send + Sync,
+    {
         let (read_half, write_half) = tokio::io::split(stream);
         let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
         let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
@@ -215,12 +516,9 @@ impl ModuleIpcServer {
                         } else {
                             // No handshake - use fallback ID (backward compatibility)
                             warn!("Module did not send handshake, using fallback ID");
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_nanos();
-                            let connection_count = self.connections.len();
-                            format!("module_{connection_count}_{timestamp}")
+                            let timestamp = crate::utils::current_timestamp_nanos();
+                            let count = self.connection_count.fetch_add(1, Ordering::SeqCst);
+                            format!("module_{count}_{timestamp}")
                         }
                     }
                     _ => {
@@ -247,11 +545,12 @@ impl ModuleIpcServer {
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
 
         // Create RPC request channel (for sending RPC requests from node to module)
+        // (correlation_id, method, params, response_tx)
         type RpcResponseSender = mpsc::UnboundedSender<
             std::result::Result<serde_json::Value, crate::rpc::errors::RpcError>,
         >;
-        let (rpc_request_tx, _rpc_request_rx) =
-            mpsc::unbounded_channel::<(u64, serde_json::Value, RpcResponseSender)>();
+        let (rpc_request_tx, mut rpc_request_rx) =
+            mpsc::unbounded_channel::<(u64, String, serde_json::Value, RpcResponseSender)>();
 
         // Create event channel for this module (events from EventManager go here)
         let (event_tx, mut event_rx) = mpsc::channel(100);
@@ -344,6 +643,46 @@ impl ModuleIpcServer {
             // Continue anyway - module can still use other APIs
         }
 
+        // Register for invoke_cli and RPC dispatch (before moving outgoing_tx)
+        {
+            let mut by_module = self.outgoing_tx_by_module.write().await;
+            by_module.insert(module_id.clone(), outgoing_tx.clone());
+        }
+        {
+            let mut channels = self.rpc_channels.write().await;
+            channels.insert(module_id.clone(), rpc_request_tx.clone());
+        }
+
+        // Spawn task to forward RPC requests from IpcRpcHandler to module via Invocation
+        let outgoing_tx_for_rpc = outgoing_tx.clone();
+        let rpc_pending = Arc::clone(&self.rpc_pending);
+        tokio::spawn(async move {
+            while let Some((correlation_id, method, params, response_tx)) =
+                rpc_request_rx.recv().await
+            {
+                rpc_pending
+                    .lock()
+                    .await
+                    .insert(correlation_id, response_tx);
+
+                let invocation = InvocationMessage {
+                    correlation_id,
+                    invocation_type: InvocationType::Rpc {
+                        method,
+                        params,
+                    },
+                };
+                if let Ok(bytes) = bincode::serialize(&ModuleMessage::Invocation(invocation)) {
+                    if outgoing_tx_for_rpc
+                        .send(bytes::Bytes::from(bytes))
+                        .is_err()
+                    {
+                        break; // Connection closed
+                    }
+                }
+            }
+        });
+
         let mut connection = ModuleConnection {
             module_id: module_id.clone(),
             reader,
@@ -379,24 +718,35 @@ impl ModuleIpcServer {
 
         info!("Module {} disconnected", module_id);
 
-        // Clean up connection: abort tasks and unsubscribe from events
-        if let Some(mut conn) = self.connections.remove(&module_id) {
-            // Close outgoing channel (will cause writer task to exit)
-            drop(conn.outgoing_tx);
+        // Clean up: remove from shared maps
+        {
+            let mut by_module = self.outgoing_tx_by_module.write().await;
+            by_module.remove(&module_id);
+        }
+        {
+            let mut channels = self.rpc_channels.write().await;
+            channels.remove(&module_id);
+        }
+        {
+            let mut registry = self.cli_registry.write().await;
+            registry.remove(&module_id);
+        }
 
-            // Abort writer task (which includes event forwarding)
-            if let Some(handle) = conn.writer_task_handle.take() {
-                handle.abort();
-            }
+        // Close outgoing channel (will cause writer task to exit)
+        drop(connection.outgoing_tx);
 
-            // Unsubscribe from event manager
-            if let Some(event_mgr) = &self.event_manager {
-                if let Err(e) = event_mgr.unsubscribe_module(&module_id).await {
-                    warn!(
-                        "Failed to unsubscribe module {} from events: {}",
-                        module_id, e
-                    );
-                }
+        // Abort writer task (which includes event forwarding)
+        if let Some(handle) = connection.writer_task_handle.take() {
+            handle.abort();
+        }
+
+        // Unsubscribe from event manager
+        if let Some(event_mgr) = &self.event_manager {
+            if let Err(e) = event_mgr.unsubscribe_module(&module_id).await {
+                warn!(
+                    "Failed to unsubscribe module {} from events: {}",
+                    module_id, e
+                );
             }
         }
 
@@ -404,10 +754,10 @@ impl ModuleIpcServer {
     }
 
     /// Handle a message from a module
-    async fn handle_message<A: NodeAPI + Send + Sync>(
+    async fn handle_message<R: tokio::io::AsyncRead, A: NodeAPI + Send + Sync>(
         &mut self,
         bytes: &[u8],
-        connection: &mut ModuleConnection,
+        connection: &mut ModuleConnection<R>,
         node_api: Arc<A>,
     ) -> Result<(), ModuleError> {
         let message: ModuleMessage = bincode::deserialize(bytes)
@@ -415,6 +765,27 @@ impl ModuleIpcServer {
 
         match message {
             ModuleMessage::Request(request) => {
+                // Handle RegisterCliSpec: store in registry, respond, don't pass to hub
+                if let RequestPayload::RegisterCliSpec { spec } = &request.payload {
+                    let module_id = connection.module_id.clone();
+                    let mut registry = self.cli_registry.write().await;
+                    registry.insert(module_id.clone(), spec.clone());
+                    debug!("Module {} registered CLI spec: {}", module_id, spec.name);
+                    let response = ResponseMessage::success(
+                        request.correlation_id,
+                        ResponsePayload::Bool(true),
+                    );
+                    let response_message = ModuleMessage::Response(response);
+                    let response_bytes = bincode::serialize(&response_message)
+                        .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+                    if let Some(tx) = &connection.outgoing_tx {
+                        tx.send(bytes::Bytes::from(response_bytes)).map_err(|e| {
+                            ModuleError::IpcError(format!("Failed to send response: {e}"))
+                        })?;
+                    }
+                    return Ok(());
+                }
+
                 // Handle SubscribeEvents specially to register with event manager
                 if let RequestPayload::SubscribeEvents { ref event_types } = request.payload {
                     if let Some(event_mgr) = &self.event_manager {
@@ -468,6 +839,48 @@ impl ModuleIpcServer {
             }
             ModuleMessage::Event(_) => {
                 warn!("Received event from module (unexpected)");
+            }
+            ModuleMessage::InvocationResult(result) => {
+                // Check rpc_pending first (IpcRpcHandler path)
+                {
+                    let mut rpc_pending = self.rpc_pending.lock().await;
+                    if let Some(response_tx) = rpc_pending.remove(&result.correlation_id) {
+                        let response = if result.success {
+                            result
+                                .payload
+                                .and_then(|p| {
+                                    if let InvocationResultPayload::Rpc(v) = p {
+                                        Some(Ok(v))
+                                    } else {
+                                        Some(Err(crate::rpc::errors::RpcError::internal_error(
+                                            "Wrong payload type".to_string(),
+                                        )))
+                                    }
+                                })
+                                .unwrap_or_else(|| {
+                                    Err(crate::rpc::errors::RpcError::internal_error(
+                                        "No RPC payload".to_string(),
+                                    ))
+                                })
+                        } else {
+                            Err(crate::rpc::errors::RpcError::internal_error(
+                                result.error.unwrap_or_else(|| "Unknown error".to_string()),
+                            ))
+                        };
+                        let _ = response_tx.send(response);
+                        return Ok(());
+                    }
+                }
+                // Fallback: pending_invocations (invoke_cli/invoke_rpc path)
+                let mut pending = self.pending_invocations.lock().await;
+                if let Some(tx) = pending.remove(&result.correlation_id) {
+                    let _ = tx.send(result);
+                }
+                return Ok(());
+            }
+            ModuleMessage::Invocation(_) => {
+                warn!("Received Invocation from module (unexpected; node sends to module)");
+                return Ok(());
             }
             ModuleMessage::Log(log_msg) => {
                 // Forward log message to node's logging system
@@ -734,71 +1147,6 @@ impl ModuleIpcServer {
                     ResponsePayload::FileMetadata(metadata),
                 ))
             }
-            // Storage API
-            RequestPayload::StorageOpenTree { name } => {
-                let tree_id = node_api.storage_open_tree(name.clone()).await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::StorageTreeId(tree_id),
-                ))
-            }
-            RequestPayload::StorageInsert {
-                tree_id,
-                key,
-                value,
-            } => {
-                node_api
-                    .storage_insert(tree_id.clone(), key.clone(), value.clone())
-                    .await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::Bool(true),
-                ))
-            }
-            RequestPayload::StorageGet { tree_id, key } => {
-                let value = node_api.storage_get(tree_id.clone(), key.clone()).await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::StorageValue(value),
-                ))
-            }
-            RequestPayload::StorageRemove { tree_id, key } => {
-                node_api
-                    .storage_remove(tree_id.clone(), key.clone())
-                    .await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::Bool(true),
-                ))
-            }
-            RequestPayload::StorageContainsKey { tree_id, key } => {
-                let exists = node_api
-                    .storage_contains_key(tree_id.clone(), key.clone())
-                    .await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::Bool(exists),
-                ))
-            }
-            RequestPayload::StorageIter { tree_id } => {
-                let pairs = node_api.storage_iter(tree_id.clone()).await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::StorageKeyValuePairs(pairs),
-                ))
-            }
-            RequestPayload::StorageTransaction {
-                tree_id,
-                operations,
-            } => {
-                node_api
-                    .storage_transaction(tree_id.clone(), operations.clone())
-                    .await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::Bool(true),
-                ))
-            }
             // Module RPC Endpoint Registration
             RequestPayload::RegisterRpcEndpoint {
                 method,
@@ -828,22 +1176,21 @@ impl ModuleIpcServer {
                 // The module would need to send a "timer_fire" request when the timer should fire
                 // For now, return an error indicating this needs a callback mechanism
                 Err(ModuleError::OperationError(
-                    "Timer registration requires callback which cannot be serialized over IPC. Use module-side timer management.".to_string()
+                    module_error_msg::TIMER_REGISTRATION_REQUIRES_CALLBACK_IPC.to_string()
                 ))
             }
             RequestPayload::CancelTimer { timer_id: _ } => {
                 // Note: Timers registered via IPC would need to be tracked differently
                 // For now, return an error
                 Err(ModuleError::OperationError(
-                    "Timer cancellation not supported over IPC. Use module-side timer management."
-                        .to_string(),
+                    module_error_msg::TIMER_CANCELLATION_NOT_SUPPORTED_IPC.to_string(),
                 ))
             }
             RequestPayload::ScheduleTask { delay_seconds: _ } => {
                 // Note: Task callbacks cannot be serialized over IPC
                 // Similar to timers, this needs a different approach
                 Err(ModuleError::OperationError(
-                    "Task scheduling requires callback which cannot be serialized over IPC. Use module-side task management.".to_string()
+                    module_error_msg::TASK_SCHEDULING_REQUIRES_CALLBACK_IPC.to_string()
                 ))
             }
             // Metrics and Telemetry
@@ -917,4 +1264,15 @@ impl ModuleIpcServer {
             )),
         }
     }
+}
+
+/// Derive Windows named pipe name from socket path (e.g. "hello.sock" -> "\\.\pipe\blvm-hello")
+#[cfg(windows)]
+fn path_to_pipe_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("blvm-module");
+    let safe = stem.replace(|c: char| !c.is_alphanumeric(), "-");
+    format!(r"\\.\pipe\blvm-{}", safe)
 }

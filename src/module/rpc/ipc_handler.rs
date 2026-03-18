@@ -15,8 +15,13 @@ pub struct IpcRpcHandler {
     module_id: String,
     /// Method name
     method: String,
-    /// Channel to send requests to module
-    request_tx: mpsc::UnboundedSender<(u64, Value, mpsc::UnboundedSender<Result<Value, RpcError>>)>,
+    /// Channel to send requests to module (correlation_id, method, params, response_tx)
+    request_tx: mpsc::UnboundedSender<(
+        u64,
+        String,
+        Value,
+        mpsc::UnboundedSender<Result<Value, RpcError>>,
+    )>,
     /// Next correlation ID
     next_correlation_id: Arc<tokio::sync::Mutex<u64>>,
 }
@@ -28,6 +33,7 @@ impl IpcRpcHandler {
         method: String,
         request_tx: mpsc::UnboundedSender<(
             u64,
+            String,
             Value,
             mpsc::UnboundedSender<Result<Value, RpcError>>,
         )>,
@@ -57,7 +63,7 @@ impl ModuleRpcHandler for IpcRpcHandler {
 
         // Send request to module
         self.request_tx
-            .send((correlation_id, params, response_tx))
+            .send((correlation_id, self.method.clone(), params, response_tx))
             .map_err(|_| {
                 RpcError::internal_error("Failed to send RPC request to module".to_string())
             })?;

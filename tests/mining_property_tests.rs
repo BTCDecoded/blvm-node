@@ -23,7 +23,7 @@ fn transaction_strategy() -> BoxedStrategy<Transaction> {
         prop::collection::vec(
             (
                 any::<[u8; 32]>(),                          // prevout hash
-                any::<u64>(),                               // prevout index
+                any::<u32>(),                               // prevout index
                 prop::collection::vec(any::<u8>(), 0..100), // script_sig
                 any::<u64>(),                               // sequence
             ),
@@ -43,7 +43,10 @@ fn transaction_strategy() -> BoxedStrategy<Transaction> {
             inputs: inputs
                 .into_iter()
                 .map(|(hash, index, script_sig, sequence)| TransactionInput {
-                    prevout: OutPoint { hash, index },
+                    prevout: OutPoint {
+                        hash: hash.into(),
+                        index,
+                    },
                     script_sig,
                     sequence,
                 })
@@ -102,8 +105,8 @@ proptest! {
         let inputs: Vec<TransactionInput> = (0..inputs_count)
             .map(|i| TransactionInput {
                 prevout: OutPoint {
-                    hash: [i as u8; 32],
-                    index: i as u64,
+                    hash: [i as u8; 32].into(),
+                    index: i as u32,
                 },
                 script_sig: vec![0x51; i % 100], // Variable length scripts
                 sequence: 0xffffffff,

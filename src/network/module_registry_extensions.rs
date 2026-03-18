@@ -41,7 +41,7 @@ pub async fn handle_get_module(
     payment_state_machine: Option<Arc<PaymentStateMachine>>,
     encryption: Option<std::sync::Arc<crate::module::encryption::ModuleEncryption>>,
     modules_dir: Option<std::path::PathBuf>,
-    _node_script: Option<Vec<u8>>, // Node's payment address (10% of payment) - placeholder for future use
+    _node_script: Option<Vec<u8>>, // Reserved: node payment address for 10% payment split when implemented
 ) -> Result<ModuleMessage> {
     let request_id = message.request_id; // Store for response
     let registry = match registry {

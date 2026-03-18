@@ -7,4 +7,5 @@ pub mod test_utils;
 pub mod lifecycle_tests;
 pub mod api_tests;
 pub mod security_tests;
+pub mod system_integration_tests;
 

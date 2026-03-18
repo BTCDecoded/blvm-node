@@ -118,13 +118,6 @@ impl NodeApiIpc {
             RequestPayload::ListDirectory { .. } => MessageType::ListDirectory,
             RequestPayload::CreateDirectory { .. } => MessageType::CreateDirectory,
             RequestPayload::GetFileMetadata { .. } => MessageType::GetFileMetadata,
-            RequestPayload::StorageOpenTree { .. } => MessageType::StorageOpenTree,
-            RequestPayload::StorageInsert { .. } => MessageType::StorageInsert,
-            RequestPayload::StorageGet { .. } => MessageType::StorageGet,
-            RequestPayload::StorageRemove { .. } => MessageType::StorageRemove,
-            RequestPayload::StorageContainsKey { .. } => MessageType::StorageContainsKey,
-            RequestPayload::StorageIter { .. } => MessageType::StorageIter,
-            RequestPayload::StorageTransaction { .. } => MessageType::StorageTransaction,
             RequestPayload::SubscribeEvents { .. } => MessageType::SubscribeEvents,
             RequestPayload::Handshake { .. } => MessageType::Handshake,
             RequestPayload::DiscoverModules => MessageType::DiscoverModules,
@@ -626,121 +619,6 @@ impl NodeAPI for NodeApiIpc {
             RequestPayload::GetFileMetadata { path },
             |payload| match payload {
                 ResponsePayload::FileMetadata(metadata) => Ok(metadata),
-                _ => Err(ModuleError::OperationError(
-                    "Unexpected response type".to_string(),
-                )),
-            },
-        )
-        .await
-    }
-
-    async fn storage_open_tree(&self, name: String) -> Result<String, ModuleError> {
-        self.request(
-            RequestPayload::StorageOpenTree { name },
-            |payload| match payload {
-                ResponsePayload::StorageTreeId(tree_id) => Ok(tree_id),
-                _ => Err(ModuleError::OperationError(
-                    "Unexpected response type".to_string(),
-                )),
-            },
-        )
-        .await
-    }
-
-    async fn storage_insert(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> Result<(), ModuleError> {
-        self.request(
-            RequestPayload::StorageInsert {
-                tree_id,
-                key,
-                value,
-            },
-            |payload| match payload {
-                ResponsePayload::Bool(_) | ResponsePayload::SubscribeAck => Ok(()),
-                _ => Err(ModuleError::OperationError(
-                    "Unexpected response type".to_string(),
-                )),
-            },
-        )
-        .await
-    }
-
-    async fn storage_get(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, ModuleError> {
-        self.request(
-            RequestPayload::StorageGet { tree_id, key },
-            |payload| match payload {
-                ResponsePayload::StorageValue(data) => Ok(data),
-                _ => Err(ModuleError::OperationError(
-                    "Unexpected response type".to_string(),
-                )),
-            },
-        )
-        .await
-    }
-
-    async fn storage_remove(&self, tree_id: String, key: Vec<u8>) -> Result<(), ModuleError> {
-        self.request(
-            RequestPayload::StorageRemove { tree_id, key },
-            |payload| match payload {
-                ResponsePayload::Bool(_) | ResponsePayload::SubscribeAck => Ok(()),
-                _ => Err(ModuleError::OperationError(
-                    "Unexpected response type".to_string(),
-                )),
-            },
-        )
-        .await
-    }
-
-    async fn storage_contains_key(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-    ) -> Result<bool, ModuleError> {
-        self.request(
-            RequestPayload::StorageContainsKey { tree_id, key },
-            |payload| match payload {
-                ResponsePayload::Bool(b) => Ok(b),
-                _ => Err(ModuleError::OperationError(
-                    "Unexpected response type".to_string(),
-                )),
-            },
-        )
-        .await
-    }
-
-    async fn storage_iter(&self, tree_id: String) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ModuleError> {
-        self.request(
-            RequestPayload::StorageIter { tree_id },
-            |payload| match payload {
-                ResponsePayload::StorageKeyValuePairs(pairs) => Ok(pairs),
-                _ => Err(ModuleError::OperationError(
-                    "Unexpected response type".to_string(),
-                )),
-            },
-        )
-        .await
-    }
-
-    async fn storage_transaction(
-        &self,
-        tree_id: String,
-        operations: Vec<crate::module::ipc::protocol::StorageOperation>,
-    ) -> Result<(), ModuleError> {
-        self.request(
-            RequestPayload::StorageTransaction {
-                tree_id,
-                operations,
-            },
-            |payload| match payload {
-                ResponsePayload::Bool(_) | ResponsePayload::SubscribeAck => Ok(()),
                 _ => Err(ModuleError::OperationError(
                     "Unexpected response type".to_string(),
                 )),

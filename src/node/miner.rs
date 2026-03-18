@@ -327,7 +327,7 @@ impl MiningEngine {
 
                 // No valid nonce found in this range
                 let mut block = template_clone;
-                block.header.nonce = start_nonce; // Use first nonce as placeholder
+                block.header.nonce = start_nonce; // Last nonce tried (failure result)
                 let _ = tx.send(Ok((block, MiningResult::Failure)));
             });
 
@@ -656,10 +656,34 @@ impl MiningCoordinator {
             height, subsidy, total_fees, coinbase_value
         );
 
-        // 4. Create coinbase transaction
+        // 4. Create coinbase transaction (BIP34 height in scriptSig; BIP54: lock_time = height - 13, sequence != 0xffffffff)
+        let lock_time = height.saturating_sub(13);
+        let h = height.min(u64::from(u32::MAX));
+        let mut height_bytes = Vec::new();
+        let mut x = h;
+        while x > 0 {
+            height_bytes.push((x & 0xff) as u8);
+            x >>= 8;
+        }
+        if height_bytes.is_empty() {
+            height_bytes.push(0);
+        }
+        let mut script_sig = vec![height_bytes.len() as u8];
+        script_sig.extend(height_bytes);
+        if script_sig.len() < 2 {
+            script_sig = vec![0x01, 0x00];
+        }
         Ok(Transaction {
             version: 1,
-            inputs: crate::tx_inputs![],
+            inputs: vec![blvm_protocol::TransactionInput {
+                prevout: blvm_protocol::OutPoint {
+                    hash: [0u8; 32],
+                    index: 0xffffffff,
+                },
+                script_sig,
+                sequence: 0xfffffffe,
+            }]
+            .into(),
             outputs: crate::tx_outputs![blvm_protocol::TransactionOutput {
                 value: coinbase_value as i64,
                 script_pubkey: vec![
@@ -672,7 +696,7 @@ impl MiningCoordinator {
                     blvm_consensus::opcodes::OP_CHECKSIG,
                 ],
             }],
-            lock_time: 0,
+            lock_time,
         })
     }
 

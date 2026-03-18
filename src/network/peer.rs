@@ -4,10 +4,11 @@
 
 use anyhow::Result;
 use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::network::protocol::cmd;
+use crate::utils::current_timestamp;
 use super::transport::{TransportAddr, TransportConnection};
 use super::NetworkMessage;
 
@@ -182,10 +183,7 @@ impl Peer {
             }
         });
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
 
         Self {
             addr,
@@ -230,7 +228,12 @@ impl Peer {
         addr: SocketAddr,
         message_tx: mpsc::UnboundedSender<NetworkMessage>,
     ) -> Self {
-        Self::from_tcp_stream_split(stream, addr, message_tx)
+        Self::from_tcp_stream_split(
+            stream,
+            addr,
+            message_tx,
+            super::protocol::MAX_PROTOCOL_MESSAGE_LENGTH,
+        )
     }
 
     /// Create a new peer from a TCP stream with properly split reader/writer
@@ -239,6 +242,7 @@ impl Peer {
         stream: tokio::net::TcpStream,
         addr: SocketAddr,
         message_tx: mpsc::UnboundedSender<NetworkMessage>,
+        max_message_length: usize,
     ) -> Self {
         use super::transport::TransportAddr;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -284,8 +288,9 @@ impl Peer {
                     u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
 
                 // Read payload if any
+                let max_payload = max_message_length.saturating_sub(24);
                 let data = if payload_len > 0 {
-                    if payload_len > 32 * 1024 * 1024 - 24 {
+                    if payload_len > max_payload {
                         warn!(
                             "Peer {:?} sent oversized message: {} bytes",
                             transport_addr_clone, payload_len
@@ -360,10 +365,7 @@ impl Peer {
             }
         });
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
 
         Self {
             addr,
@@ -447,17 +449,17 @@ impl Peer {
         debug!("Received command: {}", command);
 
         match command.as_ref() {
-            "block" => {
+            c if c == cmd::BLOCK => {
                 let _ = self
                     .message_tx
                     .send(NetworkMessage::BlockReceived(data.to_vec()));
             }
-            "tx" => {
+            c if c == cmd::TX => {
                 let _ = self
                     .message_tx
                     .send(NetworkMessage::TransactionReceived(data.to_vec()));
             }
-            "inv" => {
+            c if c == cmd::INV => {
                 let _ = self
                     .message_tx
                     .send(NetworkMessage::InventoryReceived(data.to_vec()));
@@ -500,19 +502,13 @@ impl Peer {
     /// Record a send operation
     pub fn record_send(&mut self, bytes: usize) {
         self.bytes_sent += bytes as u64;
-        self.last_send = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.last_send = current_timestamp();
     }
 
     /// Record a receive operation
     pub fn record_receive(&mut self, bytes: usize) {
         self.bytes_recv += bytes as u64;
-        self.last_recv = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.last_recv = current_timestamp();
     }
 
     /// Get last send time
@@ -598,12 +594,7 @@ impl Peer {
     /// Record that a ping was sent
     pub fn record_ping_sent(&mut self, nonce: u64) {
         self.pending_ping_nonce = Some(nonce);
-        self.ping_sent_time = Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
+        self.ping_sent_time = Some(current_timestamp());
     }
 
     /// Record that a pong was received (clears pending ping)
@@ -622,10 +613,7 @@ impl Peer {
     pub fn is_ping_timed_out(&self) -> bool {
         match (self.pending_ping_nonce, self.ping_sent_time) {
             (Some(_), Some(sent_time)) => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                let now = current_timestamp();
                 now.saturating_sub(sent_time) > self.ping_timeout_seconds
             }
             _ => false,
@@ -690,12 +678,7 @@ impl Peer {
 
     /// Record a block announcement (for outbound peer eviction)
     pub fn record_block_announcement(&mut self) {
-        self.last_block_announcement = Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
+        self.last_block_announcement = Some(current_timestamp());
     }
 
     /// Get timestamp of last block announcement

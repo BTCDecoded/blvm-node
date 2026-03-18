@@ -19,12 +19,12 @@ use std::sync::{OnceLock, RwLock};
 /// Caches serialized UTXO bytes to avoid re-serializing the same UTXO.
 /// Cache key is the OutPoint hash.
 #[cfg(feature = "production")]
-static SERIALIZATION_CACHE: OnceLock<RwLock<lru::LruCache<[u8; 32], Vec<u8>>>> = OnceLock::new();
+static SERIALIZATION_CACHE: OnceLock<RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>>> = OnceLock::new();
 
 #[cfg(feature = "production")]
-fn get_serialization_cache() -> &'static RwLock<lru::LruCache<[u8; 32], Vec<u8>>> {
+fn get_serialization_cache() -> &'static RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>> {
     SERIALIZATION_CACHE.get_or_init(|| {
-        use lru::LruCache;
+        use blvm_protocol::lru::LruCache;
         use std::num::NonZeroUsize;
         // Cache 20,000 serialized UTXOs (balance between memory and hit rate)
         // Each entry is ~100-200 bytes average, so ~2-4MB total
@@ -92,15 +92,16 @@ impl UtxoStore {
         self.utxos.clear()?;
 
         // Optimization: For large UTXO sets, parallelize serialization
-        #[cfg(all(feature = "production", feature = "rayon"))]
+        #[cfg(feature = "production")]
         {
-            use rayon::prelude::*;
+            use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+            use blvm_protocol::rayon::prelude::*;
 
             // Collect all UTXOs into vector for parallel processing
             let utxos: Vec<_> = utxo_set.iter().collect();
 
             // Parallelize serialization (but not database writes - they must be sequential)
-            let serialized_utxos: Vec<_> = utxos
+            let serialized_utxos: Vec<(Vec<u8>, Vec<u8>)> = utxos
                 .par_iter()
                 .map(|(outpoint, utxo)| {
                     let key = self.outpoint_key(outpoint);
@@ -133,7 +134,7 @@ impl UtxoStore {
 
                     Ok((key, value))
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<(Vec<u8>, Vec<u8>)>>>()?;
 
             // Sequential database writes (database operations must be sequential)
             for (key, value) in serialized_utxos {
@@ -153,7 +154,7 @@ impl UtxoStore {
             }
         }
 
-        #[cfg(not(all(feature = "production", feature = "rayon")))]
+        #[cfg(not(feature = "production"))]
         {
             // Store each UTXO sequentially
             for (outpoint, utxo) in utxo_set {
@@ -425,7 +426,7 @@ pub struct CachedUtxoStore {
     /// Underlying persistent store
     inner: UtxoStore,
     /// Hot UTXO cache (LRU eviction)
-    cache: std::sync::RwLock<lru::LruCache<OutPoint, UTXO>>,
+    cache: std::sync::RwLock<blvm_protocol::lru::LruCache<OutPoint, UTXO>>,
     /// Pending writes: None = delete, Some = insert
     pending: std::sync::Mutex<Vec<(OutPoint, Option<UTXO>)>>,
     /// Statistics
@@ -447,7 +448,7 @@ impl CachedUtxoStore {
         use std::num::NonZeroUsize;
         Self {
             inner,
-            cache: std::sync::RwLock::new(lru::LruCache::new(
+            cache: std::sync::RwLock::new(blvm_protocol::lru::LruCache::new(
                 NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(100_000).unwrap()),
             )),
             pending: std::sync::Mutex::new(Vec::with_capacity(10_000)),

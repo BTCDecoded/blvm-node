@@ -104,9 +104,7 @@ async fn test_concurrent_operations_stress() {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             } // Lock dropped
               // Access another lock (simplified - actual stats method may vary)
-            let _bytes_sent = manager_clone
-                .bytes_sent
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let _bytes_sent = manager_clone.bytes_sent();
         });
         handles.push(handle);
     }

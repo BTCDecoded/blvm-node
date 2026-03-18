@@ -24,11 +24,14 @@ use super::miniscript::miniscript_rpc;
 use super::payment;
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};
 use crate::module::rpc::handler::ModuleRpcHandler;
+use crate::network::dos_protection::ConnectionRateLimiter;
 use crate::node::metrics::MetricsCollector;
+use crate::utils::{RPC_CLIENT_READ_TIMEOUT, RPC_SERVER_STARTUP_WAIT};
 use std::collections::HashMap;
 
-/// Maximum request body size (1MB)
-const MAX_REQUEST_SIZE: usize = 1_048_576;
+/// Default maximum request body size (1MB) when not configured.
+/// Matches config rpc.max_request_size_bytes default.
+pub const DEFAULT_MAX_REQUEST_SIZE: usize = 1_048_576;
 
 /// JSON-RPC server
 #[derive(Clone)]
@@ -49,47 +52,36 @@ pub struct RpcServer {
     metrics: Option<Arc<MetricsCollector>>,
     // Module RPC endpoints (dynamic registration)
     module_endpoints: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn ModuleRpcHandler>>>>,
+    /// Maximum request body size in bytes
+    max_request_size: usize,
+    /// Connection rate limiter (per-IP connection attempts per minute)
+    connection_limiter: Option<Arc<tokio::sync::Mutex<ConnectionRateLimiter>>>,
+    /// Batch rate multiplier cap: min(batch_len, this) tokens consumed
+    batch_rate_multiplier_cap: u32,
 }
 
 impl RpcServer {
-    /// Create a new RPC server
-    pub fn new(addr: SocketAddr) -> Self {
-        Self {
-            addr,
-            blockchain: Arc::new(blockchain::BlockchainRpc::new()),
-            network: Arc::new(network::NetworkRpc::new()),
-            mempool: Arc::new(mempool::MempoolRpc::new()),
-            mining: Arc::new(mining::MiningRpc::new()),
-            rawtx: Arc::new(rawtx::RawTxRpc::new()),
-            control: Arc::new(control::ControlRpc::new()),
-            #[cfg(feature = "bip70-http")]
-            payment: None,
-            auth_manager: None,
-            metrics: None,
-            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        }
+    /// Default RPC handlers (used by `new` and `with_auth`). Single place so adding a handler type updates one spot.
+    fn default_handlers() -> (
+        Arc<blockchain::BlockchainRpc>,
+        Arc<network::NetworkRpc>,
+        Arc<mempool::MempoolRpc>,
+        Arc<mining::MiningRpc>,
+        Arc<rawtx::RawTxRpc>,
+        Arc<control::ControlRpc>,
+    ) {
+        (
+            Arc::new(blockchain::BlockchainRpc::new()),
+            Arc::new(network::NetworkRpc::new()),
+            Arc::new(mempool::MempoolRpc::new()),
+            Arc::new(mining::MiningRpc::new()),
+            Arc::new(rawtx::RawTxRpc::new()),
+            Arc::new(control::ControlRpc::new()),
+        )
     }
 
-    /// Create a new RPC server with authentication
-    pub fn with_auth(addr: SocketAddr, auth_manager: Arc<auth::RpcAuthManager>) -> Self {
-        Self {
-            addr,
-            blockchain: Arc::new(blockchain::BlockchainRpc::new()),
-            network: Arc::new(network::NetworkRpc::new()),
-            mempool: Arc::new(mempool::MempoolRpc::new()),
-            mining: Arc::new(mining::MiningRpc::new()),
-            rawtx: Arc::new(rawtx::RawTxRpc::new()),
-            control: Arc::new(control::ControlRpc::new()),
-            #[cfg(feature = "bip70-http")]
-            payment: None,
-            auth_manager: Some(auth_manager),
-            metrics: None,
-            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// Create with dependencies
-    pub fn with_dependencies(
+    /// Build server from required components and optional auth/metrics/limiter. Single assignment site for all fields.
+    fn from_components(
         addr: SocketAddr,
         blockchain: Arc<blockchain::BlockchainRpc>,
         network: Arc<network::NetworkRpc>,
@@ -97,6 +89,11 @@ impl RpcServer {
         mining: Arc<mining::MiningRpc>,
         rawtx: Arc<rawtx::RawTxRpc>,
         control: Arc<control::ControlRpc>,
+        auth_manager: Option<Arc<auth::RpcAuthManager>>,
+        metrics: Option<Arc<MetricsCollector>>,
+        connection_limiter: Option<Arc<tokio::sync::Mutex<ConnectionRateLimiter>>>,
+        max_request_size: usize,
+        batch_rate_multiplier_cap: u32,
     ) -> Self {
         Self {
             addr,
@@ -108,10 +105,93 @@ impl RpcServer {
             control,
             #[cfg(feature = "bip70-http")]
             payment: None,
-            auth_manager: None,
-            metrics: None,
+            auth_manager,
+            metrics,
             module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            max_request_size,
+            connection_limiter,
+            batch_rate_multiplier_cap,
         }
+    }
+
+    /// Create a new RPC server
+    pub fn new(addr: SocketAddr) -> Self {
+        let (blockchain, network, mempool, mining, rawtx, control) = Self::default_handlers();
+        Self::from_components(
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control,
+            None,
+            None,
+            None,
+            DEFAULT_MAX_REQUEST_SIZE,
+            10,
+        )
+    }
+
+    /// Create a new RPC server with authentication
+    pub fn with_auth(addr: SocketAddr, auth_manager: Arc<auth::RpcAuthManager>) -> Self {
+        let (blockchain, network, mempool, mining, rawtx, control) = Self::default_handlers();
+        Self::from_components(
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control,
+            Some(auth_manager),
+            None,
+            None,
+            DEFAULT_MAX_REQUEST_SIZE,
+            10,
+        )
+    }
+
+    /// Set connection rate limiter (per-IP connections per minute)
+    pub fn with_connection_limiter(
+        mut self,
+        limiter: Arc<tokio::sync::Mutex<ConnectionRateLimiter>>,
+    ) -> Self {
+        self.connection_limiter = Some(limiter);
+        self
+    }
+
+    /// Set batch rate multiplier cap (min(batch_len, cap) tokens consumed)
+    pub fn with_batch_rate_multiplier_cap(mut self, cap: u32) -> Self {
+        self.batch_rate_multiplier_cap = cap;
+        self
+    }
+
+    /// Create with dependencies
+    pub fn with_dependencies(
+        addr: SocketAddr,
+        blockchain: Arc<blockchain::BlockchainRpc>,
+        network: Arc<network::NetworkRpc>,
+        mempool: Arc<mempool::MempoolRpc>,
+        mining: Arc<mining::MiningRpc>,
+        rawtx: Arc<rawtx::RawTxRpc>,
+        control: Arc<control::ControlRpc>,
+        max_request_size: usize,
+    ) -> Self {
+        Self::from_components(
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control,
+            None,
+            None,
+            None,
+            max_request_size,
+            10,
+        )
     }
 
     /// Create with dependencies including payment RPC
@@ -131,8 +211,9 @@ impl RpcServer {
         rawtx: Arc<rawtx::RawTxRpc>,
         control: Arc<control::ControlRpc>,
         metrics: Arc<MetricsCollector>,
+        max_request_size: usize,
     ) -> Self {
-        Self {
+        Self::from_components(
             addr,
             blockchain,
             network,
@@ -140,12 +221,12 @@ impl RpcServer {
             mining,
             rawtx,
             control,
-            #[cfg(feature = "bip70-http")]
-            payment: None,
-            auth_manager: None,
-            metrics: Some(metrics),
-            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        }
+            None,
+            Some(metrics),
+            None,
+            max_request_size,
+            10,
+        )
     }
 
     /// Create with dependencies and authentication
@@ -158,8 +239,9 @@ impl RpcServer {
         rawtx: Arc<rawtx::RawTxRpc>,
         control: Arc<control::ControlRpc>,
         auth_manager: Arc<auth::RpcAuthManager>,
+        max_request_size: usize,
     ) -> Self {
-        Self {
+        Self::from_components(
             addr,
             blockchain,
             network,
@@ -167,12 +249,12 @@ impl RpcServer {
             mining,
             rawtx,
             control,
-            #[cfg(feature = "bip70-http")]
-            payment: None,
-            auth_manager: Some(auth_manager),
-            metrics: None,
-            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        }
+            Some(auth_manager),
+            None,
+            None,
+            max_request_size,
+            10,
+        )
     }
 
     /// Create with dependencies, authentication, and metrics
@@ -186,8 +268,9 @@ impl RpcServer {
         control: Arc<control::ControlRpc>,
         auth_manager: Arc<auth::RpcAuthManager>,
         metrics: Arc<MetricsCollector>,
+        max_request_size: usize,
     ) -> Self {
-        Self {
+        Self::from_components(
             addr,
             blockchain,
             network,
@@ -195,12 +278,12 @@ impl RpcServer {
             mining,
             rawtx,
             control,
-            #[cfg(feature = "bip70-http")]
-            payment: None,
-            auth_manager: Some(auth_manager),
-            metrics: Some(metrics),
-            module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        }
+            Some(auth_manager),
+            Some(metrics),
+            None,
+            max_request_size,
+            10,
+        )
     }
 
     /// Start the RPC server
@@ -225,11 +308,24 @@ impl RpcServer {
             auth_manager: self.auth_manager.clone(),
             metrics: self.metrics.clone(),
             module_endpoints: Arc::clone(&self.module_endpoints),
+            max_request_size: self.max_request_size,
+            connection_limiter: self.connection_limiter.clone(),
+            batch_rate_multiplier_cap: self.batch_rate_multiplier_cap,
         });
 
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
+                    // Connection rate limit check (per-IP per minute)
+                    if let Some(ref limiter) = server.connection_limiter {
+                        let mut guard = limiter.lock().await;
+                        if !guard.check_connection(addr.ip()) {
+                            debug!("RPC connection rejected (rate limit) from {}", addr);
+                            drop(stream);
+                            continue;
+                        }
+                    }
+
                     debug!("New RPC connection from {}", addr);
                     let peer_addr = addr;
                     let server = Arc::clone(&server);
@@ -367,13 +463,13 @@ impl RpcServer {
         let body_bytes = body.to_bytes();
 
         // Enforce maximum request size
-        if body_bytes.len() > MAX_REQUEST_SIZE {
+        if body_bytes.len() > server.max_request_size {
             return Ok(Self::http_error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 &format!(
                     "Request body too large: {} bytes (max: {} bytes)",
                     body_bytes.len(),
-                    MAX_REQUEST_SIZE
+                    server.max_request_size
                 ),
             ));
         }
@@ -407,15 +503,24 @@ impl RpcServer {
 
         debug!("HTTP RPC request from {}: {} bytes", addr, json_body.len());
 
-        // Extract method name for per-method rate limiting (before authentication)
-        let method_name = serde_json::from_str::<Value>(&json_body)
-            .ok()
-            .and_then(|req| {
+        // Parse request for method name and batch detection
+        let parsed = serde_json::from_str::<Value>(&json_body).ok();
+        let (method_name, rate_limit_n) = match &parsed {
+            Some(Value::Array(requests)) => {
+                // Batch request: consume min(len, cap) tokens
+                let cap = server.batch_rate_multiplier_cap as usize;
+                let n = requests.len().min(cap) as u32;
+                ("batch".to_string(), n)
+            }
+            Some(req) => (
                 req.get("method")
                     .and_then(|m| m.as_str())
                     .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| "unknown".to_string());
+                    .unwrap_or_else(|| "unknown".to_string()),
+                1u32,
+            ),
+            None => ("unknown".to_string(), 1u32),
+        };
 
         // Record method in span
         Span::current().record("method", &method_name);
@@ -439,7 +544,12 @@ impl RpcServer {
                 if let Some(ref user_id) = auth_result.user_id {
                     let endpoint = format!("rpc:{method_name}");
                     if !auth_manager
-                        .check_rate_limit_with_endpoint(user_id, Some(addr), Some(&endpoint))
+                        .check_rate_limit_with_endpoint_n(
+                            user_id,
+                            Some(addr),
+                            Some(&endpoint),
+                            rate_limit_n,
+                        )
                         .await
                     {
                         return Ok(Self::http_error_response(
@@ -452,7 +562,7 @@ impl RpcServer {
                 // Unauthenticated request - check per-IP rate limit
                 let endpoint = format!("rpc:{method_name}");
                 if !auth_manager
-                    .check_ip_rate_limit_with_endpoint(addr, Some(&endpoint))
+                    .check_ip_rate_limit_with_endpoint_n(addr, Some(&endpoint), rate_limit_n)
                     .await
                 {
                     return Ok(Self::http_error_response(
@@ -462,7 +572,7 @@ impl RpcServer {
                 }
             }
 
-            // Check per-method rate limiting (applies to all requests)
+            // Check per-method rate limiting (applies to all requests; batch uses "batch")
             if !auth_manager.check_method_rate_limit(&method_name).await {
                 return Ok(Self::http_error_response(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -1007,112 +1117,112 @@ impl RpcServer {
                 .blockchain
                 .get_blockchain_info()
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getblock" => {
-                let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+                let hash = crate::rpc::params::param_str(&params, 0).unwrap_or("");
                 self.blockchain
                     .get_block(hash)
                     .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+                    .map_err(errors::rpc_error_from_blockchain_result)
             }
             "getblockhash" => {
-                let height = params.get(0).and_then(|p| p.as_u64()).unwrap_or(0);
+                let height = crate::rpc::params::param_u64_default(&params, 0, 0);
                 self.blockchain
                     .get_block_hash(height)
                     .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+                    .map_err(errors::rpc_error_from_blockchain_result)
             }
             "getblockheader" => {
-                let hash = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
-                let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(true);
+                let hash = crate::rpc::params::param_str(&params, 0).unwrap_or("");
+                let verbose = crate::rpc::params::param_bool_default(&params, 1, true);
                 self.blockchain
                     .get_block_header(hash, verbose)
                     .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+                    .map_err(errors::rpc_error_from_blockchain_result)
             }
             "getbestblockhash" => self
                 .blockchain
                 .get_best_block_hash()
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getblockcount" => self
                 .blockchain
                 .get_block_count()
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getdifficulty" => self
                 .blockchain
                 .get_difficulty()
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "gettxoutsetinfo" => self
                 .blockchain
                 .get_txoutset_info()
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "loadtxoutset" => self
                 .blockchain
                 .load_txout_set(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "verifychain" => {
-                let checklevel = params.get(0).and_then(|p| p.as_u64());
-                let numblocks = params.get(1).and_then(|p| p.as_u64());
+                let checklevel = crate::rpc::params::param_u64(&params, 0);
+                let numblocks = crate::rpc::params::param_u64(&params, 1);
                 self.blockchain
                     .verify_chain(checklevel, numblocks)
                     .await
-                    .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+                    .map_err(errors::rpc_error_from_blockchain_result)
             }
             "getchaintips" => self
                 .blockchain
                 .get_chain_tips()
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getchaintxstats" => self
                 .blockchain
                 .get_chain_tx_stats(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getblockstats" => self
                 .blockchain
                 .get_block_stats(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "pruneblockchain" => self
                 .blockchain
                 .prune_blockchain(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getpruneinfo" => self
                 .blockchain
                 .get_prune_info(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "invalidateblock" => self
                 .blockchain
                 .invalidate_block(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "reconsiderblock" => self
                 .blockchain
                 .reconsider_block(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "waitfornewblock" => self
                 .blockchain
                 .wait_for_new_block(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "waitforblock" => self
                 .blockchain
                 .wait_for_block(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "waitforblockheight" => self
                 .blockchain
                 .wait_for_block_height(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
 
             // Raw Transaction methods
             "getrawtransaction" => self.rawtx.getrawtransaction(&params).await,
@@ -1157,27 +1267,27 @@ impl RpcServer {
                 .blockchain
                 .get_block_filter(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getindexinfo" => self
                 .blockchain
                 .get_index_info(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getblockchainstate" => self
                 .blockchain
                 .get_blockchain_state()
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "validateaddress" => self
                 .blockchain
                 .validate_address(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "getaddressinfo" => self
                 .blockchain
                 .get_address_info(&params)
                 .await
-                .map_err(|e| errors::RpcError::internal_error(e.to_string())),
+                .map_err(errors::rpc_error_from_blockchain_result),
             "gettransactiondetails" => self.rawtx.get_transaction_details(&params).await,
 
             // Control methods
@@ -1189,6 +1299,12 @@ impl RpcServer {
             "logging" => self.control.logging(&params).await,
             "gethealth" => self.control.gethealth(&params).await,
             "getmetrics" => self.control.getmetrics(&params).await,
+            "loadmodule" => self.control.loadmodule(&params).await,
+            "unloadmodule" => self.control.unloadmodule(&params).await,
+            "reloadmodule" => self.control.reloadmodule(&params).await,
+            "listmodules" => self.control.listmodules(&params).await,
+            "getmoduleclispecs" => self.control.getmoduleclispecs(&params).await,
+            "runmodulecli" => self.control.runmodulecli(&params).await,
             // Payment methods (requires bip70-http feature)
             #[cfg(feature = "bip70-http")]
             "createpaymentrequest" => {
@@ -1463,80 +1579,8 @@ impl RpcServer {
         method: String,
         handler: Arc<dyn ModuleRpcHandler>,
     ) -> Result<(), String> {
-        // Check if method conflicts with core endpoints
-        let core_methods = [
-            "getblockchaininfo",
-            "getblock",
-            "getblockhash",
-            "getblockheader",
-            "getbestblockhash",
-            "getblockcount",
-            "getdifficulty",
-            "gettxoutsetinfo",
-            "loadtxoutset",
-            "verifychain",
-            "getchaintips",
-            "getchaintxstats",
-            "getblockstats",
-            "pruneblockchain",
-            "getpruneinfo",
-            "invalidateblock",
-            "reconsiderblock",
-            "waitfornewblock",
-            "waitforblock",
-            "waitforblockheight",
-            "getrawtransaction",
-            "sendrawtransaction",
-            "testmempoolaccept",
-            "decoderawtransaction",
-            "gettxout",
-            "gettxoutproof",
-            "verifytxoutproof",
-            "getmempoolinfo",
-            "getrawmempool",
-            "savemempool",
-            "getmempoolancestors",
-            "getmempooldescendants",
-            "getmempoolentry",
-            "getnetworkinfo",
-            "getpeerinfo",
-            "getconnectioncount",
-            "ping",
-            "addnode",
-            "disconnectnode",
-            "getnettotals",
-            "clearbanned",
-            "setban",
-            "listbanned",
-            "getaddednodeinfo",
-            "getnodeaddresses",
-            "setnetworkactive",
-            "getmininginfo",
-            "getblocktemplate",
-            "submitblock",
-            "estimatesmartfee",
-            "prioritisetransaction",
-            "getblockfilter",
-            "getindexinfo",
-            "getblockchainstate",
-            "validateaddress",
-            "getaddressinfo",
-            "gettransactiondetails",
-            "stop",
-            "uptime",
-            "getmemoryinfo",
-            "getrpcinfo",
-            "help",
-            "logging",
-            "gethealth",
-            "getmetrics",
-            #[cfg(feature = "miniscript")]
-            "getdescriptorinfo",
-            #[cfg(feature = "miniscript")]
-            "analyzepsbt",
-        ];
-
-        if core_methods.contains(&method.as_str()) {
+        // Check if method conflicts with core endpoints (see rpc/methods.rs)
+        if crate::rpc::methods::CORE_RPC_METHODS.contains(&method.as_str()) {
             return Err(format!("Cannot override core RPC method: {method}"));
         }
 
@@ -1607,7 +1651,7 @@ mod tests {
         });
 
         // Give server time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(RPC_SERVER_STARTUP_WAIT).await;
 
         // Connect to server
         let mut client = TokioTcpStream::connect(server_addr).await.unwrap();
@@ -1629,10 +1673,7 @@ mod tests {
 
         // Read response
         let mut response = vec![0u8; 4096];
-        let n = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            client.read(&mut response),
-        )
+        let n = tokio::time::timeout(RPC_CLIENT_READ_TIMEOUT, client.read(&mut response))
         .await
         .unwrap()
         .unwrap();

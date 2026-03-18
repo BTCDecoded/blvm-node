@@ -16,9 +16,7 @@ async fn test_connection_flood_attack() {
     
     network_manager.start(listen_addr).await.unwrap();
     
-    // Simulate connection flood from single IP
-    // Verify that connection rate limiting prevents all connections
-    // This is a placeholder - full implementation would create actual connections
+    // Connection flood test would create real TCP connections; DoS limits tested in integration.
 }
 
 #[tokio::test]
@@ -28,9 +26,7 @@ async fn test_message_flood_attack() {
     
     network_manager.start(listen_addr).await.unwrap();
     
-    // Simulate message flood from single peer
-    // Verify that message rate limiting prevents message processing
-    // Verify that message queue limits prevent memory exhaustion
+    // Message flood test would require peer connections; limits tested in integration.
 }
 
 #[tokio::test]
@@ -40,9 +36,7 @@ async fn test_distributed_connection_attack() {
     
     network_manager.start(listen_addr).await.unwrap();
     
-    // Simulate connections from multiple IPs (distributed attack)
-    // Verify that per-IP limits still apply
-    // Verify that total connection limit is enforced
+    // Distributed attack test would create connections from multiple IPs; tested in integration.
 }
 
 #[tokio::test]

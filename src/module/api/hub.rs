@@ -5,7 +5,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -63,10 +62,7 @@ struct ModuleRateLimiter {
 impl ModuleRateLimiter {
     /// Create a new rate limiter
     fn new(burst_limit: u32, rate: u32) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should always be after UNIX_EPOCH")
-            .as_secs();
+        let now = crate::utils::current_timestamp();
         Self {
             tokens: burst_limit,
             burst_limit,
@@ -77,10 +73,7 @@ impl ModuleRateLimiter {
 
     /// Check if a request is allowed and consume a token
     fn check_and_consume(&mut self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should always be after UNIX_EPOCH")
-            .as_secs();
+        let now = crate::utils::current_timestamp();
 
         // Refill tokens based on elapsed time
         let elapsed = now.saturating_sub(self.last_refill);
@@ -144,6 +137,14 @@ impl ModuleApiHub {
     ) {
         self.permission_checker
             .register_module_permissions(module_id, permissions);
+    }
+
+    /// Unregister a module (permissions + rate limiters) when it unloads.
+    pub async fn unregister_module(&mut self, module_name: &str) {
+        self.permission_checker
+            .unregister_module_permissions(module_name);
+        let mut limiters = self.rate_limiters.lock().await;
+        limiters.retain(|id, _| id != module_name && !id.starts_with(&format!("{module_name}_")));
     }
 
     /// Handle a request from a module
@@ -211,6 +212,12 @@ impl ModuleApiHub {
                 // Handshake is handled at connection level, not here
                 return Err(crate::module::traits::ModuleError::IpcError(
                     "Handshake should be handled at connection level".to_string(),
+                ));
+            }
+            RequestPayload::RegisterCliSpec { .. } => {
+                // RegisterCliSpec is handled in IPC server before hub
+                return Err(crate::module::traits::ModuleError::IpcError(
+                    "RegisterCliSpec should be handled at connection level".to_string(),
                 ));
             }
             RequestPayload::GetBlock { hash } => {
@@ -356,92 +363,6 @@ impl ModuleApiHub {
                 let metadata = result?;
                 ResponsePayload::FileMetadata(metadata)
             }
-            // Storage API
-            RequestPayload::StorageOpenTree { name } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
-                    module_id.to_string(),
-                );
-                let result = self.node_api.storage_open_tree(name.clone()).await;
-                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
-                let tree_id = result?;
-                ResponsePayload::StorageTreeId(tree_id)
-            }
-            RequestPayload::StorageInsert {
-                tree_id,
-                key,
-                value,
-            } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
-                    module_id.to_string(),
-                );
-                let result = self
-                    .node_api
-                    .storage_insert(tree_id.clone(), key.clone(), value.clone())
-                    .await;
-                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
-                result?;
-                ResponsePayload::Bool(true)
-            }
-            RequestPayload::StorageGet { tree_id, key } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
-                    module_id.to_string(),
-                );
-                let result = self
-                    .node_api
-                    .storage_get(tree_id.clone(), key.clone())
-                    .await;
-                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
-                let value = result?;
-                ResponsePayload::StorageValue(value)
-            }
-            RequestPayload::StorageRemove { tree_id, key } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
-                    module_id.to_string(),
-                );
-                let result = self
-                    .node_api
-                    .storage_remove(tree_id.clone(), key.clone())
-                    .await;
-                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
-                result?;
-                ResponsePayload::Bool(true)
-            }
-            RequestPayload::StorageContainsKey { tree_id, key } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
-                    module_id.to_string(),
-                );
-                let result = self
-                    .node_api
-                    .storage_contains_key(tree_id.clone(), key.clone())
-                    .await;
-                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
-                let exists = result?;
-                ResponsePayload::Bool(exists)
-            }
-            RequestPayload::StorageIter { tree_id } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
-                    module_id.to_string(),
-                );
-                let result = self.node_api.storage_iter(tree_id.clone()).await;
-                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
-                let pairs = result?;
-                ResponsePayload::StorageKeyValuePairs(pairs)
-            }
-            RequestPayload::StorageTransaction {
-                tree_id,
-                operations,
-            } => {
-                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
-                    module_id.to_string(),
-                );
-                let result = self
-                    .node_api
-                    .storage_transaction(tree_id.clone(), operations.clone())
-                    .await;
-                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
-                result?;
-                ResponsePayload::Bool(true)
-            }
             // Metrics and Telemetry
             RequestPayload::ReportMetric { metric } => {
                 self.node_api.report_metric(metric.clone()).await?;
@@ -539,10 +460,64 @@ impl ModuleApiHub {
                     .await?;
                 ResponsePayload::Bool(true)
             }
-            _ => {
+            // Mining API
+            RequestPayload::GetBlockTemplate {
+                rules,
+                coinbase_script,
+                coinbase_address,
+            } => {
+                let template = self
+                    .node_api
+                    .get_block_template(
+                        rules.clone(),
+                        coinbase_script.clone(),
+                        coinbase_address.clone(),
+                    )
+                    .await?;
+                ResponsePayload::BlockTemplate(template)
+            }
+            RequestPayload::SubmitBlock { block } => {
+                let result = self.node_api.submit_block(block.clone()).await?;
+                ResponsePayload::SubmitBlockResult(result)
+            }
+            // Module RPC Endpoint Registration
+            RequestPayload::RegisterRpcEndpoint {
+                method,
+                description,
+            } => {
+                self.node_api
+                    .register_rpc_endpoint(method.clone(), description.clone())
+                    .await?;
+                ResponsePayload::RpcEndpointRegistered
+            }
+            RequestPayload::UnregisterRpcEndpoint { method } => {
+                self.node_api.unregister_rpc_endpoint(method).await?;
+                ResponsePayload::RpcEndpointUnregistered
+            }
+            // Timers and Scheduled Tasks - not supported over IPC (callbacks cannot be serialized)
+            RequestPayload::RegisterTimer { .. } => {
+                return Err(crate::module::traits::ModuleError::OperationError(
+                    "Timer registration requires a callback which cannot be serialized over IPC. \
+                     Use module-side timer management (e.g. tokio::spawn with sleep).".to_string(),
+                ));
+            }
+            RequestPayload::CancelTimer { .. } => {
+                return Err(crate::module::traits::ModuleError::OperationError(
+                    "Timer cancellation not supported over IPC. Use module-side timer management."
+                        .to_string(),
+                ));
+            }
+            RequestPayload::ScheduleTask { .. } => {
+                return Err(crate::module::traits::ModuleError::OperationError(
+                    "Task scheduling requires a callback which cannot be serialized over IPC. \
+                     Use module-side task management (e.g. tokio::spawn).".to_string(),
+                ));
+            }
+            #[allow(unreachable_patterns)]
+            other => {
                 return Err(crate::module::traits::ModuleError::OperationError(format!(
                     "Unimplemented request payload: {:?}",
-                    request.payload
+                    other
                 )))
             }
         };
@@ -587,14 +562,6 @@ impl ModuleApiHub {
             RequestPayload::ListDirectory { .. } => "list_directory",
             RequestPayload::CreateDirectory { .. } => "create_directory",
             RequestPayload::GetFileMetadata { .. } => "get_file_metadata",
-            // Storage API
-            RequestPayload::StorageOpenTree { .. } => "storage_open_tree",
-            RequestPayload::StorageInsert { .. } => "storage_insert",
-            RequestPayload::StorageGet { .. } => "storage_get",
-            RequestPayload::StorageRemove { .. } => "storage_remove",
-            RequestPayload::StorageContainsKey { .. } => "storage_contains_key",
-            RequestPayload::StorageIter { .. } => "storage_iter",
-            RequestPayload::StorageTransaction { .. } => "storage_transaction",
             // Module RPC Endpoint Registration
             RequestPayload::RegisterRpcEndpoint { .. } => "register_rpc_endpoint",
             RequestPayload::UnregisterRpcEndpoint { .. } => "unregister_rpc_endpoint",
@@ -623,15 +590,13 @@ impl ModuleApiHub {
             // Network Integration
             RequestPayload::SendMeshPacketToPeer { .. } => "send_mesh_packet_to_peer",
             RequestPayload::SendStratumV2MessageToPeer { .. } => "send_stratum_v2_message_to_peer",
+            RequestPayload::RegisterCliSpec { .. } => "register_cli_spec",
         }
     }
 
     /// Log an audit entry
     fn log_audit(&mut self, module_id: String, api_call: String, success: bool) {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = crate::utils::current_timestamp();
 
         let entry = AuditEntry {
             module_id: module_id.clone(),

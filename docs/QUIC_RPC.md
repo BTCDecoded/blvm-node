@@ -64,7 +64,7 @@ cargo build --features quinn
 
 - **Self-Signed Certificates**: Currently uses self-signed certificates for development
 - **Production**: Should use proper certificate management for production
-- **Authentication**: QUIC provides transport encryption but not application-level auth
+- **Authentication & Rate Limiting**: Quinn RPC uses the same auth and rate-limit model as HTTP RPC. When auth is configured (or rate-limit-only mode is enabled), all QUIC RPC requests are subject to IP-based rate limiting. Auth tokens are not supported over QUIC (no HTTP headers); only IP rate limiting applies.
 - **Same Security Boundaries**: QUIC RPC has same security boundaries as TCP RPC (no wallet access)
 
 ## Client Usage

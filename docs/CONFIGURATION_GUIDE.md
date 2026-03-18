@@ -10,8 +10,9 @@ Covers all configuration options for blvm-node, including RBF modes, mempool pol
 2. [Mempool Policies](#mempool-policies)
 3. [Network Configuration](#network-configuration)
 4. [Storage Configuration](#storage-configuration)
-5. [RPC Configuration](#rpc-configuration)
-6. [Example Configurations](#example-configurations)
+5. [Module Configuration](#module-configuration)
+6. [RPC Configuration](#rpc-configuration)
+7. [Example Configurations](#example-configurations)
 
 ## RBF Configuration
 
@@ -89,6 +90,15 @@ strategy = "eager"  # or "lazy"
 max_indexed_addresses = 1000000
 enable_compression = false
 background_indexing = false
+```
+
+## Module Configuration
+
+Node config can override module settings via `[modules.<name>]` (e.g. `[modules.selective-sync]`). Node values take precedence over module `config.toml`:
+
+```toml
+[modules.selective-sync]
+database_backend = "redb"  # Override module default; inherit from node when omitted
 ```
 
 ## RPC Configuration

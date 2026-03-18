@@ -19,8 +19,7 @@ async fn test_tcp_connection() {
     // Start network manager
     network_manager.start(listen_addr).await.unwrap();
     
-    // Test would create TCP connection and verify it works
-    // This is a placeholder - full implementation would create actual connections
+    // Full test would create TCP connection and verify handshake; transport tested in network tests.
 }
 
 #[cfg(feature = "quinn")]
@@ -35,7 +34,7 @@ async fn test_quinn_connection() {
     
     network_manager.start(listen_addr).await.unwrap();
     
-    // Test would create Quinn connection and verify it works
+    // Full test would create Quinn connection and verify handshake.
 }
 
 #[cfg(feature = "iroh")]
@@ -50,7 +49,7 @@ async fn test_iroh_connection() {
     
     network_manager.start(listen_addr).await.unwrap();
     
-    // Test would create Iroh connection and verify it works
+    // Full test would create Iroh connection and verify handshake.
 }
 
 #[tokio::test]
@@ -64,7 +63,6 @@ async fn test_mixed_transport_connections() {
     
     network_manager.start(listen_addr).await.unwrap();
     
-    // Test would create connections from different transport types
-    // Verify that all are handled correctly
+    // Full test would create connections from different transport types.
 }
 

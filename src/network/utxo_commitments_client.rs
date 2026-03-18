@@ -161,7 +161,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 let socket_to_transport = {
                     let network = network_manager.read().await;
                     // Clone the Arc to avoid holding RwLock while locking Mutex
-                    Arc::clone(&network.socket_to_transport)
+                    Arc::clone(network.socket_to_transport())
                 };
                 // Now lock the Mutex without holding the RwLock
                 socket_to_transport
@@ -174,7 +174,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // Get peer_states Arc first, then drop RwLock before Mutex lock
             let peer_states_arc = {
                 let network = network_manager.read().await;
-                Arc::clone(&network.peer_states)
+                Arc::clone(&network.peer_states())
             };
 
             // Get peer version to check capabilities - now safe to lock RwLock
@@ -231,7 +231,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             let timeout_seconds = {
                 let network = network_manager.read().await;
                 network
-                    .request_timeout_config
+                    .request_timeout_config()
                     .utxo_commitment_request_timeout_seconds
             };
             tokio::select! {
@@ -272,7 +272,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     {
                         let pending_requests_arc = {
                             let network = network_manager.read().await;
-                            Arc::clone(&network.pending_requests)
+                            Arc::clone(network.pending_requests())
                         };
                         let mut pending = pending_requests_arc.lock().await;
                         pending.remove(&request_id);
@@ -374,7 +374,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             if let Some(transport_addr) = transport_addr_opt {
                 let socket_to_transport = {
                     let network = network_manager.read().await;
-                    Arc::clone(&network.socket_to_transport)
+                    Arc::clone(network.socket_to_transport())
                 };
                 socket_to_transport
                     .lock()
@@ -420,7 +420,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             let timeout_seconds = {
                 let network = network_manager.read().await;
                 network
-                    .request_timeout_config
+                    .request_timeout_config()
                     .utxo_commitment_request_timeout_seconds
             };
             tokio::select! {
@@ -496,7 +496,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     {
                         let pending_requests_arc = {
                             let network = network_manager.read().await;
-                            Arc::clone(&network.pending_requests)
+                            Arc::clone(network.pending_requests())
                         };
                         let mut pending = pending_requests_arc.lock().await;
                         pending.remove(&request_id);
@@ -592,7 +592,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             let timeout_seconds = {
                 let network = network_manager.read().await;
                 network
-                    .request_timeout_config
+                    .request_timeout_config()
                     .utxo_commitment_request_timeout_seconds
             };
 
@@ -616,7 +616,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                     // Timeout - cleanup request
                     {
                         let network = network_manager.read().await;
-                        let mut pending = network.pending_block_requests.lock().await;
+                        let mut pending = network.pending_block_requests().lock().await;
                         pending.remove(&(peer_addr.ip(), block_hash));
                     }
                     Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
@@ -644,7 +644,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
                 let network = self.network_manager.read().await;
                 // Extract connected peer addresses - collect to avoid holding lock across await
                 let mut peer_addrs: Vec<String> = network
-                    .peer_states
+                    .peer_states()
                     .read()
                     .await
                     .keys()
@@ -766,7 +766,7 @@ impl UtxoCommitmentsClient {
             let timeout_seconds = {
                 let network = network_manager.read().await;
                 network
-                    .request_timeout_config
+                    .request_timeout_config()
                     .utxo_commitment_request_timeout_seconds
             };
 
@@ -795,7 +795,7 @@ impl UtxoCommitmentsClient {
                     {
                         let pending_requests_arc = {
                             let network = network_manager.read().await;
-                            Arc::clone(&network.pending_requests)
+                            Arc::clone(network.pending_requests())
                         };
                         let mut pending = pending_requests_arc.lock().await;
                         pending.remove(&request_id);

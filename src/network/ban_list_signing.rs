@@ -1,6 +1,10 @@
 //! Ban list cryptographic signing
 //!
 //! Provides functions to sign and verify ban lists for authenticity.
+//!
+//! S-003: bincode 1.x is unmaintained. Consider migrating to bincode 2.x with
+//! Limit or a canonical serde format (e.g. serde_json with sorted keys).
+//! Lower urgency since data is internal before signing.
 
 use crate::network::protocol::BanListMessage;
 use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey};

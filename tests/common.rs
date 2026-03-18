@@ -12,6 +12,55 @@ use blvm_protocol::ProtocolVersion;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
+// ============================================================================
+// Protocol/consensus fixtures (for mempool, RBF, and other node tests)
+// ============================================================================
+
+/// Create a minimal UTXO set (one UTXO) for protocol/mempool tests.
+/// Uses blvm_protocol types so it can be shared by mempool_policy_tests, rbf, etc.
+pub fn create_protocol_test_utxo_set() -> blvm_protocol::UtxoSet {
+    use std::sync::Arc;
+    let mut utxo_set = blvm_protocol::UtxoSet::default();
+    utxo_set.insert(
+        blvm_protocol::OutPoint {
+            hash: [1; 32],
+            index: 0,
+        },
+        Arc::new(blvm_protocol::UTXO {
+            value: 100_000,
+            script_pubkey: vec![0x76, 0xa9, 0x14, 0x00].repeat(20).into(),
+            height: 0,
+            is_coinbase: false,
+        }),
+    );
+    utxo_set
+}
+
+/// Create a test transaction for protocol/mempool tests (configurable value and size).
+pub fn create_protocol_test_tx(
+    input_value: u64,
+    output_value: u64,
+    size: usize,
+) -> blvm_protocol::Transaction {
+    use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+    blvm_protocol::Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout: OutPoint {
+                hash: [1; 32],
+                index: 0,
+            },
+            script_sig: vec![0; size / 2],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: output_value as i64,
+            script_pubkey: vec![0x76, 0xa9, 0x14].repeat(size / 2).into(),
+        }],
+        lock_time: 0,
+    }
+}
+
 pub struct TempDb {
     pub temp_dir: TempDir,
     pub utxo_store: UtxoStore,
@@ -220,7 +269,7 @@ impl TestUtxoSetBuilder {
         self.utxos.insert(
             OutPoint {
                 hash,
-                index: index as u64,
+                index,
             },
             TransactionOutput {
                 value: value as i64,

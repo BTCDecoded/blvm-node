@@ -27,22 +27,27 @@ use tracing::{debug, info};
 #[derive(Debug)]
 pub struct IrohTransport {
     endpoint: Endpoint,
+    max_message_length: usize,
 }
 
 #[cfg(feature = "iroh")]
 impl IrohTransport {
     /// Create a new Iroh transport
     pub async fn new() -> Result<Self> {
-        // Create endpoint - this handles QUIC connections with NAT traversal
-        // Endpoint::bind() automatically generates a secret key
-        let endpoint = Endpoint::bind().await?;
+        Self::with_max_message_length(crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH).await
+    }
 
+    /// Create with configurable max message length (for constrained networks).
+    pub async fn with_max_message_length(max_message_length: usize) -> Result<Self> {
+        let endpoint = Endpoint::bind().await?;
         info!(
             "Iroh transport initialized with endpoint ID: {}",
             endpoint.id()
         );
-
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            max_message_length,
+        })
     }
 
     /// Get the endpoint ID (public key) for this transport
@@ -78,6 +83,7 @@ impl Transport for IrohTransport {
         Ok(IrohListener {
             endpoint: self.endpoint.clone(),
             local_addr,
+            max_message_length: self.max_message_length,
         })
     }
 
@@ -131,6 +137,7 @@ impl Transport for IrohTransport {
 pub struct IrohListener {
     endpoint: Endpoint,
     local_addr: SocketAddr,
+    max_message_length: usize,
 }
 
 #[cfg(feature = "iroh")]
@@ -171,6 +178,7 @@ impl TransportListener for IrohListener {
                 peer_addr: peer_addr.clone(),
                 connected: true,
                 active_streams: std::collections::HashMap::new(),
+                max_message_length: self.max_message_length,
             },
             peer_addr,
         ))
@@ -268,12 +276,11 @@ impl TransportConnection for IrohConnection {
         }
 
         // Validate message size before allocation (DoS protection)
-        use crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH;
-        if len > MAX_PROTOCOL_MESSAGE_LENGTH {
+        if len > self.max_message_length {
             return Err(anyhow::anyhow!(
                 "Message too large: {} bytes (max: {} bytes)",
                 len,
-                MAX_PROTOCOL_MESSAGE_LENGTH
+                self.max_message_length
             ));
         }
 

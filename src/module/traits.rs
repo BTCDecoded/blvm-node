@@ -338,46 +338,6 @@ pub trait NodeAPI: Send + Sync {
         path: String,
     ) -> Result<crate::module::ipc::protocol::FileMetadata, ModuleError>;
 
-    // === Storage API Methods ===
-    /// Open a storage tree (isolated per module)
-    /// Returns a tree ID that can be used for subsequent operations
-    async fn storage_open_tree(&self, name: String) -> Result<String, ModuleError>;
-
-    /// Insert a key-value pair into storage
-    async fn storage_insert(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> Result<(), ModuleError>;
-
-    /// Get a value from storage by key
-    async fn storage_get(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, ModuleError>;
-
-    /// Remove a key-value pair from storage
-    async fn storage_remove(&self, tree_id: String, key: Vec<u8>) -> Result<(), ModuleError>;
-
-    /// Check if a key exists in storage
-    async fn storage_contains_key(
-        &self,
-        tree_id: String,
-        key: Vec<u8>,
-    ) -> Result<bool, ModuleError>;
-
-    /// Iterate over all key-value pairs in storage
-    async fn storage_iter(&self, tree_id: String) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ModuleError>;
-
-    /// Execute a transaction (atomic batch of operations)
-    async fn storage_transaction(
-        &self,
-        tree_id: String,
-        operations: Vec<crate::module::ipc::protocol::StorageOperation>,
-    ) -> Result<(), ModuleError>;
-
     /// Initialize filesystem and storage access for a module
     /// Called when a module connects to set up per-module sandbox and storage
     async fn initialize_module(
@@ -785,6 +745,20 @@ pub enum EventType {
     /// Ban list received from peer
     BanListReceived,
 
+    // === §6.4 New Event Types ===
+    /// Selective sync policy applied (subscribe, refresh, etc.)
+    SelectiveSyncPolicyApplied,
+    /// Mining action executed (miningos trigger_action)
+    ActionExecuted,
+    /// Module purchase completed (marketplace)
+    ModulePurchaseCompleted,
+    /// Stratum V2 miner connected
+    StratumClientConnected,
+    /// Stratum V2 miner disconnected
+    StratumClientDisconnected,
+    /// Block filtered during IBD (selective sync, prune, etc.)
+    IBDBlockFiltered,
+
     // === Module Registry Events ===
     /// Module discovered
     ModuleDiscovered,
@@ -840,6 +814,22 @@ pub enum ModuleError {
 
     #[error("Cryptographic error: {0}")]
     CryptoError(String),
+
+    // Module extension errors (CLI, RPC, migration, config handlers)
+    #[error("Config error: {0}")]
+    Config(String),
+
+    #[error("RPC error: {0}")]
+    Rpc(String),
+
+    #[error("Migration error: {0}")]
+    Migration(String),
+
+    #[error("CLI error: {0}")]
+    Cli(String),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 impl From<serde_json::Error> for ModuleError {
@@ -858,6 +848,87 @@ impl From<anyhow::Error> for ModuleError {
     fn from(e: anyhow::Error) -> Self {
         ModuleError::OperationError(e.to_string())
     }
+}
+
+impl ModuleError {
+    /// Wrap an error with a context message. Use instead of
+    /// `ModuleError::OperationError(format!("{msg}: {e}"))` for consistent formatting.
+    pub fn op_err<E: std::fmt::Display>(msg: &str, e: E) -> Self {
+        ModuleError::OperationError(format!("{msg}: {e}"))
+    }
+}
+
+impl From<String> for ModuleError {
+    fn from(s: String) -> Self {
+        ModuleError::Other(s)
+    }
+}
+
+impl From<&str> for ModuleError {
+    fn from(s: &str) -> Self {
+        ModuleError::Other(s.to_string())
+    }
+}
+
+/// Module API error message constants. Use these with `ModuleError::OperationError(s.into())`
+/// or `.to_string()` so wording stays consistent and i18n-friendly.
+pub mod module_error_msg {
+    pub const CHAIN_NOT_INITIALIZED: &str = "Chain not initialized";
+    pub const CHAIN_NOT_YET_INITIALIZED: &str = "Chain not yet initialized";
+    pub const EVENT_MANAGER_NOT_AVAILABLE: &str = "Event manager not available";
+    pub const IPC_SERVER_NOT_AVAILABLE: &str = "IPC server not available";
+    pub const MEMPOOL_MANAGER_NOT_AVAILABLE: &str = "Mempool manager not available";
+    pub const METRICS_MANAGER_NOT_AVAILABLE: &str = "Metrics manager not available";
+    pub const MODULE_API_REGISTRY_NOT_AVAILABLE: &str = "Module API registry not available";
+    pub const MODULE_ID_NOT_SET: &str = "Module ID not set";
+    pub const MODULE_ID_NOT_SET_FOR_METRICS: &str = "Module ID not set for metrics reporting";
+    pub const MODULE_ID_NOT_SET_FOR_TASK: &str = "Module ID not set for task scheduling";
+    pub const MODULE_ID_NOT_SET_FOR_TIMER: &str = "Module ID not set for timer registration";
+    pub const MODULE_MANAGER_NOT_AVAILABLE: &str = "Module manager not available";
+    pub const MODULE_REGISTRY_NOT_AVAILABLE: &str = "Module registry not available";
+    pub const MODULE_ROUTER_NOT_AVAILABLE: &str = "Module router not available";
+    pub const NETWORK_MANAGER_NOT_AVAILABLE: &str = "Network manager not available";
+    pub const NO_CHAIN_TIP: &str = "No chain tip";
+    pub const PAYMENT_STATE_MACHINE_NOT_AVAILABLE: &str = "Payment state machine not available";
+    pub const RPC_SERVER_NOT_AVAILABLE: &str = "RPC server not available";
+    pub const TIMER_MANAGER_NOT_AVAILABLE: &str = "Timer manager not available";
+
+    // IPC / invocation
+    pub const INVOCATION_RESPONSE_CHANNEL_CLOSED: &str = "Invocation response channel closed";
+    pub const MODULE_CONNECTION_CLOSED: &str = "Module connection closed";
+    pub const MODULE_DID_NOT_RESPOND_CLI_60S: &str =
+        "Module did not respond to CLI invocation within 60 seconds";
+    pub const MODULE_DID_NOT_RESPOND_RPC_60S: &str =
+        "Module did not respond to RPC invocation within 60 seconds";
+    pub const MODULE_RETURNED_SUCCESS_BUT_NO_PAYLOAD: &str =
+        "Module returned success but no payload";
+    pub const MODULE_RETURNED_WRONG_PAYLOAD_TYPE_RPC: &str =
+        "Module returned wrong payload type for RPC";
+    pub const NO_MODULE_WITH_CLI_NAME_LOADED: &str = "No module with CLI name '{}' is loaded";
+    pub const TASK_SCHEDULING_REQUIRES_CALLBACK_IPC: &str =
+        "Task scheduling requires callback which cannot be serialized over IPC. Use module-side task management.";
+    pub const TIMER_CANCELLATION_NOT_SUPPORTED_IPC: &str =
+        "Timer cancellation not supported over IPC. Use module-side timer management.";
+    pub const TIMER_REGISTRATION_REQUIRES_CALLBACK_IPC: &str =
+        "Timer registration requires callback which cannot be serialized over IPC. Use module-side timer management.";
+
+    // Registry / module fetch
+    pub const BINARY_HASH_MUST_BE_32_BYTES: &str = "Binary hash must be 32 bytes";
+    pub const EXPECTED_MODULE_MESSAGE: &str = "Expected Module message";
+    pub const HASH_MUST_BE_32_BYTES: &str = "Hash must be 32 bytes";
+    pub const IROH_TRANSPORT_NOT_SUPPORTED_MODULE_FETCHING: &str =
+        "Iroh transport not yet supported for module fetching";
+    pub const MANIFEST_HASH_MUST_BE_32_BYTES: &str = "Manifest hash must be 32 bytes";
+    pub const MISSING_BINARY_HASH_FIELD: &str = "Missing 'binary_hash' field";
+    pub const MISSING_HASH_FIELD: &str = "Missing 'hash' field";
+    pub const MISSING_MANIFEST_FIELD: &str = "Missing 'manifest' field";
+    pub const MISSING_MANIFEST_HASH_FIELD: &str = "Missing 'manifest_hash' field";
+    pub const MISSING_NAME_FIELD: &str = "Missing 'name' field";
+    pub const MISSING_VERSION_FIELD: &str = "Missing 'version' field";
+    pub const NETWORK_MANAGER_NOT_SET_P2P_FETCHING: &str =
+        "Network manager not set for P2P fetching";
+    pub const REQUEST_ID_MISMATCH: &str = "Request ID mismatch";
+    pub const RESPONSE_CHANNEL_CLOSED: &str = "Response channel closed";
 }
 
 // === API Response Types ===

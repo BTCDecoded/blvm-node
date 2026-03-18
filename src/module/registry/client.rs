@@ -13,7 +13,7 @@ use crate::module::registry::cache::{CachedModule, LocalCache};
 use crate::module::registry::cas::{ContentAddressableStorage, ModuleHash};
 use crate::module::registry::manifest::ModuleManifest;
 use crate::module::security::signing::ModuleSigner;
-use crate::module::traits::ModuleError;
+use crate::module::traits::{module_error_msg, ModuleError};
 
 /// Registry peer configuration (P2P-based)
 #[derive(Debug, Clone)]
@@ -174,7 +174,7 @@ impl ModuleRegistry {
         name: &str,
     ) -> Result<ModuleEntry, ModuleError> {
         let network_manager = self.network_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError("Network manager not set for P2P fetching".to_string())
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_SET_P2P_FETCHING.to_string())
         })?;
 
         // Convert TransportAddr to SocketAddr for network manager
@@ -185,7 +185,7 @@ impl ModuleRegistry {
             #[cfg(feature = "iroh")]
             crate::network::transport::TransportAddr::Iroh(_) => {
                 return Err(ModuleError::OperationError(
-                    "Iroh transport not yet supported for module fetching".to_string(),
+                    module_error_msg::IROH_TRANSPORT_NOT_SUPPORTED_MODULE_FETCHING.to_string(),
                 ));
             }
         };
@@ -205,33 +205,30 @@ impl ModuleRegistry {
         // Serialize and send message
         let message_wire =
             ProtocolParser::serialize_message(&ProtocolMessage::GetModule(get_module_msg))
-                .map_err(|e| {
-                    ModuleError::OperationError(format!("Failed to serialize GetModule: {e}"))
-                })?;
+                .map_err(|e| ModuleError::op_err("Failed to serialize GetModule", e))?;
 
         network_manager
             .send_to_peer(socket_addr, message_wire)
             .await
-            .map_err(|e| {
-                ModuleError::OperationError(format!("Failed to send GetModule to peer: {e}"))
-            })?;
+            .map_err(|e| ModuleError::op_err("Failed to send GetModule to peer", e))?;
 
         // Wait for response with timeout
         let response_data = tokio::time::timeout(tokio::time::Duration::from_secs(30), response_rx)
             .await
             .map_err(|_| ModuleError::Timeout)?
-            .map_err(|_| ModuleError::OperationError("Response channel closed".to_string()))?;
+            .map_err(|_| {
+            ModuleError::OperationError(module_error_msg::RESPONSE_CHANNEL_CLOSED.to_string())
+        })?;
 
         // Parse Module response
-        let parsed = ProtocolParser::parse_message(&response_data).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to parse Module response: {e}"))
-        })?;
+        let parsed = ProtocolParser::parse_message(&response_data)
+            .map_err(|e| ModuleError::op_err("Failed to parse Module response", e))?;
 
         let module_msg = match parsed {
             ProtocolMessage::Module(msg) => msg,
             _ => {
                 return Err(ModuleError::OperationError(
-                    "Expected Module message".to_string(),
+                    module_error_msg::EXPECTED_MODULE_MESSAGE.to_string(),
                 ))
             }
         };
@@ -239,7 +236,7 @@ impl ModuleRegistry {
         // Verify request_id matches
         if module_msg.request_id != request_id {
             return Err(ModuleError::OperationError(
-                "Request ID mismatch".to_string(),
+                module_error_msg::REQUEST_ID_MISMATCH.to_string(),
             ));
         }
 
@@ -270,71 +267,89 @@ impl ModuleRegistry {
         let name = data
             .get("name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ModuleError::OperationError("Missing 'name' field".to_string()))?
+            .ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MISSING_NAME_FIELD.to_string())
+        })?
             .to_string();
 
         let version = data
             .get("version")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ModuleError::OperationError("Missing 'version' field".to_string()))?
+            .ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MISSING_VERSION_FIELD.to_string())
+        })?
             .to_string();
 
         // Parse hashes (hex-encoded)
         let hash_str = data
             .get("hash")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ModuleError::OperationError("Missing 'hash' field".to_string()))?;
+            .ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MISSING_HASH_FIELD.to_string())
+        })?;
 
         let manifest_hash_str = data
             .get("manifest_hash")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ModuleError::OperationError("Missing 'manifest_hash' field".to_string())
+                ModuleError::OperationError(
+                    module_error_msg::MISSING_MANIFEST_HASH_FIELD.to_string(),
+                )
             })?;
 
         let binary_hash_str = data
             .get("binary_hash")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ModuleError::OperationError("Missing 'binary_hash' field".to_string())
+                ModuleError::OperationError(
+                    module_error_msg::MISSING_BINARY_HASH_FIELD.to_string(),
+                )
             })?;
 
         // Decode hashes from hex
         let hash = hex::decode(hash_str)
-            .map_err(|e| ModuleError::OperationError(format!("Invalid hash hex: {e}")))?
-            .try_into()
-            .map_err(|_| ModuleError::OperationError("Hash must be 32 bytes".to_string()))?;
-
-        let manifest_hash = hex::decode(manifest_hash_str)
-            .map_err(|e| ModuleError::OperationError(format!("Invalid manifest_hash hex: {e}")))?
+            .map_err(|e| ModuleError::op_err("Invalid hash hex", e))?
             .try_into()
             .map_err(|_| {
-                ModuleError::OperationError("Manifest hash must be 32 bytes".to_string())
+                ModuleError::OperationError(module_error_msg::HASH_MUST_BE_32_BYTES.to_string())
+            })?;
+
+        let manifest_hash = hex::decode(manifest_hash_str)
+            .map_err(|e| ModuleError::op_err("Invalid manifest_hash hex", e))?
+            .try_into()
+            .map_err(|_| {
+                ModuleError::OperationError(
+                    module_error_msg::MANIFEST_HASH_MUST_BE_32_BYTES.to_string(),
+                )
             })?;
 
         let binary_hash = hex::decode(binary_hash_str)
-            .map_err(|e| ModuleError::OperationError(format!("Invalid binary_hash hex: {e}")))?
+            .map_err(|e| ModuleError::op_err("Invalid binary_hash hex", e))?
             .try_into()
-            .map_err(|_| ModuleError::OperationError("Binary hash must be 32 bytes".to_string()))?;
+            .map_err(|_| {
+                ModuleError::OperationError(
+                    module_error_msg::BINARY_HASH_MUST_BE_32_BYTES.to_string(),
+                )
+            })?;
 
         // Parse manifest (TOML string or JSON object)
         let manifest = if let Some(manifest_str) = data.get("manifest").and_then(|v| v.as_str()) {
             toml::from_str::<ModuleManifest>(manifest_str)
-                .map_err(|e| ModuleError::OperationError(format!("Invalid manifest TOML: {e}")))?
+                .map_err(|e| ModuleError::op_err("Invalid manifest TOML", e))?
         } else if let Some(manifest_obj) = data.get("manifest") {
             // Try parsing as JSON and converting to TOML format
             serde_json::from_value::<ModuleManifest>(manifest_obj.clone())
-                .map_err(|e| ModuleError::OperationError(format!("Invalid manifest JSON: {e}")))?
+                .map_err(|e| ModuleError::op_err("Invalid manifest JSON", e))?
         } else {
             return Err(ModuleError::OperationError(
-                "Missing 'manifest' field".to_string(),
+                module_error_msg::MISSING_MANIFEST_FIELD.to_string(),
             ));
         };
 
         // Verify manifest hash matches
         let cas = self.cas.read().await;
         let manifest_bytes = toml::to_string(&manifest)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to serialize manifest: {e}")))?
+            .map_err(|e| ModuleError::op_err("Failed to serialize manifest", e))?
             .into_bytes();
         if !cas.verify(&manifest_bytes, &manifest_hash) {
             return Err(ModuleError::CryptoError(
@@ -399,7 +414,7 @@ impl ModuleRegistry {
         // Load binary if path exists
         let binary = if cached.local_path.exists() {
             Some(std::fs::read(&cached.local_path).map_err(|e| {
-                ModuleError::OperationError(format!("Failed to read cached binary: {e}"))
+                ModuleError::op_err("Failed to read cached binary", e)
             })?)
         } else {
             None
@@ -429,7 +444,7 @@ impl ModuleRegistry {
     async fn cache_entry(&self, entry: &ModuleEntry) -> Result<(), ModuleError> {
         // Store manifest in CAS if not already present
         let manifest_data = toml::to_string(&entry.manifest).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to serialize manifest: {e}"))
+            ModuleError::op_err("Failed to serialize manifest", e)
         })?;
 
         let mut cas = self.cas.write().await;
@@ -453,10 +468,7 @@ impl ModuleRegistry {
             hash: entry.hash,
             manifest_hash: entry.manifest_hash,
             binary_hash: entry.binary_hash,
-            verified_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            verified_at: crate::utils::current_timestamp(),
             verified_by: vec![],
             local_path: self.cache_dir.join(format!("{}.bin", entry.name)),
             expires_at: None, // No expiration by default
@@ -476,7 +488,7 @@ impl ModuleRegistry {
         // 1. Verify manifest signatures if present
         if entry.manifest.has_signatures() {
             let manifest_data = toml::to_string(&entry.manifest).map_err(|e| {
-                ModuleError::OperationError(format!("Failed to serialize manifest: {e}"))
+                ModuleError::op_err("Failed to serialize manifest", e)
             })?;
 
             let signatures = entry.manifest.get_signatures();
@@ -502,7 +514,7 @@ impl ModuleRegistry {
 
         // 2. Verify manifest hash
         let manifest_data = toml::to_string(&entry.manifest).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to serialize manifest: {e}"))
+            ModuleError::op_err("Failed to serialize manifest", e)
         })?;
 
         let cas = self.cas.read().await;

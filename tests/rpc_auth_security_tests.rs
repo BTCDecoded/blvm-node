@@ -174,6 +174,60 @@ async fn test_auth_brute_force_protection() {
 }
 
 #[tokio::test]
+async fn test_rpc_rate_limiting_without_auth() {
+    // Rate-limit-only mode: auth disabled, IP rate limiting applies
+    let manager = RpcAuthManager::with_rate_limits(false, 5, 1);
+    let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+    // First 5 requests (burst) should succeed
+    for _ in 0..5 {
+        assert!(
+            manager
+                .check_ip_rate_limit_with_endpoint(addr, Some("rpc:getblockchaininfo"))
+                .await,
+            "Burst requests should be allowed"
+        );
+    }
+
+    // 6th request should be rate limited
+    assert!(
+        !manager
+            .check_ip_rate_limit_with_endpoint(addr, Some("rpc:getblockchaininfo"))
+            .await,
+        "Request beyond burst should be rate limited"
+    );
+}
+
+#[tokio::test]
+async fn test_batch_rate_limiting() {
+    // Batch consumes min(batch_len, 10) tokens
+    let manager = RpcAuthManager::with_rate_limits(false, 5, 1);
+    let addr: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+
+    // Batch of 10 consumes 10 tokens, but burst is only 5 - should reject
+    assert!(
+        !manager
+            .check_ip_rate_limit_with_endpoint_n(addr, Some("rpc:batch"), 10)
+            .await,
+        "Batch exceeding burst should be rate limited"
+    );
+
+    // Single request should still work (tokens refill over time, but we just consumed 0 - actually
+    // the failed check doesn't consume. Let me re-read - check_and_consume_n returns false without
+    // consuming when tokens < n. So we still have 5 tokens. Let me fix the test.
+    // Actually: when we call check_ip_rate_limit_with_endpoint_n(addr, _, 10), it tries to consume
+    // 10 tokens. We have 5. So it returns false and does NOT consume (the check is atomic - only
+    // consume if we have enough). So we still have 5 tokens.
+    // Single request should work
+    assert!(
+        manager
+            .check_ip_rate_limit_with_endpoint(addr, Some("rpc:getblockchaininfo"))
+            .await,
+        "Single request after failed batch should still work"
+    );
+}
+
+#[tokio::test]
 async fn test_auth_case_sensitive_token() {
     let manager = RpcAuthManager::new(true);
     let token_str = "CaseSensitiveToken".to_string();

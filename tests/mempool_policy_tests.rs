@@ -6,49 +6,10 @@
 //! - Fee thresholds
 //! - Size limits
 
+mod common;
+
 use blvm_node::config::{EvictionStrategy, MempoolPolicyConfig};
 use blvm_node::node::mempool::MempoolManager;
-use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
-use std::collections::HashMap;
-
-/// Create a test transaction
-fn create_test_tx(input_value: u64, output_value: u64, size: usize) -> Transaction {
-    Transaction {
-        version: 1,
-        inputs: blvm_protocol::tx_inputs![TransactionInput {
-            prevout: OutPoint {
-                hash: [1; 32],
-                index: 0,
-            },
-            script_sig: vec![0; size / 2], // Approximate size
-            sequence: 0xffffffff,
-        }],
-        outputs: blvm_protocol::tx_outputs![TransactionOutput {
-            value: output_value as i64,
-            script_pubkey: vec![0x76, 0xa9, 0x14].repeat(size / 2).into(), // Approximate size
-        }],
-        lock_time: 0,
-    }
-}
-
-/// Create a test UTXO set
-fn create_test_utxo_set() -> UtxoSet {
-    let mut utxo_set = HashMap::new();
-    utxo_set.insert(
-        OutPoint {
-            hash: [1; 32],
-            index: 0,
-        },
-        UTXO {
-            value: 100_000,
-            script_pubkey: vec![0x76, 0xa9, 0x14, 0x00].repeat(20).into(),
-            height: 0,
-
-            is_coinbase: false,
-        },
-    );
-    utxo_set
-}
 
 #[tokio::test]
 async fn test_eviction_strategy_lowest_fee_rate() {

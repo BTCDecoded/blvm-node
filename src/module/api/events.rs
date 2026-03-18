@@ -17,6 +17,12 @@ impl EventManager {
     pub fn loaded_modules(&self) -> &Arc<TokioMutex<HashMap<String, (String, u64)>>> {
         &self.loaded_modules
     }
+
+    /// Remove a module from loaded_modules (when unloaded).
+    pub async fn remove_loaded_module(&self, module_name: &str) {
+        let mut loaded = self.loaded_modules.lock().await;
+        loaded.remove(module_name);
+    }
 }
 
 /// Event subscription manager

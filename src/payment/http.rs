@@ -7,6 +7,7 @@ use crate::payment::processor::PaymentError;
 #[cfg(feature = "bip70-http")]
 use crate::payment::processor::PaymentProcessor;
 use bytes::Bytes;
+use http_body_util::Limited;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::http::StatusCode;
@@ -14,6 +15,9 @@ use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+
+/// Maximum request body size (1MB) - reuses rpc.max_request_size_bytes default
+const MAX_BODY_SIZE: usize = crate::rpc::server::DEFAULT_MAX_REQUEST_SIZE;
 
 /// Handle HTTP payment request creation
 #[cfg(feature = "bip70-http")]
@@ -31,8 +35,10 @@ pub async fn handle_create_payment_request(
             .unwrap());
     }
 
-    // Read request body
-    let body = req.collect().await.map_err(|e| {
+    // Read request body with size limit (S-006)
+    let (_, body) = req.into_parts();
+    let limited = Limited::new(body, MAX_BODY_SIZE);
+    let body = limited.collect().await.map_err(|e| {
         PaymentError::ProcessingError(format!("Failed to read request body: {}", e))
     })?;
     let body_bytes = body.to_bytes();
@@ -49,16 +55,24 @@ pub async fn handle_create_payment_request(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .ok_or_else(|| PaymentError::ProcessingError("Missing 'outputs' field".to_string()))?;
 
-    // Extract optional merchant_data
+    // Extract optional merchant_data (S-002: length limits to prevent DoS)
+    const MAX_MERCHANT_DATA_HEX_LEN: usize = 512;
+    const MAX_MERCHANT_DATA_ARRAY_LEN: usize = 256;
     let merchant_data = params.get("merchant_data").and_then(|v| {
         if v.is_string() {
-            Some(hex::decode(v.as_str().unwrap()).ok()?)
+            let s = v.as_str().unwrap();
+            if s.len() > MAX_MERCHANT_DATA_HEX_LEN {
+                return None;
+            }
+            Some(hex::decode(s).ok()?)
         } else if v.is_array() {
+            let arr = v.as_array().unwrap();
+            if arr.len() > MAX_MERCHANT_DATA_ARRAY_LEN {
+                return None;
+            }
             Some(
-                v.as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|n| n.as_u64().map(|u| u as u8))
+                arr.iter()
+                    .filter_map(|n| n.as_u64().filter(|&u| u <= 255).map(|u| u as u8))
                     .collect(),
             )
         } else {
@@ -151,13 +165,15 @@ pub async fn handle_submit_payment(
         })
         .ok_or_else(|| PaymentError::ProcessingError("Missing payment_id".to_string()))?;
 
-    // Read request body
-    let body = req.collect().await.map_err(|e| {
+    // Read request body with size limit (S-006, S-007)
+    let (_, body) = req.into_parts();
+    let limited = Limited::new(body, MAX_BODY_SIZE);
+    let body = limited.collect().await.map_err(|e| {
         PaymentError::ProcessingError(format!("Failed to read request body: {}", e))
     })?;
     let body_bytes = body.to_bytes();
 
-    // Parse payment (BIP70 format)
+    // Parse payment (BIP70 format) - body already limited to MAX_BODY_SIZE
     let payment: Payment = bincode::deserialize(&body_bytes)
         .map_err(|e| PaymentError::ProcessingError(format!("Failed to parse payment: {}", e)))?;
 

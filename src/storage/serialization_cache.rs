@@ -4,7 +4,7 @@
 //! redundant serialization operations during IBD.
 
 use blvm_consensus::types::Hash;
-use lru::LruCache;
+use blvm_protocol::lru::LruCache;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 

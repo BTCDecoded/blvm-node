@@ -8,8 +8,7 @@ use hyper::HeaderMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use crate::utils::current_timestamp;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -64,10 +63,7 @@ pub struct RpcRateLimiter {
 impl RpcRateLimiter {
     /// Create a new rate limiter
     pub fn new(burst_limit: u32, rate: u32) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should always be after UNIX_EPOCH")
-            .as_secs();
+        let now = current_timestamp();
         Self {
             tokens: burst_limit,
             burst_limit,
@@ -78,10 +74,13 @@ impl RpcRateLimiter {
 
     /// Check if a request is allowed and consume a token
     pub fn check_and_consume(&mut self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should always be after UNIX_EPOCH")
-            .as_secs();
+        self.check_and_consume_n(1)
+    }
+
+    /// Check if n requests are allowed and consume that many tokens (for batch rate limiting).
+    /// Returns true only if at least n tokens were available and consumed.
+    pub fn check_and_consume_n(&mut self, n: u32) -> bool {
+        let now = current_timestamp();
 
         // Refill tokens based on elapsed time
         let elapsed = now.saturating_sub(self.last_refill);
@@ -94,9 +93,10 @@ impl RpcRateLimiter {
             self.last_refill = now;
         }
 
-        // Check if we have tokens available
-        if self.tokens > 0 {
-            self.tokens -= 1;
+        // Check if we have enough tokens
+        let n = n.min(self.burst_limit); // Cap at burst to avoid overflow
+        if self.tokens >= n {
+            self.tokens -= n;
             true
         } else {
             false
@@ -106,6 +106,11 @@ impl RpcRateLimiter {
     /// Get current token count (for monitoring)
     pub fn tokens_remaining(&self) -> u32 {
         self.tokens
+    }
+
+    /// Last refill timestamp (for stale limiter eviction)
+    pub fn last_refill(&self) -> u64 {
+        self.last_refill
     }
 }
 
@@ -123,6 +128,10 @@ pub struct RpcAuthManager {
     default_rate_limit: (u32, u32),
     /// Per-user rate limits (overrides default)
     user_rate_limits: Arc<Mutex<HashMap<UserId, (u32, u32)>>>,
+    /// Per-method rate limits (method_name -> (burst, rate))
+    method_rate_limits: Arc<Mutex<HashMap<String, (u32, u32)>>>,
+    /// Per-method rate limiters (global, one per method)
+    method_rate_limiters: Arc<Mutex<HashMap<String, RpcRateLimiter>>>,
     /// Authentication failure tracker for DoS protection
     auth_failure_tracker: AuthFailureTracker,
 }
@@ -137,6 +146,8 @@ impl RpcAuthManager {
             rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             default_rate_limit: (100, 10), // 100 burst, 10 req/sec
             user_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            method_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            method_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             auth_failure_tracker: AuthFailureTracker::new(),
         }
     }
@@ -150,6 +161,8 @@ impl RpcAuthManager {
             rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             default_rate_limit: (default_burst, default_rate),
             user_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            method_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            method_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             auth_failure_tracker: AuthFailureTracker::new(),
         }
     }
@@ -212,6 +225,15 @@ impl RpcAuthManager {
         if let Some(limiter) = limiters.get_mut(user_id) {
             *limiter = RpcRateLimiter::new(burst, rate);
         }
+    }
+
+    /// Set rate limit for a specific RPC method (e.g. stricter for getrawmempool)
+    pub async fn set_method_rate_limit(&self, method_name: &str, burst: u32, rate: u32) {
+        let mut limits = self.method_rate_limits.lock().await;
+        limits.insert(method_name.to_string(), (burst, rate));
+
+        let mut limiters = self.method_rate_limiters.lock().await;
+        limiters.insert(method_name.to_string(), RpcRateLimiter::new(burst, rate));
     }
 
     /// Get rate limit for a user (checks per-user limits first)
@@ -343,6 +365,11 @@ impl RpcAuthManager {
 
     /// Check rate limit for a user
     pub async fn check_rate_limit(&self, user_id: &UserId) -> bool {
+        self.check_rate_limit_n(user_id, 1).await
+    }
+
+    /// Check rate limit for n requests (e.g. batch with batch_multiplier)
+    pub async fn check_rate_limit_n(&self, user_id: &UserId, n: u32) -> bool {
         let mut limiters = self.rate_limiters.lock().await;
 
         // Get or create rate limiter for this user
@@ -351,17 +378,18 @@ impl RpcAuthManager {
             RpcRateLimiter::new(burst, rate)
         });
 
-        limiter.check_and_consume()
+        limiter.check_and_consume_n(n)
     }
 
-    /// Check rate limit for a method/endpoint (uses default rate limiting)
-    /// This is a convenience method for method-specific rate limiting
-    pub async fn check_method_rate_limit(&self, _method_name: &str) -> bool {
-        // For now, use default rate limiting
-        // In the future, this could support method-specific rate limits
-        // For now, we'll use a per-IP rate limiter for unauthenticated requests
-        // This method is called from RPC server before authentication, so we use IP-based limiting
-        true // Allow by default - actual rate limiting happens after authentication
+    /// Check rate limit for a method/endpoint.
+    /// When method-specific limits are set via set_method_rate_limit, enforces them.
+    /// Otherwise allows (per-user rate limiting happens after authentication).
+    pub async fn check_method_rate_limit(&self, method_name: &str) -> bool {
+        let mut limiters = self.method_rate_limiters.lock().await;
+        if let Some(limiter) = limiters.get_mut(method_name) {
+            return limiter.check_and_consume();
+        }
+        true // No method-specific limit configured; allow
     }
 
     /// Check rate limit with endpoint information (for method-specific rate limiting)
@@ -371,7 +399,19 @@ impl RpcAuthManager {
         client_addr: Option<SocketAddr>,
         endpoint: Option<&str>,
     ) -> bool {
-        let allowed = self.check_rate_limit(user_id).await;
+        self.check_rate_limit_with_endpoint_n(user_id, client_addr, endpoint, 1)
+            .await
+    }
+
+    /// Check rate limit for n requests with endpoint info (for batch)
+    pub async fn check_rate_limit_with_endpoint_n(
+        &self,
+        user_id: &UserId,
+        client_addr: Option<SocketAddr>,
+        endpoint: Option<&str>,
+        n: u32,
+    ) -> bool {
+        let allowed = self.check_rate_limit_n(user_id, n).await;
 
         if !allowed {
             // Log rate limit violation
@@ -394,18 +434,33 @@ impl RpcAuthManager {
         client_addr: SocketAddr,
         endpoint: Option<&str>,
     ) -> bool {
+        self.check_ip_rate_limit_with_endpoint_n(client_addr, endpoint, 1)
+            .await
+    }
+
+    /// Check IP-based rate limit for n requests (for batch)
+    pub async fn check_ip_rate_limit_with_endpoint_n(
+        &self,
+        client_addr: SocketAddr,
+        endpoint: Option<&str>,
+        n: u32,
+    ) -> bool {
         let user_id = UserId::Ip(client_addr);
-        // Use stricter rate limits for unauthenticated requests (half of authenticated)
-        let (burst, rate) = self.default_rate_limit;
-        let ip_burst = burst / 2;
-        let ip_rate = rate / 2;
+        // When auth not required (rate-limit-only mode), use default_rate_limit directly.
+        // When auth required, unauthenticated IPs get stricter limits (half of authenticated).
+        let (ip_burst, ip_rate) = if self.auth_required {
+            let (burst, rate) = self.default_rate_limit;
+            (burst / 2, rate / 2)
+        } else {
+            self.default_rate_limit
+        };
 
         let mut limiters = self.rate_limiters.lock().await;
         let limiter = limiters
             .entry(user_id.clone())
             .or_insert_with(|| RpcRateLimiter::new(ip_burst, ip_rate));
 
-        let allowed = limiter.check_and_consume();
+        let allowed = limiter.check_and_consume_n(n);
 
         if !allowed {
             // Log rate limit violation
@@ -420,11 +475,12 @@ impl RpcAuthManager {
         allowed
     }
 
-    /// Clean up rate limiters for disconnected users (optional optimization)
+    /// Clean up rate limiters for users inactive beyond threshold (default: 1 hour)
     pub async fn cleanup_stale_limiters(&self) {
-        // For now, we keep all limiters. In production, you might want to
-        // remove limiters for users that haven't made requests in a while.
-        // This is a placeholder for future optimization.
+        const STALE_THRESHOLD_SECS: u64 = 3600; // 1 hour
+        let now = current_timestamp();
+        let mut limiters = self.rate_limiters.lock().await;
+        limiters.retain(|_, limiter| now.saturating_sub(limiter.last_refill()) < STALE_THRESHOLD_SECS);
     }
 }
 
@@ -533,10 +589,7 @@ impl AuthFailureTracker {
     }
 
     async fn record_failure(&self, addr: SocketAddr) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should always be after UNIX_EPOCH")
-            .as_secs();
+        let now = current_timestamp();
 
         let mut failures = self.failures.lock().await;
         let timestamps = failures.entry(addr).or_insert_with(Vec::new);

@@ -14,10 +14,7 @@ use blvm_node::utils::current_timestamp;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-// Note: These are unit tests for the replay protection logic itself.
-// Full integration tests would require setting up a NetworkManager instance,
-// which is complex. These tests verify that the replay protection checks
-// work correctly with the message types.
+// Test strategy: we exercise replay protection logic with message types; full E2E would need NetworkManager.
 
 #[tokio::test]
 #[cfg(feature = "governance")]

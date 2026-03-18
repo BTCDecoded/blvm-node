@@ -127,6 +127,8 @@ Module loaded into isolated process:
 - Sandbox creation (resource limits)
 - IPC connection establishment
 - API subscription setup
+- Config merge: node `[modules.<name>]` overrides module `config.toml`; node values take precedence
+- Database backend: inherited from node when not set; module can override via `database_backend` in config
 
 ### Execution
 
@@ -286,6 +288,23 @@ The manifest is organized into logical sections:
 4. **Dependencies**: Required and optional module dependencies
 5. **Configuration Schema**: Descriptions of configurable options
 6. **Advanced Features** (optional): Signatures, binary verification, payment config
+
+## Module Storage
+
+Each module has its **own separate database** at `data/modules/<name>/db/`. By default, modules use the **same database format** as the node (redb, rocksdb, sled, tidesdb). Configurable via `database_backend` in module config or `[modules.<name>]`; when not set, inherits from the node.
+
+## Config Override
+
+Node config `[modules.<name>]` overrides module `config.toml` when loading. Node values take precedence. Example:
+
+```toml
+[modules.selective-sync]
+database_backend = "redb"
+```
+
+## CLI Flow
+
+Modules register CLI specs on connect via `RegisterCliSpec`. The node stores them in `cli_registry`. blvm fetches specs via `getmoduleclispecs` RPC and dispatches via `runmodulecli` when the user runs a module command (e.g. `blvm sync-policy list`). Node → module invocation uses `ModuleMessage::Invocation` over IPC.
 
 ## Data Flow
 

@@ -18,13 +18,21 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
-/// Block provider for dependency injection
-pub struct BlockProvider {
-    /// Mock block storage
+/// Abstraction for reading and writing blocks/headers by hash.
+/// Implemented by [InMemoryBlockProvider] (default sync path) and [MockBlockProvider] (tests).
+pub trait BlockProvider {
+    fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>>;
+    fn get_block_header(&self, hash: &[u8; 32]) -> Result<Option<BlockHeader>>;
+    fn get_best_header(&self) -> Result<Option<BlockHeader>>;
+    fn store_block(&mut self, block: &Block) -> Result<()>;
+    fn store_block_header(&mut self, header: &BlockHeader) -> Result<()>;
+    fn get_block_count(&self) -> Result<u64>;
+}
+
+/// In-memory block provider for dependency injection (default sync coordinator).
+pub struct InMemoryBlockProvider {
     blocks: std::collections::HashMap<[u8; 32], Block>,
-    /// Mock header storage
     headers: std::collections::HashMap<[u8; 32], BlockHeader>,
-    /// Mock block count
     block_count: u64,
 }
 
@@ -131,10 +139,23 @@ pub enum SyncState {
     Error(String),
 }
 
+impl SyncState {
+    /// String representation for event payloads (e.g. SyncStateChanged).
+    pub fn as_event_str(&self) -> &'static str {
+        match self {
+            SyncState::Initial => "Initial",
+            SyncState::Headers => "Headers",
+            SyncState::Blocks => "Blocks",
+            SyncState::Synced => "Synced",
+            SyncState::Error(_) => "Error",
+        }
+    }
+}
+
 /// Sync coordinator that manages blockchain synchronization
 pub struct SyncCoordinator {
     state_machine: SyncStateMachine,
-    block_provider: BlockProvider,
+    block_provider: InMemoryBlockProvider,
 }
 
 impl Default for SyncCoordinator {
@@ -154,7 +175,7 @@ impl SyncCoordinator {
     pub fn new() -> Self {
         Self {
             state_machine: SyncStateMachine::new(),
-            block_provider: BlockProvider::new(),
+            block_provider: InMemoryBlockProvider::new(),
         }
     }
 
@@ -185,19 +206,15 @@ impl SyncCoordinator {
         utxo_set: &mut UtxoSet,
         network: Option<Arc<crate::network::NetworkManager>>,
         peer_addresses: Vec<String>,
+        ibd_config: Option<&crate::config::IbdConfig>,
+        event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
     ) -> Result<bool> {
         use crate::node::parallel_ibd::{ParallelIBD, ParallelIBDConfig};
 
         // Check if we have enough peers for parallel IBD.
-        // Allow 1 peer when BLVM_IBD_PEERS is set (e.g. LAN-only IBD).
-        let min_peers = if std::env::var("BLVM_IBD_PEERS")
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
-        {
-            1
-        } else {
-            2
-        };
+        // Allow 1 peer when preferred_peers is set (e.g. LAN-only IBD).
+        let config = ParallelIBDConfig::from_config(ibd_config);
+        let min_peers = if config.preferred_peers.is_empty() { 2 } else { 1 };
         if peer_addresses.len() < min_peers {
             debug!(
                 "Not enough peers for parallel IBD (have {}, need {}). Sequential sync is not supported.",
@@ -222,13 +239,20 @@ impl SyncCoordinator {
             peer_addresses.len()
         );
 
+        // Transition to Blocks and emit SyncStateChanged before starting block download
+        let old_state = self.state_machine.state().as_event_str();
+        self.state_machine.transition_to(SyncState::Blocks);
+        if let Some(ref ep) = event_publisher {
+            ep.publish_sync_state_changed(old_state, "Blocks").await;
+        }
+
         // Create parallel IBD coordinator (Arc allows dedicated validation thread to call validate_block_only)
-        let config = ParallelIBDConfig::default();
         let mut parallel_ibd = ParallelIBD::new(config);
         parallel_ibd.initialize_peers(&peer_addresses);
         let parallel_ibd = std::sync::Arc::new(parallel_ibd);
 
-        // Attempt parallel sync
+        // Attempt parallel sync (clone event_publisher so we can use it after for SyncStateChanged)
+        let ep_for_completion = event_publisher.clone();
         match parallel_ibd
             .sync_parallel(
                 current_height,
@@ -239,12 +263,16 @@ impl SyncCoordinator {
                 std::sync::Arc::clone(&protocol),
                 utxo_set,
                 network,
+                event_publisher,
             )
             .await
         {
             Ok(()) => {
                 info!("Parallel IBD completed successfully");
                 self.state_machine.transition_to(SyncState::Synced);
+                if let Some(ref ep) = ep_for_completion {
+                    ep.publish_sync_state_changed("Blocks", "Synced").await;
+                }
                 Ok(true)
             }
             Err(e) => {
@@ -265,6 +293,8 @@ impl SyncCoordinator {
         _utxo_set: &mut UtxoSet,
         _network: Option<Arc<crate::network::NetworkManager>>,
         _peer_addresses: Vec<String>,
+        _ibd_config: Option<&crate::config::IbdConfig>,
+        _event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
     ) -> Result<bool> {
         // Parallel IBD not available without production feature
         Ok(false)
@@ -377,14 +407,14 @@ impl SyncCoordinator {
     }
 }
 
-impl Default for BlockProvider {
+impl Default for InMemoryBlockProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl BlockProvider {
-    /// Create a new block provider
+impl InMemoryBlockProvider {
+    /// Create a new in-memory block provider
     pub fn new() -> Self {
         Self {
             blocks: std::collections::HashMap::new(),
@@ -393,44 +423,6 @@ impl BlockProvider {
         }
     }
 
-    /// Get a block by hash
-    pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>> {
-        Ok(self.blocks.get(hash).cloned())
-    }
-
-    /// Get a block header by hash
-    pub fn get_block_header(&self, hash: &[u8; 32]) -> Result<Option<BlockHeader>> {
-        Ok(self.headers.get(hash).cloned())
-    }
-
-    /// Get the best block header
-    pub fn get_best_header(&self) -> Result<Option<BlockHeader>> {
-        Ok(self.headers.values().last().cloned())
-    }
-
-    /// Store a block
-    pub fn store_block(&mut self, block: &Block) -> Result<()> {
-        // Simplified hash calculation
-        let hash = self.calculate_block_hash(block);
-        self.blocks.insert(hash, block.clone());
-        self.block_count += 1;
-        Ok(())
-    }
-
-    /// Store a block header
-    pub fn store_block_header(&mut self, header: &BlockHeader) -> Result<()> {
-        // Simplified hash calculation
-        let hash = self.calculate_header_hash(header);
-        self.headers.insert(hash, header.clone());
-        Ok(())
-    }
-
-    /// Get block count
-    pub fn get_block_count(&self) -> Result<u64> {
-        Ok(self.block_count)
-    }
-
-    /// Calculate block hash (simplified)
     fn calculate_block_hash(&self, block: &Block) -> [u8; 32] {
         let mut hash = [0u8; 32];
         hash[0] = block.header.version as u8;
@@ -438,12 +430,42 @@ impl BlockProvider {
         hash
     }
 
-    /// Calculate header hash (simplified)
     fn calculate_header_hash(&self, header: &BlockHeader) -> [u8; 32] {
         let mut hash = [0u8; 32];
         hash[0] = header.version as u8;
         hash[1] = header.timestamp as u8;
         hash
+    }
+}
+
+impl BlockProvider for InMemoryBlockProvider {
+    fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>> {
+        Ok(self.blocks.get(hash).cloned())
+    }
+
+    fn get_block_header(&self, hash: &[u8; 32]) -> Result<Option<BlockHeader>> {
+        Ok(self.headers.get(hash).cloned())
+    }
+
+    fn get_best_header(&self) -> Result<Option<BlockHeader>> {
+        Ok(self.headers.values().last().cloned())
+    }
+
+    fn store_block(&mut self, block: &Block) -> Result<()> {
+        let hash = self.calculate_block_hash(block);
+        self.blocks.insert(hash, block.clone());
+        self.block_count += 1;
+        Ok(())
+    }
+
+    fn store_block_header(&mut self, header: &BlockHeader) -> Result<()> {
+        let hash = self.calculate_header_hash(header);
+        self.headers.insert(hash, header.clone());
+        Ok(())
+    }
+
+    fn get_block_count(&self) -> Result<u64> {
+        Ok(self.block_count)
     }
 }
 
@@ -472,45 +494,6 @@ impl MockBlockProvider {
         }
     }
 
-    /// Get a block by hash
-    pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>> {
-        Ok(self.blocks.get(hash).cloned())
-    }
-
-    /// Get a block header by hash
-    pub fn get_block_header(&self, hash: &[u8; 32]) -> Result<Option<BlockHeader>> {
-        Ok(self.headers.get(hash).cloned())
-    }
-
-    /// Get the best block header
-    pub fn get_best_header(&self) -> Result<Option<BlockHeader>> {
-        Ok(self.best_header.clone())
-    }
-
-    /// Store a block
-    pub fn store_block(&mut self, block: &Block) -> Result<()> {
-        // Simplified hash calculation
-        let hash = self.calculate_block_hash(block);
-        self.blocks.insert(hash, block.clone());
-        self.block_count += 1;
-        Ok(())
-    }
-
-    /// Store a block header
-    pub fn store_block_header(&mut self, header: &BlockHeader) -> Result<()> {
-        // Simplified hash calculation
-        let hash = self.calculate_header_hash(header);
-        self.headers.insert(hash, header.clone());
-        self.best_header = Some(header.clone());
-        Ok(())
-    }
-
-    /// Get block count
-    pub fn get_block_count(&self) -> Result<u64> {
-        Ok(self.block_count)
-    }
-
-    /// Calculate block hash (simplified)
     fn calculate_block_hash(&self, block: &Block) -> [u8; 32] {
         let mut hash = [0u8; 32];
         hash[0] = block.header.version as u8;
@@ -553,6 +536,38 @@ impl MockBlockProvider {
     }
 }
 
+impl BlockProvider for MockBlockProvider {
+    fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>> {
+        Ok(self.blocks.get(hash).cloned())
+    }
+
+    fn get_block_header(&self, hash: &[u8; 32]) -> Result<Option<BlockHeader>> {
+        Ok(self.headers.get(hash).cloned())
+    }
+
+    fn get_best_header(&self) -> Result<Option<BlockHeader>> {
+        Ok(self.best_header.clone())
+    }
+
+    fn store_block(&mut self, block: &Block) -> Result<()> {
+        let hash = self.calculate_block_hash(block);
+        self.blocks.insert(hash, block.clone());
+        self.block_count += 1;
+        Ok(())
+    }
+
+    fn store_block_header(&mut self, header: &BlockHeader) -> Result<()> {
+        let hash = self.calculate_header_hash(header);
+        self.headers.insert(hash, header.clone());
+        self.best_header = Some(header.clone());
+        Ok(())
+    }
+
+    fn get_block_count(&self) -> Result<u64> {
+        Ok(self.block_count)
+    }
+}
+
 /// Run UTXO commitments initial sync
 ///
 /// Fetches the UTXO commitment from peers via consensus. Used when the node wants to
@@ -576,13 +591,13 @@ pub async fn run_utxo_commitments_initial_sync(
     network_manager: std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>,
     headers: &[blvm_consensus::BlockHeader],
     peers: Vec<(
-        blvm_consensus::utxo_commitments::peer_consensus::PeerInfo,
+        blvm_protocol::utxo_commitments::peer_consensus::PeerInfo,
         String,
     )>,
-) -> anyhow::Result<blvm_consensus::utxo_commitments::data_structures::UtxoCommitment> {
+) -> anyhow::Result<blvm_protocol::utxo_commitments::data_structures::UtxoCommitment> {
     use crate::network::utxo_commitments_client::UtxoCommitmentsClient;
-    use blvm_consensus::utxo_commitments::initial_sync::InitialSync;
-    use blvm_consensus::utxo_commitments::peer_consensus::ConsensusConfig;
+    use blvm_protocol::utxo_commitments::initial_sync::InitialSync;
+    use blvm_protocol::utxo_commitments::peer_consensus::ConsensusConfig;
 
     let client = UtxoCommitmentsClient::new(std::sync::Arc::clone(&network_manager));
     let config = ConsensusConfig::default();

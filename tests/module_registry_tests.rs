@@ -17,10 +17,12 @@ fn create_test_manifest(name: &str, deps: HashMap<String, String>) -> ModuleMani
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         dependencies: deps,
+        optional_dependencies: HashMap::new(),
         entry_point: format!("{}.so", name),
         config_schema: HashMap::new(),
         binary: None,
         signatures: None,
+        payment: None,
     }
 }
 

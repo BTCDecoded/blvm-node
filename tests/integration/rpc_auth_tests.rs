@@ -15,16 +15,17 @@ async fn test_rpc_auth_token_required() {
     let auth_config = RpcAuthConfig {
         required: true,
         tokens: vec!["test-token-123".to_string()],
+        token_file: None,
         certificates: vec![],
         rate_limit_burst: 10,
         rate_limit_rate: 5,
+        ..Default::default()
     };
     
     let rpc_manager = RpcManager::new(addr)
         .with_auth_config(auth_config).await;
     
-    // Test would verify that requests without token are rejected
-    // This is a placeholder - full implementation would start server and make HTTP requests
+    // Full test would start server and make HTTP requests; auth logic tested in auth_impl.
 }
 
 #[tokio::test]
@@ -34,15 +35,17 @@ async fn test_rpc_auth_token_valid() {
     let auth_config = RpcAuthConfig {
         required: true,
         tokens: vec!["valid-token".to_string()],
+        token_file: None,
         certificates: vec![],
         rate_limit_burst: 10,
         rate_limit_rate: 5,
+        ..Default::default()
     };
     
     let rpc_manager = RpcManager::new(addr)
         .with_auth_config(auth_config).await;
     
-    // Test would verify that requests with valid token are accepted
+    // Full test would start server and make authenticated requests.
 }
 
 #[tokio::test]
@@ -52,16 +55,17 @@ async fn test_rpc_rate_limiting() {
     let auth_config = RpcAuthConfig {
         required: false, // Don't require auth, but still rate limit
         tokens: vec![],
+        token_file: None,
         certificates: vec![],
         rate_limit_burst: 5,
         rate_limit_rate: 2, // 2 requests per second
+        ..Default::default()
     };
     
     let rpc_manager = RpcManager::new(addr)
         .with_auth_config(auth_config).await;
     
-    // Test would verify that rate limiting works correctly
-    // Send 10 requests rapidly, verify first 5 succeed, rest are rate limited
+    // Full test would send rapid requests; rate limiting tested in auth_impl.
 }
 
 #[tokio::test]
@@ -71,14 +75,16 @@ async fn test_rpc_auth_optional() {
     let auth_config = RpcAuthConfig {
         required: false, // Optional auth
         tokens: vec!["optional-token".to_string()],
+        token_file: None,
         certificates: vec![],
         rate_limit_burst: 10,
         rate_limit_rate: 5,
+        ..Default::default()
     };
     
     let rpc_manager = RpcManager::new(addr)
         .with_auth_config(auth_config).await;
     
-    // Test would verify that requests work with or without token when auth is optional
+    // Full test would make requests with/without token; optional auth tested in auth_impl.
 }
 

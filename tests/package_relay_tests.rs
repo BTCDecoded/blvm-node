@@ -62,12 +62,12 @@ fn test_package_id_from_transactions() {
     let tx1 = create_minimal_tx();
     let tx2 = create_minimal_tx();
 
-    let package_id1 = PackageId::from_transactions(&[tx1.clone()]);
-    let _package_id2 = PackageId::from_transactions(&[tx2.clone()]);
-    let package_id3 = PackageId::from_transactions(&[tx1.clone(), tx2.clone()]);
+    let package_id1 = PackageId::from_transactions(&[tx1.clone()], None);
+    let _package_id2 = PackageId::from_transactions(&[tx2.clone()], None);
+    let package_id3 = PackageId::from_transactions(&[tx1.clone(), tx2.clone()], None);
 
     // Same transactions should produce same ID
-    let package_id1_again = PackageId::from_transactions(&[tx1.clone()]);
+    let package_id1_again = PackageId::from_transactions(&[tx1.clone()], None);
     assert_eq!(package_id1, package_id1_again);
 
     // Different transaction sets should produce different IDs
@@ -111,7 +111,7 @@ fn test_transaction_package_multiple_txs() {
 fn test_transaction_package_ordering_valid() {
     // Create parent and child transactions
     let parent_tx = create_minimal_tx();
-    let parent_txid = blvm_node::network::txhash::calculate_txid(&parent_tx);
+    let parent_txid = blvm_protocol::block::calculate_tx_id(&parent_tx);
 
     let child_tx = create_tx_with_input(parent_txid, 0);
 
@@ -124,7 +124,7 @@ fn test_transaction_package_ordering_valid() {
 fn test_transaction_package_ordering_invalid() {
     // Create parent and child transactions
     let parent_tx = create_minimal_tx();
-    let parent_txid = blvm_node::network::txhash::calculate_txid(&parent_tx);
+    let parent_txid = blvm_protocol::block::calculate_tx_id(&parent_tx);
 
     let child_tx = create_tx_with_input(parent_txid, 0);
 
@@ -342,8 +342,8 @@ fn test_package_reject_reason_variants() {
 #[test]
 fn test_package_id_equality() {
     let tx = create_minimal_tx();
-    let id1 = PackageId::from_transactions(&[tx.clone()]);
-    let id2 = PackageId::from_transactions(&[tx]);
+    let id1 = PackageId::from_transactions(&[tx.clone()], None);
+    let id2 = PackageId::from_transactions(&[tx], None);
 
     assert_eq!(id1, id2);
     assert_eq!(id1.0, id2.0);
@@ -356,8 +356,8 @@ fn test_package_id_hash() {
     let tx1 = create_minimal_tx();
     let tx2 = create_minimal_tx();
 
-    let id1 = PackageId::from_transactions(&[tx1.clone()]);
-    let id2 = PackageId::from_transactions(&[tx2.clone()]);
+    let id1 = PackageId::from_transactions(&[tx1.clone()], None);
+    let id2 = PackageId::from_transactions(&[tx2.clone()], None);
 
     // Note: If tx1 and tx2 are identical, they may produce the same package ID
     // So we test that HashSet works correctly with PackageId
@@ -370,7 +370,7 @@ fn test_package_id_hash() {
     assert!(set.len() <= 2);
 
     // Test that same ID can be inserted only once
-    let id1_again = PackageId::from_transactions(&[tx1]);
+    let id1_again = PackageId::from_transactions(&[tx1], None);
     set.insert(id1_again);
     // Length should not increase if it's the same ID
     assert!(!set.is_empty());

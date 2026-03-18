@@ -198,9 +198,7 @@ mod miniscript_tests {
 
         let analysis = analyze_script(&script).expect("Script analysis should succeed");
 
-        // Note: The script might not be directly parseable as miniscript
-        // because it's compiled to Bitcoin script format
-        // This test verifies the analysis function handles it gracefully
+        // Test strategy: compiled policy may not be miniscript-parseable; we verify analysis handles it.
         assert!(
             !analysis.script_type.is_empty(),
             "Script type should be determined"
@@ -342,10 +340,9 @@ mod rpc_tests {
         );
     }
 
-    /// Test analyzepsbt RPC method (placeholder test)
+    /// Smoke test for analyzepsbt RPC; full analysis coverage pending implementation.
     #[tokio::test]
     async fn test_analyzepsbt() {
-        // Note: This is a placeholder test since analyzepsbt is not fully implemented
         let psbt =
             "cHNidP8BAH0CAAAAASuBBAO7r9HADl0R9l5z0z8BAAAAAAD/////AQAAAAAAAAAAAACAAQAAAAAB6wQAAAAA";
         let params = json!([psbt]);

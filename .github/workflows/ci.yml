@@ -315,10 +315,12 @@ jobs:
         with:
           toolchain: 1.88.0
       
-      - name: Build blvm-spec-lock
+      - name: Build blvm-spec-lock (with Z3 for full contract verification)
         run: |
           cd ../blvm-spec-lock
-          cargo build --release --bin cargo-spec-lock
+          # Build with Z3 for full verification of contracts (e.g. get_block_subsidy)
+          # Requires: libz3-dev libclang-dev (apt) or z3 llvm llvm-libs clang (pacman)
+          cargo build --release --features z3 --bin cargo-spec-lock
           echo "✅ blvm-spec-lock built"
       
       - name: Run blvm-spec-lock verify (blvm-consensus)
@@ -476,6 +478,9 @@ jobs:
       - security
       - verify
     runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      # Use release-fast for PRs, branches — full release only for push to main
+      BLVM_FAST_BUILD: ${{ ((github.event_name != 'push' || github.ref != 'refs/heads/main') && (github.event_name != 'release')) && '1' || '' }}
     if: |
       always() &&
       needs.setup.result == 'success' &&
@@ -526,10 +531,16 @@ jobs:
           toolchain: 1.88.0
       
       - name: Build
-        run: cargo build --release
+        run: |
+          PROFILE_FLAG="--release"
+          [ -n "${BLVM_FAST_BUILD:-}" ] && PROFILE_FLAG="--profile release-fast"
+          cargo build $PROFILE_FLAG
       
       - name: Build tests
-        run: cargo test --no-run --release --all-features
+        run: |
+          PROFILE_FLAG="--release"
+          [ -n "${BLVM_FAST_BUILD:-}" ] && PROFILE_FLAG="--profile release-fast"
+          cargo test --no-run $PROFILE_FLAG --all-features
       
       - name: Cache target
         if: always()

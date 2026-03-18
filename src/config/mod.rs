@@ -2,16 +2,168 @@
 //!
 //! Handles configuration loading, validation, and transport selection.
 
+pub mod storage;
+pub use storage::*;
+
+pub mod bitcoin_core_convert;
+pub use bitcoin_core_convert::*;
+
+pub mod governance;
+pub use governance::*;
+
+pub mod rpc;
+pub use rpc::*;
+
+pub mod mempool;
+pub use mempool::*;
+
+pub mod ibd;
+pub use ibd::*;
+
+pub mod network;
+pub use network::*;
+
 #[cfg(feature = "fibre")]
 use crate::network::fibre;
 use crate::network::transport::TransportPreference;
+use serde::de::{Deserializer, Error, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 // TOML support for configuration files
 
+fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
+    use toml::Value;
+    let mut result = HashMap::new();
+    fn flatten(prefix: &str, v: &Value, out: &mut HashMap<String, String>) {
+        match v {
+            Value::String(s) => {
+                if !prefix.is_empty() {
+                    out.insert(prefix.to_string(), s.clone());
+                }
+            }
+            Value::Integer(i) => {
+                out.insert(prefix.to_string(), i.to_string());
+            }
+            Value::Float(f) => {
+                out.insert(prefix.to_string(), f.to_string());
+            }
+            Value::Boolean(b) => {
+                out.insert(prefix.to_string(), b.to_string());
+            }
+            Value::Array(arr) => {
+                let s: Vec<String> = arr
+                    .iter()
+                    .map(|x| match x {
+                        Value::String(s) => s.clone(),
+                        _ => x.to_string(),
+                    })
+                    .collect();
+                out.insert(prefix.to_string(), s.join(","));
+            }
+            Value::Table(t) => {
+                for (k, val) in t {
+                    let p = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{}.{}", prefix, k)
+                    };
+                    flatten(&p, val, out);
+                }
+            }
+            Value::Datetime(dt) => {
+                out.insert(prefix.to_string(), dt.to_string());
+            }
+        }
+    }
+    match value {
+        Value::Table(t) => {
+            for (k, v) in t {
+                flatten(k, v, &mut result);
+            }
+        }
+        _ => {}
+    }
+    result
+}
+
+fn deserialize_module_config<'de, D>(deserializer: D) -> Result<ModuleConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ModuleConfigVisitor;
+    impl<'de> Visitor<'de> for ModuleConfigVisitor {
+        type Value = ModuleConfig;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("modules config table")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<ModuleConfig, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut enabled = true;
+            let mut modules_dir = "modules".to_string();
+            let mut data_dir = "data/modules".to_string();
+            let mut socket_dir = "data/modules/sockets".to_string();
+            let mut enabled_modules = Vec::new();
+            let mut module_configs = HashMap::new();
+            let mut watch_enabled = true;
+            let mut watch_auto_load = false;
+            let mut watch_auto_unload = false;
+
+            while let Some(key) = map.next_key::<String>()? {
+                if MODULE_CONFIG_KNOWN_KEYS.contains(&key.as_str()) {
+                    match key.as_str() {
+                        "enabled" => enabled = map.next_value()?,
+                        "modules_dir" => modules_dir = map.next_value().unwrap_or(modules_dir),
+                        "data_dir" => data_dir = map.next_value().unwrap_or(data_dir),
+                        "socket_dir" => socket_dir = map.next_value().unwrap_or(socket_dir),
+                        "enabled_modules" => enabled_modules = map.next_value().unwrap_or_default(),
+                        "module_configs" => module_configs = map.next_value().unwrap_or_default(),
+                        "watch_enabled" => watch_enabled = map.next_value().unwrap_or(true),
+                        "watch_auto_load" => watch_auto_load = map.next_value().unwrap_or(false),
+                        "watch_auto_unload" => watch_auto_unload = map.next_value().unwrap_or(false),
+                        _ => { let _: toml::Value = map.next_value()?; }
+                    }
+                } else {
+                    // [modules.<name>] - per-module override table (e.g. [modules.selective-sync])
+                    let value: toml::Value = map.next_value()?;
+                    if let toml::Value::Table(_) = &value {
+                        let flat = flatten_toml_to_string_map(&value);
+                        if !flat.is_empty() {
+                            module_configs.insert(key, flat);
+                        }
+                    }
+                }
+            }
+
+            Ok(ModuleConfig {
+                enabled,
+                modules_dir,
+                data_dir,
+                socket_dir,
+                enabled_modules,
+                module_configs,
+                watch_enabled,
+                watch_auto_load,
+                watch_auto_unload,
+            })
+        }
+    }
+    deserializer.deserialize_map(ModuleConfigVisitor)
+}
+
+/// Known keys in [modules] section (not per-module config tables)
+const MODULE_CONFIG_KNOWN_KEYS: &[&str] = &[
+    "enabled", "modules_dir", "data_dir", "socket_dir", "enabled_modules",
+    "module_configs", "watch_enabled", "watch_auto_load", "watch_auto_unload",
+];
+
 /// Module system configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModuleConfig {
     /// Enable module system
     #[serde(default = "default_true")]
@@ -37,13 +189,25 @@ pub struct ModuleConfig {
     #[serde(default)]
     pub module_configs:
         std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+
+    /// Enable file watcher for hot-reload on module.toml/config.toml change (requires module-watcher feature)
+    #[serde(default = "default_true")]
+    pub watch_enabled: bool,
+
+    /// When a new module appears (module.toml created), auto-load it
+    #[serde(default)]
+    pub watch_auto_load: bool,
+
+    /// When a module directory is removed, auto-unload it
+    #[serde(default)]
+    pub watch_auto_unload: bool,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
-fn default_false() -> bool {
+pub(crate) fn default_false() -> bool {
     false
 }
 
@@ -59,6 +223,15 @@ fn default_modules_socket_dir() -> String {
     "data/modules/sockets".to_string()
 }
 
+impl<'de> Deserialize<'de> for ModuleConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_module_config(deserializer)
+    }
+}
+
 impl Default for ModuleConfig {
     fn default() -> Self {
         Self {
@@ -68,6 +241,9 @@ impl Default for ModuleConfig {
             socket_dir: "data/modules/sockets".to_string(),
             enabled_modules: Vec::new(),
             module_configs: std::collections::HashMap::new(),
+            watch_enabled: true,
+            watch_auto_load: false,
+            watch_auto_unload: false,
         }
     }
 }
@@ -75,9 +251,10 @@ impl Default for ModuleConfig {
 /// Network timing and connection behavior configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkTimingConfig {
-    /// Target number of peers to connect to (reference: 8-125)
-    #[serde(default = "default_target_peer_count")]
-    pub target_peer_count: usize,
+    /// Target number of outbound peers to connect to (desired connections; reference: 8-125).
+    /// Distinct from max_outbound_peers which is the PeerManager cap.
+    #[serde(default = "default_target_peer_count", rename = "target_peer_count")]
+    pub target_outbound_peers: usize,
 
     /// Wait time before connecting to peers from database (after persistent peers)
     #[serde(default = "default_peer_connection_delay")]
@@ -119,7 +296,7 @@ fn default_max_addresses_from_dns() -> usize {
 impl Default for NetworkTimingConfig {
     fn default() -> Self {
         Self {
-            target_peer_count: 8,
+            target_outbound_peers: 8,
             peer_connection_delay_seconds: 2,
             addr_relay_min_interval_seconds: 8640,
             max_addresses_per_addr_message: 1000,
@@ -158,6 +335,26 @@ pub struct RequestTimeoutConfig {
     /// Timeout for RPC operations (seconds)
     #[serde(default = "default_rpc_timeout")]
     pub rpc_timeout_seconds: u64,
+
+    /// Handshake timeout (Version/VerAck exchange)
+    #[serde(default = "default_handshake_timeout")]
+    pub handshake_timeout_secs: u64,
+
+    /// TCP connect timeout
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_secs: u64,
+
+    /// Checkpoint request timeout (LAN security)
+    #[serde(default = "default_checkpoint_request_timeout")]
+    pub checkpoint_request_timeout_secs: u64,
+
+    /// Protocol verification timeout (LAN discovery handshake)
+    #[serde(default = "default_protocol_verify_timeout")]
+    pub protocol_verify_timeout_secs: u64,
+
+    /// Headers verification timeout (LAN security)
+    #[serde(default = "default_headers_verify_timeout")]
+    pub headers_verify_timeout_secs: u64,
 }
 
 fn default_async_request_timeout() -> u64 {
@@ -188,6 +385,26 @@ fn default_rpc_timeout() -> u64 {
     60 // 60 seconds
 }
 
+fn default_handshake_timeout() -> u64 {
+    10
+}
+
+fn default_connect_timeout() -> u64 {
+    10
+}
+
+fn default_checkpoint_request_timeout() -> u64 {
+    5
+}
+
+fn default_protocol_verify_timeout() -> u64 {
+    5
+}
+
+fn default_headers_verify_timeout() -> u64 {
+    10
+}
+
 impl Default for RequestTimeoutConfig {
     fn default() -> Self {
         Self {
@@ -198,6 +415,11 @@ impl Default for RequestTimeoutConfig {
             storage_timeout_seconds: 10,
             network_timeout_seconds: 30,
             rpc_timeout_seconds: 60,
+            handshake_timeout_secs: 10,
+            connect_timeout_secs: 10,
+            checkpoint_request_timeout_secs: 5,
+            protocol_verify_timeout_secs: 5,
+            headers_verify_timeout_secs: 10,
         }
     }
 }
@@ -285,6 +507,53 @@ impl Default for ModuleResourceLimitsConfig {
     }
 }
 
+/// Protocol message limits (for constrained networks)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolLimitsConfig {
+    /// Maximum protocol message size (bytes). Default 32MB.
+    #[serde(default = "default_max_protocol_message_length")]
+    pub max_protocol_message_length: usize,
+
+    /// Maximum addresses in addr message. Default 1000.
+    #[serde(default = "default_max_addr_to_send")]
+    pub max_addr_to_send: usize,
+
+    /// Maximum inventory items in inv/getdata. Default 50000.
+    #[serde(default = "default_max_inv_sz")]
+    pub max_inv_sz: usize,
+
+    /// Maximum headers in headers message. Default 2000.
+    #[serde(default = "default_max_headers_results")]
+    pub max_headers_results: usize,
+}
+
+fn default_max_protocol_message_length() -> usize {
+    32 * 1024 * 1024
+}
+
+fn default_max_addr_to_send() -> usize {
+    1000
+}
+
+fn default_max_inv_sz() -> usize {
+    50000
+}
+
+fn default_max_headers_results() -> usize {
+    2000
+}
+
+impl Default for ProtocolLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_protocol_message_length: default_max_protocol_message_length(),
+            max_addr_to_send: default_max_addr_to_send(),
+            max_inv_sz: default_max_inv_sz(),
+            max_headers_results: default_max_headers_results(),
+        }
+    }
+}
+
 /// Per-network default assume-valid height (Core chainparams defaultAssumeValid)
 pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
     match network.to_lowercase().as_str() {
@@ -303,7 +572,7 @@ pub struct BlockValidationNodeConfig {
     pub assume_valid_height: u64,
 
     /// Assume-valid block hash: when set, verify block at assume_valid_height matches; skip verification for ancestors.
-    /// Takes precedence over assume_valid_height when both set. Not yet implemented in consensus.
+    /// Takes precedence over assume_valid_height when both set.
     #[serde(default)]
     pub assume_valid_hash: Option<[u8; 32]>,
 }
@@ -324,8 +593,9 @@ pub struct NodeConfig {
     /// Transport preference
     pub transport_preference: TransportPreferenceConfig,
 
-    /// Maximum number of peers
-    pub max_peers: Option<usize>,
+    /// Maximum outbound peers (PeerManager cap). Distinct from target_outbound_peers (desired connections).
+    #[serde(rename = "max_peers")]
+    pub max_outbound_peers: Option<usize>,
 
     /// Protocol version
     pub protocol_version: Option<String>,
@@ -336,6 +606,9 @@ pub struct NodeConfig {
     /// Stratum V2 mining configuration
     #[cfg(feature = "stratum-v2")]
     pub stratum_v2: Option<StratumV2Config>,
+
+    /// RPC server configuration (limits, etc.)
+    pub rpc: Option<RpcConfig>,
 
     /// RPC authentication configuration
     pub rpc_auth: Option<RpcAuthConfig>,
@@ -364,6 +637,9 @@ pub struct NodeConfig {
     /// IBD bandwidth protection configuration
     pub ibd_protection: Option<IbdProtectionConfig>,
 
+    /// Parallel IBD download configuration (chunk_size, mode, prefetch, etc.)
+    pub ibd: Option<IbdConfig>,
+
     /// Spam-specific peer banning configuration
     pub spam_ban: Option<SpamBanConfig>,
 
@@ -389,6 +665,15 @@ pub struct NodeConfig {
 
     /// Request timeout configuration
     pub request_timeouts: Option<RequestTimeoutConfig>,
+
+    /// Protocol message limits (for constrained networks)
+    pub protocol_limits: Option<ProtocolLimitsConfig>,
+
+    /// Background task interval configuration (DoS cleanup, ban cleanup, ping, etc.)
+    pub background_tasks: Option<BackgroundTaskConfig>,
+
+    /// Replay protection for custom protocol messages (governance, ban list, etc.)
+    pub replay_protection: Option<ReplayProtectionConfig>,
 
     /// Module resource limits configuration
     pub module_resource_limits: Option<ModuleResourceLimitsConfig>,
@@ -465,11 +750,12 @@ impl Default for NodeConfig {
             block_validation: None,
             assumeutxo_blockhash: None,
             transport_preference: TransportPreferenceConfig::TcpOnly,
-            max_peers: Some(100),
+            max_outbound_peers: Some(100),
             protocol_version: Some("BitcoinV1".to_string()),
             modules: Some(ModuleConfig::default()),
             #[cfg(feature = "stratum-v2")]
             stratum_v2: None,
+            rpc: None,
             rpc_auth: None,
             ban_list_sharing: None,
             #[cfg(feature = "governance")]
@@ -479,6 +765,7 @@ impl Default for NodeConfig {
             enable_self_advertisement: true,
             dos_protection: None,
             ibd_protection: None,
+            ibd: None,
             relay: None,
             #[cfg(feature = "fibre")]
             fibre: None,
@@ -488,6 +775,9 @@ impl Default for NodeConfig {
             peer_rate_limiting: None,
             network_timing: None,
             request_timeouts: None,
+            protocol_limits: None,
+            background_tasks: None,
+            replay_protection: None,
             module_resource_limits: None,
             spam_ban: None,
             #[cfg(feature = "zmq")]
@@ -501,178 +791,47 @@ impl Default for NodeConfig {
     }
 }
 
-/// Governance message relay configuration
-#[cfg(feature = "governance")]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GovernanceConfig {
-    /// Enable governance message relay (default: false)
-    /// If false, governance messages are gossiped but not forwarded to blvm-commons
-    #[serde(default = "default_false")]
-    pub enabled: bool,
-
-    /// URL for blvm-commons internal API (e.g., "http://10.0.0.2:8080")
-    /// Used for forwarding P2P governance messages via VPN
-    #[serde(default)]
-    pub commons_url: Option<String>,
-
-    /// API key for authenticating with blvm-commons internal API
-    /// Can also be set via COMMONS_API_KEY environment variable
-    #[serde(default)]
-    pub api_key: Option<String>,
-}
-
-/// Ban list sharing configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BanListSharingConfig {
-    /// Enable ban list sharing
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-
-    /// Share mode: Immediate, Periodic, or Disabled
-    #[serde(default = "default_ban_share_mode")]
-    pub share_mode: BanShareMode,
-
-    /// Periodic sharing interval in seconds (only used if share_mode is Periodic)
-    #[serde(default = "default_periodic_interval")]
-    pub periodic_interval_seconds: u64,
-
-    /// Minimum ban duration to share (seconds, 0 = all)
-    #[serde(default = "default_min_ban_duration")]
-    pub min_ban_duration_to_share: u64,
-}
-
-/// Ban share mode
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BanShareMode {
-    /// Share immediately when auto-ban occurs
-    Immediate,
-    /// Share periodically (default)
-    Periodic,
-    /// Disabled
-    Disabled,
-}
-
-fn default_ban_share_mode() -> BanShareMode {
-    BanShareMode::Periodic
-}
-
-fn default_periodic_interval() -> u64 {
-    300 // 5 minutes
-}
-
-fn default_min_ban_duration() -> u64 {
-    3600 // 1 hour
-}
-
-impl Default for BanListSharingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            share_mode: BanShareMode::Periodic,
-            periodic_interval_seconds: 300,
-            min_ban_duration_to_share: 3600,
+/// Expand leading `~` to home directory. Leaves other paths unchanged.
+fn expand_tilde_path(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return s.to_string();
+    }
+    if s == "~" {
+        return dirs::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "~".to_string());
+    }
+    if s.starts_with("~/") || s.starts_with("~\\") {
+        if let Some(home) = dirs::home_dir() {
+            let rest = if s.starts_with("~/") { &s[2..] } else { &s[2..] };
+            return home.join(rest).to_string_lossy().into_owned();
         }
     }
-}
-
-/// RPC authentication configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpcAuthConfig {
-    /// Require authentication for RPC requests
-    #[serde(default)]
-    pub required: bool,
-
-    /// Valid authentication tokens
-    /// Can be loaded from:
-    /// 1. Environment variable RPC_AUTH_TOKENS (comma-separated)
-    /// 2. Token file (if token_file is set)
-    /// 3. Config file (this field)
-    #[serde(default)]
-    pub tokens: Vec<String>,
-
-    /// Path to file containing tokens (one per line)
-    /// If set, tokens will be loaded from this file instead of the tokens field
-    /// File should have restricted permissions (chmod 600)
-    #[serde(default)]
-    pub token_file: Option<String>,
-
-    /// Valid certificate fingerprints (for certificate-based auth)
-    #[serde(default)]
-    pub certificates: Vec<String>,
-
-    /// Default rate limit (burst, requests per second)
-    #[serde(default = "default_rate_limit_burst")]
-    pub rate_limit_burst: u32,
-
-    #[serde(default = "default_rate_limit_rate")]
-    pub rate_limit_rate: u32,
-}
-
-fn default_rate_limit_burst() -> u32 {
-    100
-}
-
-fn default_rate_limit_rate() -> u32 {
-    10
-}
-
-impl Default for RpcAuthConfig {
-    fn default() -> Self {
-        Self {
-            required: false,
-            tokens: Vec::new(),
-            token_file: None,
-            certificates: Vec::new(),
-            rate_limit_burst: 100,
-            rate_limit_rate: 10,
-        }
-    }
-}
-
-impl RpcAuthConfig {
-    /// Load tokens from environment variable, token file, or config file
-    /// Priority: env var > token_file > config file tokens
-    ///
-    /// # Returns
-    /// Vector of tokens loaded from the highest priority source
-    pub fn load_tokens(&self) -> anyhow::Result<Vec<String>> {
-        // Use standard library directly (utils::env is just a wrapper)
-        use std::env;
-
-        // Priority 1: Environment variable (highest priority)
-        if let Ok(env_tokens) = env::var("RPC_AUTH_TOKENS") {
-            let tokens: Vec<String> = env_tokens
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !tokens.is_empty() {
-                return Ok(tokens);
-            }
-        }
-
-        // Priority 2: Token file
-        if let Some(ref token_file) = self.token_file {
-            let content = std::fs::read_to_string(token_file).map_err(|e| {
-                anyhow::anyhow!("Failed to read token file {:?}: {}", token_file, e)
-            })?;
-            let tokens: Vec<String> = content
-                .lines()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty() && !s.starts_with('#')) // Support comments
-                .collect();
-            if !tokens.is_empty() {
-                return Ok(tokens);
-            }
-        }
-
-        // Priority 3: Config file tokens (fallback to current behavior)
-        Ok(self.tokens.clone())
-    }
+    s.to_string()
 }
 
 impl NodeConfig {
+    /// Expand `~` to home directory in all path fields. Idempotent.
+    pub fn expand_paths(&mut self) {
+        if let Some(ref mut s) = self.storage {
+            s.data_dir = expand_tilde_path(&s.data_dir);
+        }
+        if let Some(ref mut m) = self.modules {
+            m.modules_dir = expand_tilde_path(&m.modules_dir);
+            m.data_dir = expand_tilde_path(&m.data_dir);
+            m.socket_dir = expand_tilde_path(&m.socket_dir);
+        }
+        if let Some(ref mut ibd) = self.ibd {
+            if let Some(ref d) = ibd.dump_dir {
+                ibd.dump_dir = Some(expand_tilde_path(d));
+            }
+            if let Some(ref d) = ibd.snapshot_dir {
+                ibd.snapshot_dir = Some(expand_tilde_path(d));
+            }
+        }
+    }
+
     /// Load configuration from file (supports JSON and TOML)
     pub fn from_file(path: &std::path::Path) -> anyhow::Result<Self> {
         // Validate file permissions (warn if world-readable)
@@ -696,31 +855,31 @@ impl NodeConfig {
 
         let content = std::fs::read_to_string(path)?;
 
-        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-            // Try TOML
-            let config: NodeConfig = toml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?;
-            Ok(config)
+        let mut config: NodeConfig = if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            toml::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?
         } else {
-            // Default to JSON
-            let config: NodeConfig = serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {}", e))?;
-            Ok(config)
-        }
+            serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {}", e))?
+        };
+        config.expand_paths();
+        Ok(config)
     }
 
     /// Load configuration from JSON file
     pub fn from_json_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: NodeConfig = serde_json::from_str(&content)?;
+        let mut config: NodeConfig = serde_json::from_str(&content)?;
+        config.expand_paths();
         Ok(config)
     }
 
     /// Load configuration from TOML file
     pub fn from_toml_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: NodeConfig = toml::from_str(&content)
+        let mut config: NodeConfig = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?;
+        config.expand_paths();
         Ok(config)
     }
 
@@ -781,591 +940,6 @@ impl NodeConfig {
         }
 
         Ok(())
-    }
-}
-
-/// Stratum V2 mining configuration
-#[cfg(feature = "stratum-v2")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StratumV2Config {
-    /// Enable Stratum V2 mining
-    pub enabled: bool,
-
-    /// Pool URL for miner mode (format: "tcp://pool.example.com:3333" or "iroh://<nodeid>")
-    pub pool_url: Option<String>,
-
-    /// Listen address for server mode
-    pub listen_addr: Option<SocketAddr>,
-
-    /// Transport preference for Stratum V2 connections
-    pub transport_preference: TransportPreferenceConfig,
-
-    /// Enable merge mining
-    pub merge_mining_enabled: bool,
-
-    /// Secondary chains for merge mining
-    pub secondary_chains: Vec<String>,
-
-    /// Merge mining fee configuration
-    pub merge_mining_fee: Option<MergeMiningFeeConfig>,
-}
-
-/// Merge mining fee configuration
-#[cfg(feature = "stratum-v2")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MergeMiningFeeConfig {
-    /// Enable automatic fee collection (default: false)
-    #[serde(default = "default_false")]
-    pub enabled: bool,
-
-    /// Fee percentage (0-100, default: 1% per whitepaper)
-    #[serde(default = "default_merge_mining_fee_percentage")]
-    pub fee_percentage: u8,
-
-    /// Commons address to send fees to (required if enabled)
-    pub commons_address: Option<String>,
-
-    /// Contributor identifier (for tracking)
-    pub contributor_id: Option<String>,
-
-    /// Automatic distribution enabled (default: false, requires blvm-commons integration)
-    #[serde(default = "default_false")]
-    pub auto_distribute: bool,
-}
-
-#[cfg(feature = "stratum-v2")]
-fn default_merge_mining_fee_percentage() -> u8 {
-    1 // 1% per whitepaper
-}
-
-#[cfg(feature = "stratum-v2")]
-impl Default for StratumV2Config {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            pool_url: None,
-            listen_addr: None,
-            transport_preference: TransportPreferenceConfig::TcpOnly,
-            merge_mining_enabled: false,
-            secondary_chains: Vec::new(),
-            merge_mining_fee: None,
-        }
-    }
-}
-
-#[cfg(feature = "stratum-v2")]
-impl Default for MergeMiningFeeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            fee_percentage: 1,
-            commons_address: None,
-            contributor_id: None,
-            auto_distribute: false,
-        }
-    }
-}
-
-/// Pruning mode configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum PruningMode {
-    /// No pruning (keep all blocks)
-    Disabled,
-
-    /// Normal pruning (keep recent blocks for verification)
-    Normal {
-        /// Keep blocks from this height onwards
-        #[serde(default = "default_zero")]
-        keep_from_height: u64,
-        /// Keep at least this many recent blocks
-        #[serde(default = "default_min_recent_blocks")]
-        min_recent_blocks: u64,
-    },
-
-    /// Aggressive pruning with UTXO commitments
-    /// Requires: utxo-commitments feature enabled
-    Aggressive {
-        /// Keep blocks from this height onwards
-        #[serde(default = "default_zero")]
-        keep_from_height: u64,
-        /// Keep UTXO commitments for all pruned blocks
-        #[serde(default = "default_true")]
-        keep_commitments: bool,
-        /// Keep filtered blocks (spam-filtered) for pruned range
-        #[serde(default = "default_false")]
-        keep_filtered_blocks: bool,
-        /// Minimum blocks to keep (safety margin)
-        #[serde(default = "default_min_blocks")]
-        min_blocks: u64,
-    },
-
-    /// Custom pruning configuration
-    Custom {
-        /// Keep block headers (always required for PoW verification)
-        #[serde(default = "default_true")]
-        keep_headers: bool,
-        /// Keep block bodies from this height onwards
-        #[serde(default = "default_zero")]
-        keep_bodies_from_height: u64,
-        /// Keep UTXO commitments (if utxo-commitments feature enabled)
-        #[serde(default = "default_false")]
-        keep_commitments: bool,
-        /// Keep BIP158 filters (if BIP157/158 enabled)
-        #[serde(default = "default_false")]
-        keep_filters: bool,
-        /// Keep filtered blocks (spam-filtered)
-        #[serde(default = "default_false")]
-        keep_filtered_blocks: bool,
-        /// Keep witness data (for SegWit verification)
-        #[serde(default = "default_false")]
-        keep_witnesses: bool,
-        /// Keep transaction index
-        #[serde(default = "default_false")]
-        keep_tx_index: bool,
-    },
-}
-
-fn default_zero() -> u64 {
-    0
-}
-
-fn default_min_recent_blocks() -> u64 {
-    288 // ~2 days at 10 min/block
-}
-
-fn default_min_blocks() -> u64 {
-    144 // ~1 day at 10 min/block
-}
-
-/// Pruning configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PruningConfig {
-    /// Pruning mode
-    #[serde(default = "default_pruning_mode")]
-    pub mode: PruningMode,
-
-    /// Automatic pruning (prune periodically as chain grows)
-    #[serde(default = "default_false")]
-    pub auto_prune: bool,
-
-    /// Automatic pruning interval (blocks)
-    /// Prune every N blocks if auto_prune is enabled
-    #[serde(default = "default_auto_prune_interval")]
-    pub auto_prune_interval: u64,
-
-    /// Minimum blocks to keep (safety margin)
-    /// Even with aggressive pruning, keep at least this many blocks
-    #[serde(default = "default_min_blocks_to_keep")]
-    pub min_blocks_to_keep: u64,
-
-    /// Prune on startup (prune old blocks when node starts)
-    #[serde(default = "default_false")]
-    pub prune_on_startup: bool,
-
-    /// Allow incremental pruning during IBD (requires UTXO commitments + aggressive mode)
-    /// When enabled, old blocks are pruned incrementally during sync, keeping only a window
-    /// of recent blocks. This prevents the need to download the full blockchain before pruning.
-    #[serde(default = "default_false")]
-    pub incremental_prune_during_ibd: bool,
-
-    /// Block window size for incremental pruning (number of recent blocks to keep)
-    /// Only used when incremental_prune_during_ibd is true
-    #[serde(default = "default_prune_window_size")]
-    pub prune_window_size: u64,
-
-    /// Minimum blocks before starting incremental pruning during IBD
-    /// Prevents pruning too early in the sync process
-    #[serde(default = "default_min_blocks_for_incremental_prune")]
-    pub min_blocks_for_incremental_prune: u64,
-
-    /// UTXO commitments integration
-    #[cfg(feature = "utxo-commitments")]
-    pub utxo_commitments: Option<UtxoCommitmentsPruningConfig>,
-
-    /// BIP158 filter integration
-    #[cfg(feature = "bip158")]
-    pub bip158_filters: Option<Bip158PruningConfig>,
-}
-
-fn default_pruning_mode() -> PruningMode {
-    PruningMode::Aggressive {
-        keep_from_height: 0,
-        keep_commitments: true,
-        keep_filtered_blocks: false,
-        min_blocks: 144, // ~1 day at 10 min/block
-    }
-}
-
-fn default_auto_prune_interval() -> u64 {
-    144 // Prune every ~1 day at 10 min/block
-}
-
-fn default_min_blocks_to_keep() -> u64 {
-    144 // ~1 day at 10 min/block
-}
-
-fn default_prune_window_size() -> u64 {
-    144 // Keep last 144 blocks (~1 day) during incremental pruning
-}
-
-fn default_min_blocks_for_incremental_prune() -> u64 {
-    288 // Start incremental pruning after 288 blocks (~2 days) to ensure stability
-}
-
-impl Default for PruningConfig {
-    fn default() -> Self {
-        Self {
-            mode: PruningMode::Aggressive {
-                keep_from_height: 0,
-                keep_commitments: true,
-                keep_filtered_blocks: false,
-                min_blocks: 144, // ~1 day at 10 min/block
-            },
-            auto_prune: true,         // Enable automatic pruning
-            auto_prune_interval: 144, // Prune every ~1 day
-            min_blocks_to_keep: 144,
-            prune_on_startup: false,               // Still false for safety
-            incremental_prune_during_ibd: true,    // Enable incremental pruning during IBD
-            prune_window_size: 144,                // Keep sliding window of 144 blocks during IBD
-            min_blocks_for_incremental_prune: 288, // Start pruning after 288 blocks (~2 days)
-            #[cfg(feature = "utxo-commitments")]
-            utxo_commitments: None,
-            #[cfg(feature = "bip158")]
-            bip158_filters: None,
-        }
-    }
-}
-
-/// UTXO commitments pruning configuration
-#[cfg(feature = "utxo-commitments")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UtxoCommitmentsPruningConfig {
-    /// Keep UTXO commitments for pruned blocks
-    #[serde(default = "default_true")]
-    pub keep_commitments: bool,
-
-    /// Keep filtered blocks (spam-filtered) for pruned range
-    #[serde(default = "default_false")]
-    pub keep_filtered_blocks: bool,
-
-    /// Generate commitments before pruning (if not already generated)
-    #[serde(default = "default_true")]
-    pub generate_before_prune: bool,
-
-    /// Maximum age for commitments (days, 0 = keep forever)
-    #[serde(default = "default_commitment_max_age")]
-    pub max_commitment_age_days: u32,
-}
-
-#[cfg(feature = "utxo-commitments")]
-fn default_commitment_max_age() -> u32 {
-    0 // Keep forever by default
-}
-
-#[cfg(feature = "utxo-commitments")]
-impl Default for UtxoCommitmentsPruningConfig {
-    fn default() -> Self {
-        Self {
-            keep_commitments: true,
-            keep_filtered_blocks: false,
-            generate_before_prune: true,
-            max_commitment_age_days: 0,
-        }
-    }
-}
-
-/// BIP158 filter pruning configuration
-#[cfg(feature = "bip158")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Bip158PruningConfig {
-    /// Keep BIP158 filters for pruned blocks
-    #[serde(default = "default_true")]
-    pub keep_filters: bool,
-
-    /// Keep filter header chain (always required for verification)
-    #[serde(default = "default_true")]
-    pub keep_filter_headers: bool,
-
-    /// Maximum age for filters (days, 0 = keep forever)
-    #[serde(default = "default_filter_max_age")]
-    pub max_filter_age_days: u32,
-}
-
-#[cfg(feature = "bip158")]
-fn default_filter_max_age() -> u32 {
-    0 // Keep forever by default
-}
-
-#[cfg(feature = "bip158")]
-impl Default for Bip158PruningConfig {
-    fn default() -> Self {
-        Self {
-            keep_filters: true,
-            keep_filter_headers: true,
-            max_filter_age_days: 0,
-        }
-    }
-}
-
-/// Storage configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageConfig {
-    /// Database backend selection
-    #[serde(default = "default_database_backend")]
-    pub database_backend: DatabaseBackendConfig,
-
-    /// Storage path
-    #[serde(default = "default_storage_path")]
-    pub data_dir: String,
-
-    /// redb/LevelDB internal cache size (MB). Like Core -dbcache. Default 450.
-    #[serde(default = "default_dbcache_mb")]
-    pub dbcache_mb: usize,
-
-    /// TidesDB-specific options (when database_backend = tidesdb)
-    pub tidesdb: Option<TidesDBConfig>,
-
-    /// Pruning configuration
-    pub pruning: Option<PruningConfig>,
-
-    /// Cache sizes
-    pub cache: Option<StorageCacheConfig>,
-
-    /// Transaction indexing configuration
-    #[serde(default)]
-    pub indexing: Option<IndexingConfig>,
-
-    /// Compression configuration
-    #[cfg(feature = "compression")]
-    pub compression: Option<CompressionConfig>,
-}
-
-/// TidesDB backend configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TidesDBConfig {
-    /// Klog value threshold (bytes). Values <= this stay inline (fast); larger go to vlog.
-    /// 0 = all to vlog (slowest, safest). Default 64KB for most UTXOs inline.
-    #[serde(default = "default_tidesdb_utxo_klog_threshold")]
-    pub utxo_klog_threshold: usize,
-}
-
-fn default_tidesdb_utxo_klog_threshold() -> usize {
-    64 * 1024
-}
-
-impl Default for TidesDBConfig {
-    fn default() -> Self {
-        Self {
-            utxo_klog_threshold: default_tidesdb_utxo_klog_threshold(),
-        }
-    }
-}
-
-/// Database backend configuration
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DatabaseBackendConfig {
-    /// Use sled database (beta, fallback)
-    Sled,
-    /// Use redb database (default, recommended)
-    Redb,
-    /// Use RocksDB (LSM, good for IBD; requires --features rocksdb)
-    Rocksdb,
-    /// Use TidesDB (LSM, optional; requires --features tidesdb)
-    Tidesdb,
-    /// Auto-select based on availability
-    Auto,
-}
-
-fn default_database_backend() -> DatabaseBackendConfig {
-    DatabaseBackendConfig::Auto
-}
-
-fn default_storage_path() -> String {
-    "data".to_string()
-}
-
-fn default_dbcache_mb() -> usize {
-    450
-}
-
-/// Storage cache configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageCacheConfig {
-    /// Block cache size (MB)
-    #[serde(default = "default_block_cache_mb")]
-    pub block_cache_mb: usize,
-
-    /// UTXO cache size (MB)
-    #[serde(default = "default_utxo_cache_mb")]
-    pub utxo_cache_mb: usize,
-
-    /// Header cache size (MB)
-    #[serde(default = "default_header_cache_mb")]
-    pub header_cache_mb: usize,
-}
-
-fn default_block_cache_mb() -> usize {
-    100
-}
-
-fn default_utxo_cache_mb() -> usize {
-    50
-}
-
-fn default_header_cache_mb() -> usize {
-    10
-}
-
-impl Default for StorageCacheConfig {
-    fn default() -> Self {
-        Self {
-            block_cache_mb: 100,
-            utxo_cache_mb: 50,
-            header_cache_mb: 10,
-        }
-    }
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            database_backend: DatabaseBackendConfig::Auto,
-            data_dir: "data".to_string(),
-            dbcache_mb: 450,
-            tidesdb: None,
-            pruning: None,
-            cache: None,
-            indexing: None,
-            #[cfg(feature = "compression")]
-            compression: None,
-        }
-    }
-}
-
-/// Compression configuration for storage optimization
-#[cfg(feature = "compression")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompressionConfig {
-    /// Enable block compression (30-50% storage reduction)
-    #[serde(default = "default_true")]
-    pub block_compression_enabled: bool,
-
-    /// Block compression level (1-22, default: 3 = balanced)
-    #[serde(default = "default_block_compression_level")]
-    pub block_compression_level: u32,
-
-    /// Enable UTXO compression (20-40% storage reduction)
-    #[serde(default = "default_true")]
-    pub utxo_compression_enabled: bool,
-
-    /// UTXO compression level (1-22, default: 1 = fast, UTXO set is hot data)
-    #[serde(default = "default_utxo_compression_level")]
-    pub utxo_compression_level: u32,
-
-    /// Enable witness compression (20-30% storage reduction)
-    #[serde(default = "default_true")]
-    pub witness_compression_enabled: bool,
-
-    /// Witness compression level (1-22, default: 2 = balanced)
-    #[serde(default = "default_witness_compression_level")]
-    pub witness_compression_level: u32,
-}
-
-#[cfg(feature = "compression")]
-fn default_block_compression_level() -> u32 {
-    3 // Balanced: good compression with reasonable speed
-}
-
-#[cfg(feature = "compression")]
-fn default_utxo_compression_level() -> u32 {
-    1 // Fast: UTXO set is frequently accessed
-}
-
-#[cfg(feature = "compression")]
-fn default_witness_compression_level() -> u32 {
-    2 // Balanced: witness data is less frequently accessed
-}
-
-#[cfg(feature = "compression")]
-impl Default for CompressionConfig {
-    fn default() -> Self {
-        Self {
-            block_compression_enabled: true,
-            block_compression_level: 3,
-            utxo_compression_enabled: true,
-            utxo_compression_level: 1,
-            witness_compression_enabled: true,
-            witness_compression_level: 2,
-        }
-    }
-}
-
-/// Transaction indexing configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexingConfig {
-    /// Enable address indexing (script_pubkey → transactions)
-    /// Increases disk usage by ~20-30% and slows block processing by 2-3x
-    /// Required for wallet functionality and address-based queries
-    #[serde(default)]
-    pub enable_address_index: bool,
-
-    /// Enable value range indexing (value buckets → transactions)
-    /// Increases disk usage by ~5-10% and slows block processing by ~1.5x
-    /// Useful for querying transactions by output value ranges
-    #[serde(default)]
-    pub enable_value_index: bool,
-
-    /// Indexing strategy: eager (index immediately) or lazy (index on-demand)
-    /// Eager: Better query performance, slower block processing
-    /// Lazy: Faster block processing, slower first query per address
-    #[serde(default = "default_indexing_strategy")]
-    pub strategy: IndexingStrategy,
-
-    /// Maximum number of addresses to index (0 = unlimited)
-    /// Useful for limiting memory/disk usage on resource-constrained systems
-    #[serde(default = "default_max_indexed_addresses")]
-    pub max_indexed_addresses: usize,
-
-    /// Enable index compression (reduces disk usage, increases CPU)
-    #[serde(default)]
-    pub enable_compression: bool,
-
-    /// Background indexing: index in background thread (non-blocking)
-    /// Improves block processing speed but requires async support
-    #[serde(default)]
-    pub background_indexing: bool,
-}
-
-fn default_indexing_strategy() -> IndexingStrategy {
-    IndexingStrategy::Eager
-}
-
-fn default_max_indexed_addresses() -> usize {
-    0 // Unlimited
-}
-
-/// Indexing strategy
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum IndexingStrategy {
-    /// Index transactions immediately during block processing
-    Eager,
-    /// Index transactions on-demand when queried (lazy loading)
-    Lazy,
-}
-
-impl Default for IndexingConfig {
-    fn default() -> Self {
-        Self {
-            enable_address_index: false,
-            enable_value_index: false,
-            strategy: IndexingStrategy::Eager,
-            max_indexed_addresses: 0,
-            enable_compression: false,
-            background_indexing: false,
-        }
     }
 }
 
@@ -1452,765 +1026,96 @@ impl NodeConfig {
 
         warnings
     }
-}
 
-impl PruningConfig {
-    /// Validate pruning configuration
-    pub fn validate(&self) -> anyhow::Result<()> {
-        // Validate aggressive mode requires utxo-commitments feature
-        if let PruningMode::Aggressive { .. } = self.mode {
-            #[cfg(not(feature = "utxo-commitments"))]
-            {
-                return Err(anyhow::anyhow!(
-                    "Aggressive pruning mode requires the 'utxo-commitments' feature to be enabled. \
-                    Please enable it in Cargo.toml or use Normal pruning mode instead."
-                ));
-            }
-        }
-
-        // Validate min_blocks_to_keep is reasonable
-        if self.min_blocks_to_keep == 0 {
-            return Err(anyhow::anyhow!(
-                "min_blocks_to_keep must be greater than 0 for safety"
-            ));
-        }
-
-        // Validate auto_prune_interval
-        if self.auto_prune && self.auto_prune_interval == 0 {
-            return Err(anyhow::anyhow!(
-                "auto_prune_interval must be greater than 0 when auto_prune is enabled"
-            ));
-        }
-
-        // Validate mode-specific settings
-        match &self.mode {
-            PruningMode::Normal {
-                min_recent_blocks, ..
-            } => {
-                if *min_recent_blocks == 0 {
-                    return Err(anyhow::anyhow!(
-                        "min_recent_blocks must be greater than 0 in Normal pruning mode"
-                    ));
-                }
-            }
-            PruningMode::Aggressive { min_blocks, .. } => {
-                if *min_blocks == 0 {
-                    return Err(anyhow::anyhow!(
-                        "min_blocks must be greater than 0 in Aggressive pruning mode"
-                    ));
-                }
-            }
-            PruningMode::Custom { keep_headers, .. } => {
-                if !keep_headers {
-                    return Err(anyhow::anyhow!(
-                        "keep_headers must be true in Custom pruning mode (required for PoW verification)"
-                    ));
-                }
-            }
-            PruningMode::Disabled => {
-                // No validation needed
-            }
-        }
-
-        Ok(())
+    /// Maximum RPC/REST request body size in bytes.
+    /// ENV BLVM_RPC_MAX_REQUEST_SIZE_BYTES overrides config.
+    pub fn max_request_size_bytes(&self) -> usize {
+        crate::utils::env_int::<usize>("BLVM_RPC_MAX_REQUEST_SIZE_BYTES")
+            .unwrap_or_else(|| {
+                self.rpc
+                    .as_ref()
+                    .map(|r| r.max_request_size_bytes)
+                    .unwrap_or(1_048_576)
+            })
     }
-}
 
-/// DoS protection configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DosProtectionConfig {
-    /// Maximum connections per IP per time window
-    #[serde(default = "default_dos_max_connections_per_window")]
-    pub max_connections_per_window: usize,
+    /// Max RPC connections per IP per minute.
+    /// ENV BLVM_RPC_MAX_CONNECTIONS_PER_IP_PER_MINUTE overrides config.
+    pub fn max_connections_per_ip_per_minute(&self) -> u32 {
+        crate::utils::env_int::<u32>("BLVM_RPC_MAX_CONNECTIONS_PER_IP_PER_MINUTE")
+            .unwrap_or_else(|| {
+                self.rpc
+                    .as_ref()
+                    .map(|r| r.max_connections_per_ip_per_minute)
+                    .unwrap_or(10)
+            })
+    }
 
-    /// Time window in seconds for connection rate limiting
-    #[serde(default = "default_dos_window_seconds")]
-    pub window_seconds: u64,
-
-    /// Maximum message queue size
-    #[serde(default = "default_dos_max_message_queue_size")]
-    pub max_message_queue_size: usize,
-
-    /// Maximum active connections
-    #[serde(default = "default_dos_max_active_connections")]
-    pub max_active_connections: usize,
-
-    /// Auto-ban threshold (number of violations before auto-ban)
-    #[serde(default = "default_dos_auto_ban_threshold")]
-    pub auto_ban_threshold: usize,
-
-    /// Default ban duration in seconds
-    #[serde(default = "default_dos_ban_duration")]
-    pub ban_duration_seconds: u64,
-}
-
-/// Spam-specific peer banning configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpamBanConfig {
-    /// Number of spam transactions before auto-ban
-    /// Default: 10
-    #[serde(default = "default_spam_ban_threshold")]
-    pub spam_ban_threshold: usize,
-
-    /// Ban duration in seconds for spam violations
-    /// Default: 3600 (1 hour)
-    #[serde(default = "default_spam_ban_duration")]
-    pub spam_ban_duration_seconds: u64,
-}
-
-fn default_spam_ban_threshold() -> usize {
-    10
-}
-
-fn default_spam_ban_duration() -> u64 {
-    3600 // 1 hour
-}
-
-impl Default for SpamBanConfig {
-    fn default() -> Self {
-        Self {
-            spam_ban_threshold: 10,
-            spam_ban_duration_seconds: 3600,
+    /// When auth disabled, still apply IP rate limiting.
+    /// ENV BLVM_RPC_RATE_LIMIT_WHEN_AUTH_DISABLED (true/1/yes/on) overrides config.
+    pub fn rpc_rate_limit_when_auth_disabled(&self) -> bool {
+        if std::env::var("BLVM_RPC_RATE_LIMIT_WHEN_AUTH_DISABLED").is_ok() {
+            crate::utils::env_bool("BLVM_RPC_RATE_LIMIT_WHEN_AUTH_DISABLED")
+        } else {
+            self.rpc
+                .as_ref()
+                .map(|r| r.rate_limit_when_auth_disabled)
+                .unwrap_or(true)
         }
     }
-}
 
-/// IBD (Initial Block Download) bandwidth protection configuration
-/// Protects against bandwidth exhaustion attacks where malicious peers repeatedly
-/// request full blockchain sync to exhaust node bandwidth.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IbdProtectionConfig {
-    /// Max bandwidth per peer per day (GB)
-    #[serde(default = "default_ibd_max_bandwidth_per_peer_per_day")]
-    pub max_bandwidth_per_peer_per_day_gb: u64,
-
-    /// Max bandwidth per peer per hour (GB)
-    #[serde(default = "default_ibd_max_bandwidth_per_peer_per_hour")]
-    pub max_bandwidth_per_peer_per_hour_gb: u64,
-
-    /// Max bandwidth per IP per day (GB)
-    #[serde(default = "default_ibd_max_bandwidth_per_ip_per_day")]
-    pub max_bandwidth_per_ip_per_day_gb: u64,
-
-    /// Max bandwidth per IP per hour (GB)
-    #[serde(default = "default_ibd_max_bandwidth_per_ip_per_hour")]
-    pub max_bandwidth_per_ip_per_hour_gb: u64,
-
-    /// Max bandwidth per subnet per day (GB)
-    #[serde(default = "default_ibd_max_bandwidth_per_subnet_per_day")]
-    pub max_bandwidth_per_subnet_per_day_gb: u64,
-
-    /// Max bandwidth per subnet per hour (GB)
-    #[serde(default = "default_ibd_max_bandwidth_per_subnet_per_hour")]
-    pub max_bandwidth_per_subnet_per_hour_gb: u64,
-
-    /// Max concurrent IBD serving connections
-    #[serde(default = "default_ibd_max_concurrent_serving")]
-    pub max_concurrent_ibd_serving: usize,
-
-    /// IBD request cooldown period (seconds)
-    #[serde(default = "default_ibd_request_cooldown")]
-    pub ibd_request_cooldown_seconds: u64,
-
-    /// Suspicious reconnection threshold (reconnections per hour)
-    #[serde(default = "default_ibd_suspicious_reconnection_threshold")]
-    pub suspicious_reconnection_threshold: u32,
-
-    /// Peer reputation ban threshold (negative reputation to ban)
-    #[serde(default = "default_ibd_reputation_ban_threshold")]
-    pub reputation_ban_threshold: i32,
-
-    /// Enable emergency throttle mode
-    #[serde(default = "default_false")]
-    pub enable_emergency_throttle: bool,
-
-    /// Emergency throttle percentage (0-100)
-    #[serde(default = "default_ibd_emergency_throttle_percent")]
-    pub emergency_throttle_percent: u8,
-}
-
-fn default_ibd_max_bandwidth_per_peer_per_day() -> u64 {
-    50 // 50 GB/day per peer
-}
-
-fn default_ibd_max_bandwidth_per_peer_per_hour() -> u64 {
-    10 // 10 GB/hour per peer
-}
-
-fn default_ibd_max_bandwidth_per_ip_per_day() -> u64 {
-    100 // 100 GB/day per IP
-}
-
-fn default_ibd_max_bandwidth_per_ip_per_hour() -> u64 {
-    20 // 20 GB/hour per IP
-}
-
-fn default_ibd_max_bandwidth_per_subnet_per_day() -> u64 {
-    500 // 500 GB/day per subnet
-}
-
-fn default_ibd_max_bandwidth_per_subnet_per_hour() -> u64 {
-    100 // 100 GB/hour per subnet
-}
-
-fn default_ibd_max_concurrent_serving() -> usize {
-    3 // Max 3 concurrent IBD serving
-}
-
-fn default_ibd_request_cooldown() -> u64 {
-    3600 // 1 hour cooldown
-}
-
-fn default_ibd_suspicious_reconnection_threshold() -> u32 {
-    3 // 3 reconnections in 1 hour = suspicious
-}
-
-fn default_ibd_reputation_ban_threshold() -> i32 {
-    -100 // Ban peer if reputation < -100
-}
-
-fn default_ibd_emergency_throttle_percent() -> u8 {
-    50 // 50% throttle when enabled
-}
-
-impl Default for IbdProtectionConfig {
-    fn default() -> Self {
-        Self {
-            max_bandwidth_per_peer_per_day_gb: 50,
-            max_bandwidth_per_peer_per_hour_gb: 10,
-            max_bandwidth_per_ip_per_day_gb: 100,
-            max_bandwidth_per_ip_per_hour_gb: 20,
-            max_bandwidth_per_subnet_per_day_gb: 500,
-            max_bandwidth_per_subnet_per_hour_gb: 100,
-            max_concurrent_ibd_serving: 3,
-            ibd_request_cooldown_seconds: 3600,
-            suspicious_reconnection_threshold: 3,
-            reputation_ban_threshold: -100,
-            enable_emergency_throttle: false,
-            emergency_throttle_percent: 50,
-        }
+    /// IP rate limit burst when auth disabled.
+    /// ENV BLVM_RPC_IP_RATE_LIMIT_BURST overrides config.
+    pub fn rpc_ip_rate_limit_burst(&self) -> u32 {
+        crate::utils::env_int::<u32>("BLVM_RPC_IP_RATE_LIMIT_BURST")
+            .unwrap_or_else(|| {
+                self.rpc
+                    .as_ref()
+                    .map(|r| r.ip_rate_limit_burst)
+                    .unwrap_or(50)
+            })
     }
-}
 
-fn default_dos_max_connections_per_window() -> usize {
-    10
-}
-
-fn default_dos_window_seconds() -> u64 {
-    60
-}
-
-fn default_dos_max_message_queue_size() -> usize {
-    10000
-}
-
-fn default_dos_max_active_connections() -> usize {
-    200
-}
-
-fn default_dos_auto_ban_threshold() -> usize {
-    3
-}
-
-fn default_dos_ban_duration() -> u64 {
-    3600 // 1 hour
-}
-
-impl Default for DosProtectionConfig {
-    fn default() -> Self {
-        Self {
-            max_connections_per_window: 10,
-            window_seconds: 60,
-            max_message_queue_size: 10000,
-            max_active_connections: 200,
-            auto_ban_threshold: 3,
-            ban_duration_seconds: 3600,
-        }
+    /// IP rate limit per second when auth disabled.
+    /// ENV BLVM_RPC_IP_RATE_LIMIT_RATE overrides config.
+    pub fn rpc_ip_rate_limit_rate(&self) -> u32 {
+        crate::utils::env_int::<u32>("BLVM_RPC_IP_RATE_LIMIT_RATE")
+            .unwrap_or_else(|| {
+                self.rpc
+                    .as_ref()
+                    .map(|r| r.ip_rate_limit_rate)
+                    .unwrap_or(5)
+            })
     }
-}
 
-/// Network relay configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelayConfig {
-    /// Maximum age for relayed items (seconds)
-    #[serde(default = "default_relay_max_age")]
-    pub max_relay_age: u64,
-
-    /// Maximum number of items to track
-    #[serde(default = "default_relay_max_tracked_items")]
-    pub max_tracked_items: usize,
-
-    /// Enable block relay
-    #[serde(default = "default_true")]
-    pub enable_block_relay: bool,
-
-    /// Enable transaction relay
-    #[serde(default = "default_true")]
-    pub enable_tx_relay: bool,
-
-    /// Enable Dandelion++ privacy relay
-    #[serde(default = "default_false")]
-    pub enable_dandelion: bool,
-}
-
-fn default_relay_max_age() -> u64 {
-    3600 // 1 hour
-}
-
-fn default_relay_max_tracked_items() -> usize {
-    10000
-}
-
-impl Default for RelayConfig {
-    fn default() -> Self {
-        Self {
-            max_relay_age: 3600,
-            max_tracked_items: 10000,
-            enable_block_relay: true,
-            enable_tx_relay: true,
-            enable_dandelion: false,
-        }
+    /// Batch rate limit multiplier cap: min(batch_len, this) tokens consumed.
+    /// ENV BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP overrides config.
+    pub fn rpc_batch_rate_multiplier_cap(&self) -> u32 {
+        crate::utils::env_int::<u32>("BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP")
+            .unwrap_or_else(|| {
+                self.rpc
+                    .as_ref()
+                    .map(|r| r.batch_rate_multiplier_cap)
+                    .unwrap_or(10)
+            })
     }
-}
 
-/// Address database configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddressDatabaseConfig {
-    /// Maximum number of addresses to store
-    #[serde(default = "default_address_db_max_addresses")]
-    pub max_addresses: usize,
-
-    /// Address expiration time in seconds
-    #[serde(default = "default_address_db_expiration")]
-    pub expiration_seconds: u64,
-}
-
-fn default_address_db_max_addresses() -> usize {
-    10000
-}
-
-fn default_address_db_expiration() -> u64 {
-    24 * 60 * 60 // 24 hours
-}
-
-impl Default for AddressDatabaseConfig {
-    fn default() -> Self {
-        Self {
-            max_addresses: 10000,
-            expiration_seconds: 24 * 60 * 60,
-        }
-    }
-}
-
-/// Dandelion++ privacy relay configuration
-#[cfg(feature = "dandelion")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DandelionConfig {
-    /// Stem phase timeout in seconds
-    #[serde(default = "default_dandelion_stem_timeout")]
-    pub stem_timeout_seconds: u64,
-
-    /// Probability of fluffing at each hop (0.0 to 1.0)
-    #[serde(default = "default_dandelion_fluff_probability")]
-    pub fluff_probability: f64,
-
-    /// Maximum stem hops before forced fluff
-    #[serde(default = "default_dandelion_max_stem_hops")]
-    pub max_stem_hops: u8,
-}
-
-#[cfg(feature = "dandelion")]
-fn default_dandelion_stem_timeout() -> u64 {
-    10
-}
-
-#[cfg(feature = "dandelion")]
-fn default_dandelion_fluff_probability() -> f64 {
-    0.1 // 10%
-}
-
-#[cfg(feature = "dandelion")]
-fn default_dandelion_max_stem_hops() -> u8 {
-    2
-}
-
-#[cfg(feature = "dandelion")]
-impl Default for DandelionConfig {
-    fn default() -> Self {
-        Self {
-            stem_timeout_seconds: 10,
-            fluff_probability: 0.1,
-            max_stem_hops: 2,
-        }
-    }
-}
-
-/// Peer rate limiting configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerRateLimitingConfig {
-    /// Default burst size (token bucket)
-    #[serde(default = "default_peer_rate_burst")]
-    pub default_burst: u32,
-
-    /// Default rate (messages per second)
-    #[serde(default = "default_peer_rate_rate")]
-    pub default_rate: u32,
-}
-
-fn default_peer_rate_burst() -> u32 {
-    100
-}
-
-fn default_peer_rate_rate() -> u32 {
-    10
-}
-
-impl Default for PeerRateLimitingConfig {
-    fn default() -> Self {
-        Self {
-            default_burst: 100,
-            default_rate: 10,
-        }
+    /// Connection rate limit window in seconds.
+    /// ENV BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS overrides config.
+    pub fn rpc_connection_rate_limit_window_seconds(&self) -> u64 {
+        crate::utils::env_int::<u64>("BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS")
+            .unwrap_or_else(|| {
+                self.rpc
+                    .as_ref()
+                    .map(|r| r.connection_rate_limit_window_seconds)
+                    .unwrap_or(60)
+            })
     }
 }
 
 /// ZMQ notification configuration
 #[cfg(feature = "zmq")]
 pub use crate::zmq::ZmqConfig;
-
-/// RBF (Replace-By-Fee) mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RbfMode {
-    /// RBF disabled - no replacements allowed
-    Disabled,
-
-    /// Conservative RBF - strict BIP125 rules with additional safety checks
-    /// - Requires higher fee rate increase (e.g., 2x instead of 1.1x)
-    /// - Longer confirmation wait before allowing replacement
-    /// - Additional validation checks
-    Conservative,
-
-    /// Standard RBF - strict BIP125 compliance (default)
-    /// - Standard fee rate increase requirement
-    /// - Standard absolute fee bump
-    /// - All BIP125 rules enforced
-    Standard,
-
-    /// Aggressive RBF - relaxed rules for miners
-    /// - Lower fee rate increase threshold
-    /// - Faster replacement processing
-    /// - May allow package replacements
-    Aggressive,
-}
-
-/// RBF (Replace-By-Fee) configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RbfConfig {
-    /// RBF mode (disabled, conservative, standard, aggressive)
-    #[serde(default = "default_rbf_mode")]
-    pub mode: RbfMode,
-
-    /// Minimum fee rate multiplier for replacement (e.g., 1.1 = 10% increase)
-    /// Conservative: 2.0 (100% increase)
-    /// Standard: 1.1 (10% increase, BIP125 minimum)
-    /// Aggressive: 1.05 (5% increase)
-    #[serde(default = "default_rbf_fee_rate_multiplier")]
-    pub min_fee_rate_multiplier: f64,
-
-    /// Minimum absolute fee bump in satoshis
-    /// Conservative: 5000 sat
-    /// Standard: 1000 sat (BIP125 MIN_RELAY_FEE)
-    /// Aggressive: 500 sat
-    #[serde(default = "default_rbf_min_fee_bump")]
-    pub min_fee_bump_satoshis: u64,
-
-    /// Minimum confirmations before allowing replacement (conservative only)
-    /// 0 = allow immediately
-    #[serde(default = "default_rbf_min_confirmations")]
-    pub min_confirmations: u32,
-
-    /// Allow package replacements (aggressive only)
-    /// Package = parent + child transactions replaced together
-    #[serde(default = "default_rbf_allow_packages")]
-    pub allow_package_replacements: bool,
-
-    /// Maximum number of replacements per transaction
-    /// Prevents replacement spam
-    #[serde(default = "default_rbf_max_replacements")]
-    pub max_replacements_per_tx: u32,
-
-    /// Replacement cooldown period (seconds)
-    /// Prevents rapid-fire replacements
-    #[serde(default = "default_rbf_cooldown_seconds")]
-    pub cooldown_seconds: u64,
-}
-
-fn default_rbf_mode() -> RbfMode {
-    RbfMode::Standard
-}
-
-fn default_rbf_fee_rate_multiplier() -> f64 {
-    1.1 // Standard BIP125 minimum
-}
-
-fn default_rbf_min_fee_bump() -> u64 {
-    1000 // BIP125 MIN_RELAY_FEE
-}
-
-fn default_rbf_min_confirmations() -> u32 {
-    0
-}
-
-fn default_rbf_allow_packages() -> bool {
-    false
-}
-
-fn default_rbf_max_replacements() -> u32 {
-    10
-}
-
-fn default_rbf_cooldown_seconds() -> u64 {
-    60
-}
-
-impl Default for RbfConfig {
-    fn default() -> Self {
-        Self {
-            mode: RbfMode::Standard,
-            min_fee_rate_multiplier: 1.1,
-            min_fee_bump_satoshis: 1000,
-            min_confirmations: 0,
-            allow_package_replacements: false,
-            max_replacements_per_tx: 10,
-            cooldown_seconds: 60,
-        }
-    }
-}
-
-impl RbfConfig {
-    /// Get mode-specific defaults
-    pub fn with_mode(mode: RbfMode) -> Self {
-        match mode {
-            RbfMode::Disabled => Self {
-                mode: RbfMode::Disabled,
-                min_fee_rate_multiplier: f64::INFINITY, // Never allow
-                min_fee_bump_satoshis: u64::MAX,
-                min_confirmations: u32::MAX,
-                allow_package_replacements: false,
-                max_replacements_per_tx: 0,
-                cooldown_seconds: u64::MAX,
-            },
-            RbfMode::Conservative => Self {
-                mode: RbfMode::Conservative,
-                min_fee_rate_multiplier: 2.0,
-                min_fee_bump_satoshis: 5000,
-                min_confirmations: 1,
-                allow_package_replacements: false,
-                max_replacements_per_tx: 3,
-                cooldown_seconds: 300,
-            },
-            RbfMode::Standard => Self::default(),
-            RbfMode::Aggressive => Self {
-                mode: RbfMode::Aggressive,
-                min_fee_rate_multiplier: 1.05,
-                min_fee_bump_satoshis: 500,
-                min_confirmations: 0,
-                allow_package_replacements: true,
-                max_replacements_per_tx: 10,
-                cooldown_seconds: 60,
-            },
-        }
-    }
-}
-
-/// Transaction eviction strategy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EvictionStrategy {
-    /// Evict lowest fee rate transactions first (standard default)
-    LowestFeeRate,
-
-    /// Evict oldest transactions first (FIFO)
-    OldestFirst,
-
-    /// Evict largest transactions first (to free most space)
-    LargestFirst,
-
-    /// Evict transactions with no descendants first (safest)
-    NoDescendantsFirst,
-
-    /// Hybrid: Combine fee rate and age
-    Hybrid,
-
-    /// SpamFirst: Evict spam transactions first (when mempool is full)
-    /// Requires spam filter to be enabled
-    SpamFirst,
-}
-
-/// Mempool policy configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MempoolPolicyConfig {
-    /// Maximum mempool size in megabytes
-    #[serde(default = "default_max_mempool_mb")]
-    pub max_mempool_mb: u64,
-
-    /// Maximum number of transactions in mempool
-    #[serde(default = "default_max_mempool_txs")]
-    pub max_mempool_txs: usize,
-
-    /// Minimum relay fee rate (satoshis per vbyte)
-    #[serde(default = "default_min_relay_fee_rate")]
-    pub min_relay_fee_rate: u64,
-
-    /// Minimum transaction fee (absolute, in satoshis)
-    #[serde(default = "default_min_tx_fee")]
-    pub min_tx_fee: u64,
-
-    /// Incremental relay fee (for fee bumping)
-    #[serde(default = "default_incremental_relay_fee")]
-    pub incremental_relay_fee: u64,
-
-    /// Maximum ancestor count (transaction + all ancestors)
-    #[serde(default = "default_max_ancestor_count")]
-    pub max_ancestor_count: u32,
-
-    /// Maximum ancestor size in vbytes
-    #[serde(default = "default_max_ancestor_size")]
-    pub max_ancestor_size: u64,
-
-    /// Maximum descendant count (transaction + all descendants)
-    #[serde(default = "default_max_descendant_count")]
-    pub max_descendant_count: u32,
-
-    /// Maximum descendant size in vbytes
-    #[serde(default = "default_max_descendant_size")]
-    pub max_descendant_size: u64,
-
-    /// Transaction eviction strategy
-    #[serde(default = "default_eviction_strategy")]
-    pub eviction_strategy: EvictionStrategy,
-
-    /// Mempool expiry time in hours
-    #[serde(default = "default_mempool_expiry_hours")]
-    pub mempool_expiry_hours: u64,
-
-    /// Enable mempool persistence (survives restarts)
-    #[serde(default)]
-    pub persist_mempool: bool,
-
-    /// Mempool persistence file path
-    #[serde(default = "default_mempool_persistence_path")]
-    pub mempool_persistence_path: String,
-
-    /// Transaction rate limit burst size (max transactions in burst)
-    /// Default: 10
-    #[serde(default = "default_tx_rate_limit_burst")]
-    pub tx_rate_limit_burst: u32,
-
-    /// Transaction rate limit per second
-    /// Default: 1 tx/sec
-    #[serde(default = "default_tx_rate_limit_per_sec")]
-    pub tx_rate_limit_per_sec: u32,
-
-    /// Transaction byte rate limit per second (bytes per second per peer)
-    /// Default: 100,000 bytes/sec (100 KB/s)
-    #[serde(default = "default_tx_byte_rate_limit")]
-    pub tx_byte_rate_limit: u64,
-
-    /// Transaction byte rate limit burst size (max bytes in burst)
-    /// Default: 1,000,000 bytes (1 MB)
-    #[serde(default = "default_tx_byte_rate_burst")]
-    pub tx_byte_rate_burst: u64,
-}
-
-fn default_max_mempool_mb() -> u64 {
-    300
-}
-
-fn default_max_mempool_txs() -> usize {
-    100_000
-}
-
-fn default_min_relay_fee_rate() -> u64 {
-    1 // 1 sat/vB
-}
-
-fn default_min_tx_fee() -> u64 {
-    1000
-}
-
-fn default_incremental_relay_fee() -> u64 {
-    1000
-}
-
-fn default_max_ancestor_count() -> u32 {
-    25
-}
-
-fn default_max_ancestor_size() -> u64 {
-    101_000 // 101 kB (reference default)
-}
-
-fn default_max_descendant_count() -> u32 {
-    25
-}
-
-fn default_max_descendant_size() -> u64 {
-    101_000 // 101 kB (reference default)
-}
-
-fn default_eviction_strategy() -> EvictionStrategy {
-    EvictionStrategy::LowestFeeRate
-}
-
-fn default_mempool_expiry_hours() -> u64 {
-    336 // 14 days
-}
-
-fn default_mempool_persistence_path() -> String {
-    "data/mempool.dat".to_string()
-}
-
-fn default_tx_rate_limit_burst() -> u32 {
-    10
-}
-
-fn default_tx_rate_limit_per_sec() -> u32 {
-    1
-}
-
-fn default_tx_byte_rate_limit() -> u64 {
-    100_000 // 100 KB/s
-}
-
-fn default_tx_byte_rate_burst() -> u64 {
-    1_000_000 // 1 MB
-}
-
-impl Default for MempoolPolicyConfig {
-    fn default() -> Self {
-        Self {
-            max_mempool_mb: 300,
-            max_mempool_txs: 100_000,
-            min_relay_fee_rate: 1,
-            min_tx_fee: 1000,
-            incremental_relay_fee: 1000,
-            max_ancestor_count: 25,
-            max_ancestor_size: 101_000,
-            max_descendant_count: 25,
-            max_descendant_size: 101_000,
-            eviction_strategy: EvictionStrategy::LowestFeeRate,
-            mempool_expiry_hours: 336,
-            persist_mempool: false,
-            mempool_persistence_path: "data/mempool.dat".to_string(),
-            tx_rate_limit_burst: 10,
-            tx_rate_limit_per_sec: 1,
-            tx_byte_rate_limit: 100_000,
-            tx_byte_rate_burst: 1_000_000,
-        }
-    }
-}
 
 /// Payment configuration (BIP70)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2294,7 +1199,8 @@ pub struct RestApiConfig {
 pub struct LoggingConfig {
     /// Log level filter (e.g., "info", "debug", "blvm_node=debug,network=trace")
     /// If not set, uses RUST_LOG environment variable or defaults to "info"
-    #[serde(default)]
+    /// Config key "level" is accepted as alias for "filter" (e.g. level = "info")
+    #[serde(default, alias = "level")]
     pub filter: Option<String>,
 
     /// Enable JSON logging format (for log aggregation systems)

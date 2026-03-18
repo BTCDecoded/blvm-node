@@ -7,7 +7,7 @@
 //! - Get vault state
 
 use crate::payment::state_machine::PaymentStateMachine;
-use crate::rpc::rest::types::{error_response, success_response};
+use crate::rpc::rest::types::{rest_error_failed, rest_error_invalid, error_response, success_response};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};
@@ -149,7 +149,7 @@ async fn create_vault(
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     "BAD_REQUEST",
-                    &format!("Invalid withdrawal_script: {}", e),
+                    &rest_error_invalid("withdrawal_script", e),
                     request_id,
                 );
             }
@@ -233,7 +233,7 @@ async fn unvault_vault(
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
-                    &format!("Failed to get vault state: {}", e),
+                    &rest_error_failed("get vault state", e),
                     request_id,
                 );
             }
@@ -318,7 +318,7 @@ async fn withdraw_from_vault(
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INTERNAL_ERROR",
-                    &format!("Failed to get vault state: {}", e),
+                    &rest_error_failed("get vault state", e),
                     request_id,
                 );
             }
@@ -400,7 +400,7 @@ async fn get_vault_state(
                 Err(e) => error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "VAULT_LOAD_FAILED",
-                    &format!("Failed to load vault: {}", e),
+                    &rest_error_failed("load vault", e),
                     request_id,
                 ),
             },

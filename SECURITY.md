@@ -127,9 +127,15 @@ This document defines the security boundaries, threat model, and limitations of 
 
 3. **RPC Interface**
    - ✅ Authentication implemented (token-based and certificate-based, configurable)
-   - ✅ Rate limiting implemented (per-user rate limiting)
+   - ✅ Rate limiting implemented (per-user, per-IP when auth disabled, batch-aware)
+   - ✅ IP rate limiting when auth disabled (rate-limit-only mode)
+   - ✅ Quinn RPC auth and rate limiting (same model as HTTP RPC)
+   - ✅ Batch RPC rate limiting (consumes min(batch_len, 10) tokens)
+   - ✅ Connection rate limiting (per-IP per minute for RPC and REST)
+   - ✅ REST vault/pool/congestion: oversized body returns 413
    - ✅ Input validation and sanitization
    - ✅ Access control via authentication
+   - ⚠️ **Certificate auth (S-001)**: When using certificate-based RPC auth, the RPC endpoint **must** be behind TLS termination (e.g. nginx, Caddy) that sets the `x-client-cert-fingerprint` header from the validated client certificate. Without this, the header is spoofable—any client can forge it. If RPC is not behind such TLS, use token-based auth only or disable cert auth.
 
 4. **Consensus Layer**
    - Signature verification now uses real transaction hashes ✅
@@ -155,6 +161,13 @@ This document defines the security boundaries, threat model, and limitations of 
 - [x] Add comprehensive fuzzing (protocol parsing, compact blocks, enhanced edge cases)
 - [x] Add eclipse attack prevention (IP diversity tracking, limits connections from same IP range)
 - [x] Add storage bounds checking (prevents overflow, warns when approaching limits)
+
+#### Phase 2.5: RPC Security Hardening (Complete)
+- [x] Rate limiting when auth disabled (see [RPC Security Remediation Plan](docs/RPC_SECURITY_REMEDIATION_PLAN.md))
+- [x] Quinn RPC auth and rate limiting
+- [x] Batch RPC rate limiting
+- [x] RPC connection rate limiting
+- [x] REST vault/pool/congestion error handling (413 for oversized body)
 
 #### Phase 3: Mainnet Hardening
 - [ ] Professional security audit (external, requires security firm)

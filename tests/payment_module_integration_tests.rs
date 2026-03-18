@@ -82,6 +82,7 @@ fn create_manifest_with_payment(
         author: Some("Test Author".to_string()),
         capabilities: Vec::new(),
         dependencies: HashMap::new(),
+        optional_dependencies: HashMap::new(),
         entry_point: format!("{}.so", name),
         config_schema: HashMap::new(),
         binary: None,

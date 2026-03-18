@@ -13,7 +13,8 @@
 //! - Reduces orphan transactions in mempool
 //! - More efficient validation (package as unit)
 
-use crate::network::txhash::calculate_txid;
+use crate::network::txhash::calculate_wtxid;
+use blvm_protocol::block::calculate_tx_id;
 use blvm_protocol::{Hash, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -105,31 +106,35 @@ impl Default for PackageValidator {
 }
 
 impl PackageId {
-    /// Calculate package ID from transactions
-    pub fn from_transactions(transactions: &[Transaction]) -> Self {
+    /// Calculate package ID per BIP331: SHA256 of wtxids concatenated in lexicographical order.
+    /// When witnesses is None (typical for packages), wtxid == txid for non-SegWit transactions.
+    pub fn from_transactions(
+        transactions: &[Transaction],
+        witnesses: Option<&[Option<Vec<Vec<u8>>>]>,
+    ) -> Self {
+        let mut wtxids: Vec<Hash> = transactions
+            .iter()
+            .enumerate()
+            .map(|(i, tx)| {
+                let w = witnesses.and_then(|w| w.get(i)).and_then(|o| o.as_ref());
+                match w {
+                    Some(v) => {
+                        let arr = [v.clone()];
+                        calculate_wtxid(tx, Some(&arr))
+                    }
+                    None => calculate_wtxid(tx, None),
+                }
+            })
+            .collect();
+        wtxids.sort(); // Lexicographical order (Hash is [u8; 32])
         let mut hasher = Sha256::new();
-
-        // Hash all transactions in order (placeholder: serialize structure)
-        // Full implementation should hash txids
-        for tx in transactions {
-            hasher.update(tx.version.to_le_bytes());
-            hasher.update((tx.inputs.len() as u64).to_le_bytes());
-            hasher.update((tx.outputs.len() as u64).to_le_bytes());
-            hasher.update(tx.lock_time.to_le_bytes());
+        for w in &wtxids {
+            hasher.update(w);
         }
-
         let hash_bytes = hasher.finalize();
         let mut package_hash = [0u8; 32];
         package_hash.copy_from_slice(&hash_bytes);
-
-        // Double hash for package ID
-        let mut hasher2 = Sha256::new();
-        hasher2.update(package_hash);
-        let final_hash = hasher2.finalize();
-        let mut final_package_hash = [0u8; 32];
-        final_package_hash.copy_from_slice(&final_hash);
-
-        PackageId(final_package_hash)
+        PackageId(package_hash)
     }
 }
 
@@ -151,19 +156,8 @@ impl TransactionPackage {
         // Validate ordering (parents before children)
         Self::validate_ordering(&transactions)?;
 
-        // Calculate package ID from txids
-        let mut hasher = sha2::Sha256::new();
-        for tx in &transactions {
-            let txid = calculate_txid(tx);
-            hasher.update(txid);
-        }
-        let first = hasher.finalize();
-        let mut hasher2 = sha2::Sha256::new();
-        hasher2.update(first);
-        let final_bytes = hasher2.finalize();
-        let mut pkg_hash = [0u8; 32];
-        pkg_hash.copy_from_slice(&final_bytes);
-        let package_id = PackageId(pkg_hash);
+        // Calculate package ID per BIP331: SHA256 of wtxids in lexicographical order
+        let package_id = PackageId::from_transactions(&transactions, None);
 
         // Calculate combined fee from UTXO set if provided
         let combined_fee = if let Some(utxo_set) = utxo_set {
@@ -208,7 +202,7 @@ impl TransactionPackage {
         // Build index of txids to position
         let mut idx = std::collections::HashMap::new();
         for (i, tx) in transactions.iter().enumerate() {
-            idx.insert(calculate_txid(tx), i);
+            idx.insert(calculate_tx_id(tx), i);
         }
 
         // Check each transaction: inputs that reference in-package parents must be earlier
@@ -291,7 +285,7 @@ impl PackageRelay {
         // Check for duplicates by txid
         let mut seen = std::collections::HashSet::new();
         for tx in &package.transactions {
-            let txid = calculate_txid(tx);
+            let txid = calculate_tx_id(tx);
             if !seen.insert(txid) {
                 return Err(PackageRejectReason::DuplicateTransactions);
             }
@@ -315,10 +309,7 @@ impl PackageRelay {
 
         let package_id = package.package_id;
         let tx_count = package.transactions.len();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = crate::utils::current_timestamp();
 
         let state = PackageState {
             package,
@@ -363,10 +354,7 @@ impl PackageRelay {
 
     /// Clean up old packages
     pub fn cleanup_old_packages(&mut self, max_age: u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = crate::utils::current_timestamp();
 
         let expired: Vec<PackageId> = self
             .pending_packages

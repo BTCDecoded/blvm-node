@@ -2,8 +2,9 @@
 //!
 //! Provides health status monitoring and alerting for node components.
 
+use crate::utils::current_timestamp;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 /// Overall node health status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,14 +70,11 @@ impl HealthChecker {
         network_metrics: Option<&crate::node::metrics::NetworkMetrics>,
         storage_metrics: Option<&crate::node::metrics::StorageMetrics>,
     ) -> HealthReport {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_timestamp();
 
         let uptime = SystemTime::now()
             .duration_since(self.start_time)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         let mut components = Vec::new();

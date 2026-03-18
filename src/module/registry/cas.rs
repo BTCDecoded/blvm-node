@@ -24,7 +24,7 @@ impl ContentAddressableStorage {
 
         // Create storage directory if it doesn't exist
         std::fs::create_dir_all(&storage_dir).map_err(|e| {
-            ModuleError::OperationError(format!("Failed to create CAS directory: {e}"))
+            ModuleError::op_err("Failed to create CAS directory", e)
         })?;
 
         // Load existing index
@@ -40,7 +40,7 @@ impl ContentAddressableStorage {
 
         // Write content to file
         std::fs::write(&path, content)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to write CAS file: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to write CAS file", e))?;
 
         // Update index
         self.index.insert(hash, path);
@@ -56,14 +56,14 @@ impl ContentAddressableStorage {
         // Check index first
         if let Some(path) = self.index.get(hash) {
             return std::fs::read(path)
-                .map_err(|e| ModuleError::OperationError(format!("Failed to read CAS file: {e}")));
+                .map_err(|e| ModuleError::op_err("Failed to read CAS file", e));
         }
 
         // Try to read from storage directory (for files not in index)
         let path = self.storage_dir.join(hex::encode(hash));
         if path.exists() {
             return std::fs::read(&path)
-                .map_err(|e| ModuleError::OperationError(format!("Failed to read CAS file: {e}")));
+                .map_err(|e| ModuleError::op_err("Failed to read CAS file", e));
         }
 
         Err(ModuleError::ModuleNotFound(format!(
@@ -102,15 +102,15 @@ impl ContentAddressableStorage {
         }
 
         let contents = std::fs::read_to_string(&index_file)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to read index file: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to read index file", e))?;
 
         let index_data: HashMap<String, String> = serde_json::from_str(&contents)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to parse index file: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to parse index file", e))?;
 
         let mut index = HashMap::new();
         for (hash_hex, path_str) in index_data {
             let hash_bytes = hex::decode(&hash_hex)
-                .map_err(|e| ModuleError::OperationError(format!("Invalid hash in index: {e}")))?;
+                .map_err(|e| ModuleError::op_err("Invalid hash in index", e))?;
 
             if hash_bytes.len() != 32 {
                 continue;
@@ -135,10 +135,10 @@ impl ContentAddressableStorage {
             .collect();
 
         let contents = serde_json::to_string_pretty(&index_data)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to serialize index: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to serialize index", e))?;
 
         std::fs::write(&index_file, contents)
-            .map_err(|e| ModuleError::OperationError(format!("Failed to write index file: {e}")))?;
+            .map_err(|e| ModuleError::op_err("Failed to write index file", e))?;
 
         Ok(())
     }

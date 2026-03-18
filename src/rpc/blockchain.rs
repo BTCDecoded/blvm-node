@@ -2,10 +2,18 @@
 //!
 //! Implements blockchain-related JSON-RPC methods for querying blockchain state.
 
+use crate::config::RequestTimeoutConfig;
 use crate::node::event_publisher::EventPublisher;
-use crate::rpc::errors::RpcError;
+use crate::rpc::params::{param_str_required, param_u64, param_u64_default};
+use crate::rpc::errors::{
+    BlockNotFoundError, RpcError, BLOCK_HASH_PARAM_REQUIRED_MSG, BLOCK_NOT_FOUND_MSG,
+    HEIGHT_PARAM_REQUIRED_MSG, STORAGE_NOT_AVAILABLE_MSG,
+};
 use crate::storage::assumeutxo::AssumeUtxoManager;
 use crate::storage::Storage;
+use crate::utils::{
+    storage_timeout_from_config, with_custom_timeout, CACHE_REFRESH_TIP, POLL_INTERVAL_WAIT_FOR_BLOCK,
+};
 use anyhow::Result;
 use blvm_protocol::BlockHeader;
 use serde_json::{json, Number, Value};
@@ -14,6 +22,15 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 const ZERO_HASH_STR: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+thread_local! {
+    static CACHED_TIP_HEIGHT: crate::rpc::cache::ThreadLocalTimedCache<u64> =
+        crate::rpc::cache::ThreadLocalTimedCache::new();
+    static CACHED_TIP_HASH_HEX: crate::rpc::cache::ThreadLocalKeyedCache<String, ([u8; 32], u64)> =
+        crate::rpc::cache::ThreadLocalKeyedCache::new();
+    static CACHED_DIFFICULTY: crate::rpc::cache::ThreadLocalKeyedCache<f64, u64> =
+        crate::rpc::cache::ThreadLocalKeyedCache::new();
+}
 
 /// Helper function to decode a 32-byte hash from hex string
 fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
@@ -43,6 +60,8 @@ pub struct BlockchainRpc {
     protocol: Option<Arc<blvm_protocol::BitcoinProtocolEngine>>,
     /// Event publisher for BlockDisconnected/ChainReorg (reorg resolution)
     event_publisher: Option<Arc<EventPublisher>>,
+    /// Request timeout config (storage/network/rpc timeouts)
+    request_timeouts: Option<RequestTimeoutConfig>,
 }
 
 impl Default for BlockchainRpc {
@@ -58,6 +77,7 @@ impl BlockchainRpc {
             storage: None,
             protocol: None,
             event_publisher: None,
+            request_timeouts: None,
         }
     }
 
@@ -67,12 +87,27 @@ impl BlockchainRpc {
             storage: Some(storage),
             protocol: None,
             event_publisher: None,
+            request_timeouts: None,
         }
+    }
+
+    /// Return a reference to storage or a consistent RPC error if not set.
+    /// Use in RPC methods that require storage instead of repeating ok_or_else.
+    pub fn require_storage(&self) -> Result<&Arc<Storage>, RpcError> {
+        self.storage
+            .as_ref()
+            .ok_or_else(RpcError::storage_not_available)
     }
 
     /// Set event publisher for BlockDisconnected/ChainReorg notifications
     pub fn with_event_publisher(mut self, event_publisher: Option<Arc<EventPublisher>>) -> Self {
         self.event_publisher = event_publisher;
+        self
+    }
+
+    /// Set request timeout config (storage/network/rpc timeouts from config)
+    pub fn with_request_timeouts(mut self, config: Option<RequestTimeoutConfig>) -> Self {
+        self.request_timeouts = config;
         self
     }
 
@@ -85,7 +120,12 @@ impl BlockchainRpc {
             storage: Some(storage),
             protocol: Some(protocol),
             event_publisher: None,
+            request_timeouts: None,
         }
+    }
+
+    fn storage_timeout(&self) -> std::time::Duration {
+        storage_timeout_from_config(self.request_timeouts.as_ref())
     }
 
     /// Get chain name from protocol version
@@ -100,28 +140,10 @@ impl BlockchainRpc {
             .unwrap_or("regtest") // Default fallback
     }
 
-    /// Calculate difficulty from bits (compact target format)
+    /// Calculate difficulty from bits (compact target format).
+    /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty(bits: u64) -> f64 {
-        // Difficulty = MAX_TARGET / target
-        // MAX_TARGET for Bitcoin mainnet is 0x00000000FFFF0000000000000000000000000000000000000000000000000000
-        // But we use a simpler calculation: difficulty = 2^256 / (target + 1)
-        // For display purposes, we normalize to genesis difficulty = 1.0
-        // MAX_TARGET is 256 bits, use U256 from blvm-consensus
-        // 0x00000000FFFF0000000000000000000000000000000000000000000000000000
-        // For now, use a placeholder - this should be calculated from difficulty bits
-        const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
-
-        // Simplified difficulty calculation
-        // For display purposes, use a simple approximation based on bits
-        // Note: expand_target returns U256 which is private, so we just use bits directly
-        // Use bits directly for difficulty approximation
-        // Lower bits value = higher difficulty
-        let mantissa = (bits & 0x00ffffff) as f64;
-        if mantissa == 0.0 {
-            return 1.0;
-        }
-        let max_mantissa = 0x00ffff00 as f64;
-        (max_mantissa / mantissa).max(1.0)
+        blvm_consensus::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 
     /// Calculate median time from recent headers (BIP113)
@@ -152,35 +174,10 @@ impl BlockchainRpc {
         INITIAL_SUBSIDY >> halvings
     }
 
-    /// Calculate hash_serialized_2 for UTXO set (double SHA256)
-    ///
-    /// Serializes UTXO set deterministically and computes double SHA256 hash.
-    /// Matches gettxoutsetinfo hash_serialized_2 calculation.
-    fn calculate_utxo_set_hash(utxo_set: &blvm_protocol::UtxoSet) -> [u8; 32] {
-        use crate::storage::hashing::double_sha256;
-
-        // Sort UTXOs for deterministic hashing (by outpoint: hash first, then index)
-        let mut entries: Vec<_> = utxo_set.iter().collect();
-        entries.sort_by(|(a, _), (b, _)| match a.hash.cmp(&b.hash) {
-            std::cmp::Ordering::Equal => a.index.cmp(&b.index),
-            other => other,
-        });
-
-        // Serialize each UTXO entry
-        let mut serialized = Vec::new();
-        for (outpoint, utxo) in entries {
-            // Serialize outpoint (32-byte hash + 8-byte index, little-endian)
-            serialized.extend_from_slice(&outpoint.hash);
-            serialized.extend_from_slice(&outpoint.index.to_le_bytes());
-
-            // Serialize UTXO (8-byte value + script_pubkey + 8-byte height, little-endian)
-            serialized.extend_from_slice(&utxo.value.to_le_bytes());
-            serialized.extend_from_slice(&utxo.script_pubkey);
-            serialized.extend_from_slice(&utxo.height.to_le_bytes());
-        }
-
-        // Double SHA256 hash
-        double_sha256(&serialized)
+    /// Calculate MuHash3072 for UTXO set (Core gettxoutsetinfo muhash).
+    fn calculate_utxo_muhash(utxo_set: &blvm_protocol::UtxoSet) -> [u8; 32] {
+        crate::storage::assumeutxo::AssumeUtxoManager::calculate_utxo_hash(utxo_set)
+            .unwrap_or_else(|_| [0u8; 32])
     }
 
     /// Calculate confirmations for a block
@@ -222,42 +219,16 @@ impl BlockchainRpc {
         });
 
         if let Some(ref storage) = self.storage {
-            use std::time::{Duration, Instant};
-
-            thread_local! {
-                static CACHED_TIP_HASH_HEX: std::cell::RefCell<(Option<String>, [u8; 32], Instant, Option<u64>)> =
-                    std::cell::RefCell::new((None, [0u8; 32], Instant::now(), None));
-            }
-
-            let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
-            let height = storage.chain().get_height()?.unwrap_or(0);
+            let (best_hash, height) = storage.chain().get_tip_hash_and_height()?;
             let block_count = storage.blocks().block_count().unwrap_or(0);
 
-            let best_hash_hex = {
-                let should_refresh = CACHED_TIP_HASH_HEX.with(|c| {
-                    let cache = c.borrow();
-                    cache.0.is_none()
-                        || cache.1 != best_hash
-                        || cache.2.elapsed() >= Duration::from_secs(1)
-                        || cache.3 != Some(height)
-                });
-
-                if should_refresh {
-                    let hex_str = hex::encode(best_hash);
-                    CACHED_TIP_HASH_HEX.with(|c| {
-                        let mut cache = c.borrow_mut();
-                        *cache = (
-                            Some(hex_str.clone()),
-                            best_hash,
-                            Instant::now(),
-                            Some(height),
-                        );
-                    });
-                    CACHED_TIP_HASH_HEX.with(|c| c.borrow().0.as_ref().unwrap().clone())
-                } else {
-                    CACHED_TIP_HASH_HEX.with(|c| c.borrow().0.as_ref().unwrap().clone())
-                }
-            };
+            let best_hash_hex = CACHED_TIP_HASH_HEX.with(|c| {
+                c.get_or_refresh(
+                    CACHE_REFRESH_TIP,
+                    &(best_hash, height),
+                    || hex::encode(best_hash),
+                )
+            });
 
             // Calculate difficulty from tip header (single lookup)
             let difficulty = if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
@@ -340,7 +311,7 @@ impl BlockchainRpc {
                 "pruneheight": 0,
                 "automatic_pruning": false,
                 "softforks": softforks,
-                "warnings": "Storage not available - returning default values"
+                "warnings": format!("{} - returning default values", STORAGE_NOT_AVAILABLE_MSG.split('.').next().unwrap_or(STORAGE_NOT_AVAILABLE_MSG))
             }))
         }
     }
@@ -367,45 +338,27 @@ impl BlockchainRpc {
         // Try to get block from storage with graceful degradation
         if let Some(ref storage) = self.storage {
             // Use timeout to prevent hanging on slow storage (wrap sync operation)
-            use crate::utils::with_storage_timeout;
-            match with_storage_timeout(async {
+            let timeout_dur = self.storage_timeout();
+            match with_custom_timeout(async {
                 tokio::task::spawn_blocking({
                     let storage = storage.clone();
                     let hash_array = hash_array;
                     move || storage.blocks().get_block(&hash_array)
                 })
                 .await
-            })
+            }, timeout_dur)
             .await
             {
                 Ok(Ok(Ok(Some(block)))) => {
                     // Block found - calculate all required fields (similar to get_block_header)
-                    use std::time::{Duration, Instant};
-
-                    thread_local! {
-                        static CACHED_TIP_HEIGHT: std::cell::RefCell<(Option<u64>, Instant)> =
-                            std::cell::RefCell::new((None, Instant::now()));
-                    }
-
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
 
-                    let tip_height = {
-                        let should_refresh = CACHED_TIP_HEIGHT.with(|c| {
-                            let cache = c.borrow();
-                            cache.0.is_none() || cache.1.elapsed() >= Duration::from_secs(1)
-                        });
-
-                        if should_refresh {
-                            let height = storage.chain().get_height()?.unwrap_or(0);
-                            CACHED_TIP_HEIGHT.with(|c| {
-                                let mut cache = c.borrow_mut();
-                                *cache = (Some(height), Instant::now());
-                            });
-                            CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
-                        } else {
-                            CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
-                        }
-                    };
+                    let tip_height = CACHED_TIP_HEIGHT.with(|c| {
+                        c.get_or_refresh(
+                            CACHE_REFRESH_TIP,
+                            || storage.chain().get_height().map(|h| h.unwrap_or(0)).unwrap_or(0),
+                        )
+                    });
 
                     let confirmations = block_height
                         .map(|h| Self::calculate_confirmations(h, tip_height))
@@ -513,8 +466,8 @@ impl BlockchainRpc {
                     }));
                 }
                 Ok(Ok(Ok(None))) => {
-                    // Block not found - return error
-                    return Err(anyhow::anyhow!("Block not found"));
+                    // Block not found - return error (server will map to RpcError::block_not_found)
+                    return Err(BlockNotFoundError::new(hash).into());
                 }
                 Ok(Ok(Err(e))) => {
                     // Storage error - log and fall through to graceful degradation
@@ -533,7 +486,7 @@ impl BlockchainRpc {
 
         // Graceful degradation: return error if storage unavailable or block not found
         // (Don't return fake data - that's misleading)
-        Err(anyhow::anyhow!("Block not found or storage unavailable"))
+        Err(anyhow::anyhow!("{} or storage unavailable", BLOCK_NOT_FOUND_MSG))
     }
 
     /// Get block hash by height
@@ -542,7 +495,7 @@ impl BlockchainRpc {
 
         // Simplified implementation - return error for non-existent heights
         if height > 1000 {
-            return Err(anyhow::anyhow!("Block height {} not found", height));
+            return Err(BlockNotFoundError::new(format!("at height {}", height)).into());
         }
 
         Ok(json!(
@@ -580,32 +533,14 @@ impl BlockchainRpc {
 
             if let Ok(Some(header)) = storage.blocks().get_header(&hash_array) {
                 if verbose {
-                    use std::time::{Duration, Instant};
-
-                    thread_local! {
-                        static CACHED_TIP_HEIGHT: std::cell::RefCell<(Option<u64>, Instant)> =
-                            std::cell::RefCell::new((None, Instant::now()));
-                    }
-
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
 
-                    let tip_height = {
-                        let should_refresh = CACHED_TIP_HEIGHT.with(|c| {
-                            let cache = c.borrow();
-                            cache.0.is_none() || cache.1.elapsed() >= Duration::from_secs(1)
-                        });
-
-                        if should_refresh {
-                            let height = storage.chain().get_height()?.unwrap_or(0);
-                            CACHED_TIP_HEIGHT.with(|c| {
-                                let mut cache = c.borrow_mut();
-                                *cache = (Some(height), Instant::now());
-                            });
-                            CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
-                        } else {
-                            CACHED_TIP_HEIGHT.with(|c| c.borrow().0.unwrap_or(0))
-                        }
-                    };
+                    let tip_height = CACHED_TIP_HEIGHT.with(|c| {
+                        c.get_or_refresh(
+                            CACHE_REFRESH_TIP,
+                            || storage.chain().get_height().map(|h| h.unwrap_or(0)).unwrap_or(0),
+                        )
+                    });
 
                     let confirmations = block_height
                         .map(|h| Self::calculate_confirmations(h, tip_height))
@@ -675,7 +610,7 @@ impl BlockchainRpc {
                     Ok(Value::String(hex::encode(header_bytes)))
                 }
             } else {
-                Err(anyhow::anyhow!("Block not found"))
+                Err(BlockNotFoundError::new("").into())
             }
         } else if verbose {
             Ok(json!({
@@ -708,42 +643,17 @@ impl BlockchainRpc {
         debug!("RPC: getbestblockhash");
 
         if let Some(ref storage) = self.storage {
-            use std::time::{Duration, Instant};
-
-            thread_local! {
-                static CACHED_TIP_HASH_HEX: std::cell::RefCell<(Option<String>, [u8; 32], Instant, Option<u64>)> =
-                    std::cell::RefCell::new((None, [0u8; 32], Instant::now(), None));
-            }
-
             let current_height = storage.chain().get_height()?.unwrap_or(0);
 
             if let Ok(Some(hash)) = storage.chain().get_tip_hash() {
-                let should_refresh = CACHED_TIP_HASH_HEX.with(|c| {
-                    let cache = c.borrow();
-                    cache.0.is_none()
-                        || cache.1 != hash
-                        || cache.2.elapsed() >= Duration::from_secs(1)
-                        || cache.3 != Some(current_height)
+                let hex_str = CACHED_TIP_HASH_HEX.with(|c| {
+                    c.get_or_refresh(
+                        CACHE_REFRESH_TIP,
+                        &(hash, current_height),
+                        || hex::encode(hash),
+                    )
                 });
-
-                if should_refresh {
-                    let hex_str = hex::encode(hash);
-                    CACHED_TIP_HASH_HEX.with(|c| {
-                        let mut cache = c.borrow_mut();
-                        *cache = (
-                            Some(hex_str.clone()),
-                            hash,
-                            Instant::now(),
-                            Some(current_height),
-                        );
-                    });
-                    Ok(Value::String(hex_str))
-                } else {
-                    CACHED_TIP_HASH_HEX.with(|c| {
-                        let cache = c.borrow();
-                        Ok(Value::String(cache.0.as_ref().unwrap().clone()))
-                    })
-                }
+                Ok(Value::String(hex_str))
             } else {
                 Ok(Value::String(ZERO_HASH_STR.to_string()))
             }
@@ -775,49 +685,26 @@ impl BlockchainRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getdifficulty");
 
-        use std::time::{Duration, Instant};
-
         if let Some(ref storage) = self.storage {
-            thread_local! {
-                static CACHED_DIFFICULTY: std::cell::RefCell<(Option<f64>, Instant, Option<u64>)> =
-                    std::cell::RefCell::new((None, Instant::now(), None));
-            }
-
-            // Check current height for cache invalidation
             let current_height = storage.chain().get_height()?.unwrap_or(0);
-
-            let should_refresh = CACHED_DIFFICULTY.with(|c| {
-                let cache = c.borrow();
-                cache.0.is_none()
-                    || cache.1.elapsed() >= Duration::from_secs(1)
-                    || cache.2 != Some(current_height)
+            let difficulty = CACHED_DIFFICULTY.with(|c| {
+                c.get_or_refresh(
+                    CACHE_REFRESH_TIP,
+                    &current_height,
+                    || {
+                        storage
+                            .chain()
+                            .get_tip_header()
+                            .ok()
+                            .flatten()
+                            .map(|h| Self::calculate_difficulty(h.bits))
+                            .unwrap_or(1.0)
+                    },
+                )
             });
-
-            if should_refresh {
-                if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
-                    let difficulty = Self::calculate_difficulty(tip_header.bits);
-
-                    // Cache the result
-                    CACHED_DIFFICULTY.with(|c| {
-                        let mut cache = c.borrow_mut();
-                        *cache = (Some(difficulty), Instant::now(), Some(current_height));
-                    });
-
-                    Ok(Value::Number(
-                        Number::from_f64(difficulty).unwrap_or_else(|| Number::from(1)),
-                    ))
-                } else {
-                    Ok(Value::Number(Number::from_f64(1.0).unwrap()))
-                }
-            } else {
-                // Return cached value
-                CACHED_DIFFICULTY.with(|c| {
-                    let cache = c.borrow();
-                    Ok(Value::Number(
-                        Number::from_f64(cache.0.unwrap_or(1.0)).unwrap_or_else(|| Number::from(1)),
-                    ))
-                })
-            }
+            Ok(Value::Number(
+                Number::from_f64(difficulty).unwrap_or_else(|| Number::from(1)),
+            ))
         } else {
             Ok(Value::Number(Number::from_f64(1.0).unwrap()))
         }
@@ -831,40 +718,34 @@ impl BlockchainRpc {
 
         if let Some(ref storage) = self.storage {
             let (height, best_hash) = {
-                let h = storage.chain().get_height()?.unwrap_or(0);
-                let hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
+                let (hash, h) = storage.chain().get_tip_hash_and_height()?;
                 (h, hash)
             };
 
             if let Ok(Some(stats)) = storage.chain().get_latest_utxo_stats() {
-                // Use cached stats - much faster than loading entire UTXO set!
                 Ok(json!({
                     "height": stats.height,
                     "bestblock": hex::encode(best_hash),
                     "transactions": stats.transactions,
                     "txouts": stats.txouts,
-                    "bogosize": stats.txouts * 180, // Approximate
-                    "hash_serialized_2": hex::encode(stats.hash_serialized_2),
+                    "bogosize": stats.txouts * 180,
+                    "muhash": hex::encode(stats.muhash),
                     "disk_size": storage.disk_size().unwrap_or(0),
                     "total_amount": stats.total_amount as f64 / 100_000_000.0
                 }))
             } else {
-                // Fallback: Calculate from UTXO set (expensive, but works if cache is missing)
-                // This will be slow with large UTXO sets, but ensures correctness
                 let utxos = storage.utxos().get_all_utxos()?;
                 let txouts = utxos.len();
                 let total_amount: u64 = utxos.values().map(|utxo| utxo.value as u64).sum();
-
-                // Calculate hash_serialized_2 (double SHA256 of serialized UTXO set)
-                let hash_serialized_2 = Self::calculate_utxo_set_hash(&utxos);
+                let muhash = Self::calculate_utxo_muhash(&utxos);
 
                 Ok(json!({
                     "height": height,
                     "bestblock": hex::encode(best_hash),
                     "transactions": storage.transaction_count().unwrap_or(0),
                     "txouts": txouts,
-                    "bogosize": txouts * 180, // Approximate
-                    "hash_serialized_2": hex::encode(hash_serialized_2),
+                    "bogosize": txouts * 180,
+                    "muhash": hex::encode(muhash),
                     "disk_size": storage.disk_size().unwrap_or(0),
                     "total_amount": total_amount as f64 / 100_000_000.0
                 }))
@@ -876,7 +757,7 @@ impl BlockchainRpc {
                 "transactions": 0,
                 "txouts": 0,
                 "bogosize": 0,
-                "hash_serialized_2": ZERO_HASH_STR,
+                "muhash": ZERO_HASH_STR,
                 "disk_size": 0,
                 "total_amount": 0.0
             }))
@@ -1047,18 +928,14 @@ impl BlockchainRpc {
         debug!("RPC: getchaintips");
 
         if let Some(ref storage) = self.storage {
-            let (tip_hash, tip_height) = {
-                let hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
-                let height = storage.chain().get_height()?.unwrap_or(0);
-                (hash, height)
-            };
+            let (tip_hash, tip_height) = storage.chain().get_tip_hash_and_height()?;
 
             // Get all chain tips (including forks)
             // Usually 1-2 tips, but pre-allocate for potential forks
             let mut tips = Vec::with_capacity(4);
 
             // Add active tip
-            if tip_hash != [0u8; 32] {
+            if tip_hash != blvm_protocol::Hash::default() {
                 tips.push(json!({
                     "height": tip_height,
                     "hash": hex::encode(tip_hash),
@@ -1097,7 +974,7 @@ impl BlockchainRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getchaintxstats");
 
-        let nblocks = params.get(0).and_then(|p| p.as_u64()).unwrap_or(144); // Default: 1 day (144 blocks at 10 min/block)
+        let nblocks = param_u64_default(params, 0, 144); // Default: 1 day (144 blocks at 10 min/block)
 
         if let Some(ref storage) = self.storage {
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
@@ -1218,7 +1095,12 @@ impl BlockchainRpc {
                     storage
                         .blocks()
                         .get_hash_by_height(height)?
-                        .ok_or_else(|| anyhow::anyhow!("Block at height {} not found", height))?
+                        .ok_or_else(|| {
+                            anyhow::Error::from(BlockNotFoundError::new(format!(
+                                "at height {}",
+                                height
+                            )))
+                        })?
                 } else {
                     // Parse as hash
                     let hash_bytes = hex::decode(hoh)
@@ -1324,13 +1206,10 @@ impl BlockchainRpc {
                     "utxo_size_inc": 0
                 }))
             } else {
-                Err(anyhow::anyhow!("Block not found"))
+                Err(BlockNotFoundError::new("").into())
             }
         } else {
-            // Graceful degradation: return informative error instead of failing silently
-            Err(anyhow::anyhow!(
-                "Storage not available. This operation requires storage to be initialized."
-            ))
+            Err(anyhow::anyhow!(STORAGE_NOT_AVAILABLE_MSG))
         }
     }
 
@@ -1343,7 +1222,7 @@ impl BlockchainRpc {
         let height = params
             .get(0)
             .and_then(|p| p.as_u64())
-            .ok_or_else(|| anyhow::anyhow!("Height parameter required"))?;
+            .ok_or_else(|| anyhow::anyhow!(HEIGHT_PARAM_REQUIRED_MSG))?;
 
         if let Some(ref storage) = self.storage {
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
@@ -1380,10 +1259,7 @@ impl BlockchainRpc {
                 ))
             }
         } else {
-            // Graceful degradation: return informative error instead of failing silently
-            Err(anyhow::anyhow!(
-                "Storage not available. This operation requires storage to be initialized."
-            ))
+            Err(anyhow::anyhow!(STORAGE_NOT_AVAILABLE_MSG))
         }
     }
 
@@ -1438,7 +1314,7 @@ impl BlockchainRpc {
             Ok(json!({
                 "pruning_enabled": false,
                 "mode": "disabled",
-                "note": "Storage not available"
+                "note": STORAGE_NOT_AVAILABLE_MSG
             }))
         }
     }
@@ -1452,7 +1328,7 @@ impl BlockchainRpc {
         let blockhash = params
             .get(0)
             .and_then(|p| p.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Block hash parameter required"))?;
+            .ok_or_else(|| anyhow::anyhow!(BLOCK_HASH_PARAM_REQUIRED_MSG))?;
 
         let hash =
             decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
@@ -1470,12 +1346,16 @@ impl BlockchainRpc {
                 .unwrap_or(0);
             if let Some(ref ep) = self.event_publisher {
                 ep.publish_block_disconnected(&hash, height).await;
-            }
 
-            // Check if this is the current tip - if so, we'd need to trigger a reorg
-            if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
-                if hash == tip_hash {
-                    warn!("Invalidated current chain tip - reorg may be needed");
+                // If we invalidated the current tip, publish ChainReorg (old_tip=invalidated, new_tip=prev)
+                if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
+                    if hash == tip_hash {
+                        warn!("Invalidated current chain tip - publishing ChainReorg");
+                        if let Ok(Some(header)) = storage.blocks().get_header(&hash) {
+                            let new_tip = header.prev_block_hash;
+                            ep.publish_chain_reorg(&hash, &new_tip).await;
+                        }
+                    }
                 }
             }
 
@@ -1483,7 +1363,7 @@ impl BlockchainRpc {
         } else {
             // Graceful degradation: return informative error instead of failing silently
             Err(anyhow::anyhow!(
-                "Storage not available. This operation requires storage to be initialized."
+                STORAGE_NOT_AVAILABLE_MSG
             ))
         }
     }
@@ -1497,7 +1377,7 @@ impl BlockchainRpc {
         let blockhash = params
             .get(0)
             .and_then(|p| p.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Block hash parameter required"))?;
+            .ok_or_else(|| anyhow::anyhow!(BLOCK_HASH_PARAM_REQUIRED_MSG))?;
 
         let hash =
             decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
@@ -1513,136 +1393,183 @@ impl BlockchainRpc {
         } else {
             // Graceful degradation: return informative error instead of failing silently
             Err(anyhow::anyhow!(
-                "Storage not available. This operation requires storage to be initialized."
+                STORAGE_NOT_AVAILABLE_MSG
             ))
         }
     }
 
     /// Wait for new block
     ///
-    /// Params: ["timeout"] (optional, timeout in seconds, default: no timeout)
+    /// Params: ["timeout"] (optional, timeout in seconds, default: immediate check only)
     ///
-    /// Note: Full implementation requires async notification infrastructure.
-    /// Currently returns current tip immediately. Future enhancement will:
-    /// 1. Subscribe to block notifications
-    /// 2. Wait for new block or timeout
-    /// 3. Return block hash and height
+    /// When timeout is set, polls until tip changes or timeout. Without timeout, returns current tip immediately.
     pub async fn wait_for_new_block(&self, params: &Value) -> Result<Value> {
         debug!("RPC: waitfornewblock");
 
-        let _timeout = params
-            .get(0)
-            .and_then(|p| p.as_u64())
-            .map(tokio::time::Duration::from_secs);
+        let timeout_secs = param_u64(params, 0);
+        let storage = self
+            .require_storage()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        if let Some(ref storage) = self.storage {
-            if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
+        let initial_tip = storage.chain().get_tip_hash()?;
+        let initial_tip_clone = initial_tip.clone();
+
+        if timeout_secs.is_none() {
+            if let Some(ref tip_hash) = initial_tip {
                 let tip_height = storage.chain().get_height()?.unwrap_or(0);
-                Ok(json!({
+                return Ok(json!({
                     "hash": hex::encode(tip_hash),
                     "height": tip_height
-                }))
-            } else {
-                Err(anyhow::anyhow!("Chain not initialized"))
+                }));
             }
+            return Err(anyhow::anyhow!("Chain not initialized"));
+        }
+
+        let deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_secs(timeout_secs.unwrap_or(0));
+        let poll_interval = POLL_INTERVAL_WAIT_FOR_BLOCK;
+
+        while tokio::time::Instant::now() < deadline {
+            let current = storage.chain().get_tip_hash()?;
+            match (&initial_tip_clone, &current) {
+                (Some(init), Some(cur)) if init != cur => {
+                    let tip_height = storage.chain().get_height()?.unwrap_or(0);
+                    return Ok(json!({
+                        "hash": hex::encode(cur),
+                        "height": tip_height
+                    }));
+                }
+                (None, Some(cur)) => {
+                    let tip_height = storage.chain().get_height()?.unwrap_or(0);
+                    return Ok(json!({
+                        "hash": hex::encode(cur),
+                        "height": tip_height
+                    }));
+                }
+                _ => {}
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        if let Some(ref tip_hash) = initial_tip {
+            let tip_height = storage.chain().get_height()?.unwrap_or(0);
+            Ok(json!({
+                "hash": hex::encode(tip_hash),
+                "height": tip_height
+            }))
         } else {
-            // Graceful degradation: return informative error instead of failing silently
-            Err(anyhow::anyhow!(
-                "Storage not available. This operation requires storage to be initialized."
-            ))
+            Err(anyhow::anyhow!("Chain not initialized"))
         }
     }
 
     /// Wait for specific block
     ///
-    /// Params: ["blockhash", "timeout"] (block hash, optional timeout)
+    /// Params: ["blockhash", "timeout"] (block hash, optional timeout in seconds)
     ///
-    /// Note: Full implementation requires async notification infrastructure.
-    /// Currently checks if block exists immediately. Future enhancement will:
-    /// 1. Subscribe to block notifications
-    /// 2. Wait for block to appear or timeout
-    /// 3. Return block hash and height
+    /// When timeout is set, polls until block appears or timeout. Without timeout, checks immediately.
     pub async fn wait_for_block(&self, params: &Value) -> Result<Value> {
         debug!("RPC: waitforblock");
 
-        let blockhash = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Block hash parameter required"))?;
+        let blockhash = param_str_required(params, 0, "waitforblock")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let _timeout = params
-            .get(1)
-            .and_then(|p| p.as_u64())
-            .map(tokio::time::Duration::from_secs);
-
+        let timeout_secs = param_u64(params, 1);
         let hash =
-            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+            decode_hash32(&blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
-        // Note: This requires async notification infrastructure
-        // For now, check if block exists immediately
-        if let Some(ref storage) = self.storage {
+        let storage = self
+            .require_storage()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if timeout_secs.is_none() {
             if let Ok(Some(_block)) = storage.blocks().get_block(&hash) {
                 let height = storage.blocks().get_height_by_hash(&hash)?.unwrap_or(0);
-                Ok(json!({
+                return Ok(json!({
                     "hash": blockhash,
                     "height": height
-                }))
-            } else {
-                Err(anyhow::anyhow!("Block not found"))
+                }));
             }
-        } else {
-            // Graceful degradation: return informative error instead of failing silently
-            Err(anyhow::anyhow!(
-                "Storage not available. This operation requires storage to be initialized."
-            ))
+            return Err(BlockNotFoundError::new("").into());
         }
+
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs.unwrap_or(0));
+        let poll_interval = POLL_INTERVAL_WAIT_FOR_BLOCK;
+
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(_block)) = storage.blocks().get_block(&hash) {
+                let height = storage.blocks().get_height_by_hash(&hash)?.unwrap_or(0);
+                return Ok(json!({
+                    "hash": blockhash,
+                    "height": height
+                }));
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        Err(BlockNotFoundError::new("").into())
     }
 
     /// Wait for block height
     ///
-    /// Params: ["height", "timeout"] (block height, optional timeout)
+    /// Params: ["height", "timeout"] (block height, optional timeout in seconds)
     ///
-    /// Note: Full implementation requires async notification infrastructure.
-    /// Currently checks if block at height exists immediately. Future enhancement will:
-    /// 1. Subscribe to block notifications
-    /// 2. Wait for block at height to appear or timeout
-    /// 3. Return block hash and height
+    /// When timeout is set, polls until block at height exists or timeout. Without timeout, checks immediately.
     pub async fn wait_for_block_height(&self, params: &Value) -> Result<Value> {
         debug!("RPC: waitforblockheight");
 
         let height = params
             .get(0)
             .and_then(|p| p.as_u64())
-            .ok_or_else(|| anyhow::anyhow!("Height parameter required"))?;
+            .ok_or_else(|| anyhow::anyhow!(HEIGHT_PARAM_REQUIRED_MSG))?;
 
-        let _timeout = params
-            .get(1)
-            .and_then(|p| p.as_u64())
-            .map(tokio::time::Duration::from_secs);
-        if let Some(ref storage) = self.storage {
+        let timeout_secs = param_u64(params, 1);
+
+        let storage = self
+            .require_storage()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if timeout_secs.is_none() {
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
             if height <= tip_height {
                 if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
-                    Ok(json!({
+                    return Ok(json!({
                         "hash": hex::encode(hash),
                         "height": height
-                    }))
-                } else {
-                    Err(anyhow::anyhow!("Block at height {} not found", height))
+                    }));
                 }
-            } else {
-                Err(anyhow::anyhow!(
-                    "Block at height {} not yet available (tip: {})",
-                    height,
-                    tip_height
-                ))
+                return Err(BlockNotFoundError::new(format!("at height {}", height)).into());
             }
-        } else {
-            // Graceful degradation: return informative error instead of failing silently
-            Err(anyhow::anyhow!(
-                "Storage not available. This operation requires storage to be initialized."
-            ))
+            return Err(anyhow::anyhow!(
+                "Block at height {} not yet available (tip: {})",
+                height,
+                tip_height
+            ));
         }
+
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs.unwrap_or(0));
+        let poll_interval = POLL_INTERVAL_WAIT_FOR_BLOCK;
+
+        while tokio::time::Instant::now() < deadline {
+            let tip_height = storage.chain().get_height()?.unwrap_or(0);
+            if height <= tip_height {
+                if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
+                    return Ok(json!({
+                        "hash": hex::encode(hash),
+                        "height": height
+                    }));
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        let tip_height = storage.chain().get_height()?.unwrap_or(0);
+        Err(anyhow::anyhow!(
+            "Block at height {} not yet available (tip: {})",
+            height,
+            tip_height
+        ))
     }
 
     /// Get block filter (BIP158)
@@ -1654,9 +1581,9 @@ impl BlockchainRpc {
         let blockhash = params
             .get(0)
             .and_then(|p| p.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Block hash parameter required"))?;
+            .ok_or_else(|| anyhow::anyhow!(BLOCK_HASH_PARAM_REQUIRED_MSG))?;
 
-        let filtertype = params.get(1).and_then(|p| p.as_u64()).unwrap_or(0); // Default: Basic filter
+        let filtertype = param_u64_default(params, 1, 0); // Default: Basic filter
 
         if filtertype != 0 {
             return Err(anyhow::anyhow!("Only filter type 0 (Basic) is supported"));
@@ -1699,12 +1626,12 @@ impl BlockchainRpc {
                     Err(e) => Err(anyhow::anyhow!("Failed to build filter: {}", e)),
                 }
             } else {
-                Err(anyhow::anyhow!("Block not found"))
+                Err(BlockNotFoundError::new("").into())
             }
         } else {
             // Graceful degradation: return informative error instead of failing silently
             Err(anyhow::anyhow!(
-                "Storage not available. This operation requires storage to be initialized."
+                STORAGE_NOT_AVAILABLE_MSG
             ))
         }
     }
@@ -1715,11 +1642,7 @@ impl BlockchainRpc {
     pub async fn get_index_info(&self, _params: &Value) -> Result<Value> {
         debug!("RPC: getindexinfo");
 
-        let storage = self.storage.as_ref().ok_or_else(|| {
-            RpcError::internal_error(
-                "Storage not available. This operation requires storage to be initialized.",
-            )
-        })?;
+        let storage = self.require_storage()?;
 
         // Get index statistics
         let index_stats = storage
@@ -1754,11 +1677,7 @@ impl BlockchainRpc {
     pub async fn getaddresstxids(&self, params: &Value) -> Result<Value> {
         debug!("RPC: getaddresstxids");
 
-        let storage = self.storage.as_ref().ok_or_else(|| {
-            RpcError::internal_error(
-                "Storage not available. This operation requires storage to be initialized.",
-            )
-        })?;
+        let storage = self.require_storage()?;
 
         // Parse address parameter
         let address = params
@@ -1800,11 +1719,7 @@ impl BlockchainRpc {
     pub async fn getaddressbalance(&self, params: &Value) -> Result<Value> {
         debug!("RPC: getaddressbalance");
 
-        let storage = self.storage.as_ref().ok_or_else(|| {
-            RpcError::internal_error(
-                "Storage not available. This operation requires storage to be initialized.",
-            )
-        })?;
+        let storage = self.require_storage()?;
 
         // Parse address parameter
         let address = params
@@ -1853,8 +1768,7 @@ impl BlockchainRpc {
         debug!("RPC: getblockchainstate");
 
         if let Some(ref storage) = self.storage {
-            let height = storage.chain().get_height()?.unwrap_or(0);
-            let tip_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
+            let (tip_hash, height) = storage.chain().get_tip_hash_and_height()?;
             let tip_header = storage.chain().get_tip_header()?.unwrap_or({
                 // Return genesis block header as fallback
                 blvm_protocol::BlockHeader {

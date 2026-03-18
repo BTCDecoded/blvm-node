@@ -5,7 +5,6 @@
 
 use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Merge multiple ban lists into a single list
 ///
@@ -72,10 +71,7 @@ pub fn merge_ban_lists(ban_lists: Vec<&BanListMessage>) -> Vec<BanEntry> {
 pub fn validate_ban_entry(entry: &BanEntry) -> bool {
     // Check if ban is expired
     if entry.unban_timestamp != u64::MAX {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = crate::utils::current_timestamp();
 
         if now >= entry.unban_timestamp {
             return false; // Ban already expired

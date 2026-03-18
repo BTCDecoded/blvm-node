@@ -8,8 +8,11 @@ use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
-#[cfg(unix)]
+use crate::utils::retry::{retry_async_with_backoff, RetryConfig};
+
 use crate::module::ipc::client::ModuleIpcClient;
+#[cfg(unix)]
+use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
 use crate::module::sandbox::{FileSystemSandbox, NetworkSandbox, ProcessSandbox, SandboxConfig};
 use crate::module::traits::{ModuleContext, ModuleError};
 
@@ -95,22 +98,19 @@ impl ModuleProcessSpawner {
             fs_sandbox.validate_path(&module_data_dir)?;
         }
 
-        // Create IPC socket path
-        let socket_path = self.socket_dir.join(format!("{module_name}.sock"));
+        // Use node's IPC socket path from context (modules connect to node; node listens on one socket)
+        let socket_path = PathBuf::from(&context.socket_path);
 
         // Spawn the process
         let mut command = Command::new(binary_path);
         command
-            .arg("--module-id")
-            .arg(&context.module_id)
-            .arg("--socket-path")
-            .arg(&socket_path)
-            .arg("--data-dir")
-            .arg(&module_data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env("MODULE_NAME", module_name);
+            .env("MODULE_NAME", module_name)
+            .env("MODULE_ID", &context.module_id)
+            .env("SOCKET_PATH", &socket_path)
+            .env("DATA_DIR", &module_data_dir);
 
         // Add module config as environment variables
         for (key, value) in &context.config {
@@ -174,31 +174,48 @@ impl ModuleProcessSpawner {
             }
         }
 
-        // Connect to the module IPC (Unix only)
-        #[cfg(unix)]
-        {
-            let client = Some(ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
-                ModuleError::IpcError(format!("Failed to connect to module IPC: {e}"))
-            })?);
+        // Connect to the node IPC (modules connect to node; spawner connects for heartbeat)
+        let mut ipc_client = ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
+            ModuleError::IpcError(format!("Failed to connect to node IPC: {e}"))
+        })?;
 
-            Ok(ModuleProcess {
+        // Send handshake so node registers this connection (for heartbeat)
+        let version = context
+            .config
+            .get("version")
+            .cloned()
+            .unwrap_or_else(|| "0.1.0".to_string());
+        let handshake = RequestMessage {
+            correlation_id: 1,
+            request_type: MessageType::Handshake,
+            payload: RequestPayload::Handshake {
+                module_id: context.module_id.clone(),
                 module_name: module_name.to_string(),
-                process: child,
-                socket_path,
-                client,
-            })
+                version,
+            },
+        };
+        let response = ipc_client.request(handshake).await.map_err(|e| {
+            ModuleError::IpcError(format!("Failed to send handshake: {e}"))
+        })?;
+        if !response.success {
+            return Err(ModuleError::IpcError(
+                response
+                    .error
+                    .unwrap_or_else(|| "Handshake failed".to_string()),
+            ));
         }
-        #[cfg(not(unix))]
-        {
-            Ok(ModuleProcess {
-                module_name: module_name.to_string(),
-                process: child,
-                socket_path,
-            })
-        }
+
+        let client = Some(ipc_client);
+
+        Ok(ModuleProcess {
+            module_name: module_name.to_string(),
+            process: child,
+            socket_path,
+            client,
+        })
     }
 
-    /// Wait for socket file to be created
+    /// Wait for socket/pipe to be ready (Unix: file exists, Windows: connect succeeds)
     async fn wait_for_socket(&self, socket_path: &Path) -> Result<(), ModuleError> {
         let check_interval = self
             .resource_limits_config
@@ -211,18 +228,40 @@ impl ModuleProcessSpawner {
             .map(|c| c.module_socket_max_attempts)
             .unwrap_or(50);
 
-        let mut attempts = 0;
-        while attempts < max_attempts {
-            if socket_path.exists() {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(check_interval)).await;
-            attempts += 1;
-        }
+        let path = socket_path.to_path_buf();
+        let config = RetryConfig::new(
+            max_attempts.try_into().unwrap_or(u32::MAX),
+            Duration::from_millis(check_interval),
+        );
 
-        Err(ModuleError::InitializationError(
-            "Module socket did not appear within timeout".to_string(),
-        ))
+        retry_async_with_backoff(&config, || {
+            let p = path.clone();
+            async move {
+                #[cfg(unix)]
+                if p.exists() {
+                    return Ok(());
+                }
+                #[cfg(windows)]
+                if ModuleIpcClient::connect(&p).await.is_ok() {
+                    return Ok(());
+                }
+                Err(SocketNotReady)
+            }
+        })
+        .await
+        .map_err(|_| {
+            ModuleError::InitializationError(
+                "Module socket/pipe did not appear within timeout".to_string(),
+            )
+        })
+    }
+}
+
+/// Used with retry_async_with_backoff when socket is not yet ready (Display required).
+struct SocketNotReady;
+impl std::fmt::Display for SocketNotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "socket not ready")
     }
 }
 
@@ -234,8 +273,7 @@ pub struct ModuleProcess {
     pub process: Child,
     /// IPC socket path
     pub socket_path: PathBuf,
-    /// IPC client connection (optional, may be dropped for cleanup, Unix only)
-    #[cfg(unix)]
+    /// IPC client connection (optional, may be dropped for cleanup)
     client: Option<ModuleIpcClient>,
 }
 
@@ -255,7 +293,7 @@ impl ModuleProcess {
         self.process
             .wait()
             .await
-            .map_err(|e| ModuleError::OperationError(format!("Failed to wait for process: {e}")))
+            .map_err(|e| ModuleError::op_err("Failed to wait for process", e))
             .map(Some)
     }
 
@@ -270,7 +308,7 @@ impl ModuleProcess {
         // Wait for process to exit
         let _ = self.process.wait().await;
 
-        // Clean up socket file
+        // Clean up socket file if it exists (Unix; Windows named pipes don't create files)
         if self.socket_path.exists() {
             if let Err(e) = std::fs::remove_file(&self.socket_path) {
                 warn!("Failed to remove socket file {:?}: {}", self.socket_path, e);
@@ -280,14 +318,12 @@ impl ModuleProcess {
         Ok(())
     }
 
-    /// Get IPC client (mutable, Unix only)
-    #[cfg(unix)]
+    /// Get IPC client (mutable)
     pub fn client_mut(&mut self) -> Option<&mut ModuleIpcClient> {
         self.client.as_mut()
     }
 
-    /// Take IPC client (for cleanup, Unix only)
-    #[cfg(unix)]
+    /// Take IPC client (for cleanup)
     pub fn take_client(&mut self) -> Option<ModuleIpcClient> {
         self.client.take()
     }

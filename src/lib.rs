@@ -38,6 +38,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod bip21;
+pub mod cli;
 pub mod config;
 #[cfg(feature = "miniscript")]
 pub mod miniscript;
@@ -50,6 +51,8 @@ pub mod storage;
 pub mod utils;
 #[cfg(feature = "production")]
 pub mod validation;
+#[cfg(feature = "zmq")]
+extern crate zeromq;  // zeromq = { package = "zmq" } in Cargo.toml
 #[cfg(feature = "zmq")]
 pub mod zmq;
 

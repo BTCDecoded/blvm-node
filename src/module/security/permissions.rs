@@ -183,6 +183,13 @@ impl PermissionChecker {
         self.module_permissions.insert(module_id, permissions);
     }
 
+    /// Unregister module-specific permissions (when module unloads).
+    pub fn unregister_module_permissions(&mut self, module_id: &str) {
+        if self.module_permissions.remove(module_id).is_some() {
+            debug!("Unregistered permissions for module {}", module_id);
+        }
+    }
+
     /// Check if a module has a specific permission
     #[inline]
     pub fn check_permission(&self, module_id: &str, permission: &Permission) -> bool {
@@ -252,14 +259,6 @@ impl PermissionChecker {
             RequestPayload::ListDirectory { .. } => Permission::ReadFilesystem,
             RequestPayload::CreateDirectory { .. } => Permission::ManageFilesystem,
             RequestPayload::GetFileMetadata { .. } => Permission::ReadFilesystem,
-            // Storage API
-            RequestPayload::StorageOpenTree { .. } => Permission::ManageStorage,
-            RequestPayload::StorageInsert { .. } => Permission::WriteStorage,
-            RequestPayload::StorageGet { .. } => Permission::ReadStorage,
-            RequestPayload::StorageRemove { .. } => Permission::WriteStorage,
-            RequestPayload::StorageContainsKey { .. } => Permission::ReadStorage,
-            RequestPayload::StorageIter { .. } => Permission::ReadStorage,
-            RequestPayload::StorageTransaction { .. } => Permission::WriteStorage,
             // Module RPC Endpoint Registration
             RequestPayload::RegisterRpcEndpoint { .. } => Permission::RegisterRpcEndpoint,
             RequestPayload::UnregisterRpcEndpoint { .. } => Permission::RegisterRpcEndpoint,
@@ -290,6 +289,7 @@ impl PermissionChecker {
             RequestPayload::UnregisterModuleApi => Permission::RegisterModuleApi,
             RequestPayload::GetBlockTemplate { .. } => Permission::ReadBlockchain,
             RequestPayload::SubmitBlock { .. } => Permission::SubmitBlock,
+            RequestPayload::RegisterCliSpec { .. } => Permission::RegisterRpcEndpoint,
         };
 
         if !self.check_permission(module_id, &required_permission) {

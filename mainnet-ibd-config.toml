@@ -11,6 +11,8 @@ database_backend = "rocksdb"
 # TidesDB tuning (when database_backend = "tidesdb"):
 # [storage.tidesdb]
 # utxo_klog_threshold = 65536   # Values <= this stay inline (fast). 0 = all to vlog. Default 64KB.
+# flush_threads = 4             # ENV BLVM_TIDESDB_FLUSH_THREADS overrides
+# compact_threads = 4           # ENV BLVM_TIDESDB_COMPACT_THREADS overrides
 
 [storage.pruning]
 # Pruning mode: normal (utxo-commitments disabled during spec migration)
@@ -28,12 +30,17 @@ auto_prune = true
 auto_prune_interval = 144
 min_blocks_to_keep = 144
 
+# IBD tuning (config file; ENV BLVM_IBD_* overrides at runtime)
+[ibd]
+chunk_size = 16
+download_timeout_secs = 30
+mode = "parallel"
+# preferred_peers = ["192.168.2.100:8333"]
+# max_ahead_blocks = 512
+eviction = "fifo"
+
 [rpc]
-enabled = true
-listen_address = "127.0.0.1:8332"
-# IMPORTANT: Set strong credentials for mainnet!
-# rpc_user = "your_username"
-# rpc_password = "strong_password_here"
+max_request_size_bytes = 1048576  # 1MB (RPC/REST request body limit)
 
 [logging]
 level = "info"  # Use "debug" for more detail during sync

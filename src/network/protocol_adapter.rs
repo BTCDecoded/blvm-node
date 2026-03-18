@@ -19,12 +19,12 @@ use std::sync::{OnceLock, RwLock};
 /// Caches serialized message bytes to avoid re-serializing the same message.
 /// Cache key is a fast hash of message type + content.
 #[cfg(feature = "production")]
-static SERIALIZATION_CACHE: OnceLock<RwLock<lru::LruCache<u64, Vec<u8>>>> = OnceLock::new();
+static SERIALIZATION_CACHE: OnceLock<RwLock<blvm_protocol::lru::LruCache<u64, Vec<u8>>>> = OnceLock::new();
 
 #[cfg(feature = "production")]
-fn get_serialization_cache() -> &'static RwLock<lru::LruCache<u64, Vec<u8>>> {
+fn get_serialization_cache() -> &'static RwLock<blvm_protocol::lru::LruCache<u64, Vec<u8>>> {
     SERIALIZATION_CACHE.get_or_init(|| {
-        use lru::LruCache;
+        use blvm_protocol::lru::LruCache;
         use std::num::NonZeroUsize;
         // Cache 5,000 serialized messages (balance between memory and hit rate)
         // Each entry is ~100-500 bytes average, so ~0.5-2.5MB total

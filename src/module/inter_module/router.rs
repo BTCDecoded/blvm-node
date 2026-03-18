@@ -95,9 +95,10 @@ impl ModuleRouter {
                 .validate_module_dependencies(target_module_name)
                 .await
             {
-                return Err(ModuleError::OperationError(format!(
-                    "Dependency validation failed for module '{target_id}': {e}"
-                )));
+                return Err(ModuleError::op_err(
+                    &format!("Dependency validation failed for module '{target_id}'"),
+                    e,
+                ));
             }
 
             // Check target module health (don't allow calls to unhealthy modules)
@@ -124,8 +125,15 @@ impl ModuleRouter {
             }
         }
 
+        // Resolve module name to full ID (e.g. "blvm-lightning" -> "blvm-lightning_<uuid>")
+        let resolved_id = self
+            .registry
+            .resolve_module_id(&target_id)
+            .await
+            .unwrap_or_else(|| target_id.clone());
+
         // Get the API implementation
-        let api = self.registry.get_api(&target_id).await.ok_or_else(|| {
+        let api = self.registry.get_api(&resolved_id).await.ok_or_else(|| {
             ModuleError::OperationError(format!(
                 "Module '{target_id}' not found or has no API registered"
             ))

@@ -107,6 +107,7 @@ async fn run_background_validation(
             protocol,
             &mut utxo_set,
             Some(network_manager),
+            None, // EventPublisher not available in background validation
         )
         .await?;
 

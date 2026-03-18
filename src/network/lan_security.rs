@@ -615,6 +615,9 @@ impl InternetCheckpointValidator {
     ///
     /// Returns Ok(()) if validation passed or was skipped,
     /// Err with details if validation failed.
+    ///
+    /// `checkpoint_timeout`: Override from config (request_timeouts.checkpoint_request_timeout_secs).
+    /// When None, uses CHECKPOINT_REQUEST_TIMEOUT (5s).
     pub async fn validate_lan_block(
         &self,
         lan_peer: SocketAddr,
@@ -627,6 +630,7 @@ impl InternetCheckpointValidator {
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Option<[u8; 32]>> + Send>,
         >,
+        checkpoint_timeout: Option<Duration>,
     ) -> Result<(), CheckpointValidationError> {
         // Skip if not a checkpoint height
         if !self.needs_validation(height) {
@@ -665,8 +669,9 @@ impl InternetCheckpointValidator {
         // We need consensus from MIN_CHECKPOINT_PEERS
         let mut internet_hashes: Vec<[u8; 32]> = Vec::with_capacity(internet_peers.len());
 
+        let timeout_duration = checkpoint_timeout.unwrap_or(CHECKPOINT_REQUEST_TIMEOUT);
         for peer in internet_peers.iter().take(MIN_CHECKPOINT_PEERS + 2) {
-            match tokio::time::timeout(CHECKPOINT_REQUEST_TIMEOUT, get_block_hash_fn(*peer, height))
+            match tokio::time::timeout(timeout_duration, get_block_hash_fn(*peer, height))
                 .await
             {
                 Ok(Some(hash)) => {
@@ -885,6 +890,9 @@ impl DiscoveryVerifier {
     /// 2. Chain verification (compare headers with internet)
     ///
     /// Returns true only if both pass.
+    ///
+    /// `timeouts`: (protocol_verify, headers_verify) from request_timeouts config.
+    /// When None, uses PROTOCOL_VERIFY_TIMEOUT (5s) and HEADERS_VERIFY_TIMEOUT (10s).
     pub async fn verify_lan_peer(
         &self,
         addr: SocketAddr,
@@ -898,6 +906,7 @@ impl DiscoveryVerifier {
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Option<(u64, [u8; 32])>> + Send>,
         >,
+        timeouts: Option<(Duration, Duration)>,
     ) -> (bool, String) {
         // Step 1: Protocol handshake
         info!(
@@ -905,8 +914,10 @@ impl DiscoveryVerifier {
             addr
         );
 
+        let (proto_timeout, headers_timeout) = timeouts
+            .unwrap_or((PROTOCOL_VERIFY_TIMEOUT, HEADERS_VERIFY_TIMEOUT));
         let handshake_result =
-            match tokio::time::timeout(PROTOCOL_VERIFY_TIMEOUT, do_handshake(addr)).await {
+            match tokio::time::timeout(proto_timeout, do_handshake(addr)).await {
                 Ok(Some((version, user_agent, height))) => {
                     debug!(
                         "LAN peer {} handshake OK: version={}, agent={}, height={}",
@@ -944,7 +955,7 @@ impl DiscoveryVerifier {
             addr, internet_tip.height
         );
 
-        let peer_tip = match tokio::time::timeout(HEADERS_VERIFY_TIMEOUT, get_peer_tip(addr)).await
+        let peer_tip = match tokio::time::timeout(headers_timeout, get_peer_tip(addr)).await
         {
             Ok(Some((height, hash))) => (height, hash),
             Ok(None) => {
@@ -1007,7 +1018,8 @@ impl DiscoveryVerifier {
 
     /// Batch verify multiple LAN peers
     ///
-    /// Returns list of verified peers
+    /// Returns list of verified peers.
+    /// `timeouts`: (protocol_verify, headers_verify) from config; None uses defaults.
     pub async fn verify_peers(
         &self,
         peers: Vec<SocketAddr>,
@@ -1021,12 +1033,13 @@ impl DiscoveryVerifier {
             ) -> std::pin::Pin<
                 Box<dyn std::future::Future<Output = Option<(u64, [u8; 32])>> + Send>,
             > + Clone,
+        timeouts: Option<(Duration, Duration)>,
     ) -> Vec<(SocketAddr, bool, String)> {
         let mut results = Vec::with_capacity(peers.len());
 
         for peer in peers {
             let (ok, reason) = self
-                .verify_lan_peer(peer, do_handshake.clone(), get_peer_tip.clone())
+                .verify_lan_peer(peer, do_handshake.clone(), get_peer_tip.clone(), timeouts)
                 .await;
             results.push((peer, ok, reason));
         }

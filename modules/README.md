@@ -69,33 +69,67 @@ See `examples/simple-module/` for a complete example module implementation.
 
 ## Runtime Module Management
 
-Modules can be loaded, unloaded, and reloaded at runtime:
+Modules can be loaded, unloaded, and reloaded at runtime via **RPC**, **CLI**, or **programmatically**:
+
+### RPC (JSON-RPC)
+
+```bash
+# Load a module
+bitcoin-cli loadmodule "my-module"
+
+# Unload a module
+bitcoin-cli unloadmodule "my-module"
+
+# Reload a module (hot reload)
+bitcoin-cli reloadmodule "my-module"
+
+# List loaded modules
+bitcoin-cli listmodules
+```
+
+### CLI (blvm binary)
+
+```bash
+blvm module load my-module
+blvm module unload my-module
+blvm module reload my-module
+blvm module list
+```
+
+Universal shorthand (same as above):
+```bash
+blvm unload my-module
+blvm reload my-module
+blvm config-path my-module   # Print module config file path (works offline)
+```
+
+### Programmatic (ModuleManager)
 
 ```rust
+let manager = node.module_manager().unwrap();
+let mut mgr = manager.lock().await;
+
 // Load a module
-node.module_manager_mut()
-    .unwrap()
-    .load_module("my-module", &binary_path, metadata, config)
-    .await?;
+mgr.load_module("my-module", &binary_path, metadata, config).await?;
 
 // List loaded modules
-let modules = node.module_manager()
-    .unwrap()
-    .list_modules()
-    .await;
+let modules = mgr.list_modules().await;
 
 // Unload a module
-node.module_manager_mut()
-    .unwrap()
-    .unload_module("my-module")
-    .await?;
+mgr.unload_module("my-module").await?;
 
 // Reload a module (hot reload)
-node.module_manager_mut()
-    .unwrap()
-    .reload_module("my-module", &binary_path, metadata, config)
-    .await?;
+mgr.reload_module("my-module", &binary_path, metadata, config).await?;
 ```
+
+### File Watcher (optional)
+
+With the `module-watcher` feature, the node watches the modules directory for changes to `module.toml`, `config.toml`, or module binaries and automatically reloads loaded modules.
+
+Config in `[modules]`:
+- `watch_enabled` (default: true) — enable/disable the watcher
+- `watch_auto_load` (default: false) — auto-load new modules when `module.toml` appears
+- `watch_auto_unload` (default: false) — auto-unload when a module directory is removed
 
 ## Module Security
 

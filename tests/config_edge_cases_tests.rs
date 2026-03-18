@@ -44,7 +44,7 @@ fn test_config_with_extreme_values() {
 
     // Set extreme but valid values
     let mut network_timing = NetworkTimingConfig::default();
-    network_timing.target_peer_count = 1000; // Very high
+    network_timing.target_outbound_peers = 1000; // Very high
     network_timing.peer_connection_delay_seconds = 3600; // 1 hour
     config.network_timing = Some(network_timing);
 
@@ -61,7 +61,7 @@ fn test_config_with_extreme_values() {
             .network_timing
             .as_ref()
             .unwrap()
-            .target_peer_count,
+            .target_outbound_peers,
         1000
     );
     assert!(deserialized.storage.is_some());
@@ -73,7 +73,7 @@ fn test_config_with_minimal_values() {
 
     // Set minimal values
     let mut network_timing = NetworkTimingConfig::default();
-    network_timing.target_peer_count = 1;
+    network_timing.target_outbound_peers = 1;
     network_timing.peer_connection_delay_seconds = 0;
     config.network_timing = Some(network_timing);
 
@@ -89,7 +89,7 @@ fn test_config_with_minimal_values() {
             .network_timing
             .as_ref()
             .unwrap()
-            .target_peer_count,
+            .target_outbound_peers,
         1
     );
     assert_eq!(
@@ -276,7 +276,7 @@ fn test_config_roundtrip_complex_scenario() {
     config.transport_preference = TransportPreferenceConfig::TcpOnly;
 
     let mut network_timing = NetworkTimingConfig::default();
-    network_timing.target_peer_count = 50;
+    network_timing.target_outbound_peers = 50;
     config.network_timing = Some(network_timing);
 
     // Storage settings
@@ -313,7 +313,7 @@ fn test_config_roundtrip_complex_scenario() {
             .network_timing
             .as_ref()
             .unwrap()
-            .target_peer_count,
+            .target_outbound_peers,
         50
     );
     if let Some(ref storage) = deserialized.storage {

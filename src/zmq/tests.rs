@@ -6,7 +6,7 @@ mod zmq_tests {
     use blvm_protocol::{Block, Hash, Transaction};
     use std::time::Duration;
     use tokio::time::timeout;
-    use zmq::{Context, SUB};
+    use zeromq::{Context, SUB};
 
     fn create_test_block() -> Block {
         use blvm_protocol::BlockHeader;

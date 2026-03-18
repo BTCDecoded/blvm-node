@@ -73,6 +73,52 @@ async fn test_createrawtransaction_bech32_address() {
     assert!(result.is_ok(), "Should support Bech32 addresses");
 }
 
+/// Test transaction creation with legacy P2PKH address (Base58Check)
+#[tokio::test]
+async fn test_createrawtransaction_legacy_p2pkh_address() {
+    let rawtx = create_test_rawtx_rpc();
+
+    let inputs = json!([
+        {
+            "txid": "0000000000000000000000000000000000000000000000000000000000000000",
+            "vout": 0
+        }
+    ]);
+
+    // P2PKH address (1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa - genesis block coinbase)
+    let outputs = json!({
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa": 0.0001
+    });
+
+    let params = json!([inputs, outputs]);
+    let result = rawtx.createrawtransaction(&params).await;
+
+    assert!(result.is_ok(), "Should support legacy P2PKH addresses");
+}
+
+/// Test transaction creation with legacy P2SH address (Base58Check)
+#[tokio::test]
+async fn test_createrawtransaction_legacy_p2sh_address() {
+    let rawtx = create_test_rawtx_rpc();
+
+    let inputs = json!([
+        {
+            "txid": "0000000000000000000000000000000000000000000000000000000000000000",
+            "vout": 0
+        }
+    ]);
+
+    // P2SH address (3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy)
+    let outputs = json!({
+        "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy": 0.0001
+    });
+
+    let params = json!([inputs, outputs]);
+    let result = rawtx.createrawtransaction(&params).await;
+
+    assert!(result.is_ok(), "Should support legacy P2SH addresses");
+}
+
 /// Test transaction creation with Bech32m address (Taproot)
 #[tokio::test]
 async fn test_createrawtransaction_bech32m_address() {

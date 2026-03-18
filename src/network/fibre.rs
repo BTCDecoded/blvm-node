@@ -841,31 +841,45 @@ impl FibreRelay {
 
         let block_hash = chunk.block_hash;
 
+        // Validate FEC params before creating assembly (prevents panic from malicious peer)
+        let data_shards = chunk.data_chunks as usize;
+        let parity_shards = chunk
+            .total_chunks
+            .saturating_sub(chunk.data_chunks) as usize;
+        const MAX_TOTAL_SHARDS: usize = 1024;
+        if data_shards == 0
+            || chunk.total_chunks < chunk.data_chunks
+            || chunk.total_chunks as usize > MAX_TOTAL_SHARDS
+        {
+            return Err(FibreError::FecError(format!(
+                "Invalid FEC chunk params: data_chunks={}, total_chunks={}",
+                chunk.data_chunks, chunk.total_chunks
+            )));
+        }
+
+        let shard_size = blvm_protocol::fibre::DEFAULT_SHARD_SIZE;
+
         // Get or create assembly and add chunk
         let should_reconstruct = {
-            let assembly = self.receiving_blocks.entry(block_hash).or_insert_with(|| {
-                // Create FEC encoder for this block
-                let data_shards = chunk.data_chunks as usize;
-                let parity_shards = (chunk.total_chunks - chunk.data_chunks) as usize;
-                let shard_size = blvm_protocol::fibre::DEFAULT_SHARD_SIZE;
+            if !self.receiving_blocks.contains_key(&block_hash) {
+                let fec_encoder =
+                    FecEncoder::new(data_shards, parity_shards, shard_size)?;
+                self.receiving_blocks.insert(
+                    block_hash,
+                    BlockAssembly {
+                        block_hash: chunk.block_hash,
+                        received_chunks: HashMap::new(),
+                        total_chunks: chunk.total_chunks,
+                        data_chunks: chunk.data_chunks,
+                        received_at: Instant::now(),
+                        fec_encoder,
+                    },
+                );
+            }
 
-                let fec_encoder = FecEncoder::new(data_shards, parity_shards, shard_size)
-                    .expect("Failed to create FEC encoder");
-
-                BlockAssembly {
-                    block_hash: chunk.block_hash,
-                    received_chunks: HashMap::new(),
-                    total_chunks: chunk.total_chunks,
-                    data_chunks: chunk.data_chunks,
-                    received_at: Instant::now(),
-                    fec_encoder,
-                }
-            });
-
-            // Add chunk to assembly
+            let assembly = self.receiving_blocks.get_mut(&block_hash).unwrap();
             assembly.received_chunks.insert(chunk.index, chunk.clone());
 
-            // Check if we have enough chunks to reconstruct
             let received_count = assembly.received_chunks.len();
             let required_count = assembly.data_chunks as usize;
 
@@ -950,6 +964,14 @@ impl FibreRelay {
         self.encoded_blocks
             .get(block_hash)
             .filter(|e| e.encoded_at.elapsed() < self.cache_ttl)
+    }
+
+    /// Get local UDP address when UDP transport is initialized (for tests)
+    pub async fn udp_local_addr(&self) -> Option<SocketAddr> {
+        match &self.udp_transport {
+            Some(t) => Some(t.lock().await.local_addr),
+            None => None,
+        }
     }
 
     /// Get list of FIBRE-capable peers

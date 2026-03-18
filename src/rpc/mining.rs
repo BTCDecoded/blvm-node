@@ -3,10 +3,11 @@
 //! Implements mining-related JSON-RPC methods for block template generation and mining.
 //! Uses formally verified blvm-consensus mining functions.
 
+use crate::node::event_publisher::EventPublisher;
 use crate::node::mempool::MempoolManager;
-use crate::rpc::errors::{RpcError, RpcResult};
+use crate::rpc::errors::{RpcError, RpcResult, TIP_BLOCK_NOT_FOUND_MSG};
 use crate::storage::Storage;
-use crate::utils::current_timestamp;
+use crate::utils::{current_timestamp, CACHE_REFRESH_TIP};
 use blvm_protocol::mining::BlockTemplate;
 use blvm_protocol::serialization::deserialize_block_with_witnesses;
 use blvm_protocol::serialization::serialize_transaction;
@@ -29,6 +30,8 @@ pub struct MiningRpc {
     storage: Option<Arc<Storage>>,
     /// Mempool accessor for transaction retrieval
     mempool: Option<Arc<MempoolManager>>,
+    /// Event publisher for BlockMined, BlockTemplateUpdated (optional)
+    event_publisher: Option<Arc<EventPublisher>>,
 }
 
 impl MiningRpc {
@@ -38,6 +41,7 @@ impl MiningRpc {
             consensus: ConsensusProof::new(),
             storage: None,
             mempool: None,
+            event_publisher: None,
         }
     }
 
@@ -47,7 +51,14 @@ impl MiningRpc {
             consensus: ConsensusProof::new(),
             storage: Some(storage),
             mempool: Some(mempool),
+            event_publisher: None,
         }
+    }
+
+    /// Set event publisher for BlockMined, BlockTemplateUpdated
+    pub fn with_event_publisher(mut self, event_publisher: Option<Arc<EventPublisher>>) -> Self {
+        self.event_publisher = event_publisher;
+        self
     }
 
     /// Get mining information
@@ -55,7 +66,7 @@ impl MiningRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getmininginfo");
 
-        use std::time::{Duration, Instant};
+        use std::time::Instant;
 
         // This avoids multiple storage lookups for height, tip_header, chain_info
         thread_local! {
@@ -74,7 +85,7 @@ impl MiningRpc {
         let should_refresh = CACHED_MINING_INFO.with(|cache| {
             let cache = cache.borrow();
             cache.0.is_none()
-                || cache.1.elapsed() >= Duration::from_secs(1)
+                || cache.1.elapsed() >= CACHE_REFRESH_TIP
                 || cache.2 != Some(current_height)
         });
 
@@ -224,6 +235,14 @@ impl MiningRpc {
             }
         };
 
+        // Publish BlockTemplateUpdated for module subscribers
+        if let Some(ref ep) = self.event_publisher {
+            let prev_hash = prev_header.prev_block_hash;
+            let tx_count = template.transactions.len();
+            ep.publish_block_template_updated(&prev_hash, height, tx_count)
+                .await;
+        }
+
         // 6. Convert to JSON-RPC format (BIP 22/23)
         self.template_to_json_rpc(&template, &prev_header, height)
     }
@@ -370,25 +389,10 @@ impl MiningRpc {
         }
     }
 
-    /// Calculate difficulty from bits (compact target format)
-    /// Uses the same logic as BlockchainRpc::calculate_difficulty
+    /// Calculate difficulty from bits (compact target format).
+    /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty(bits: u64) -> f64 {
-        // Difficulty = MAX_TARGET / target
-        // MAX_TARGET for Bitcoin mainnet is 0x00000000FFFF0000000000000000000000000000000000000000000000000000
-        // For display purposes, we normalize to genesis difficulty = 1.0
-        // MAX_TARGET is 256 bits, use U256 from blvm-consensus
-        // 0x00000000FFFF0000000000000000000000000000000000000000000000000000
-        // For now, use a placeholder - this should be calculated from difficulty bits
-        const MAX_TARGET: u64 = 0x00000000FFFF0000u64;
-
-        // Simplified difficulty calculation using bits directly
-        // For display purposes, use a simple approximation based on bits
-        let mantissa = (bits & 0x00ffffff) as f64;
-        if mantissa == 0.0 {
-            return 1.0;
-        }
-        let max_mantissa = 0x00ffff00 as f64;
-        (max_mantissa / mantissa).max(1.0)
+        blvm_consensus::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 
     /// Calculate network hashrate from recent block timestamps
@@ -440,11 +444,11 @@ impl MiningRpc {
         let tip_hash = storage
             .blocks()
             .get_hash_by_height(tip_height)?
-            .ok_or_else(|| anyhow::anyhow!("Tip block not found"))?;
+            .ok_or_else(|| anyhow::anyhow!(TIP_BLOCK_NOT_FOUND_MSG))?;
         let tip_block = storage
             .blocks()
             .get_block(&tip_hash)?
-            .ok_or_else(|| anyhow::anyhow!("Tip block not found"))?;
+            .ok_or_else(|| anyhow::anyhow!(TIP_BLOCK_NOT_FOUND_MSG))?;
         let difficulty = Self::calculate_difficulty(tip_block.header.bits);
 
         // Calculate hashrate: difficulty * 2^32 / avg_time_per_block
@@ -691,14 +695,46 @@ impl MiningRpc {
         ) {
             Ok((ValidationResult::Valid, _)) => {
                 // Block is valid - in production would submit to block processor
-                // For now, just return success
                 debug!("Block submitted successfully");
+                if let Some(ref ep) = self.event_publisher {
+                    if let Some(ref storage) = self.storage {
+                        let block_hash = storage.blocks().get_block_hash(&block);
+                        ep.publish_block_mined(&block_hash, height, None).await;
+                    }
+                }
                 Ok(Value::Null)
             }
             Ok((ValidationResult::Invalid(reason), _)) => {
+                if let Some(ref ep) = self.event_publisher {
+                    if let Some(ref storage) = self.storage {
+                        let block_hash = storage.blocks().get_block_hash(&block);
+                        ep.publish_consensus_rule_violation(
+                            "block_validation",
+                            Some(&block_hash),
+                            None,
+                            &reason,
+                        )
+                        .await;
+                    }
+                }
                 Err(RpcError::invalid_params(format!("Invalid block: {reason}")))
             }
-            Err(e) => Err(RpcError::internal_error(format!("Validation error: {e}"))),
+            Err(e) => {
+                let err_msg = format!("Validation error: {e}");
+                if let Some(ref ep) = self.event_publisher {
+                    if let Some(ref storage) = self.storage {
+                        let block_hash = storage.blocks().get_block_hash(&block);
+                        ep.publish_consensus_rule_violation(
+                            "block_validation",
+                            Some(&block_hash),
+                            None,
+                            &err_msg,
+                        )
+                        .await;
+                    }
+                }
+                Err(RpcError::internal_error(err_msg))
+            }
         }
     }
 
@@ -708,12 +744,9 @@ impl MiningRpc {
     pub async fn estimate_smart_fee(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: estimatesmartfee");
 
-        let conf_target = params.get(0).and_then(|p| p.as_u64()).unwrap_or(6);
+        let conf_target = crate::rpc::params::param_u64_default(params, 0, 6);
 
-        let estimate_mode = params
-            .get(1)
-            .and_then(|p| p.as_str())
-            .unwrap_or("conservative");
+        let estimate_mode = crate::rpc::params::param_str(params, 1).unwrap_or("conservative");
 
         // Validate estimate_mode
         match estimate_mode {

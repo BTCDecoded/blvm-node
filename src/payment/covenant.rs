@@ -9,7 +9,7 @@ use crate::{Hash, Transaction};
 use blvm_consensus::bip119::calculate_template_hash;
 use blvm_protocol::payment::PaymentOutput;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::current_timestamp;
 
 /// CTV covenant proof for payment commitment
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,10 +115,7 @@ impl CovenantEngine {
             // Calculate CTV template hash
             let template_hash = self.calculate_template_hash_for_template(&template, 0)?;
 
-            let created_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let created_at = current_timestamp();
 
             Ok(CovenantProof {
                 template_hash,

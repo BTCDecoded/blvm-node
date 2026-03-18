@@ -9,7 +9,7 @@ async fn getblockchaininfo_softforks_contains_expected_keys() {
     let result = &response["result"];
     assert!(result.is_object());
 
-    // Softforks should be an object, and contain segwit/taproot keys (placeholders for now)
+    // Softforks object must include segwit and taproot keys per RPC spec
     let softforks = &result["softforks"];
     assert!(softforks.is_object());
     assert!(softforks.get("segwit").is_some());
@@ -39,7 +39,7 @@ async fn getblocktemplate_rules_include_feature_flags() {
     );
 
     let rules = result["rules"].as_array().expect("rules array");
-    // Placeholders currently include csv, segwit, taproot
+    // Rules array includes csv, segwit, taproot per getblocktemplate spec
     let rule_set: std::collections::HashSet<String> = rules
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))

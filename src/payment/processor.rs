@@ -164,12 +164,7 @@ impl PaymentProcessor {
         merchant_data: Option<Vec<u8>>,
         merchant_key: Option<&secp256k1::SecretKey>,
     ) -> Result<PaymentRequest, PaymentError> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = crate::utils::current_timestamp();
 
         // Determine network from config (defaults to mainnet if not specified)
         let network_str = match self.config.network.as_deref() {
@@ -334,11 +329,7 @@ impl PaymentProcessor {
 
         // Create metadata
         use crate::module::encryption::EncryptedModuleMetadata;
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let encrypted_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let encrypted_at = crate::utils::current_timestamp();
 
         let encryption_metadata = EncryptedModuleMetadata {
             payment_id: payment_id.to_string(),
@@ -421,22 +412,13 @@ impl PaymentProcessor {
         // BIP47 payment code address derivation
         // Derives a unique payment address from a payment code for privacy
         fn derive_bip47_address(
-            payment_code: &str,
-            notification_index: u32,
+            _payment_code: &str,
+            _notification_index: u32,
         ) -> Result<String, PaymentError> {
-            // BIP47 implementation requires:
-            // 1. Decode payment code (base58)
-            // 2. Extract public key from payment code
-            // 3. Derive notification address using ECDH
-            // 4. Derive payment address from notification address + index
-            //
-            // For now, return error indicating BIP47 requires full cryptographic implementation
-            // This is a placeholder that can be extended with proper BIP47 library integration
-            Err(PaymentError::ProcessingError(format!(
-                "BIP47 payment code derivation requires full cryptographic implementation. \
-                 Payment code: {payment_code}, index: {notification_index}. \
-                 Please provide a legacy address as fallback or implement BIP47 library integration."
-            )))
+            // BIP47 requires node sender payment code + bip47 crate (PublicCode, ECDH). Use legacy fallback until integrated.
+            Err(PaymentError::ProcessingError(
+                "BIP47 not yet implemented. Provide legacy address (author_address/commons_address) as fallback.".to_string(),
+            ))
         }
 
         // Prefer payment codes (BIP47) over fixed addresses for privacy

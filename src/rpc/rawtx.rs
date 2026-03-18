@@ -9,11 +9,14 @@
 //! - gettxoutproof
 //! - verifytxoutproof
 
+use crate::config::RequestTimeoutConfig;
 use crate::node::mempool::MempoolManager;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use crate::rpc::errors::{RpcError, RpcErrorCode, RpcResult};
+use crate::rpc::params::{param_array, param_bool_default, param_f64, param_str, param_u64_default};
 use crate::storage::Storage;
+use crate::utils::{storage_timeout_from_config, with_custom_timeout};
 use hex;
 use serde_json::{json, Value};
 use std::result::Result;
@@ -27,6 +30,8 @@ pub struct RawTxRpc {
     mempool: Option<Arc<MempoolManager>>,
     metrics: Option<Arc<MetricsCollector>>,
     profiler: Option<Arc<PerformanceProfiler>>,
+    /// Request timeout config (storage/network/rpc timeouts)
+    request_timeouts: Option<RequestTimeoutConfig>,
 }
 
 impl RawTxRpc {
@@ -37,6 +42,7 @@ impl RawTxRpc {
             mempool: None,
             metrics: None,
             profiler: None,
+            request_timeouts: None,
         }
     }
 
@@ -52,7 +58,18 @@ impl RawTxRpc {
             mempool: Some(mempool),
             metrics,
             profiler,
+            request_timeouts: None,
         }
+    }
+
+    /// Set request timeout config (storage/network/rpc timeouts from config)
+    pub fn with_request_timeouts(mut self, config: Option<RequestTimeoutConfig>) -> Self {
+        self.request_timeouts = config;
+        self
+    }
+
+    fn storage_timeout(&self) -> std::time::Duration {
+        storage_timeout_from_config(self.request_timeouts.as_ref())
     }
 
     /// Send a raw transaction to the network
@@ -75,14 +92,9 @@ impl RawTxRpc {
 
         // Parse optional parameters
         let maxfeerate_btc_per_kvb: Option<f64> =
-            params.get(1).and_then(|p| p.as_f64()).or_else(|| {
-                params
-                    .get(1)
-                    .and_then(|p| p.as_str())
-                    .and_then(|s| s.parse::<f64>().ok())
-            });
+            param_f64(params, 1).or_else(|| param_str(params, 1).and_then(|s| s.parse::<f64>().ok()));
 
-        let allowhighfees: bool = params.get(2).and_then(|p| p.as_bool()).unwrap_or(false);
+        let allowhighfees: bool = param_bool_default(params, 2, false);
 
         let tx_bytes = hex::decode(&hex_string).map_err(|e| {
             RpcError::invalid_params_with_fields(
@@ -284,7 +296,7 @@ impl RawTxRpc {
         debug!("RPC: testmempoolaccept");
 
         // Handle both array of transactions (package) and single transaction
-        let rawtxs = if let Some(arr) = params.get(0).and_then(|p| p.as_array()) {
+        let rawtxs = if let Some(arr) = param_array(params, 0) {
             // Array of hex strings (package validation)
             arr.iter()
                 .map(|v| {
@@ -295,7 +307,7 @@ impl RawTxRpc {
                     })
                 })
                 .collect::<Result<Vec<&str>, _>>()?
-        } else if let Some(hex_str) = params.get(0).and_then(|p| p.as_str()) {
+        } else if let Some(hex_str) = param_str(params, 0) {
             // Single hex string
             vec![hex_str]
         } else {
@@ -887,7 +899,7 @@ impl RawTxRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| RpcError::invalid_params("Missing txid parameter"))?;
 
-        let verbose = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+        let verbose = param_bool_default(params, 1, false);
 
         let txid_bytes = hex::decode(txid)
             .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {e}")))?;
@@ -970,7 +982,7 @@ impl RawTxRpc {
                     Ok(json!(tx_hex))
                 }
             } else {
-                Err(RpcError::invalid_params("Transaction not found"))
+                Err(RpcError::tx_not_found(""))
             }
         } else if verbose {
             Ok(json!({
@@ -1006,7 +1018,7 @@ impl RawTxRpc {
             .and_then(|p| p.as_u64())
             .ok_or_else(|| RpcError::invalid_params("Missing n parameter"))?;
 
-        let include_mempool = params.get(2).and_then(|p| p.as_bool()).unwrap_or(true);
+        let include_mempool = param_bool_default(params, 2, true);
 
         let txid_bytes = hex::decode(txid)
             .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {e}")))?;
@@ -1029,7 +1041,7 @@ impl RawTxRpc {
                     if let Some(tx) = mempool.get_transaction(&txid_array) {
                         if (n as usize) < tx.outputs.len() {
                             let output = &tx.outputs[n as usize];
-                            let best_hash = storage.chain().get_tip_hash()?.unwrap_or([0u8; 32]);
+                            let (best_hash, _) = storage.chain().get_tip_hash_and_height()?;
                             return Ok(json!({
                                 "bestblock": hex::encode(best_hash),
                                 "confirmations": 0,
@@ -1049,19 +1061,20 @@ impl RawTxRpc {
             }
 
             // Check storage with timeout to prevent hanging (wrap sync operations)
-            use crate::utils::with_storage_timeout;
-            match with_storage_timeout(async {
+            let timeout_dur = self.storage_timeout();
+            match with_custom_timeout(async {
                 tokio::task::spawn_blocking({
                     let storage = storage.clone();
                     move || storage.utxos().get_utxo(&outpoint)
                 })
                 .await
-            })
+            }, timeout_dur)
             .await
             {
                 Ok(Ok(Ok(Some(utxo)))) => {
                     // UTXO found - get chain info with timeout
-                    let (best_hash, tip_height) = match with_storage_timeout(async {
+                    let timeout_dur2 = self.storage_timeout();
+                    let (best_hash, tip_height) = match with_custom_timeout(async {
                         tokio::task::spawn_blocking({
                             let storage = storage.clone();
                             move || -> Result<([u8; 32], u64), anyhow::Error> {
@@ -1077,7 +1090,7 @@ impl RawTxRpc {
                             }
                         })
                         .await
-                    })
+                    }, timeout_dur2)
                     .await
                     {
                         Ok(Ok(Ok((hash, height)))) => (hash, height),
@@ -1086,7 +1099,8 @@ impl RawTxRpc {
 
                     // Find block height containing this transaction (with timeout protection)
                     // Use blocking task with timeout to prevent hanging
-                    let tx_height = match with_storage_timeout(async {
+                    let timeout_dur3 = self.storage_timeout();
+                    let tx_height = match with_custom_timeout(async {
                         tokio::task::spawn_blocking({
                             let storage = storage.clone();
                             let outpoint_hash = outpoint.hash;
@@ -1118,7 +1132,7 @@ impl RawTxRpc {
                             }
                         })
                         .await
-                    })
+                    }, timeout_dur3)
                     .await
                     {
                         Ok(Ok(Ok(height))) => height,
@@ -1250,7 +1264,7 @@ impl RawTxRpc {
             .and_then(|p| p.as_array())
             .ok_or_else(|| RpcError::invalid_params("Missing txids parameter"))?;
 
-        let blockhash_opt = params.get(1).and_then(|p| p.as_str());
+        let blockhash_opt = param_str(params, 1);
 
         if let Some(ref storage) = self.storage {
             // Find block containing the transactions
@@ -1331,7 +1345,7 @@ impl RawTxRpc {
 
                 Ok(json!(hex::encode(proof_bytes)))
             } else {
-                Err(RpcError::invalid_params("Block not found"))
+                Err(RpcError::block_not_found(""))
             }
         } else {
             Err(RpcError::invalid_params(
@@ -1413,7 +1427,7 @@ impl RawTxRpc {
                     "matches": matches
                 })))
             } else {
-                Err(RpcError::invalid_params("Block not found"))
+                Err(RpcError::block_not_found(""))
             }
         } else {
             Err(RpcError::invalid_params(
@@ -1434,7 +1448,7 @@ impl RawTxRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| RpcError::missing_parameter("txid", Some("string (hex)")))?;
 
-        let include_hex = params.get(1).and_then(|p| p.as_bool()).unwrap_or(false);
+        let include_hex = param_bool_default(params, 1, false);
 
         let hash_bytes = hex::decode(txid).map_err(|e| {
             RpcError::invalid_hash_format(
@@ -1591,13 +1605,12 @@ impl RawTxRpc {
             .ok_or_else(|| RpcError::missing_parameter("outputs", Some("object or array")))?;
 
         // Parse optional parameters
-        let locktime = params.get(2).and_then(|p| p.as_u64()).unwrap_or(0);
-        let replaceable = params.get(3).and_then(|p| p.as_bool()).unwrap_or(true);
-        let version = params.get(4).and_then(|p| p.as_u64()).unwrap_or(2);
+        let locktime = param_u64_default(params, 2, 0);
+        let replaceable = param_bool_default(params, 3, true);
+        let version = param_u64_default(params, 4, 2);
 
         // Build transaction inputs
         use blvm_protocol::OutPoint;
-        use blvm_protocol::Transaction;
         use blvm_protocol::TransactionInput;
 
         let mut tx_inputs = Vec::new();
@@ -1766,54 +1779,68 @@ impl RawTxRpc {
             ));
         }
 
-        // Build transaction
-        // Transaction uses SmallVec in production, Vec otherwise
-        // The type system handles this automatically via feature flags
-        // Build transaction - Transaction type varies by feature flags
-        // In production, Transaction uses SmallVec; otherwise Vec
-        #[cfg(feature = "production")]
+        let tx_bytes = Self::serialize_createrawtransaction_bytes(
+            version,
+            tx_inputs,
+            tx_outputs,
+            locktime,
+        )?;
+        Ok(json!({
+            "hex": hex::encode(&tx_bytes),
+            "complete": true,
+        }))
+    }
+}
+
+/// Build Transaction for createrawtransaction; production uses SmallVec, non-production uses Vec.
+macro_rules! createrawtransaction_tx {
+    ($version:expr, $inputs:expr, $outputs:expr, $locktime:expr) => {
         {
-            // Use SmallVec from blvm-consensus re-export
+            use blvm_protocol::Transaction;
             #[cfg(feature = "production")]
-            use smallvec::SmallVec;
+            {
+                use smallvec::SmallVec;
+                Transaction {
+                    version: $version,
+                    inputs: SmallVec::from_vec($inputs),
+                    outputs: SmallVec::from_vec($outputs),
+                    lock_time: $locktime,
+                }
+            }
             #[cfg(not(feature = "production"))]
-            use std::vec::Vec as SmallVec;
-            let tx = Transaction {
-                version,
-                inputs: SmallVec::from_vec(tx_inputs),
-                outputs: SmallVec::from_vec(tx_outputs),
-                lock_time: locktime,
-            };
-            // Serialize and return
-            use blvm_protocol::serialization::transaction::serialize_transaction;
-            let tx_bytes = serialize_transaction(&tx);
-            Ok(json!({
-                "hex": hex::encode(&tx_bytes),
-                "complete": true,
-            }))
+            {
+                Transaction {
+                    version: $version,
+                    inputs: $inputs,
+                    outputs: $outputs,
+                    lock_time: $locktime,
+                }
+            }
         }
-        #[cfg(not(feature = "production"))]
-        {
-            let tx = Transaction {
-                version,
-                inputs: tx_inputs,
-                outputs: tx_outputs,
-                lock_time: locktime,
-            };
-            // Serialize and return
-            use blvm_protocol::serialization::transaction::serialize_transaction;
-            let tx_bytes = serialize_transaction(&tx);
-            return Ok(json!({
-                "hex": hex::encode(&tx_bytes),
-                "complete": true,
-            }));
-        }
+    };
+}
+
+impl RawTxRpc {
+    /// Build Transaction (SmallVec vs Vec by feature) and return serialized bytes.
+    /// Single place for serialize; production/non-production differ only in container type (macro).
+    fn serialize_createrawtransaction_bytes(
+        version: u64,
+        tx_inputs: Vec<blvm_protocol::TransactionInput>,
+        tx_outputs: Vec<blvm_protocol::TransactionOutput>,
+        locktime: u64,
+    ) -> RpcResult<Vec<u8>> {
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+
+        let tx = createrawtransaction_tx!(version, tx_inputs, tx_outputs, locktime);
+        Ok(serialize_transaction(&tx))
     }
 
     /// Convert Bitcoin address to script_pubkey
-    /// Supports Bech32/Bech32m (SegWit/Taproot) addresses
-    /// Note: Legacy P2PKH/P2SH support requires Base58 decoding (not yet implemented)
+    /// Supports Bech32/Bech32m (SegWit/Taproot) and legacy Base58Check (P2PKH/P2SH)
     fn address_to_script_pubkey(address: &str) -> Result<Vec<u8>, RpcError> {
+        use blvm_consensus::opcodes::{
+            OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, PUSH_20_BYTES,
+        };
         use blvm_protocol::address::BitcoinAddress;
 
         // Try Bech32/Bech32m first
@@ -1838,13 +1865,49 @@ impl RawTxRpc {
                 )),
             }
         } else {
-            // Legacy address support would go here (P2PKH/P2SH)
-            // For now, return error
-            Err(RpcError::invalid_address_format(
-                address,
-                Some("Only Bech32/Bech32m addresses supported. Legacy P2PKH/P2SH support coming soon."),
-                None,
-            ))
+            // Legacy Base58Check (P2PKH/P2SH): version 1 byte + hash 20 bytes = 21 bytes after checksum verification
+            let decoded = match bs58::decode(address).with_check(None).into_vec() {
+                Ok(v) => v,
+                Err(_) => {
+                    return Err(RpcError::invalid_address_format(
+                        address,
+                        Some("Invalid address: not Bech32/Bech32m and not valid Base58Check"),
+                        None,
+                    ))
+                }
+            };
+            if decoded.len() != 21 {
+                return Err(RpcError::invalid_address_format(
+                    address,
+                    Some("Base58Check address must decode to 21 bytes (version + 20-byte hash)"),
+                    None,
+                ));
+            }
+            let version = decoded[0];
+            let hash: &[u8; 20] = decoded[1..21]
+                .try_into()
+                .expect("slice length checked above");
+            match version {
+                0x00 => {
+                    // P2PKH: OP_DUP OP_HASH160 PUSH_20_BYTES <20> OP_EQUALVERIFY OP_CHECKSIG
+                    let mut script = vec![OP_DUP, OP_HASH160, PUSH_20_BYTES];
+                    script.extend_from_slice(hash);
+                    script.extend_from_slice(&[OP_EQUALVERIFY, OP_CHECKSIG]);
+                    Ok(script)
+                }
+                0x05 => {
+                    // P2SH: OP_HASH160 PUSH_20_BYTES <20> OP_EQUAL
+                    let mut script = vec![OP_HASH160, PUSH_20_BYTES];
+                    script.extend_from_slice(hash);
+                    script.push(OP_EQUAL);
+                    Ok(script)
+                }
+                _ => Err(RpcError::invalid_address_format(
+                    address,
+                    Some("Base58Check version must be 0x00 (P2PKH) or 0x05 (P2SH)"),
+                    None,
+                )),
+            }
         }
     }
 }

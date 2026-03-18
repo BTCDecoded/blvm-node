@@ -24,6 +24,7 @@ use tracing::{debug, info};
 #[derive(Debug)]
 pub struct QuinnTransport {
     endpoint: quinn::Endpoint,
+    max_message_length: usize,
 }
 
 #[cfg(feature = "quinn")]
@@ -32,13 +33,17 @@ impl QuinnTransport {
     ///
     /// For client connections. Server endpoints are created in listen().
     pub fn new() -> Result<Self> {
-        // Create client endpoint
-        // For now, use default client config (will need proper cert verification later)
+        Self::with_max_message_length(crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH)
+    }
+
+    /// Create with configurable max message length (for constrained networks).
+    pub fn with_max_message_length(max_message_length: usize) -> Result<Self> {
         let endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
-
         info!("Quinn transport initialized (client mode)");
-
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            max_message_length,
+        })
     }
 
     // Note: Server certificates are handled in listen() method
@@ -75,6 +80,7 @@ impl Transport for QuinnTransport {
         Ok(QuinnListener {
             endpoint,
             local_addr: addr,
+            max_message_length: self.max_message_length,
         })
     }
 
@@ -100,6 +106,7 @@ impl Transport for QuinnTransport {
             conn,
             peer_addr: TransportAddr::Quinn(socket_addr),
             connected: true,
+            max_message_length: self.max_message_length,
         })
     }
 }
@@ -109,6 +116,7 @@ impl Transport for QuinnTransport {
 pub struct QuinnListener {
     endpoint: quinn::Endpoint,
     local_addr: SocketAddr,
+    max_message_length: usize,
 }
 
 #[cfg(feature = "quinn")]
@@ -138,6 +146,7 @@ impl TransportListener for QuinnListener {
                 conn,
                 peer_addr: transport_addr.clone(),
                 connected: true,
+                max_message_length: self.max_message_length,
             },
             transport_addr,
         ))
@@ -154,6 +163,7 @@ pub struct QuinnConnection {
     conn: quinn::Connection,
     peer_addr: TransportAddr,
     connected: bool,
+    max_message_length: usize,
 }
 
 #[cfg(feature = "quinn")]
@@ -203,12 +213,11 @@ impl TransportConnection for QuinnConnection {
         }
 
         // Validate message size before allocation (DoS protection)
-        use crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH;
-        if len > MAX_PROTOCOL_MESSAGE_LENGTH {
+        if len > self.max_message_length {
             return Err(anyhow::anyhow!(
                 "Message too large: {} bytes (max: {} bytes)",
                 len,
-                MAX_PROTOCOL_MESSAGE_LENGTH
+                self.max_message_length
             ));
         }
 

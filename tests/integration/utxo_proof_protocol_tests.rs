@@ -9,8 +9,8 @@ mod tests {
         handle_get_utxo_proof, serialize_get_utxo_proof, deserialize_utxo_proof,
     };
     use blvm_consensus::types::{OutPoint, UTXO};
-    use blvm_consensus::utxo_commitments::merkle_tree::UtxoMerkleTree;
-    use blvm_consensus::utxo_commitments::data_structures::UtxoCommitment;
+    use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
+    use blvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
     use std::sync::Arc;
     
     // Mock storage for testing
@@ -72,8 +72,8 @@ mod tests {
         let tx_hash = [1; 32];
         let output_index = 0;
         
-        // Create a mock proof (serialized)
-        let mock_proof_bytes = vec![0u8; 100]; // Placeholder
+        // Mock proof bytes for serialization round-trip test (format not validated)
+        let mock_proof_bytes = vec![0u8; 100];
         
         let proof_msg = UTXOProofMessage {
             request_id,

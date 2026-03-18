@@ -10,10 +10,7 @@ use crate::rpc::auth::{RpcAuthManager, UserId};
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 
-// Note: Full integration tests would require starting the HTTP server
-// and making actual HTTP requests. These tests focus on the security
-// logic itself (authentication, rate limiting, validation) which can
-// be tested without a full server instance.
+// Test strategy: we test security logic (auth, rate limit, validation) without starting the server.
 
 /// Test that authentication is required when enabled
 #[tokio::test]
@@ -85,10 +82,10 @@ async fn test_rest_api_rate_limiting_with_endpoint() {
 /// Test IP-based rate limiting for unauthenticated requests
 #[tokio::test]
 async fn test_rest_api_ip_rate_limiting() {
-    let auth = RpcAuthManager::with_rate_limits(false, 10, 2); // 10 burst, 2/sec
+    let auth = RpcAuthManager::with_rate_limits(false, 5, 1); // 5 burst, 1/sec
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
-    // Should allow requests up to IP limit (half of authenticated: 5 burst)
+    // Should allow requests up to burst limit
     for i in 0..5 {
         assert!(
             auth.check_ip_rate_limit_with_endpoint(addr, Some("/api/v1/chain/info"))
@@ -113,16 +110,20 @@ async fn test_brute_force_detection() {
     let auth = RpcAuthManager::new(true);
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
-    // Make 5 failed authentication attempts
-    for i in 0..5 {
-        auth.record_auth_failure(addr, format!("Invalid token attempt {}", i))
-            .await;
+    // Make many failed authentication attempts (recorded internally via authenticate_request)
+    for i in 0..10 {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer invalid-token-{i}").parse().unwrap(),
+        );
+        let result = auth.authenticate_request(&headers, addr).await;
+        assert!(result.user_id.is_none());
+        assert!(result.error.is_some());
     }
 
-    // The 5th failure should trigger brute force detection
-    // (threshold is 5 failures in 5 minutes)
-    // Note: This test verifies the tracking mechanism works
-    // In a real scenario, we'd check logs for the ERROR level message
+    // System should still be functional (not locked out)
+    // Brute force attempts are tracked internally; threshold triggers log
 }
 
 /// Test input validation for transaction hex
@@ -222,6 +223,24 @@ async fn test_security_event_logging() {
         auth_method: "token".to_string(),
     };
     event.log(); // Should not panic
+}
+
+/// Test that oversized request body returns error (413 path for vault/pool/congestion)
+#[tokio::test]
+async fn test_rest_oversized_body_returns_error() {
+    use crate::rpc::rest::types::MAX_REQUEST_SIZE;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full, Limited};
+
+    // Body exceeding 1MB limit should fail when collected (same logic as read_json_body)
+    let oversized = vec![0u8; MAX_REQUEST_SIZE + 1];
+    let body = Full::new(Bytes::from(oversized));
+    let limited = Limited::new(body, MAX_REQUEST_SIZE);
+    let result = limited.collect().await;
+    assert!(
+        result.is_err(),
+        "Oversized body (>1MB) should fail when collected with size limit"
+    );
 }
 
 /// Test that rate limiting respects time windows

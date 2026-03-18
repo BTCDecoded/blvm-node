@@ -207,10 +207,17 @@ impl Drop for BufferedBlockStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::database::{create_database, default_backend, Database};
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
     #[test]
-    fn test_buffered_store_config() {
-        // Just verify the struct can be created with expected values
-        assert_eq!(1000, 1000); // Placeholder
+    fn test_buffered_store_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
+        let blockstore = BlockStore::new(db).unwrap();
+        let buffer = BufferedBlockStore::new(blockstore, 1000);
+        assert_eq!(buffer.inner().block_count().unwrap(), 0);
     }
 }

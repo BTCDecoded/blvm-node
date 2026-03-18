@@ -93,10 +93,111 @@ impl ProcessSandbox {
         Self { config }
     }
 
+    #[cfg(target_os = "windows")]
+    fn apply_windows_job_limits(
+        &self,
+        pid: u32,
+        limits: &ResourceLimits,
+    ) -> Result<(), ModuleError> {
+        use std::ptr::null_mut;
+
+        #[allow(unused_imports)]
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        #[allow(unused_imports)]
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOBOBJECT_BASIC_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        #[allow(unused_imports)]
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+        #[allow(unused_imports)]
+        use windows_sys::core::PCWSTR;
+
+        let job_name: Vec<u16> = format!("blvm-module-{}", pid)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let job_handle = unsafe { CreateJobObjectW(null_mut(), PCWSTR(job_name.as_ptr())) };
+
+        if job_handle == 0 || job_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            warn!("Failed to create Windows job object for PID {}: {}", pid, std::io::Error::last_os_error());
+            return Err(ModuleError::op_err(
+                "Failed to create job object",
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        // Job handle is intentionally not closed: limits persist while the job exists.
+        // Closing would destroy the job and remove limits. Handles are freed when our process exits.
+
+        let mut limit_info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+
+        if let Some(max_memory) = limits.max_memory_bytes {
+            limit_info.ProcessMemoryLimit = max_memory as usize;
+            limit_info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        }
+
+        if self.config.strict_mode {
+            limit_info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        }
+
+        let result = unsafe {
+            SetInformationJobObject(
+                job_handle,
+                JobObjectExtendedLimitInformation,
+                &limit_info as *const _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
+            )
+        };
+
+        if result == 0 {
+            warn!("Failed to set job object limits for PID {}: {}", pid, std::io::Error::last_os_error());
+            return Err(ModuleError::op_err(
+                "Failed to set job limits",
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        let process_handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+                0,
+                pid,
+            )
+        };
+
+        if process_handle == 0 || process_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            warn!("Failed to open process {} for job assignment: {}", pid, std::io::Error::last_os_error());
+            return Err(ModuleError::op_err(
+                "Failed to open process",
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        let assign_result = unsafe { AssignProcessToJobObject(job_handle, process_handle) };
+        unsafe { CloseHandle(process_handle); }
+
+        if assign_result == 0 {
+            warn!("Failed to assign process {} to job object: {}", pid, std::io::Error::last_os_error());
+            return Err(ModuleError::op_err(
+                "Failed to assign process to job",
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        debug!("Applied Windows job object limits for PID {} (memory: {:?})", pid, limits.max_memory_bytes);
+        Ok(())
+    }
+
     /// Apply resource limits to a process
     ///
-    /// On Unix systems, uses `setrlimit` via the `nix` crate.
-    /// On Windows, uses job objects (not yet implemented).
+    /// On Unix (Linux): uses `prlimit` for memory, FDs, processes; CPU % not yet supported.
+    /// On Windows: uses job objects (memory limit, kill-on-close). CPU % not yet supported.
     pub fn apply_limits(&self, pid: Option<u32>) -> Result<(), ModuleError> {
         let limits = &self.config.resource_limits;
 
@@ -201,12 +302,8 @@ impl ProcessSandbox {
                         use nix::sys::resource::{setrlimit, Resource};
                         let soft_limit = max_memory as u64;
                         let hard_limit = max_memory as u64;
-                        setrlimit(Resource::RLIMIT_AS, soft_limit, hard_limit).map_err(|e| {
-                            ModuleError::OperationError(format!(
-                                "Failed to set memory limit: {}",
-                                e
-                            ))
-                        })?;
+                        setrlimit(Resource::RLIMIT_AS, soft_limit, hard_limit)
+                            .map_err(|e| ModuleError::op_err("Failed to set memory limit", e))?;
                         debug!("Set memory limit: {} bytes", max_memory);
                     }
 
@@ -217,14 +314,8 @@ impl ProcessSandbox {
                         #[cfg(feature = "nix")]
                         {
                             use nix::sys::resource::{setrlimit, Resource};
-                            setrlimit(Resource::RLIMIT_NOFILE, soft_limit, hard_limit).map_err(
-                                |e| {
-                                    ModuleError::OperationError(format!(
-                                        "Failed to set file descriptor limit: {}",
-                                        e
-                                    ))
-                                },
-                            )?;
+                            setrlimit(Resource::RLIMIT_NOFILE, soft_limit, hard_limit)
+                                .map_err(|e| ModuleError::op_err("Failed to set file descriptor limit", e))?;
                         }
                         #[cfg(not(feature = "nix"))]
                         {
@@ -241,14 +332,8 @@ impl ProcessSandbox {
                             use nix::sys::resource::{setrlimit, Resource};
                             let soft_limit = max_children as u64;
                             let hard_limit = max_children as u64;
-                            setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit).map_err(
-                                |e| {
-                                    ModuleError::OperationError(format!(
-                                        "Failed to set process limit: {}",
-                                        e
-                                    ))
-                                },
-                            )?;
+                            setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit)
+                                .map_err(|e| ModuleError::op_err("Failed to set process limit", e))?;
                         }
                         #[cfg(not(feature = "nix"))]
                         {
@@ -270,15 +355,18 @@ impl ProcessSandbox {
             }
         }
 
-        #[cfg(not(unix))]
+        #[cfg(target_os = "windows")]
         {
-            if self.config.strict_mode {
-                warn!("Strict sandboxing requested but Windows support not yet implemented");
-                return Err(ModuleError::OperationError(
-                    "Windows sandboxing not yet implemented".to_string(),
-                ));
+            if let Some(pid) = pid {
+                self.apply_windows_job_limits(pid, limits)?;
+            } else {
+                debug!("No PID provided, skipping Windows job object limits");
             }
-            debug!("Resource limits configured (Windows support pending)");
+        }
+
+        #[cfg(all(not(unix), not(target_os = "windows")))]
+        {
+            debug!("Resource limits not supported on this platform");
         }
 
         Ok(())

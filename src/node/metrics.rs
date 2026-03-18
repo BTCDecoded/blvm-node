@@ -2,10 +2,11 @@
 //!
 //! Provides comprehensive metrics for monitoring node health, performance, and behavior.
 
+use crate::utils::current_timestamp;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 /// Comprehensive node metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,14 +167,14 @@ impl MetricsCollector {
 
     /// Collect all metrics into a single structure
     pub fn collect(&self) -> NodeMetrics {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_timestamp();
 
         let uptime = SystemTime::now()
             .duration_since(self.start_time)
-            .unwrap()
+            .unwrap_or_else(|_| {
+                tracing::warn!("System clock went backward, using 0 for uptime");
+                std::time::Duration::from_secs(0)
+            })
             .as_secs();
 
         let mut system = self.system.lock().unwrap();

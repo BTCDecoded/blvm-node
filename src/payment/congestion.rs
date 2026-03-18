@@ -9,12 +9,13 @@
 use crate::node::mempool::MempoolManager;
 use crate::payment::covenant::{CovenantEngine, CovenantProof};
 use crate::payment::processor::PaymentError;
+use crate::rpc::errors::STORAGE_NOT_AVAILABLE_MSG;
 use crate::storage::Storage;
 use blvm_protocol::payment::PaymentOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::current_timestamp;
 use tracing::{debug, info};
 
 /// Transaction priority
@@ -127,7 +128,7 @@ impl CongestionManager {
         let storage = self
             .storage
             .as_ref()
-            .ok_or_else(|| PaymentError::ProcessingError("Storage not available".to_string()))?;
+            .ok_or_else(|| PaymentError::ProcessingError(STORAGE_NOT_AVAILABLE_MSG.to_string()))?;
 
         let batches_tree = storage.open_tree("batches").map_err(|e| {
             PaymentError::ProcessingError(format!("Failed to open batches tree: {}", e))
@@ -172,10 +173,7 @@ impl CongestionManager {
     /// Batch ID
     pub fn create_batch(&mut self, batch_id: &str, target_fee_rate: Option<u64>) -> String {
         let target = target_fee_rate.unwrap_or(self.config.target_fee_rate);
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let created_at = crate::utils::current_timestamp();
 
         let batch = TransactionBatch {
             batch_id: batch_id.to_string(),
@@ -285,10 +283,7 @@ impl CongestionManager {
             avg_fee_rate,
             median_fee_rate,
             estimated_blocks,
-            collected_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            collected_at: current_timestamp(),
         })
     }
 
@@ -326,10 +321,7 @@ impl CongestionManager {
         }
 
         // Check if max wait time has passed
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_timestamp();
         if now - batch.created_at >= self.config.max_wait_time {
             return Ok(true);
         }
@@ -405,10 +397,7 @@ impl CongestionManager {
 
                 batch.ready_to_broadcast = true;
                 batch.broadcast_at = Some(
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
+                    current_timestamp(),
                 );
 
                 covenant.clone()
