@@ -24,6 +24,75 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, warn};
 
+/// Decode a Bitcoin address to `script_pubkey` (Bech32/Bech32m and legacy Base58Check).
+pub(crate) fn address_string_to_script_pubkey(address: &str) -> Result<Vec<u8>, RpcError> {
+    use blvm_consensus::opcodes::{
+        OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, PUSH_20_BYTES,
+    };
+    use blvm_protocol::address::BitcoinAddress;
+
+    if let Ok(addr) = BitcoinAddress::decode(address) {
+        match (addr.witness_version, addr.witness_program.len()) {
+            (0, 20) | (0, 32) => {
+                let mut script = vec![0x00];
+                script.extend_from_slice(&addr.witness_program);
+                Ok(script)
+            }
+            (1, 32) => {
+                let mut script = vec![blvm_consensus::opcodes::OP_1];
+                script.extend_from_slice(&addr.witness_program);
+                Ok(script)
+            }
+            _ => Err(RpcError::invalid_address_format(
+                address,
+                Some("Unsupported witness version or program length"),
+                None,
+            )),
+        }
+    } else {
+        let decoded = match bs58::decode(address).with_check(None).into_vec() {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(RpcError::invalid_address_format(
+                    address,
+                    Some("Invalid address: not Bech32/Bech32m and not valid Base58Check"),
+                    None,
+                ))
+            }
+        };
+        if decoded.len() != 21 {
+            return Err(RpcError::invalid_address_format(
+                address,
+                Some("Base58Check address must decode to 21 bytes (version + 20-byte hash)"),
+                None,
+            ));
+        }
+        let version = decoded[0];
+        let hash: &[u8; 20] = decoded[1..21]
+            .try_into()
+            .expect("slice length checked above");
+        match version {
+            0x00 => {
+                let mut script = vec![OP_DUP, OP_HASH160, PUSH_20_BYTES];
+                script.extend_from_slice(hash);
+                script.extend_from_slice(&[OP_EQUALVERIFY, OP_CHECKSIG]);
+                Ok(script)
+            }
+            0x05 => {
+                let mut script = vec![OP_HASH160, PUSH_20_BYTES];
+                script.extend_from_slice(hash);
+                script.push(OP_EQUAL);
+                Ok(script)
+            }
+            _ => Err(RpcError::invalid_address_format(
+                address,
+                Some("Base58Check version must be 0x00 (P2PKH) or 0x05 (P2SH)"),
+                None,
+            )),
+        }
+    }
+}
+
 /// Raw Transaction RPC methods
 pub struct RawTxRpc {
     storage: Option<Arc<Storage>>,
@@ -1785,10 +1854,8 @@ impl RawTxRpc {
             tx_outputs,
             locktime,
         )?;
-        Ok(json!({
-            "hex": hex::encode(&tx_bytes),
-            "complete": true,
-        }))
+        // Bitcoin Core returns the raw transaction as a single hex string.
+        Ok(Value::String(hex::encode(&tx_bytes)))
     }
 }
 
@@ -1838,77 +1905,7 @@ impl RawTxRpc {
     /// Convert Bitcoin address to script_pubkey
     /// Supports Bech32/Bech32m (SegWit/Taproot) and legacy Base58Check (P2PKH/P2SH)
     fn address_to_script_pubkey(address: &str) -> Result<Vec<u8>, RpcError> {
-        use blvm_consensus::opcodes::{
-            OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, PUSH_20_BYTES,
-        };
-        use blvm_protocol::address::BitcoinAddress;
-
-        // Try Bech32/Bech32m first
-        if let Ok(addr) = BitcoinAddress::decode(address) {
-            match (addr.witness_version, addr.witness_program.len()) {
-                // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
-                (0, 20) | (0, 32) => {
-                    let mut script = vec![0x00]; // OP_0
-                    script.extend_from_slice(&addr.witness_program);
-                    Ok(script)
-                }
-                // Taproot v1: P2TR (32 bytes)
-                (1, 32) => {
-                    let mut script = vec![blvm_consensus::opcodes::OP_1];
-                    script.extend_from_slice(&addr.witness_program);
-                    Ok(script)
-                }
-                _ => Err(RpcError::invalid_address_format(
-                    address,
-                    Some("Unsupported witness version or program length"),
-                    None,
-                )),
-            }
-        } else {
-            // Legacy Base58Check (P2PKH/P2SH): version 1 byte + hash 20 bytes = 21 bytes after checksum verification
-            let decoded = match bs58::decode(address).with_check(None).into_vec() {
-                Ok(v) => v,
-                Err(_) => {
-                    return Err(RpcError::invalid_address_format(
-                        address,
-                        Some("Invalid address: not Bech32/Bech32m and not valid Base58Check"),
-                        None,
-                    ))
-                }
-            };
-            if decoded.len() != 21 {
-                return Err(RpcError::invalid_address_format(
-                    address,
-                    Some("Base58Check address must decode to 21 bytes (version + 20-byte hash)"),
-                    None,
-                ));
-            }
-            let version = decoded[0];
-            let hash: &[u8; 20] = decoded[1..21]
-                .try_into()
-                .expect("slice length checked above");
-            match version {
-                0x00 => {
-                    // P2PKH: OP_DUP OP_HASH160 PUSH_20_BYTES <20> OP_EQUALVERIFY OP_CHECKSIG
-                    let mut script = vec![OP_DUP, OP_HASH160, PUSH_20_BYTES];
-                    script.extend_from_slice(hash);
-                    script.extend_from_slice(&[OP_EQUALVERIFY, OP_CHECKSIG]);
-                    Ok(script)
-                }
-                0x05 => {
-                    // P2SH: OP_HASH160 PUSH_20_BYTES <20> OP_EQUAL
-                    let mut script = vec![OP_HASH160, PUSH_20_BYTES];
-                    script.extend_from_slice(hash);
-                    script.push(OP_EQUAL);
-                    Ok(script)
-                }
-                _ => Err(RpcError::invalid_address_format(
-                    address,
-                    Some("Base58Check version must be 0x00 (P2PKH) or 0x05 (P2SH)"),
-                    None,
-                )),
-            }
-        }
+        address_string_to_script_pubkey(address)
     }
 }
 

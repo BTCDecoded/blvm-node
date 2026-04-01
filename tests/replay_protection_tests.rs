@@ -5,6 +5,7 @@
 
 use blvm_node::network::replay_protection::{ReplayError, ReplayProtection};
 use blvm_node::utils::current_timestamp;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::test]

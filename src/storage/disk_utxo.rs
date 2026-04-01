@@ -24,7 +24,7 @@
 //! - **Flush without cache drop**: Cache stays warm; only pending_writes drains to disk.
 //! - **Unified path**: Prefetch → validate → sync → evict runs every block.
 //!   Early blocks: prefetch/sync/evict are fast (cache hit, small pending, no eviction).
-//! - **O(1) pending_writes lookup**: HashMap instead of Vec linear scan
+//! - **Pending flush log**: append + sort/dedupe at flush (last write wins per key)
 //! - **Fixed-size keys**: `[u8; 40]` avoids heap allocation per outpoint
 //! - **Batch eviction**: Only evict when 10% over limit, clear 15% headroom
 //! - **Cache size**: Auto-tuned by MemoryGuard from system RAM.
@@ -78,24 +78,51 @@ pub fn key_to_outpoint(key: &OutPointKey) -> OutPoint {
 ///
 /// Uses Tree::get_many when available (RocksDB multi_get_cf = 1 batch call vs N get calls).
 /// Fallback: sequential get. No par_iter (was causing 500+ concurrent get = lock contention).
+///
+/// Returns `(map, keys_sorted)` so callers can scan the same key set (e.g. in-flight UTXO
+/// fallback) without cloning the request list.
 pub(crate) fn load_keys_from_disk(
     disk: Arc<dyn Tree>,
-    keys: Vec<OutPointKey>,
-) -> Result<FxHashMap<OutPointKey, UTXO>> {
+    mut keys: Vec<OutPointKey>,
+) -> Result<(FxHashMap<OutPointKey, UTXO>, Vec<OutPointKey>)> {
     if keys.is_empty() {
-        return Ok(FxHashMap::default());
+        return Ok((FxHashMap::default(), Vec::new()));
     }
-    let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+    keys.sort_unstable();
+    let mut key_refs: Vec<&[u8]> = Vec::with_capacity(keys.len());
+    for k in &keys {
+        key_refs.push(k.as_slice());
+    }
     let values = disk.get_many(&key_refs)?;
     let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
-    for (key, value) in keys.into_iter().zip(values.into_iter()) {
-        if let Some(data) = value {
-            if let Ok(utxo) = bincode::deserialize::<UTXO>(&data) {
-                result.insert(key, utxo);
+    #[cfg(feature = "rayon")]
+    {
+        use blvm_protocol::rayon::prelude::*;
+        let rows: Vec<(OutPointKey, Option<Vec<u8>>)> =
+            keys.iter().copied().zip(values).collect();
+        for (k, utxo) in rows
+            .into_par_iter()
+            .filter_map(|(key, value)| {
+                let data = value?;
+                let utxo = bincode::deserialize::<UTXO>(&data).ok()?;
+                Some((key, utxo))
+            })
+            .collect::<Vec<_>>()
+        {
+            result.insert(k, utxo);
+        }
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        for (key, value) in keys.iter().zip(values.into_iter()) {
+            if let Some(data) = value {
+                if let Ok(utxo) = bincode::deserialize::<UTXO>(&data) {
+                    result.insert(*key, utxo);
+                }
             }
         }
     }
-    Ok(result)
+    Ok((result, keys))
 }
 
 /// Reuses buffer for block input keys. Avoids per-block alloc in IBD v2 validation hot path.
@@ -220,6 +247,66 @@ pub(crate) fn block_input_keys_batch_into_arc(
     }
 }
 
+/// Like `block_input_keys_into` but filters out intra-block spends.
+///
+/// Only skips prefetch when the input spends an output of a **non-coinbase** transaction that
+/// appears **earlier in this block** (`tx_ids[j] == prevout.hash` for some `j` with `1 <= j < idx`).
+/// Those UTXOs are not on disk yet; `connect_block_ibd`'s overlay supplies them after earlier txs.
+///
+/// Prevouts matching **coinbase** (`j == 0`) are never treated as prefetch-elidable here: BIP30
+/// chain UTXOs can share a txid with this block's coinbase and must still load from disk.
+///
+/// Returns the number of keys filtered out (informational; log at tracing::debug level if needed).
+/// Filter input keys using precomputed `tx_ids` (same length as `block.transactions`).
+pub fn block_input_keys_into_filtered_with_tx_ids(
+    block: &Block,
+    tx_ids: &[Hash],
+    keys_out: &mut Vec<OutPointKey>,
+) -> usize {
+    let est: usize = block
+        .transactions
+        .iter()
+        .filter(|tx| !is_coinbase(tx))
+        .map(|tx| tx.inputs.len())
+        .sum();
+    keys_out.clear();
+    keys_out.reserve(est);
+
+    let mut filtered = 0usize;
+    for (spending_idx, tx) in block.transactions.iter().enumerate() {
+        if is_coinbase(tx) {
+            continue;
+        }
+        for input in tx.inputs.iter() {
+            let h = input.prevout.hash;
+            let funded_by_prior_non_cb = (1..spending_idx).any(|j| tx_ids[j] == h);
+            if funded_by_prior_non_cb {
+                filtered += 1;
+            } else {
+                keys_out.push(outpoint_to_key(&input.prevout));
+            }
+        }
+    }
+    filtered
+}
+
+/// One `compute_block_tx_ids` + filtered keys (reuses `tx_ids_buf`).
+pub fn block_input_keys_and_tx_ids_filtered(
+    block: &Block,
+    tx_ids_buf: &mut Vec<Hash>,
+    keys_out: &mut Vec<OutPointKey>,
+) -> usize {
+    use blvm_consensus::block::compute_block_tx_ids_into;
+    compute_block_tx_ids_into(block, tx_ids_buf);
+    block_input_keys_into_filtered_with_tx_ids(block, tx_ids_buf, keys_out)
+}
+
+pub fn block_input_keys_into_filtered(block: &Block, keys_out: &mut Vec<OutPointKey>) -> usize {
+    use blvm_consensus::block::compute_block_tx_ids;
+    let tx_ids = compute_block_tx_ids(block);
+    block_input_keys_into_filtered_with_tx_ids(block, &tx_ids, keys_out)
+}
+
 /// Pre-computed sync batch for disk persistence. Applied by IbdUtxoStore::apply_sync_batch.
 /// Inserts hold Arc<UTXO> to avoid clone in IBD v2 apply_sync_batch hot path.
 pub struct SyncBatch {
@@ -231,24 +318,25 @@ pub struct SyncBatch {
 /// Flush a batch of UTXO operations to disk. Splits into chunks of MAX_BATCH_OPS to stay
 /// under TidesDB's TDB_MAX_TXN_OPS (100k). Used by IbdUtxoStore.
 pub fn flush_batch_to_disk(
-    batch: &FxHashMap<OutPointKey, PendingValue>,
+    batch: &[(OutPointKey, PendingValue)],
     disk: &dyn Tree,
 ) -> Result<usize> {
     if batch.is_empty() {
         return Ok(0);
     }
-    let entries: Vec<_> = batch.iter().collect();
     let mut total_flushed = 0;
-    for chunk in entries.chunks(MAX_BATCH_OPS) {
+    let mut ser_buf = Vec::with_capacity(192);
+    for chunk in batch.chunks(MAX_BATCH_OPS) {
         let mut b = disk.batch();
         for (key, value_opt) in chunk {
             match value_opt {
                 Some(arc) => {
-                    let bytes = bincode::serialize(arc.as_ref())
+                    ser_buf.clear();
+                    bincode::serialize_into(&mut ser_buf, arc.as_ref())
                         .map_err(|e| anyhow::anyhow!("UTXO serialize: {}", e))?;
-                    b.put(*key, bytes.as_slice());
+                    b.put(key.as_slice(), ser_buf.as_slice());
                 }
-                None => b.delete(*key),
+                None => b.delete(key.as_slice()),
             }
         }
         b.commit()?;

@@ -17,6 +17,7 @@ use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::storage::blockstore::BlockStore;
 use crate::storage::hashing::double_sha256;
+use blvm_consensus::GENESIS_BLOCK_HASH_INTERNAL;
 
 /// Download headers for a range starting from the given locator hash.
 ///
@@ -247,31 +248,63 @@ pub(crate) async fn download_headers_parallel(
     all_headers.sort_by_key(|(start, _)| *start);
 
     let mut current_height = start_height;
+    let mut last_hash: [u8; 32] = if start_height == 0 {
+        GENESIS_BLOCK_HASH_INTERNAL
+    } else {
+        let parent_h = start_height
+            .checked_sub(1)
+            .ok_or_else(|| anyhow::anyhow!("parallel header merge: invalid start_height"))?;
+        blockstore
+            .get_hash_by_height(parent_h)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot merge parallel headers at height {}: missing parent hash at {}",
+                    start_height,
+                    parent_h
+                )
+            })?
+    };
+
     for (range_start, headers) in all_headers {
         if range_start > current_height {
-            warn!(
-                "Gap detected at height {}, expected {}",
-                range_start, current_height
-            );
+            return Err(anyhow::anyhow!(
+                "Gap in parallel header ranges: got start {} but chain tip is height {}",
+                range_start,
+                current_height
+            ));
+        }
+        if range_start < current_height {
+            return Err(anyhow::anyhow!(
+                "Overlapping parallel header ranges: batch starts at {} but merge already at height {}",
+                range_start,
+                current_height
+            ));
         }
 
         for header in headers {
             match blvm_consensus::pow::check_proof_of_work(&header) {
                 Ok(true) => {}
                 Ok(false) => {
-                    warn!(
-                        "Header at height {} failed PoW check, skipping",
+                    return Err(anyhow::anyhow!(
+                        "Header at height {} failed PoW — refusing to skip (parallel merge)",
                         current_height
-                    );
-                    continue;
+                    ));
                 }
                 Err(e) => {
-                    warn!(
-                        "Header at height {} PoW check error: {}, skipping",
-                        current_height, e
-                    );
-                    continue;
+                    return Err(anyhow::anyhow!(
+                        "Header at height {} PoW check error (parallel merge): {e}",
+                        current_height
+                    ));
                 }
+            }
+
+            if header.prev_block_hash != last_hash {
+                return Err(anyhow::anyhow!(
+                    "Header chain break at height {} (parallel merge): expected prev {} got {}",
+                    current_height,
+                    hex::encode(last_hash),
+                    hex::encode(header.prev_block_hash)
+                ));
             }
 
             let mut header_data = [0u8; 80];
@@ -290,6 +323,7 @@ pub(crate) async fn download_headers_parallel(
                 .store_height(current_height, &header_hash)
                 .context("Failed to store height")?;
 
+            last_hash = header_hash;
             current_height += 1;
         }
     }
@@ -347,14 +381,13 @@ pub(crate) async fn download_headers(
         peer_addrs.len()
     );
 
-    let genesis_hash: [u8; 32] = [
-        0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72, 0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63,
-        0xf7, 0x4f, 0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c, 0x68, 0xd6, 0x19, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-    ];
+    let genesis_hash = GENESIS_BLOCK_HASH_INTERNAL;
 
-    let mut current_height = start_height;
-    let mut last_hash = genesis_hash;
+    // `sync_parallel` passes the next block height to fetch. When resuming (start_height > 0),
+    // we must anchor GetHeaders to the stored parent hash — not genesis — or peers return
+    // block 1,2,… which get written at the wrong height (BIP90 rejects v1 at high height).
+    let mut current_height: u64;
+    let mut last_hash: [u8; 32];
 
     if start_height == 0 {
         let genesis_header = blvm_protocol::BlockHeader {
@@ -399,6 +432,27 @@ pub(crate) async fn download_headers(
             hex::encode(genesis_hash)
         );
         current_height = 1;
+        last_hash = genesis_hash;
+    } else {
+        let parent_h = start_height
+            .checked_sub(1)
+            .ok_or_else(|| anyhow::anyhow!("header sync: invalid start_height"))?;
+        last_hash = blockstore
+            .get_hash_by_height(parent_h)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot resume header sync at height {}: missing parent hash at height {}. \
+                     Sync from genesis or repair height_index (data may be inconsistent).",
+                    start_height,
+                    parent_h
+                )
+            })?;
+        current_height = start_height;
+        info!(
+            "Resuming header sync at height {} (GetHeaders locator = parent {})",
+            start_height,
+            hex::encode(last_hash)
+        );
     }
     let mut consecutive_failures = 0;
     let mut current_peer_idx = 0;
@@ -486,19 +540,26 @@ pub(crate) async fn download_headers(
                     match blvm_consensus::pow::check_proof_of_work(header) {
                         Ok(true) => {}
                         Ok(false) => {
-                            warn!(
-                                "Header at height {} failed PoW check, skipping",
+                            return Err(anyhow::anyhow!(
+                                "Header at height {} failed PoW — refusing to skip (would corrupt height index)",
                                 current_height
-                            );
-                            continue;
+                            ));
                         }
                         Err(e) => {
-                            warn!(
-                                "Header at height {} PoW check error: {}, skipping",
-                                current_height, e
-                            );
-                            continue;
+                            return Err(anyhow::anyhow!(
+                                "Header at height {} PoW check error: {e}",
+                                current_height
+                            ));
                         }
+                    }
+
+                    if header.prev_block_hash != last_hash {
+                        return Err(anyhow::anyhow!(
+                            "Header chain break at height {}: expected prev {} got {}",
+                            current_height,
+                            hex::encode(last_hash),
+                            hex::encode(header.prev_block_hash)
+                        ));
                     }
 
                     let mut header_data = [0u8; 80];

@@ -18,7 +18,7 @@ fn create_minimal_tx() -> Transaction {
     }
 }
 
-fn create_tx_with_input(prevout_hash: [u8; 32], prevout_index: u64) -> Transaction {
+fn create_tx_with_input(prevout_hash: [u8; 32], prevout_index: u32) -> Transaction {
     Transaction {
         version: 1,
         inputs: blvm_protocol::tx_inputs![TransactionInput {

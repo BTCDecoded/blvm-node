@@ -9,7 +9,7 @@
 use blvm_node::config::{RbfConfig, RbfMode};
 use blvm_node::node::mempool::MempoolManager;
 use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
-use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Create a test transaction with RBF signaling
 fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
@@ -33,19 +33,18 @@ fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
 
 /// Create a test UTXO set
 fn create_test_utxo_set() -> UtxoSet {
-    let mut utxo_set = HashMap::new();
+    let mut utxo_set = UtxoSet::default();
     utxo_set.insert(
         OutPoint {
             hash: [1; 32],
             index: 0,
         },
-        UTXO {
+        Arc::new(UTXO {
             value: 100_000,
             script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20).into(),
             height: 0,
-
             is_coinbase: false,
-        },
+        }),
     );
     utxo_set
 }

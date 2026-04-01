@@ -1,5 +1,6 @@
 //! Integration tests for mining functionality
 
+use blvm_protocol::SEGWIT_ACTIVATION_MAINNET;
 use blvm_node::rpc::mining::MiningRpc;
 use blvm_node::storage::Storage;
 use blvm_node::node::mempool::MempoolManager;
@@ -308,9 +309,12 @@ async fn test_template_rules_activation() {
     let rules = result.get("rules").unwrap().as_array().unwrap();
     assert!(rules.len() >= 1); // At least CSV
     
-    // Test at SegWit activation (height 481824)
-    tip_header.timestamp = 1231006505 + 481824 * 600;
-    storage.chain().update_tip(&random_hash(), &tip_header, 481824).unwrap();
+    // Test at SegWit activation (BIP141 mainnet)
+    tip_header.timestamp = 1231006505 + SEGWIT_ACTIVATION_MAINNET * 600;
+    storage
+        .chain()
+        .update_tip(&random_hash(), &tip_header, SEGWIT_ACTIVATION_MAINNET)
+        .unwrap();
     let result = mining.get_block_template(&params).await.unwrap();
     let rules = result.get("rules").unwrap().as_array().unwrap();
     let rule_strings: Vec<String> = rules.iter()

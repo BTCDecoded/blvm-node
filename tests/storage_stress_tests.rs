@@ -44,14 +44,9 @@ async fn test_storage_concurrent_block_writes() {
         let height = i as u64;
 
         handles.push(tokio::spawn(async move {
-            // Store block
-            blockstore_clone.store_block(&block_clone).ok()?;
-
-            // Store height
+            let _ = blockstore_clone.store_block(&block_clone);
             let block_hash = blockstore_clone.get_block_hash(&block_clone);
-            blockstore_clone.store_height(height, &block_hash).ok()?;
-
-            Some(())
+            let _ = blockstore_clone.store_height(height, &block_hash);
         }));
     }
 
@@ -84,7 +79,7 @@ async fn test_storage_concurrent_reads_writes() {
         let blockstore_clone = Arc::clone(&blockstore);
         let block = create_test_block(i);
         handles.push(tokio::spawn(async move {
-            blockstore_clone.store_block(&block).ok()
+            let _ = blockstore_clone.store_block(&block);
         }));
     }
 
@@ -94,7 +89,7 @@ async fn test_storage_concurrent_reads_writes() {
         let block = create_test_block(i);
         handles.push(tokio::spawn(async move {
             let block_hash = blockstore_clone.get_block_hash(&block);
-            blockstore_clone.get_block(&block_hash).ok()
+            let _ = blockstore_clone.get_block(&block_hash);
         }));
     }
 
@@ -136,14 +131,9 @@ async fn test_storage_concurrent_height_indexing() {
         let height = i;
 
         handles.push(tokio::spawn(async move {
-            // Store block
-            blockstore_clone.store_block(&block).ok()?;
-
-            // Store height index
+            let _ = blockstore_clone.store_block(&block);
             let block_hash = blockstore_clone.get_block_hash(&block);
-            blockstore_clone.store_height(height, &block_hash).ok()?;
-
-            Some(())
+            let _ = blockstore_clone.store_height(height, &block_hash);
         }));
     }
 
@@ -155,7 +145,7 @@ async fn test_storage_concurrent_height_indexing() {
     for i in 0..50 {
         let block = create_test_block(i);
         let block_hash = blockstore.get_block_hash(&block);
-        let stored_height = blockstore.get_height(&block_hash).unwrap();
+        let stored_height = blockstore.get_height_by_hash(&block_hash).unwrap();
         assert_eq!(stored_height, Some(i));
     }
 }
@@ -191,15 +181,8 @@ async fn test_storage_concurrent_header_storage() {
         let height = i;
 
         handles.push(tokio::spawn(async move {
-            // Store block (includes header)
-            blockstore_clone.store_block(&block).ok()?;
-
-            // Store recent header
-            blockstore_clone
-                .store_recent_header(height, &block.header)
-                .ok()?;
-
-            Some(())
+            let _ = blockstore_clone.store_block(&block);
+            let _ = blockstore_clone.store_recent_header(height, &block.header);
         }));
     }
 
@@ -225,17 +208,10 @@ async fn test_storage_witness_storage_concurrent() {
         let block = create_test_block(i);
 
         handles.push(tokio::spawn(async move {
-            // Store block
-            blockstore_clone.store_block(&block).ok()?;
-
-            // Store empty witnesses
+            let _ = blockstore_clone.store_block(&block);
             let block_hash = blockstore_clone.get_block_hash(&block);
-            let witnesses: Vec<Vec<Vec<u8>>> = vec![];
-            blockstore_clone
-                .store_witness(&block_hash, &witnesses)
-                .ok()?;
-
-            Some(())
+            let witnesses: &[Vec<blvm_protocol::segwit::Witness>] = &[];
+            let _ = blockstore_clone.store_witness(&block_hash, witnesses);
         }));
     }
 
@@ -255,7 +231,7 @@ async fn test_storage_flush_under_load() {
     }
 
     // Flush should succeed even with pending writes
-    let flush_result = storage.blocks().db.flush();
+    let flush_result = storage.flush();
     // May succeed or fail depending on implementation
     let _ = flush_result;
 }

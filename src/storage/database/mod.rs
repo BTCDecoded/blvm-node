@@ -7,6 +7,7 @@
 //! Module storage has been removed; modules use their own DB at {data_dir}/db/.
 
 use anyhow::Result;
+use std::any::Any;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -24,6 +25,13 @@ pub trait Database: Send + Sync {
 
     /// Flush all pending writes
     fn flush(&self) -> Result<()>;
+
+    /// Optional: reduce RocksDB background work / shrink caches when IBD reports memory pressure.
+    /// `level_u8` is `PressureLevel` as `u8` (see `parallel_ibd::memory`).
+    fn ibd_memory_pressure_tick(&self, _level_u8: u8) {}
+
+    /// For backend-specific fast paths (e.g. cross-column-family RocksDB `WriteBatch`).
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Tree/Table abstraction trait
@@ -61,6 +69,12 @@ pub trait Tree: Send + Sync {
     /// Check if tree is empty
     fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
+    }
+
+    /// Flush in-memory (memtable) data for this tree to durable on-disk storage.
+    /// Required before writing a persistence marker when writes used `commit_no_wal`.
+    fn flush_to_disk(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Iterate over all key-value pairs
@@ -107,6 +121,13 @@ pub trait BatchWriter {
     /// Returns Ok(()) if all operations were applied successfully.
     /// On error, no operations are applied (atomic rollback).
     fn commit(self: Box<Self>) -> Result<()>;
+
+    /// Commit without Write-Ahead Log (WAL).
+    /// Safe for IBD where crash recovery re-downloads from peers.
+    /// Default: falls back to `commit()`.
+    fn commit_no_wal(self: Box<Self>) -> Result<()> {
+        self.commit()
+    }
 
     /// Get the number of pending operations in the batch
     fn len(&self) -> usize;
@@ -345,6 +366,10 @@ mod sled_impl {
     }
 
     impl Database for SledDatabase {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
             if name.starts_with("module_") || name == "modules" {
                 return Err(anyhow::anyhow!(
@@ -443,7 +468,7 @@ mod sled_impl {
 
 // Redb implementation
 #[cfg(feature = "redb")]
-mod redb_impl {
+pub(crate) mod redb_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use redb::{Database as RedbDb, ReadableTable, TableDefinition};
@@ -720,9 +745,110 @@ mod redb_impl {
                 _ => None,
             }
         }
+
+        /// Single Redb write transaction for one parallel IBD block batch: all blockstore tables plus
+        /// recent-header MTP rows. Matches per-tree `commit_no_wal` semantics in `parallel_ibd`.
+        pub(crate) fn write_ibd_blockstore_flush_no_wal(
+            &self,
+            flush_order: &[usize],
+            heights: &[u64],
+            block_hashes: &[blvm_protocol::Hash],
+            block_data: &[Vec<u8>],
+            header_data: &[std::sync::Arc<Vec<u8>>],
+            witness_blobs: &[Option<Vec<u8>>],
+            metadata_blobs: &[Vec<u8>],
+            recent_entries: &[(u64, Vec<u8>)],
+        ) -> Result<()> {
+            use crate::storage::blockstore::block_height_row_key;
+
+            let n = flush_order.len();
+            let mut blocks_ops: Vec<([u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN], usize)> =
+                Vec::with_capacity(n);
+            let mut headers_ops: Vec<([u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN], usize)> =
+                Vec::with_capacity(n);
+            let mut witness_ops: Vec<([u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN], usize)> =
+                Vec::new();
+            let mut height_ops: Vec<([u8; 8], usize)> = Vec::with_capacity(n);
+            let mut h2h_ops: Vec<(usize, [u8; 8])> = Vec::with_capacity(n);
+            let mut meta_ops: Vec<([u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN], usize)> =
+                Vec::with_capacity(n);
+
+            for &i in flush_order {
+                let height = heights[i];
+                let key = block_height_row_key(height, &block_hashes[i]);
+                blocks_ops.push((key, i));
+                headers_ops.push((key, i));
+                if witness_blobs[i].is_some() {
+                    witness_ops.push((key, i));
+                }
+                height_ops.push((height.to_be_bytes(), i));
+                h2h_ops.push((i, height.to_be_bytes()));
+                meta_ops.push((key, i));
+            }
+
+            let write_txn = self.db.begin_write()?;
+            {
+                {
+                    let mut t = write_txn.open_table(BLOCKS_TABLE)?;
+                    for (key, i) in blocks_ops {
+                        t.insert(key.as_slice(), block_data[i].as_slice())?;
+                    }
+                }
+                {
+                    let mut t = write_txn.open_table(HEADERS_TABLE)?;
+                    for (key, i) in headers_ops {
+                        t.insert(key.as_slice(), header_data[i].as_slice())?;
+                    }
+                }
+                if !witness_ops.is_empty() {
+                    let mut t = write_txn.open_table(WITNESSES_TABLE)?;
+                    for (key, i) in witness_ops {
+                        let w = witness_blobs[i].as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("IBD Redb flush: witness_ops index missing blob")
+                        })?;
+                        t.insert(key.as_slice(), w.as_slice())?;
+                    }
+                }
+                {
+                    let mut t = write_txn.open_table(HEIGHT_INDEX_TABLE)?;
+                    for (height_key, i) in height_ops {
+                        t.insert(height_key.as_slice(), block_hashes[i].as_slice())?;
+                    }
+                }
+                {
+                    let mut t = write_txn.open_table(HASH_TO_HEIGHT_TABLE)?;
+                    for (i, height_key) in h2h_ops {
+                        t.insert(block_hashes[i].as_slice(), height_key.as_slice())?;
+                    }
+                }
+                {
+                    let mut t = write_txn.open_table(BLOCK_METADATA_TABLE)?;
+                    for (key, i) in meta_ops {
+                        t.insert(key.as_slice(), metadata_blobs[i].as_slice())?;
+                    }
+                }
+                {
+                    let mut t = write_txn.open_table(RECENT_HEADERS_TABLE)?;
+                    for &(height, ref header_bytes) in recent_entries {
+                        let height_bytes = height.to_be_bytes();
+                        t.insert(height_bytes.as_slice(), header_bytes.as_slice())?;
+                        if height > 11 {
+                            let rm = (height - 12).to_be_bytes();
+                            let _ = t.remove(rm.as_slice());
+                        }
+                    }
+                }
+            }
+            write_txn.commit()?;
+            Ok(())
+        }
     }
 
     impl Database for RedbDatabase {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
             if name.starts_with("module_") || name == "modules" {
                 return Err(anyhow::anyhow!(
@@ -959,13 +1085,16 @@ mod redb_impl {
 pub mod rocksdb_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
-    use rocksdb::{BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, DB};
+    use rocksdb::{
+        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, WriteOptions, DB,
+    };
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     pub struct RocksDBDatabase {
-        #[allow(dead_code)]
-        cache: Option<Cache>,
+        cache: std::sync::Mutex<Option<Cache>>,
+        cache_nominal_bytes: usize,
         db: Arc<DB>,
     }
 
@@ -980,23 +1109,8 @@ pub mod rocksdb_impl {
             opts.create_if_missing(true);
             opts.create_missing_column_families(true);
 
-            // IBD tuning: more background threads for flush/compaction (read-heavy workloads benefit)
-            // Precedence: config > ENV > default
-            let default_parallelism = std::thread::available_parallelism()
-                .map(|p| p.get().max(4) as i32)
-                .unwrap_or(4);
-            let parallelism: i32 = storage_config
-                .and_then(|s| s.rocksdb.as_ref())
-                .and_then(|r| r.parallelism)
-                .or_else(|| std::env::var("BLVM_ROCKSDB_PARALLELISM").ok().and_then(|s| s.parse().ok()))
-                .unwrap_or(default_parallelism);
-            opts.increase_parallelism(parallelism);
-            // Each open SST file has a table reader loaded in memory (~64KB+).
-            // At 10000, this is a hidden ~640MB+ RSS contributor. 256 is sufficient
-            // for IBD's sequential scan pattern; files reopen on demand.
-            opts.set_max_open_files(256);
-
-            // Detect system RAM to scale RocksDB memory usage.
+            // Detect system RAM first so every tunable below can scale with it.
+            // /proc/meminfo gives kB; round to nearest GB.
             let total_ram_gb: u64 = {
                 #[cfg(target_os = "linux")]
                 {
@@ -1008,12 +1122,11 @@ pub mod rocksdb_impl {
                                 .and_then(|l| l.split_whitespace().nth(1))
                                 .and_then(|v| v.parse::<u64>().ok())
                         })
-                        .map(|kb| kb / (1024 * 1024))
+                        .map(|kb| (kb / 1024 + 512) / 1024)
                         .unwrap_or(16)
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    // Windows/macOS: no /proc. Use BLVM_RAM_GB env override or default 16GB.
                     std::env::var("BLVM_RAM_GB")
                         .ok()
                         .and_then(|s| s.parse().ok())
@@ -1021,11 +1134,22 @@ pub mod rocksdb_impl {
                 }
             };
 
+            let default_parallelism = std::thread::available_parallelism()
+                .map(|p| p.get().max(4) as i32)
+                .unwrap_or(4);
+            let parallelism: i32 = storage_config
+                .and_then(|s| s.rocksdb.as_ref())
+                .and_then(|r| r.parallelism)
+                .or_else(|| std::env::var("BLVM_ROCKSDB_PARALLELISM").ok().and_then(|s| s.parse().ok()))
+                .unwrap_or(default_parallelism);
+            opts.increase_parallelism(parallelism);
+            let max_open = if total_ram_gb >= 32 { 256 } else if total_ram_gb >= 24 { 192 } else { 64 };
+            opts.set_max_open_files(max_open);
+
             // Each compaction thread holds ~64MB of input/output buffers in memory.
-            // Scale by RAM: 2 threads on <=16GB, 4 on 32GB+.
-            // Precedence: config > ENV > default
-            let default_compactions = if total_ram_gb >= 32 { 4 } else { 2 };
-            let default_flushes = if total_ram_gb >= 32 { 4 } else { 2 };
+            // 16 GB: 1+1=2 bg jobs to keep ~64 MB in compaction instead of ~128 MB.
+            let default_compactions = if total_ram_gb >= 32 { 4 } else if total_ram_gb >= 24 { 2 } else { 1 };
+            let default_flushes = if total_ram_gb >= 32 { 4 } else if total_ram_gb >= 24 { 2 } else { 1 };
             let rocksdb_cfg = storage_config.and_then(|s| s.rocksdb.as_ref());
             let max_compactions: i32 = rocksdb_cfg
                 .and_then(|r| r.max_background_compactions)
@@ -1042,19 +1166,44 @@ pub mod rocksdb_impl {
             // RocksDB uses max_background_jobs; it allocates between flushes and compactions
             opts.set_max_background_jobs(max_compactions + max_flushes);
             opts.set_level_zero_file_num_compaction_trigger(level0_trigger);
+            let max_subcompactions: u32 = std::env::var("BLVM_ROCKSDB_MAX_SUBCOMPACTIONS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| {
+                    if total_ram_gb >= 32 {
+                        4
+                    } else if total_ram_gb >= 24 {
+                        3
+                    } else {
+                        2
+                    }
+                })
+                .clamp(1, 64);
+            opts.set_max_subcompactions(max_subcompactions);
+            if let Ok(bps) = std::env::var("BLVM_ROCKSDB_BYTES_PER_SYNC") {
+                if let Ok(n) = bps.parse::<u64>() {
+                    if n > 0 {
+                        opts.set_bytes_per_sync(n);
+                    }
+                }
+            }
             let default_write_buffer = if total_ram_gb >= 32 {
                 256
             } else if total_ram_gb >= 24 {
                 192
+            } else if total_ram_gb >= 16 {
+                16
             } else {
-                128
+                8
             };
             let default_block_cache = if total_ram_gb >= 32 {
-                450
+                512
             } else if total_ram_gb >= 24 {
-                300
+                384
+            } else if total_ram_gb >= 16 {
+                32
             } else {
-                200
+                16
             };
 
             // Precedence: config > ENV > default
@@ -1067,42 +1216,128 @@ pub mod rocksdb_impl {
             tracing::info!("[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={} write_buffer={}MB (ram={}GB)",
                 parallelism, max_compactions, max_flushes, level0_trigger, db_write_buffer_mb, total_ram_gb);
 
-            // RocksDB block cache: ENV > config > default (12-factor)
+            // Block cache: ENV > config (capped to RAM-tier) > RAM-tiered default.
             let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .or_else(|| storage_config.map(|s| s.dbcache_mb))
-                .unwrap_or(default_block_cache);
+                .unwrap_or_else(|| {
+                    let from_config = storage_config.map(|s| s.dbcache_mb).unwrap_or(0);
+                    if from_config > 0 { from_config.min(default_block_cache) } else { default_block_cache }
+                });
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let cache = Cache::new_lru_cache(dbcache_bytes);
             let mut block_opts = BlockBasedOptions::default();
             block_opts.set_block_cache(&cache);
+            block_opts.set_cache_index_and_filter_blocks(true);
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
             opts.set_block_based_table_factory(&block_opts);
-            tracing::info!("[ROCKSDB] block_cache={}MB (BLVM_DBCACHE_MB)", dbcache_mb);
+            tracing::info!("[ROCKSDB] block_cache={}MB (ram={}GB)", dbcache_mb, total_ram_gb);
 
-            // Build CF list: default + all known trees (parity with redb)
+            // WriteBufferManager: hard cap on total memtable memory across ALL CFs.
+            // allow_stall=true blocks writes instead of exceeding the cap.
+            let wbm_mb: usize = if total_ram_gb >= 32 {
+                512
+            } else if total_ram_gb >= 24 {
+                384
+            } else if total_ram_gb >= 16 {
+                48
+            } else {
+                32
+            };
+            let wbm = rocksdb::WriteBufferManager::new_write_buffer_manager(wbm_mb * 1024 * 1024, true);
+            opts.set_write_buffer_manager(&wbm);
+            tracing::info!("[ROCKSDB] WriteBufferManager: {}MB memtable cap (allow_stall=true)", wbm_mb);
+
+            // Dedicated block cache for ibd_utxos/utxos CFs.
+            // The shared `cache` above covers all other CFs. A separate UTXO cache prevents
+            // block and header reads from evicting hot UTXO SST blocks during IBD.
+            // At h=270k the UTXO SST is several GB; the shared 32 MB cache has ~0% hit rate.
+            // A 128 MB dedicated cache on 16 GB covers more of the recently-written UTXO SST
+            // blocks, reducing multi_get SSD round-trips in the prefetch workers.
+            let utxo_block_cache_mb: usize = std::env::var("BLVM_ROCKSDB_UTXO_BLOCK_CACHE_MB")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0 && n <= 16_384)
+                .unwrap_or_else(|| {
+                    if total_ram_gb >= 64 {
+                        2048
+                    } else if total_ram_gb >= 32 {
+                        1024
+                    } else if total_ram_gb >= 24 {
+                        384
+                    } else if total_ram_gb >= 16 {
+                        128
+                    } else {
+                        64
+                    }
+                });
+            let utxo_cache = Cache::new_lru_cache(utxo_block_cache_mb * 1024 * 1024);
+            tracing::info!("[ROCKSDB] utxo_block_cache={}MB (dedicated, ram={}GB)", utxo_block_cache_mb, total_ram_gb);
+
+            // Per-CF options for IBD-hot column families.
+            let make_utxo_cf_opts = |uc: &Cache| -> Options {
+                let mut o = Options::default();
+                let mut bbo = BlockBasedOptions::default();
+                bbo.set_bloom_filter(10.0, false);
+                bbo.set_block_cache(uc);
+                bbo.set_cache_index_and_filter_blocks(true);
+                bbo.set_pin_l0_filter_and_index_blocks_in_cache(true);
+                o.set_block_based_table_factory(&bbo);
+                let wb = if total_ram_gb >= 32 { 256 } else if total_ram_gb >= 24 { 128 } else if total_ram_gb >= 16 { 8 } else { 4 };
+                o.set_write_buffer_size(wb * 1024 * 1024);
+                o.set_max_write_buffer_number(2);
+                o.set_level_zero_file_num_compaction_trigger(12);
+                o.set_target_file_size_base(if total_ram_gb >= 32 { 128 } else { 64 } * 1024 * 1024);
+                o.set_compression_type(rocksdb::DBCompressionType::Zstd);
+                o.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+                o
+            };
+            let make_bulk_cf_opts = |cache: &Cache| -> Options {
+                let mut o = Options::default();
+                let mut bbo = BlockBasedOptions::default();
+                bbo.set_block_cache(cache);
+                bbo.set_cache_index_and_filter_blocks(true);
+                o.set_block_based_table_factory(&bbo);
+                let wb = if total_ram_gb >= 32 { 64 } else if total_ram_gb >= 24 { 32 } else if total_ram_gb >= 16 { 8 } else { 4 };
+                o.set_write_buffer_size(wb * 1024 * 1024);
+                o.set_level_zero_file_num_compaction_trigger(12);
+                o.set_compression_type(rocksdb::DBCompressionType::Zstd);
+                o.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+                o
+            };
+            let cf_opts_for = |name: &str| -> Options {
+                match name {
+                    "ibd_utxos" | "utxos" => make_utxo_cf_opts(&utxo_cache),
+                    "blocks" | "headers" | "witnesses" | "height_index" => make_bulk_cf_opts(&cache),
+                    _ => Options::default(),
+                }
+            };
+            tracing::info!("[ROCKSDB] per-CF: ibd_utxos/utxos bloom+zstd+dedicated_cache, blocks/headers/witnesses zstd, WAL disabled for IBD");
+
             let mut cfs = vec![ColumnFamilyDescriptor::new("default", Options::default())];
             cfs.extend(
                 super::KNOWN_TREE_NAMES
                     .iter()
-                    .map(|n| ColumnFamilyDescriptor::new(*n, Options::default())),
+                    .map(|n| ColumnFamilyDescriptor::new(*n, cf_opts_for(n))),
             );
 
-            // If existing DB may have extra CFs (e.g. old module_* per-CF), merge for reopen
             let db = if db_path.exists() {
                 let known: std::collections::HashSet<_> = ["default"]
                     .iter()
                     .chain(super::KNOWN_TREE_NAMES)
                     .map(|s| (*s).to_string())
                     .collect();
-                let mut cf_descriptors: Vec<ColumnFamilyDescriptor> = cfs
+                let cf_descriptors: Vec<ColumnFamilyDescriptor> = cfs
                     .into_iter()
                     .chain(
                         rocksdb::DB::list_cf(&opts, &db_path)
                             .unwrap_or_default()
                             .into_iter()
                             .filter(|name| !known.contains(name))
-                            .map(|name| ColumnFamilyDescriptor::new(name, Options::default())),
+                            .map(|name| {
+                                let o = cf_opts_for(&name);
+                                ColumnFamilyDescriptor::new(name, o)
+                            }),
                     )
                     .collect();
                 DB::open_cf_descriptors(&opts, &db_path, cf_descriptors)?
@@ -1111,7 +1346,8 @@ pub mod rocksdb_impl {
             };
 
             Ok(Self {
-                cache: Some(cache),
+                cache: std::sync::Mutex::new(Some(cache)),
+                cache_nominal_bytes: dbcache_bytes,
                 db: Arc::new(db),
             })
         }
@@ -1135,13 +1371,148 @@ pub mod rocksdb_impl {
             let db = DB::open_cf_descriptors(&opts, &chainstate_path, cfs)?;
 
             Ok(Self {
-                cache: None,
+                cache: std::sync::Mutex::new(None),
+                cache_nominal_bytes: 0,
                 db: Arc::new(db),
             })
         }
     }
 
+    impl RocksDBDatabase {
+        /// One cross-CF `WriteBatch` + `write_opt` (no WAL) for parallel IBD block flush.
+        /// Semantics match separate per-tree `commit_no_wal` batches in `parallel_ibd::do_flush_to_storage`.
+        pub(crate) fn write_ibd_blockstore_flush_no_wal(
+            &self,
+            flush_order: &[usize],
+            heights: &[u64],
+            block_hashes: &[blvm_protocol::Hash],
+            block_data: &[Vec<u8>],
+            header_data: &[std::sync::Arc<Vec<u8>>],
+            witness_blobs: &[Option<Vec<u8>>],
+            metadata_blobs: &[Vec<u8>],
+            recent_entries: &[(u64, Vec<u8>)],
+        ) -> Result<()> {
+            use crate::storage::blockstore::block_height_row_key;
+
+            let cf_blocks = self
+                .db
+                .cf_handle("blocks")
+                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"blocks\" not found"))?;
+            let cf_headers = self
+                .db
+                .cf_handle("headers")
+                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"headers\" not found"))?;
+            let cf_witnesses = self
+                .db
+                .cf_handle("witnesses")
+                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"witnesses\" not found"))?;
+            let cf_height = self
+                .db
+                .cf_handle("height_index")
+                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"height_index\" not found"))?;
+            let cf_h2h = self
+                .db
+                .cf_handle("hash_to_height")
+                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"hash_to_height\" not found"))?;
+            let cf_meta = self
+                .db
+                .cf_handle("block_metadata")
+                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"block_metadata\" not found"))?;
+            let cf_recent = self
+                .db
+                .cf_handle("recent_headers")
+                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"recent_headers\" not found"))?;
+
+            let mut batch = rocksdb::WriteBatch::default();
+
+            for &i in flush_order {
+                let height = heights[i];
+                let key = block_height_row_key(height, &block_hashes[i]);
+                batch.put_cf(cf_blocks, key, &block_data[i]);
+                batch.put_cf(cf_headers, key, header_data[i].as_slice());
+                if let Some(w) = witness_blobs[i].as_ref() {
+                    batch.put_cf(cf_witnesses, key, w.as_slice());
+                }
+                let height_key = height.to_be_bytes();
+                batch.put_cf(cf_height, height_key, block_hashes[i]);
+                batch.put_cf(cf_h2h, block_hashes[i], height_key);
+                batch.put_cf(cf_meta, key, &metadata_blobs[i]);
+            }
+
+            for &(height, ref header_bytes) in recent_entries {
+                let height_bytes = height.to_be_bytes();
+                batch.put_cf(cf_recent, height_bytes, header_bytes.as_slice());
+                if height > 11 {
+                    let rm = (height - 12).to_be_bytes();
+                    batch.delete_cf(cf_recent, rm);
+                }
+            }
+
+            let mut wo = WriteOptions::default();
+            wo.set_sync(false);
+            wo.disable_wal(true);
+            self.db.write_opt(batch, &wo)?;
+            Ok(())
+        }
+    }
+
     impl Database for RocksDBDatabase {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn ibd_memory_pressure_tick(&self, level_u8: u8) {
+            static THROTTLED: AtomicBool = AtomicBool::new(false);
+            static CACHE_SHRUNK: AtomicBool = AtomicBool::new(false);
+
+            let critical_plus = level_u8 >= 2;
+            let emergency = level_u8 >= 3;
+            let throttled = THROTTLED.load(Ordering::Relaxed);
+
+            if emergency && !throttled {
+                if let Ok(()) = self.db.set_options(&[("max_background_jobs", "1")]) {
+                    self.db.cancel_all_background_work(false);
+                    THROTTLED.store(true, Ordering::Relaxed);
+                    tracing::warn!("[ROCKSDB] EMERGENCY: max_background_jobs -> 1, cancelled pending bg work");
+                }
+            } else if critical_plus && !throttled {
+                if let Ok(()) = self.db.set_options(&[("max_background_jobs", "1")]) {
+                    THROTTLED.store(true, Ordering::Relaxed);
+                    tracing::warn!("[ROCKSDB] IBD: max_background_jobs -> 1 under Critical+");
+                }
+            } else if !critical_plus && throttled {
+                if let Ok(()) = self.db.set_options(&[("max_background_jobs", "2")]) {
+                    THROTTLED.store(false, Ordering::Relaxed);
+                    tracing::info!("[ROCKSDB] IBD: max_background_jobs restored to 2");
+                }
+            }
+
+            let cache_is_shrunk = CACHE_SHRUNK.load(Ordering::Relaxed);
+            if emergency && !cache_is_shrunk {
+                if let Ok(mut guard) = self.cache.lock() {
+                    if let Some(c) = guard.as_mut() {
+                        c.set_capacity(8 * 1024 * 1024);
+                        CACHE_SHRUNK.store(true, Ordering::Relaxed);
+                        tracing::warn!(
+                            "[ROCKSDB] EMERGENCY: block_cache shrunk to 8MB (was {}MB)",
+                            self.cache_nominal_bytes / (1024 * 1024)
+                        );
+                    }
+                }
+            } else if !emergency && cache_is_shrunk {
+                if let Ok(mut guard) = self.cache.lock() {
+                    if let Some(c) = guard.as_mut() {
+                        c.set_capacity(self.cache_nominal_bytes);
+                        CACHE_SHRUNK.store(false, Ordering::Relaxed);
+                        tracing::info!(
+                            "[ROCKSDB] block_cache restored to {}MB",
+                            self.cache_nominal_bytes / (1024 * 1024)
+                        );
+                    }
+                }
+            }
+        }
+
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
             if name.starts_with("module_") || name == "modules" {
                 return Err(anyhow::anyhow!(
@@ -1197,7 +1568,8 @@ pub mod rocksdb_impl {
                 return Ok(Vec::new());
             }
             let cf = self.cf()?;
-            let pairs: Vec<_> = keys.iter().map(|k| (cf, *k)).collect();
+            let mut pairs = Vec::with_capacity(keys.len());
+            pairs.extend(keys.iter().map(|k| (cf, *k)));
             let raw = self.db.multi_get_cf(pairs);
             let mut results = Vec::with_capacity(raw.len());
             for r in raw {
@@ -1213,6 +1585,12 @@ pub mod rocksdb_impl {
 
         fn contains_key(&self, key: &[u8]) -> Result<bool> {
             Ok(self.db.get_cf(self.cf()?, key)?.is_some())
+        }
+
+        fn flush_to_disk(&self) -> Result<()> {
+            self.db
+                .flush_cf(self.cf()?)
+                .map_err(|e| anyhow::anyhow!("RocksDB flush_cf failed: {}", e))
         }
 
         fn clear(&self) -> Result<()> {
@@ -1297,6 +1675,14 @@ pub mod rocksdb_impl {
             Ok(())
         }
 
+        fn commit_no_wal(self: Box<Self>) -> Result<()> {
+            let mut wo = WriteOptions::default();
+            wo.set_sync(false);
+            wo.disable_wal(true);
+            self.db.write_opt(self.batch, &wo)?;
+            Ok(())
+        }
+
         fn len(&self) -> usize {
             self.op_count
         }
@@ -1305,7 +1691,7 @@ pub mod rocksdb_impl {
 
 // TidesDB implementation
 #[cfg(feature = "tidesdb")]
-mod tidesdb_impl {
+pub(crate) mod tidesdb_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use std::path::Path;
@@ -1401,9 +1787,63 @@ mod tidesdb_impl {
                 .get_column_family(name)
                 .map_err(|e| anyhow::anyhow!("TidesDB get_column_family failed: {}", e))
         }
+
+        /// One transaction for all blockstore column families plus recent headers (IBD, no extra sync).
+        /// Matches the per-CF batch sequence in `parallel_ibd::do_flush_to_storage`.
+        pub(crate) fn write_ibd_blockstore_flush_no_wal(
+            &self,
+            flush_order: &[usize],
+            heights: &[u64],
+            block_hashes: &[blvm_protocol::Hash],
+            block_data: &[Vec<u8>],
+            header_data: &[std::sync::Arc<Vec<u8>>],
+            witness_blobs: &[Option<Vec<u8>>],
+            metadata_blobs: &[Vec<u8>],
+            recent_entries: &[(u64, Vec<u8>)],
+        ) -> Result<()> {
+            use crate::storage::blockstore::block_height_row_key;
+
+            let cf_blocks = self.get_or_create_cf("blocks")?;
+            let cf_headers = self.get_or_create_cf("headers")?;
+            let cf_witnesses = self.get_or_create_cf("witnesses")?;
+            let cf_height = self.get_or_create_cf("height_index")?;
+            let cf_h2h = self.get_or_create_cf("hash_to_height")?;
+            let cf_meta = self.get_or_create_cf("block_metadata")?;
+            let cf_recent = self.get_or_create_cf("recent_headers")?;
+
+            let mut txn = self.db.begin_transaction()?;
+            for &i in flush_order {
+                let height = heights[i];
+                let key = block_height_row_key(height, &block_hashes[i]);
+                txn.put(&cf_blocks, key.as_slice(), &block_data[i], -1)?;
+                txn.put(&cf_headers, key.as_slice(), header_data[i].as_slice(), -1)?;
+                if let Some(w) = witness_blobs[i].as_ref() {
+                    txn.put(&cf_witnesses, key.as_slice(), w.as_slice(), -1)?;
+                }
+                let height_key = height.to_be_bytes();
+                txn.put(&cf_height, &height_key, block_hashes[i].as_slice(), -1)?;
+                txn.put(&cf_h2h, block_hashes[i].as_slice(), &height_key, -1)?;
+                txn.put(&cf_meta, key.as_slice(), &metadata_blobs[i], -1)?;
+            }
+            for &(height, ref header_bytes) in recent_entries {
+                let height_bytes = height.to_be_bytes();
+                txn.put(&cf_recent, height_bytes.as_slice(), header_bytes.as_slice(), -1)?;
+                if height > 11 {
+                    let rm = (height - 12).to_be_bytes();
+                    txn.delete(&cf_recent, rm.as_slice())?;
+                }
+            }
+            txn.commit().map_err(|e| {
+                anyhow::anyhow!("TidesDB IBD blockstore flush commit failed: {}", e)
+            })
+        }
     }
 
     impl Database for TidesDBDatabase {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
             if name.starts_with("module_") || name == "modules" {
                 return Err(anyhow::anyhow!(

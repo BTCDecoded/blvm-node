@@ -1,5 +1,6 @@
 //! Mempool policy and RBF (Replace-By-Fee) configuration.
 
+use blvm_protocol::spam_filter::SpamFilterConfigSerializable;
 use serde::{Deserialize, Serialize};
 
 /// RBF (Replace-By-Fee) mode
@@ -187,6 +188,15 @@ pub struct MempoolPolicyConfig {
 
     #[serde(default = "default_tx_byte_rate_burst")]
     pub tx_byte_rate_burst: u64,
+
+    /// Reject transactions classified as spam before they enter the mempool (opt-in).
+    /// When `spam_filter` is set, it overrides default spam filter parameters.
+    #[serde(default = "default_reject_spam_in_mempool")]
+    pub reject_spam_in_mempool: bool,
+
+    /// Optional spam filter tuning when `reject_spam_in_mempool` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spam_filter: Option<SpamFilterConfigSerializable>,
 }
 
 fn default_max_mempool_mb() -> u64 {
@@ -253,6 +263,10 @@ fn default_tx_byte_rate_burst() -> u64 {
     1_000_000
 }
 
+fn default_reject_spam_in_mempool() -> bool {
+    false
+}
+
 impl Default for MempoolPolicyConfig {
     fn default() -> Self {
         Self {
@@ -273,6 +287,8 @@ impl Default for MempoolPolicyConfig {
             tx_rate_limit_per_sec: 1,
             tx_byte_rate_limit: 100_000,
             tx_byte_rate_burst: 1_000_000,
+            reject_spam_in_mempool: false,
+            spam_filter: None,
         }
     }
 }

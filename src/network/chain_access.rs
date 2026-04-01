@@ -65,32 +65,11 @@ impl ChainStateAccess for NodeChainAccess {
     }
 
     /// Get headers for a block locator (for GetHeaders requests)
-    /// This implements the Bitcoin block locator algorithm
     fn get_headers_for_locator(&self, locator: &[Hash], stop: &Hash) -> Vec<BlockHeader> {
-        let mut headers = Vec::new();
-
-        // Bitcoin block locator algorithm:
-        // 1. Start with the most recent block hash
-        // 2. Go back exponentially (1, 2, 4, 8, 16, ...) until we find a common ancestor
-        // 3. Stop when we reach the stop hash or run out of hashes
-
-        for hash in locator {
-            // If we've reached the stop hash, stop
-            if hash == stop {
-                break;
-            }
-
-            // Try to get the header
-            if let Ok(Some(header)) = self.blockstore.get_header(hash) {
-                headers.push(header);
-            } else {
-                // If we can't find this hash, we've likely gone too far back
-                // Continue to next hash in locator
-                continue;
-            }
-        }
-
-        headers
+        const MAX_HEADERS: usize = 2000;
+        self.blockstore
+            .build_headers_response(locator, stop, MAX_HEADERS)
+            .unwrap_or_default()
     }
 
     /// Get all mempool transactions

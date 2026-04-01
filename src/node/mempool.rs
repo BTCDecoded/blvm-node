@@ -684,12 +684,15 @@ impl MempoolManager {
         let mut spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
         let mut non_spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
 
+        let entries: Vec<(Hash, Transaction)> = {
+            let pool = self.pool_lock();
+            pool.transactions.iter().map(|(h, t)| (*h, t.clone())).collect()
+        };
         let fee_cache = self.fee_cache.read().unwrap();
-        for (hash, tx) in &self.pool_lock().transactions {
+        for (hash, tx) in &entries {
             let size = serialize_transaction(tx).len();
             let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
 
-            // Check if transaction is spam
             let result = spam_filter.is_spam(tx);
             if result.is_spam {
                 spam_txs.push((*hash, fee_rate, size));
@@ -970,16 +973,20 @@ impl MempoolManager {
             }
             processed.insert(current_hash);
 
-            if let Some(current_tx) = self.pool_lock().transactions.get(&current_hash) {
-                for input in &current_tx.inputs {
-                    // Find parent transaction that created this output
-                    for parent_hash in self.pool_lock().transactions.keys() {
-                        if parent_hash == &input.prevout.hash {
-                            if !ancestors.contains(parent_hash) {
-                                ancestors.insert(*parent_hash);
-                                to_process.push(*parent_hash);
+            // Single pool critical section — nested pool_lock() would deadlock (non-reentrant Mutex).
+            {
+                let pool = self.pool_lock();
+                if let Some(current_tx) = pool.transactions.get(&current_hash) {
+                    let parent_keys: Vec<Hash> = pool.transactions.keys().copied().collect();
+                    for input in &current_tx.inputs {
+                        for parent_hash in &parent_keys {
+                            if parent_hash == &input.prevout.hash {
+                                if !ancestors.contains(parent_hash) {
+                                    ancestors.insert(*parent_hash);
+                                    to_process.push(*parent_hash);
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
                 }
@@ -1031,24 +1038,25 @@ impl MempoolManager {
             }
             processed.insert(current_hash);
 
-            if let Some(current_tx) = self.pool_lock().transactions.get(&current_hash) {
-                // Find all outputs of current tx
-                let output_outpoints: Vec<_> = (0..current_tx.outputs.len())
-                    .map(|idx| OutPoint {
-                        hash: current_hash,
-                        index: idx as u32,
-                    })
-                    .collect();
+            {
+                let pool = self.pool_lock();
+                if let Some(current_tx) = pool.transactions.get(&current_hash) {
+                    let output_outpoints: Vec<_> = (0..current_tx.outputs.len())
+                        .map(|idx| OutPoint {
+                            hash: current_hash,
+                            index: idx as u32,
+                        })
+                        .collect();
 
-                // Find transactions that spend these outputs
-                for (child_hash, child_tx) in &self.pool_lock().transactions {
-                    for input in &child_tx.inputs {
-                        if output_outpoints.contains(&input.prevout) {
-                            if !descendants.contains(child_hash) {
-                                descendants.insert(*child_hash);
-                                to_process.push(*child_hash);
+                    for (child_hash, child_tx) in &pool.transactions {
+                        for input in &child_tx.inputs {
+                            if output_outpoints.contains(&input.prevout) {
+                                if !descendants.contains(child_hash) {
+                                    descendants.insert(*child_hash);
+                                    to_process.push(*child_hash);
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
                 }
@@ -1130,6 +1138,24 @@ impl MempoolManager {
         use blvm_protocol::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
 
+        if let Some(ref policy) = *self.policy_config.read().unwrap() {
+            if policy.reject_spam_in_mempool {
+                use blvm_protocol::spam_filter::SpamFilter;
+                let filter = policy
+                    .spam_filter
+                    .as_ref()
+                    .map(|cfg| SpamFilter::with_config(cfg.clone().into()))
+                    .unwrap_or_else(SpamFilter::new);
+                if filter.is_spam(&tx).is_spam {
+                    warn!(
+                        "Transaction {} rejected: classified as spam (reject_spam_in_mempool)",
+                        hex::encode(tx_hash)
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+
         // Check for conflicts with existing mempool transactions
         // If conflict exists, check if RBF replacement is allowed
         let mut conflicting_tx_hash: Option<Hash> = None;
@@ -1148,7 +1174,11 @@ impl MempoolManager {
 
         // If there's a conflict, try RBF replacement
         if let Some(existing_hash) = conflicting_tx_hash {
-            if let Some(existing_tx) = self.pool_lock().transactions.get(&existing_hash) {
+            let existing_clone = {
+                let pool = self.pool_lock();
+                pool.transactions.get(&existing_hash).cloned()
+            };
+            if let Some(ref existing_tx) = existing_clone {
                 // Check if RBF replacement is allowed
                 // Note: Storage is not available in MempoolManager context
                 // Conservative mode confirmation checks will be skipped if storage is None
@@ -1158,7 +1188,7 @@ impl MempoolManager {
                         hex::encode(existing_hash)
                     );
 
-                    // Remove existing transaction
+                    // Remove existing transaction (must not hold pool lock — remove_transaction locks pool)
                     self.remove_transaction(&existing_hash);
 
                     // Update RBF tracking
@@ -1312,16 +1342,31 @@ impl MempoolManager {
         // Note: In a production system, we'd track UTXO set changes and only recalculate when needed
         self.update_fee_index(utxo_set);
 
-        // Use sorted index to get top N transactions (already sorted by fee rate descending)
-        let mut result = Vec::with_capacity(limit);
-        let fee_index = self.fee_index.read().unwrap();
-        for (Reverse(_fee_rate), tx_hashes) in fee_index.iter() {
-            for tx_hash in tx_hashes {
-                if let Some(tx) = self.pool_lock().transactions.get(tx_hash) {
-                    result.push(tx.clone());
-                    if result.len() >= limit {
-                        return result;
+        // Collect hashes under fee_index read only; do not call pool_lock while holding fee_index
+        // (update_fee_index may interleave with remove_transaction — opposite lock order would deadlock).
+        let mut ordered_hashes: Vec<Hash> = Vec::with_capacity(limit);
+        {
+            let fee_index = self.fee_index.read().unwrap();
+            for (Reverse(_fee_rate), tx_hashes) in fee_index.iter() {
+                for tx_hash in tx_hashes {
+                    ordered_hashes.push(*tx_hash);
+                    if ordered_hashes.len() >= limit {
+                        break;
                     }
+                }
+                if ordered_hashes.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        let mut result = Vec::with_capacity(limit.min(ordered_hashes.len()));
+        let pool = self.pool_lock();
+        for h in ordered_hashes {
+            if let Some(tx) = pool.transactions.get(&h) {
+                result.push(tx.clone());
+                if result.len() >= limit {
+                    break;
                 }
             }
         }
@@ -1379,18 +1424,30 @@ impl MempoolManager {
         fee_index.clear();
         drop(fee_index);
 
-        let mut fee_cache = self.fee_cache.write().unwrap();
-        fee_cache.clear();
+        {
+            let mut fee_cache = self.fee_cache.write().unwrap();
+            fee_cache.clear();
+        }
 
-        // Optimization: Pre-collect all prevouts from all transactions for batch UTXO lookup
-        let all_prevouts: Vec<(Hash, OutPoint)> = self
-            .pool_lock()
-            .transactions
+        // Snapshot under pool lock only — never hold fee_cache/fee_index writes while locking pool
+        // (avoids deadlock with remove_transaction: pool → fee_cache).
+        let txs_snapshot: Vec<(Hash, Transaction)> = {
+            let pool = self.pool_lock();
+            pool.transactions
+                .iter()
+                .map(|(h, t)| (*h, t.clone()))
+                .collect()
+        };
+
+        let all_prevouts: Vec<(Hash, OutPoint)> = txs_snapshot
             .iter()
-            .flat_map(|(tx_hash, tx)| tx.inputs.iter().map(move |input| (*tx_hash, input.prevout)))
+            .flat_map(|(tx_hash, tx)| {
+                tx.inputs
+                    .iter()
+                    .map(move |input| (*tx_hash, input.prevout))
+            })
             .collect();
 
-        // Batch UTXO lookup for all transactions (single pass through HashMap)
         let mut utxo_cache: HashMap<&OutPoint, u64> = HashMap::with_capacity(all_prevouts.len());
         for (_, prevout) in &all_prevouts {
             if let Some(utxo) = utxo_set.get(prevout) {
@@ -1398,9 +1455,7 @@ impl MempoolManager {
             }
         }
 
-        // Recalculate fee rates for all transactions using cached UTXOs
-        for (tx_hash, tx) in &self.pool_lock().transactions {
-            // Calculate fee using cached UTXOs
+        for (tx_hash, tx) in &txs_snapshot {
             let mut input_total = 0u64;
             for input in &tx.inputs {
                 if let Some(&value) = utxo_cache.get(&input.prevout) {
@@ -1408,26 +1463,19 @@ impl MempoolManager {
                 }
             }
 
-            // Sum output values
             let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-
-            // Calculate fee
             let fee = input_total.saturating_sub(output_total);
-
-            // Calculate transaction size
             let size = self.estimate_transaction_size(tx);
-
-            // Calculate fee rate (satoshis per vbyte)
             let fee_rate = if size > 0 {
                 fee * 1000 / size as u64
             } else {
                 0
             };
 
-            // Update cache
-            fee_cache.insert(*tx_hash, fee_rate);
-
-            // Add to sorted index
+            {
+                let mut fee_cache = self.fee_cache.write().unwrap();
+                fee_cache.insert(*tx_hash, fee_rate);
+            }
             let mut fee_index = self.fee_index.write().unwrap();
             fee_index
                 .entry(Reverse(fee_rate))
@@ -1487,72 +1535,71 @@ impl MempoolManager {
 
     /// Remove transaction from mempool
     pub fn remove_transaction(&self, hash: &Hash) -> bool {
-        if let Some(tx) = self.pool_lock().transactions.remove(hash) {
-            self.mempool.write().unwrap().remove(hash);
-
-            // Remove spent outputs tracking
+        let tx = {
+            let mut pool = self.pool_lock();
+            let Some(tx) = pool.transactions.remove(hash) else {
+                return false;
+            };
             for input in &tx.inputs {
-                self.pool_lock().spent_outputs.remove(&input.prevout);
+                pool.spent_outputs.remove(&input.prevout);
             }
+            tx
+        };
 
-            // Remove from fee index
-            if let Some(fee_rate) = self.fee_cache.write().unwrap().remove(hash) {
-                let mut fee_index = self.fee_index.write().unwrap();
-                if let Some(tx_hashes) = fee_index.get_mut(&Reverse(fee_rate)) {
-                    tx_hashes.retain(|&h| h != *hash);
-                    if tx_hashes.is_empty() {
-                        fee_index.remove(&Reverse(fee_rate));
-                    }
+        self.mempool.write().unwrap().remove(hash);
+
+        // Remove from fee index
+        if let Some(fee_rate) = self.fee_cache.write().unwrap().remove(hash) {
+            let mut fee_index = self.fee_index.write().unwrap();
+            if let Some(tx_hashes) = fee_index.get_mut(&Reverse(fee_rate)) {
+                tx_hashes.retain(|&h| h != *hash);
+                if tx_hashes.is_empty() {
+                    fee_index.remove(&Reverse(fee_rate));
                 }
             }
-
-            // Remove RBF tracking
-            self.rbf_tracking.write().unwrap().remove(hash);
-
-            // Remove timestamp
-            self.tx_timestamps.write().unwrap().remove(hash);
-
-            // Remove from dependency graph
-            {
-                let mut dependencies = self.tx_dependencies.write().unwrap();
-                let mut descendants = self.tx_descendants.write().unwrap();
-
-                // Remove this transaction from all its descendants' dependency lists
-                if let Some(children) = descendants.remove(hash) {
-                    for child_hash in children {
-                        if let Some(parents) = dependencies.get_mut(&child_hash) {
-                            parents.remove(hash);
-                        }
-                    }
-                }
-
-                // Remove this transaction from all its ancestors' descendant lists
-                if let Some(parents) = dependencies.remove(hash) {
-                    for parent_hash in parents {
-                        if let Some(children) = descendants.get_mut(&parent_hash) {
-                            children.remove(hash);
-                        }
-                    }
-                }
-            }
-
-            // Publish mempool transaction removed event
-            if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
-                let mempool_size = self.pool_lock().transactions.len();
-                let hash_clone = *hash;
-                let reason = "removed".to_string(); // Could be more specific: "confirmed", "expired", "replaced", "rejected"
-                let event_pub_clone = Arc::clone(event_pub);
-                tokio::spawn(async move {
-                    event_pub_clone
-                        .publish_mempool_transaction_removed(&hash_clone, reason, mempool_size)
-                        .await;
-                });
-            }
-
-            true
-        } else {
-            false
         }
+
+        // Remove RBF tracking
+        self.rbf_tracking.write().unwrap().remove(hash);
+
+        // Remove timestamp
+        self.tx_timestamps.write().unwrap().remove(hash);
+
+        // Remove from dependency graph
+        {
+            let mut dependencies = self.tx_dependencies.write().unwrap();
+            let mut descendants = self.tx_descendants.write().unwrap();
+
+            if let Some(children) = descendants.remove(hash) {
+                for child_hash in children {
+                    if let Some(parents) = dependencies.get_mut(&child_hash) {
+                        parents.remove(hash);
+                    }
+                }
+            }
+
+            if let Some(parents) = dependencies.remove(hash) {
+                for parent_hash in parents {
+                    if let Some(children) = descendants.get_mut(&parent_hash) {
+                        children.remove(hash);
+                    }
+                }
+            }
+        }
+
+        if let Some(ref event_pub) = *self.event_publisher.read().unwrap() {
+            let mempool_size = self.pool_lock().transactions.len();
+            let hash_clone = *hash;
+            let reason = "removed".to_string();
+            let event_pub_clone = Arc::clone(event_pub);
+            tokio::spawn(async move {
+                event_pub_clone
+                    .publish_mempool_transaction_removed(&hash_clone, reason, mempool_size)
+                    .await;
+            });
+        }
+
+        true
     }
 
     /// Clear mempool

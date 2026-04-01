@@ -10,7 +10,7 @@ use crate::network::protocol::{NetworkAddress, ProtocolMessage, ProtocolParser};
 use crate::network::transport::TransportAddr;
 use crate::network::NetworkMessage;
 use anyhow::Result;
-use crate::utils::ignore_error;
+use crate::utils::{current_timestamp, ignore_error};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -347,11 +347,27 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
     }
 }
 
+#[allow(irrefutable_let_patterns)] // TransportAddr is TCP-only without quinn/iroh features
 async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
     info!("Peer disconnected: {:?}", addr);
     let mut pm = nm.peer_manager_mutex().lock().await;
     pm.remove_peer(&addr);
     drop(pm);
+
+    // Enqueue TCP persistent peers for automatic reconnect (see `start_peer_reconnection_task`).
+    // The periodic task used to bail out when `current_peers >= min_peers`, so a LAN node could
+    // stay gone while many WAN peers kept the count high.
+    if let TransportAddr::Tcp(sock) = addr {
+        let persistent = nm.get_persistent_peers().await;
+        if persistent.contains(&sock) {
+            let mut q = nm.peer_reconnection_queue().lock().await;
+            q.entry(sock).or_insert((0, current_timestamp(), 1.0));
+            info!(
+                "Persistent peer {} queued for automatic TCP reconnection",
+                sock
+            );
+        }
+    }
 
     let event_publisher_guard = nm.event_publisher().lock().await;
     if let Some(ref event_publisher) = *event_publisher_guard {

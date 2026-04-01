@@ -4,11 +4,12 @@
 
 use crate::network::network_manager::NetworkManager;
 use crate::network::peer;
-use crate::network::transport::{TransportAddr, TransportType};
+use crate::network::transport::{Transport, TransportAddr, TransportType};
 use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 impl NetworkManager {
@@ -254,7 +255,10 @@ impl NetworkManager {
         }
 
         if lan_connected > 0 {
-            info!("Connected to {} LAN sibling node(s) - these will be prioritized for block downloads", lan_connected);
+            info!(
+                "Connected to {} LAN sibling node(s) - these will be prioritized for block downloads",
+                lan_connected
+            );
         }
 
         let should_discover_dns = self.transport_preference().allows_tcp() || {
@@ -367,6 +371,44 @@ impl NetworkManager {
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All transport attempts failed")))
+    }
+
+    /// Fire-and-forget TCP reconnect when a peer is no longer in the peer map (e.g. IBD GetData).
+    /// Uses the full `connect_to_peer` path (stream split, DoS checks, handshake via PeerConnected).
+    pub fn spawn_outbound_reconnect_attempt(self: Arc<Self>, addr: SocketAddr) {
+        let reconnection_queue = Arc::clone(self.peer_reconnection_queue());
+        let nm = self;
+        tokio::spawn(async move {
+            {
+                let pm = nm.peer_manager_mutex().lock().await;
+                if let Some(p) = pm.get_peer(&TransportAddr::Tcp(addr)) {
+                    if p.is_connected() {
+                        return;
+                    }
+                }
+            }
+            {
+                let mut q = reconnection_queue.lock().await;
+                q.entry(addr).or_insert((0, 0, 0.85));
+            }
+            info!(
+                "Attempting immediate reconnect to {} (IBD / transient disconnect)",
+                addr
+            );
+            match nm.connect_to_peer(addr).await {
+                Ok(()) => {
+                    let mut q = reconnection_queue.lock().await;
+                    q.remove(&addr);
+                    info!("Immediate reconnect succeeded for {}", addr);
+                }
+                Err(e) => {
+                    debug!(
+                        "Immediate reconnect to {} failed: {} (periodic task may retry)",
+                        addr, e
+                    );
+                }
+            }
+        });
     }
 
     fn get_transports_for_connection(&self) -> Vec<TransportType> {

@@ -252,6 +252,8 @@ fn test_payment_config_serialization() {
         merchant_key: Some("test_key".to_string()),
         payment_store_path: "test/path".to_string(),
         module_payments_enabled: true,
+        node_payment_address: None,
+        safe_confirmation_depth: 6,
     };
 
     let serialized = serde_json::to_string(&config).expect("Should serialize");
@@ -383,6 +385,8 @@ async fn test_payment_processor_with_custom_config() {
         payment_store_path: "test/payments".to_string(),
         module_payments_enabled: true,
         merchant_key: None,
+        node_payment_address: None,
+        safe_confirmation_depth: 6,
     };
 
     let _processor = PaymentProcessor::new(config).expect("Should create processor");

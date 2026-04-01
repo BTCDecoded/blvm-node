@@ -59,6 +59,7 @@ pub const CORE_RPC_METHODS: &[&str] = &[
     // Mining
     "getmininginfo",
     "getblocktemplate",
+    "generatetoaddress",
     "submitblock",
     "estimatesmartfee",
     "prioritisetransaction",

@@ -33,6 +33,8 @@
                                                                              // Memory allocator optimization using mimalloc (faster than default allocator)
                                                                              // Note: Only in blvm-node, not blvm-consensus
                                                                              // Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
+                                                                             // Temporarily disabled for IBD memory profiling — mimalloc arenas
+                                                                             // retain freed pages and inflate RSS on 16GB boxes.
 #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

@@ -5,6 +5,9 @@ transport_preference = "tcponly"
 listen_addr = "0.0.0.0:8333"
 protocol_version = "BitcoinV1"
 
+# Try this host early at startup (TOOLS.md LAN Core). IBD download filtering uses [ibd].preferred_peers / BLVM_IBD_PEERS.
+persistent_peers = ["192.168.2.100:8333"]
+
 [storage]
 data_dir = "~/.local/share/blvm-mainnet"
 database_backend = "rocksdb"
@@ -31,12 +34,14 @@ auto_prune_interval = 144
 min_blocks_to_keep = 144
 
 # IBD tuning (config file; ENV BLVM_IBD_* overrides at runtime)
+# Optional throughput: BLVM_UTXO_PREFETCH_LOOKAHEAD (default 64) — try 96–128 on 32GB+ if memory allows.
 [ibd]
 chunk_size = 16
 download_timeout_secs = 30
 mode = "parallel"
-# preferred_peers = ["192.168.2.100:8333"]
+preferred_peers = ["192.168.2.100:8333"]
 # max_ahead_blocks = 512
+# fifo: minimal per-block eviction overhead during IBD (dynamic can cost noticeably early chain)
 eviction = "fifo"
 
 [rpc]

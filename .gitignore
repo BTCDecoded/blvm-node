@@ -1,6 +1,15 @@
+# Local Cargo overrides
+.cargo/config.toml
+
 # Rust build artifacts
 /target/
+target/
 fuzz/target/
+examples/**/target/
+modules/**/target/
+
+# Local IBD benchmark dumps next to the repo
+ibd-bps-*.csv
 **/*.rs.bk
 *.pdb
 **/*.rmeta

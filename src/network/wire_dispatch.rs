@@ -6,7 +6,7 @@
 use blvm_spec_lock::spec_locked;
 
 use crate::network::network_manager::NetworkManager;
-use crate::network::protocol::{ProtocolMessage, ProtocolParser, VersionMessage};
+use crate::network::protocol::{HeadersMessage, ProtocolMessage, ProtocolParser, VersionMessage};
 use crate::network::transport::TransportAddr;
 use crate::network::NetworkMessage;
 use anyhow::Result;
@@ -161,6 +161,36 @@ impl NetworkManager {
                         }
                     }
                 }
+
+                if let Some(storage) = self.storage().as_ref() {
+                    let max = self.protocol_limits().max_headers_results.max(1);
+                    match storage.blocks().build_headers_response(
+                        &getheaders.block_locator_hashes,
+                        &getheaders.hash_stop,
+                        max,
+                    ) {
+                        Ok(headers) => {
+                            debug!(
+                                "GetHeaders from {}: sending {} header(s) (locator_len={})",
+                                peer_addr,
+                                headers.len(),
+                                getheaders.block_locator_hashes.len()
+                            );
+                            let msg = ProtocolMessage::Headers(HeadersMessage { headers });
+                            if let Ok(wire) = ProtocolParser::serialize_message(&msg) {
+                                if let Err(e) = self.send_to_peer(peer_addr, wire).await {
+                                    warn!("Failed to send Headers to {}: {}", peer_addr, e);
+                                }
+                            } else {
+                                warn!("Failed to serialize Headers for {}", peer_addr);
+                            }
+                        }
+                        Err(e) => warn!("GetHeaders: build_headers_response failed: {}", e),
+                    }
+                } else {
+                    debug!("GetHeaders from {}: no storage, not replying", peer_addr);
+                }
+                return Ok(());
             }
             ProtocolMessage::GetData(getdata) => {
                 let max_inv = self.protocol_limits().max_inv_sz;
@@ -363,16 +393,20 @@ impl NetworkManager {
                     );
                     return Ok(());
                 }
-                let pending_count = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(async { self.pending_block_requests().lock().await.len() })
-                });
-                info!(
-                    "Block from {} (hash {}) had no pending request ({} pending for other peers/hashes)",
-                    peer_addr,
-                    hex::encode(block_hash),
-                    pending_count
+                // Relay / post-IBD: main loop / process_block expect consensus block+witness bytes,
+                // not a full P2P frame (magic/command/checksum wrapper).
+                let wire = blvm_protocol::serialization::serialize_block_with_witnesses(
+                    &block_msg.block,
+                    &block_msg.witnesses,
+                    true,
                 );
+                self.queue_block(wire);
+                debug!(
+                    "Block from {} (hash {}) queued for main loop (no IBD getdata pending)",
+                    peer_addr,
+                    hex::encode(block_hash)
+                );
+                return Ok(());
             }
             ProtocolMessage::CmpctBlock(cmpct_msg) => {
                 use crate::network::compact_blocks::CompactBlock;

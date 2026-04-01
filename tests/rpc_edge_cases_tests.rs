@@ -159,31 +159,33 @@ async fn test_rpc_concurrent_different_methods() {
     let blockchain = Arc::new(BlockchainRpc::new());
     let control = Arc::new(ControlRpc::new());
 
-    // Concurrent calls to different RPC modules
-    let mut handles = vec![];
-
-    // Blockchain calls
+    // Concurrent calls to different RPC modules (split handles: different error types per module)
+    let mut blockchain_handles = vec![];
     for _ in 0..5 {
         let blockchain_clone = Arc::clone(&blockchain);
-        handles.push(tokio::spawn(async move {
+        blockchain_handles.push(tokio::spawn(async move {
             blockchain_clone.get_blockchain_info().await
         }));
     }
 
-    // Control calls
+    let mut control_handles = vec![];
     for _ in 0..5 {
         let control_clone = Arc::clone(&control);
-        handles.push(tokio::spawn(async move {
+        control_handles.push(tokio::spawn(async move {
             control_clone.uptime(&json!([])).await
         }));
     }
 
-    // Wait for all calls
-    let results: Vec<_> = futures::future::join_all(handles).await;
-    assert_eq!(results.len(), 10);
+    let bc_results: Vec<_> = futures::future::join_all(blockchain_handles).await;
+    let ctl_results: Vec<_> = futures::future::join_all(control_handles).await;
+    assert_eq!(bc_results.len() + ctl_results.len(), 10);
 
-    // All should complete
-    for result in results {
+    for result in bc_results {
         assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+    }
+    for result in ctl_results {
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
     }
 }

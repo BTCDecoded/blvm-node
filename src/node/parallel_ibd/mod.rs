@@ -28,7 +28,7 @@ pub use chunk_assigner::BlockChunk;
 use download::download_chunk;
 use feeder::{new_feeder_state, run_feeder_thread};
 use memory::{MemoryGuard, TIDESDB_MAX_TXN_OPS};
-use types::{ChunkWorkItem, FeederBufferValue, ReadyItem, FEEDER_BLOCK_BYTES_ESTIMATE};
+use types::{ChunkWorkItem, FeederBufferValue, ReadyItem};
 #[cfg(feature = "production")]
 use types::PrefetchWorkItemV2;
 
@@ -39,10 +39,11 @@ use crate::network::protocol::{
 };
 use crate::network::NetworkManager;
 use crate::node::block_processor::validate_block_with_context;
-use crate::storage::blockstore::BlockStore;
+use crate::storage::blockstore::{block_height_row_key, BlockMetadata, BlockStore};
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::{
-    block_input_keys_batch_into_arc, block_input_keys_into, key_to_outpoint, load_keys_from_disk,
+    block_input_keys_and_tx_ids_filtered,
+    block_input_keys_batch_into_arc, key_to_outpoint,
     outpoint_to_key, OutPointKey, SyncBatch,
 };
 #[cfg(feature = "production")]
@@ -189,9 +190,10 @@ impl ParallelIBDConfig {
             .or_else(|| ibd_config.and_then(|c| c.prefetch_queue_size));
         let utxo_prefetch_lookahead = std::env::var("BLVM_UTXO_PREFETCH_LOOKAHEAD")
             .ok()
-            .and_then(|s| s.parse().ok())
+            .and_then(|s| s.parse::<u64>().ok())
             .or_else(|| ibd_config.map(|c| c.utxo_prefetch_lookahead))
-            .unwrap_or(64);
+            .unwrap_or(128)
+            .clamp(1, 128);
         let max_blocks_in_transit = std::env::var("BLVM_IBD_MAX_BLOCKS_IN_TRANSIT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -245,6 +247,8 @@ struct BlockRequest {
 /// Parallel IBD coordinator
 pub struct ParallelIBD {
     config: ParallelIBDConfig,
+    /// Earliest BIP54 activation height from version-bits lock-in along the validated chain (mainnet).
+    bip54_activation_from_version_bits: parking_lot::Mutex<Option<u64>>,
     /// Semaphore to limit concurrent chunk downloads per peer
     peer_semaphores: Arc<HashMap<String, Arc<Semaphore>>>,
     /// Core-style: max blocks in flight per peer (shared across all workers). Prevents 6 workers × 64 pipeline = 384 requests to one peer.
@@ -253,11 +257,13 @@ pub struct ParallelIBD {
     peer_scorer: Arc<crate::network::peer_scoring::PeerScorer>,
 }
 
+
 impl ParallelIBD {
     /// Create a new parallel IBD coordinator
     pub fn new(config: ParallelIBDConfig) -> Self {
         Self {
             config,
+            bip54_activation_from_version_bits: parking_lot::Mutex::new(None),
             peer_semaphores: Arc::new(HashMap::new()),
             peer_blocks_semaphores: Arc::new(HashMap::new()),
             peer_scorer: Arc::new(crate::network::peer_scoring::PeerScorer::new()),
@@ -368,6 +374,16 @@ impl ParallelIBD {
             "Headers synced up to height {}, will download blocks for heights {} to {}",
             actual_synced_height, start_height, effective_end_height
         );
+
+        // Peers have no blocks past our header tip (e.g. both at genesis). Nothing to fetch;
+        // exit IBD so the node can run the main loop and pick up new blocks via relay/sync.
+        if effective_end_height < start_height {
+            info!(
+                "Parallel IBD: no block range to download (end {} < start {}); treating as caught up to peer tip",
+                effective_end_height, start_height
+            );
+            return Ok(());
+        }
 
         // Step 2: Filter out extremely slow peers (>90s average latency)
         // Keep at least 2 peers even if all are slow
@@ -513,6 +529,21 @@ impl ParallelIBD {
                 (p.clone(), score)
             })
             .collect();
+
+        // Matches per-peer worker_count below: (2×priority).clamp(2, 6) per peer.
+        let total_download_workers: usize = filtered_peers
+            .iter()
+            .map(|peer_id| {
+                let priority = scored_peers
+                    .iter()
+                    .find(|(p, _)| p == peer_id)
+                    .map(|(_, s)| *s)
+                    .unwrap_or(1.0);
+                ((2.0 * priority) as usize).clamp(2, 6)
+            })
+            .sum::<usize>()
+            .max(1);
+
         let chunks = self.create_chunks(
             start_height,
             effective_end_height,
@@ -533,21 +564,74 @@ impl ParallelIBD {
 
         // Step 3: Streaming download + validation
         //
-        // Uses a bounded channel for natural backpressure:
-        // - Downloads pause when buffer is full
-        // - Memory stays bounded (~500MB-1GB max)
-        // - Validation runs concurrently with downloads
+        // Bounded channel from download workers → coordinator: **required** for RAM safety.
+        // Unbounded `mpsc` let WAN workers flood full blocks while the coordinator was busy,
+        // causing kernel OOM on 16GiB hosts (each queued item holds a full `Block`).
 
-        // Unbounded channel: worker send never blocks, avoiding tokio task starvation where
-        // worker sends block 0, coordinator recv_many gets it, worker never gets scheduled to send 1+
-        // (bounded send could theoretically block but 10k cap made that rare; unbounded eliminates it)
-        // Maximum blocks allowed in the reorder buffer before logging warnings
-        const MAX_REORDER_BUFFER: usize = 500;
+        // Disable Transparent Huge Pages for this process. THP promotes anonymous
+        // pages to 2MB granularity, causing massive internal fragmentation with
+        // millions of small UTXO allocations. On a system with THP=[always], this
+        // saves ~300MB+ of wasted RSS. Zero performance cost.
+        #[cfg(target_os = "linux")]
+        {
+            // PR_SET_THP_DISABLE = 41
+            let ret = unsafe { libc::prctl(41, 1, 0, 0, 0) };
+            if ret == 0 {
+                info!("Disabled Transparent Huge Pages for this process");
+            }
+        }
+
+        // Auto-tune memory **before** allocating download queue (capacity uses buffer_limit).
+        let mut mem_guard = MemoryGuard::new();
+        // Bounded download→coordinator queue + safety valve (see docs/IBD_AGENT_HANDOFF §2.4):
+        // 1) Tokio bounded channel → backpressure when coordinator is slow (workers await send).
+        // 2) RAM-tier ceiling → cap autosize so high worker×pipeline estimates do not create a
+        //    huge queued-block arena on ≤16/32 GiB hosts.
+        // 3) Optional BLVM_IBD_DOWNLOAD_QUEUE_MAX_BLOCKS → operator hard cap (min with computed).
+        let download_block_queue_cap: usize = {
+            let bl = mem_guard.buffer_limit(start_height);
+            let pipeline = self
+                .config
+                .max_concurrent_per_peer
+                .max(self.config.max_blocks_in_transit_per_peer);
+            const PIPELINE_HORIZON_FOR_CAP: usize = 32;
+            let h = pipeline.min(PIPELINE_HORIZON_FOR_CAP).max(1);
+            let base = bl.saturating_mul(4);
+            let parallel = total_download_workers.saturating_mul(h).saturating_mul(2);
+            let floor = if mem_guard.system_total_ram_mb() <= 16 * 1024 {
+                128
+            } else {
+                256
+            };
+            let raw = base.max(parallel).clamp(floor, 8192);
+            let ram_ceiling = match mem_guard.system_total_ram_mb() {
+                m if m <= 16 * 1024 => 2048,
+                m if m <= 32 * 1024 => 4096,
+                _ => 8192,
+            };
+            let env_cap = std::env::var("BLVM_IBD_DOWNLOAD_QUEUE_MAX_BLOCKS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0);
+            let capped = raw.min(ram_ceiling);
+            match env_cap {
+                Some(e) => capped.min(e).max(floor),
+                None => capped.max(floor),
+            }
+        };
         let (block_tx, mut block_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(u64, Block, Vec<Vec<Witness>>)>();
+            tokio::sync::mpsc::channel::<(u64, Block, Vec<Vec<Witness>>)>(download_block_queue_cap);
+        info!(
+            "IBD: download→coordinator channel capacity={} blocks (buffer_limit={}, workers={}, bounded + RAM/env valve)",
+            download_block_queue_cap,
+            mem_guard.buffer_limit(start_height),
+            total_download_workers,
+        );
         let (stall_tx, _) = broadcast::channel::<u64>(16);
 
-        let validation_height = Arc::new(AtomicU64::new(start_height));
+        // Last block height whose UTXO effects are visible to the coordinator/prefetch path.
+        // start_height is the *next* block to validate → parent is start_height - 1 (synced tip).
+        let validation_height = Arc::new(AtomicU64::new(start_height.saturating_sub(1)));
         // Sequential chunk assigner: workers get chunks in height order; validation never starves.
         // Peer-to-chunk mapping ensures bootstrap goes to the designated (typically fastest) peer.
         let chunk_list: Vec<(u64, u64)> = chunks
@@ -569,25 +653,11 @@ impl ParallelIBD {
         let workers_current_chunks: Arc<tokio::sync::Mutex<Vec<(String, u64, u64)>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
-        // Disable Transparent Huge Pages for this process. THP promotes anonymous
-        // pages to 2MB granularity, causing massive internal fragmentation with
-        // millions of small UTXO allocations. On a system with THP=[always], this
-        // saves ~300MB+ of wasted RSS. Zero performance cost.
-        #[cfg(target_os = "linux")]
-        {
-            // PR_SET_THP_DISABLE = 41
-            let ret = unsafe { libc::prctl(41, 1, 0, 0, 0) };
-            if ret == 0 {
-                info!("Disabled Transparent Huge Pages for this process");
-            }
-        }
-
-        // Auto-tune all memory parameters from hardware.
-        let mut mem_guard = MemoryGuard::new();
         let effective_max_entries = mem_guard.utxo_max_entries;
         let utxo_flush_threshold = mem_guard.utxo_flush_threshold;
         // Max blocks download can race ahead of validation. Limits block_rx channel depth.
         let max_ahead_blocks: u64 = self.config.max_ahead_blocks.unwrap_or(mem_guard.max_ahead_blocks);
+        let max_ahead_live = Arc::new(AtomicU64::new(max_ahead_blocks));
         // IBD v2 (IbdUtxoStore) is the only path. Storage is guaranteed Some (checked at start).
         let ibd_memory_only: bool = self.config.memory_only && start_height <= 1;
         let ibd_store_v2: Arc<IbdUtxoStore> = {
@@ -600,12 +670,19 @@ impl ParallelIBD {
             );
             let eviction =
                 crate::storage::ibd_utxo_store::EvictionStrategy::from_str(&self.config.eviction);
+            let utxo_disk_baseline = storage
+                .chain()
+                .get_utxo_watermark()
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| start_height.saturating_sub(1));
             let store = Arc::new(IbdUtxoStore::new_with_options(
                 tree,
                 utxo_flush_threshold,
                 ibd_memory_only,
                 effective_max_entries,
                 eviction,
+                utxo_disk_baseline,
             ));
             if start_height <= 1 {
                 store.bootstrap_genesis(&protocol.get_network_params().genesis_block);
@@ -615,6 +692,7 @@ impl ParallelIBD {
             }
             store
         };
+
         // Ready-queue: ALWAYS created. Validation ONLY receives from ready_rx — fully isolated.
         // Prefetch workers load UTXOs; coordinator feeds them. Larger queue = less overflow to gap-fill.
         // Core does ~1k BPS; 2048 gives runway when validation briefly stalls.
@@ -633,17 +711,14 @@ impl ParallelIBD {
                 None => guard_limit,
             }
         };
-        // Prefetch/gap workers: config > hardware-derived (nproc*2, capped 4–24)
         let prefetch_workers: usize = self.config.prefetch_workers.unwrap_or_else(|| {
-                let n = std::thread::available_parallelism()
-                    .map(|p| p.get())
-                    .unwrap_or(8);
-                (n.saturating_mul(2)).clamp(4, 24)
-            });
-        // Gap-fill overflow: when prefetch is full, route here instead of bypassing with empty.
-        // Par-2: Match prefetch count so critical blocks (gap-fill path) have same throughput.
+            let n = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(8);
+            (n.saturating_mul(2)).clamp(4, 24)
+        });
         let gap_fill_workers: usize = prefetch_workers;
-        let (prefetch_input_tx_v2, gap_fill_tx_v2, ready_tx, ready_rx) = {
+        let (prefetch_input_tx_v2, gap_fill_tx_v2, ready_tx_for_coord, ready_rx) = {
             let store = Arc::clone(&ibd_store_v2);
             let (in_tx, in_rx) =
                 crossbeam_channel::bounded::<PrefetchWorkItemV2>(max_prefetches_in_flight);
@@ -664,8 +739,10 @@ impl ParallelIBD {
                 std::thread::spawn(move || prefetch::run_prefetch_worker(rx_clone, tx_clone, store));
             }
             info!(
-                "IBD v2 prefetch: {} workers, queue={}; gap-fill overflow: {} workers",
-                prefetch_workers, max_prefetches_in_flight, gap_fill_workers
+                "IBD v2 prefetch: {} workers, queue={}; gap-fill overflow: {} workers (direct to feeder)",
+                prefetch_workers,
+                max_prefetches_in_flight,
+                gap_fill_workers
             );
             (in_tx, gap_tx_v2, out_tx, out_rx)
         };
@@ -678,6 +755,7 @@ impl ParallelIBD {
 
         let mut download_handles = Vec::new();
         let num_peers = filtered_peers.len();
+        let ibd_protocol_version = protocol.get_protocol_version();
 
         for peer_id in &filtered_peers {
             let priority = scored_peers
@@ -706,6 +784,8 @@ impl ParallelIBD {
                 let workers_current_clone = Arc::clone(&workers_current_chunks);
                 let num_peers_clone = num_peers;
                 let peer_blocks_semaphores_clone = Arc::clone(&self.peer_blocks_semaphores);
+                let max_ahead_live_clone = Arc::clone(&max_ahead_live);
+                let ibd_pv = ibd_protocol_version;
                 let mut stall_rx = stall_tx.subscribe();
                 let semaphore = self
                     .peer_semaphores
@@ -722,7 +802,7 @@ impl ParallelIBD {
                     loop {
                         let maybe_work = loop {
                             if let Some((chunk_start, chunk_end)) =
-                                assigner_clone.get_work(&peer_id, max_ahead_blocks)
+                                assigner_clone.get_work(&peer_id, max_ahead_live_clone.load(std::sync::atomic::Ordering::Relaxed))
                             {
                                 break Some((chunk_start, chunk_end));
                             }
@@ -775,6 +855,7 @@ impl ParallelIBD {
                             Some(tx.clone()),
                             blocks_sem,
                             Some(&mut stall_rx),
+                            ibd_pv,
                         )
                         .await;
                         workers_current_clone
@@ -782,9 +863,9 @@ impl ParallelIBD {
                             .await
                             .retain(|(p, s, _)| !(*p == peer_id && *s == start));
                         match dl_result {
-                            Ok(blocks) => {
+                            Ok(chunk) => {
                                 consecutive_failures = 0;
-                                let block_count = blocks.len();
+                                let block_count = chunk.block_count();
                                 if start == 0 {
                                     info!("IBD: bootstrap chunk 0-{} downloaded, coordinator enables parallel when received", end);
                                 }
@@ -821,8 +902,6 @@ impl ParallelIBD {
                                 consecutive_failures += 1;
                                 warn!("Peer {} failed chunk {}-{} ({}/{}): {} - will retry with different peer", 
                                 peer_id, start, end, consecutive_failures, MAX_CONSECUTIVE_FAILURES, e);
-                                // Single-peer deadlock: exclude would block all workers (they're all this peer).
-                                // Skip exclude so same peer can retry; stall recovery also clears exclude.
                                 let exclude = if num_peers_clone > 1 {
                                     Some(peer_id.clone())
                                 } else {
@@ -839,12 +918,28 @@ impl ParallelIBD {
                                 _guard.disarm();
                                 assigner_clone.on_chunk_complete(&peer_id);
 
-                                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                                if num_peers_clone > 1 && consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                                     warn!(
                                         "Peer {} exceeded max failures, stopping worker",
                                         peer_id
                                     );
                                     break;
+                                }
+
+                                if num_peers_clone == 1 && consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                                    // Single peer: wait for reconnect instead of killing the worker.
+                                    // The reconnect logic in peer_connections / background_tasks will
+                                    // re-establish the TCP session; we just need to stay alive.
+                                    warn!(
+                                        "Peer {} at {} consecutive failures (single-peer mode) — waiting for reconnect",
+                                        peer_id, consecutive_failures
+                                    );
+                                    let wait_secs = 10u64;
+                                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                                    // After waiting, try to get work again — peer may be back.
+                                    // Reset failure count so we get fresh retries.
+                                    consecutive_failures = 0;
+                                    continue;
                                 }
 
                                 let backoff_secs = (1 << (consecutive_failures - 1).min(4)).min(16);
@@ -868,8 +963,9 @@ impl ParallelIBD {
         // Drop the original sender so the channel closes when all workers complete
         drop(block_tx);
 
-        // COORDINATOR: Drains block_rx, sends to prefetch. When prefetch full, routes to gap_fill
-        // overflow — validation never receives empty UTXOs, never blocks on disk.
+        // COORDINATOR: Drains block_rx, sends to prefetch. When prefetch and gap-fill are full,
+        // pushes to the feeder with an empty UTXO map so the coordinator never blocks on workers
+        // (keeps block_rx + buffer draining; validation supplements UTXOs on-thread when needed).
         // Mark bootstrap complete only when we've DRAINED the bootstrap chunk — not when the worker
         // returns. Otherwise parallel workers get chunks 128+ and send blocks before we receive 100,
         // causing interleaving and a stall at 99. Coordinator knows we have 0..=bootstrap_end when
@@ -881,7 +977,7 @@ impl ParallelIBD {
         };
         let assigner_for_coord = Arc::clone(&assigner);
         let validation_height_for_coord = Arc::clone(&validation_height);
-        let dynamic_buffer_limit = mem_guard.buffer_limit(start_height);
+        let coord_buffer_limit = mem_guard.buffer_limit(start_height);
         let gap_fill_tx_v2_for_coord = gap_fill_tx_v2.clone();
         let prefetch_input_tx_v2_for_coord = prefetch_input_tx_v2.clone();
         let ibd_store_v2_for_coord = Arc::clone(&ibd_store_v2);
@@ -891,6 +987,7 @@ impl ParallelIBD {
         if sequential {
             info!("Coordinator: sequential mode (single peer) — passthrough, no reorder buffer");
         }
+        let ready_tx_coord = ready_tx_for_coord;
         tokio::spawn(async move {
             let mut reorder_buffer: std::collections::BTreeMap<u64, (Block, Vec<Vec<Witness>>)> =
                 std::collections::BTreeMap::new();
@@ -901,9 +998,27 @@ impl ParallelIBD {
                 Vec::with_capacity(BATCH_DRAIN_LIMIT);
             // S2: Reuse buffer for block_input_keys (avoids alloc per block)
             let mut coord_keys_buf: Vec<OutPointKey> = Vec::new();
+            let mut coord_tx_ids_buf: Vec<Hash> = Vec::new();
             info!("Coordinator: started, awaiting blocks from download workers");
             const COORD_STALL_LOG_SECS: u64 = 30;
+            let mut coord_buffer_full_since: Option<std::time::Instant> = None;
+            #[cfg(target_os = "linux")]
+            let mut coord_emergency_log = std::time::Instant::now();
             loop {
+                let dynamic_buffer_limit = coord_buffer_limit;
+                // §9 L3: do not drain block_rx while validation reports Emergency — WAN workers block on send().
+                #[cfg(target_os = "linux")]
+                {
+                    while memory::ibd_pressure_is_emergency() {
+                        if coord_emergency_log.elapsed() > Duration::from_secs(5) {
+                            warn!(
+                                "Coordinator: EMERGENCY admission pause — not draining block_rx until memory recovers"
+                            );
+                            coord_emergency_log = std::time::Instant::now();
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
                 // Backpressure: when reorder_buffer full, drain contiguous blocks before receiving more.
                 // Prevents unbounded growth when downloads outpace validation.
                 if reorder_buffer.len() >= dynamic_buffer_limit {
@@ -911,7 +1026,11 @@ impl ParallelIBD {
                         let (block, witnesses) = reorder_buffer
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
-                        block_input_keys_into(&block, &mut coord_keys_buf);
+                        block_input_keys_and_tx_ids_filtered(
+                            &block,
+                            &mut coord_tx_ids_buf,
+                            &mut coord_keys_buf,
+                        );
                         let h = next_prefetch_height;
                         next_prefetch_height += 1;
                         if h == bootstrap_end {
@@ -920,46 +1039,84 @@ impl ParallelIBD {
                         }
                         {
                             let store = &ibd_store_v2_for_coord;
-                            let ptx = &prefetch_input_tx_v2_for_coord;
                             let keys_owned = std::mem::take(&mut coord_keys_buf);
-                            let item = (Arc::clone(store), keys_owned, h, block, witnesses);
+                            let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                            let item = (Arc::clone(store), keys_owned, tx_ids_owned, h, block, witnesses);
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
                             let route_to_gap_fill = h <= next_needed;
-                            if route_to_gap_fill {
-                                tokio::task::block_in_place(|| {
+                            let ptx = &prefetch_input_tx_v2_for_coord;
+                            tokio::task::block_in_place(|| {
+                                if route_to_gap_fill {
                                     if let Err(e) = gap_fill_tx_v2_for_coord.try_send(item) {
-                                        let (_, _, _, b, w) = e.into_inner();
-                                        let _ = ready_tx.send((
-                                            h,
+                                        let (_, _, tx_ids, hb, b, w) = e.into_inner();
+                                        let _ = ready_tx_coord.send((
+                                            hb,
                                             b,
                                             w,
+                                            Vec::new(),
                                             rustc_hash::FxHashMap::default(),
+                                            tx_ids,
                                         ));
                                     }
-                                });
-                            } else {
-                                tokio::task::block_in_place(|| {
-                                    if let Err(e) = ptx.try_send(item) {
-                                        let back = e.into_inner();
-                                        if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
-                                            let (_, _, _, b, w) = e2.into_inner();
-                                            let _ = ready_tx.send((
-                                                h,
-                                                b,
-                                                w,
-                                                rustc_hash::FxHashMap::default(),
-                                            ));
-                                        }
+                                } else if let Err(e) = ptx.try_send(item) {
+                                    let back = e.into_inner();
+                                    if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
+                                        let (_, _, tx_ids, hb, b, w) = e2.into_inner();
+                                        let _ = ready_tx_coord.send((
+                                            hb,
+                                            b,
+                                            w,
+                                            Vec::new(),
+                                            rustc_hash::FxHashMap::default(),
+                                            tx_ids,
+                                        ));
                                     }
-                                });
-                            }
+                                }
+                            });
                         }
                         if reorder_buffer.len() < dynamic_buffer_limit {
                             break;
                         }
                     }
-                    if reorder_buffer.len() >= dynamic_buffer_limit {
+                    if reorder_buffer.len() >= dynamic_buffer_limit
+                        && !reorder_buffer.contains_key(&next_prefetch_height)
+                    {
+                        // Gap: next_prefetch_height is missing. Drain block_rx
+                        // to see if it arrived after the buffer filled.
+                        let mut found_missing = false;
+                        let mut gap_drained = 0usize;
+                        while let Ok((h, block, witnesses)) = block_rx.try_recv() {
+                            total_received += 1;
+                            if h == next_prefetch_height {
+                                found_missing = true;
+                            }
+                            reorder_buffer.insert(h, (block, witnesses));
+                            gap_drained += 1;
+                            if found_missing || gap_drained >= 200 { break; }
+                        }
+                        if !found_missing {
+                            // Still missing after draining channel. Track how long.
+                            let now = std::time::Instant::now();
+                            let stall_start = *coord_buffer_full_since.get_or_insert(now);
+                            let stuck_secs = now.duration_since(stall_start).as_secs();
+                            if stuck_secs >= COORD_STALL_LOG_SECS {
+                                warn!(
+                                    "Coordinator stall: buffer full ({}) but height {} missing for {}s (drained {} from rx), signalling retry",
+                                    reorder_buffer.len(), next_prefetch_height, stuck_secs, gap_drained
+                                );
+                                let _ = stall_tx_for_coord.send(next_prefetch_height);
+                                assigner_for_coord
+                                    .requeue_chunk_containing_height(next_prefetch_height);
+                                coord_buffer_full_since = None;
+                            }
+                            tokio::time::sleep(IBD_YIELD_SLEEP).await;
+                        } else {
+                            coord_buffer_full_since = None;
+                            // Found the missing block — loop will drain contiguous blocks next iteration
+                        }
+                    } else if reorder_buffer.len() >= dynamic_buffer_limit {
+                        coord_buffer_full_since = None;
                         tokio::time::sleep(IBD_YIELD_SLEEP).await;
                     }
                     continue;
@@ -974,6 +1131,7 @@ impl ParallelIBD {
                             COORD_STALL_LOG_SECS, next_needed, total_received, next_prefetch_height
                         );
                         let _ = stall_tx_for_coord.send(next_needed);
+                        assigner_for_coord.requeue_chunk_containing_height(next_needed);
                         continue;
                     }
                 };
@@ -987,7 +1145,11 @@ impl ParallelIBD {
                         let (block, witnesses) = reorder_buffer
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
-                        block_input_keys_into(&block, &mut coord_keys_buf);
+                        block_input_keys_and_tx_ids_filtered(
+                            &block,
+                            &mut coord_tx_ids_buf,
+                            &mut coord_keys_buf,
+                        );
                         let h = next_prefetch_height;
                         next_prefetch_height += 1;
                         if h == bootstrap_end {
@@ -996,43 +1158,44 @@ impl ParallelIBD {
                         }
                         {
                             let store = &ibd_store_v2_for_coord;
-                            let ptx = &prefetch_input_tx_v2_for_coord;
                             let keys_owned = std::mem::take(&mut coord_keys_buf);
-                            let item = (Arc::clone(store), keys_owned, h, block, witnesses);
+                            let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                            let item = (Arc::clone(store), keys_owned, tx_ids_owned, h, block, witnesses);
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
                             let route_to_gap_fill = h <= next_needed;
-                            if route_to_gap_fill {
-                                tokio::task::block_in_place(|| {
+                            let ptx = &prefetch_input_tx_v2_for_coord;
+                            tokio::task::block_in_place(|| {
+                                if route_to_gap_fill {
                                     if let Err(e) = gap_fill_tx_v2_for_coord.try_send(item) {
-                                        let (_, _, _, b, w) = e.into_inner();
-                                        let _ = ready_tx.send((
-                                            h,
+                                        let (_, _, tx_ids, hb, b, w) = e.into_inner();
+                                        let _ = ready_tx_coord.send((
+                                            hb,
                                             b,
                                             w,
+                                            Vec::new(),
                                             rustc_hash::FxHashMap::default(),
+                                            tx_ids,
                                         ));
                                     }
-                                });
-                            } else {
-                                tokio::task::block_in_place(|| {
-                                    if let Err(e) = ptx.try_send(item) {
-                                        let back = e.into_inner();
-                                        if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
-                                            let (_, _, _, b, w) = e2.into_inner();
-                                            let _ = ready_tx.send((
-                                                h,
-                                                b,
-                                                w,
-                                                rustc_hash::FxHashMap::default(),
-                                            ));
-                                        }
+                                } else if let Err(e) = ptx.try_send(item) {
+                                    let back = e.into_inner();
+                                    if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
+                                        let (_, _, tx_ids, hb, b, w) = e2.into_inner();
+                                        let _ = ready_tx_coord.send((
+                                            hb,
+                                            b,
+                                            w,
+                                            Vec::new(),
+                                            rustc_hash::FxHashMap::default(),
+                                            tx_ids,
+                                        ));
                                     }
-                                });
-                            }
+                                }
+                            });
                         }
                     }
-                    drop(ready_tx);
+                    drop(ready_tx_coord);
                     info!("Coordinator: done, sent {} blocks", total_received);
                     break;
                 }
@@ -1055,10 +1218,21 @@ impl ParallelIBD {
                             assigner_for_coord.mark_bootstrap_complete();
                             info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
                         }
-                        // Seq-2: Sequential fast path — skip prefetch entirely. Send directly to ready_tx.
-                        // Validation does AccessCoin-style inline (store.build_utxo_map_into) when prefetched empty.
+                        blvm_consensus::block::compute_block_tx_ids_into(
+                            &block,
+                            &mut coord_tx_ids_buf,
+                        );
+                        // Single-peer path: no prefetch overlap; validation builds the UTXO base map
+                        // on-thread (same as a prefetch miss, but steady state at low BPS).
                         let _ = tokio::task::block_in_place(|| {
-                            ready_tx.send((h, block, witnesses, rustc_hash::FxHashMap::default()))
+                            ready_tx_coord.send((
+                                h,
+                                block,
+                                witnesses,
+                                Vec::new(),
+                                rustc_hash::FxHashMap::default(),
+                                std::mem::take(&mut coord_tx_ids_buf),
+                            ))
                         });
                         next_prefetch_height = h + 1;
                     }
@@ -1083,7 +1257,11 @@ impl ParallelIBD {
                         let (block, witnesses) = reorder_buffer
                             .remove(&next_prefetch_height)
                             .expect("contains_key");
-                        block_input_keys_into(&block, &mut coord_keys_buf);
+                        block_input_keys_and_tx_ids_filtered(
+                            &block,
+                            &mut coord_tx_ids_buf,
+                            &mut coord_keys_buf,
+                        );
                         let h = next_prefetch_height;
                         next_prefetch_height += 1;
                         if h == bootstrap_end {
@@ -1092,40 +1270,41 @@ impl ParallelIBD {
                         }
                         {
                             let store = &ibd_store_v2_for_coord;
-                            let ptx = &prefetch_input_tx_v2_for_coord;
                             let keys_owned = std::mem::take(&mut coord_keys_buf);
-                            let item = (Arc::clone(store), keys_owned, h, block, witnesses);
+                            let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                            let item = (Arc::clone(store), keys_owned, tx_ids_owned, h, block, witnesses);
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
                             let route_to_gap_fill = h <= next_needed;
-                            if route_to_gap_fill {
-                                tokio::task::block_in_place(|| {
+                            let ptx = &prefetch_input_tx_v2_for_coord;
+                            tokio::task::block_in_place(|| {
+                                if route_to_gap_fill {
                                     if let Err(e) = gap_fill_tx_v2_for_coord.try_send(item) {
-                                        let (_, _, _, b, w) = e.into_inner();
-                                        let _ = ready_tx.send((
-                                            h,
+                                        let (_, _, tx_ids, hb, b, w) = e.into_inner();
+                                        let _ = ready_tx_coord.send((
+                                            hb,
                                             b,
                                             w,
+                                            Vec::new(),
                                             rustc_hash::FxHashMap::default(),
+                                            tx_ids,
                                         ));
                                     }
-                                });
-                            } else {
-                                tokio::task::block_in_place(|| {
-                                    if let Err(e) = ptx.try_send(item) {
-                                        let back = e.into_inner();
-                                        if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
-                                            let (_, _, _, b, w) = e2.into_inner();
-                                            let _ = ready_tx.send((
-                                                h,
-                                                b,
-                                                w,
-                                                rustc_hash::FxHashMap::default(),
-                                            ));
-                                        }
+                                } else if let Err(e) = ptx.try_send(item) {
+                                    let back = e.into_inner();
+                                    if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
+                                        let (_, _, tx_ids, hb, b, w) = e2.into_inner();
+                                        let _ = ready_tx_coord.send((
+                                            hb,
+                                            b,
+                                            w,
+                                            Vec::new(),
+                                            rustc_hash::FxHashMap::default(),
+                                            tx_ids,
+                                        ));
                                     }
-                                });
-                            }
+                                }
+                            });
                         }
                         if reorder_buffer.len() >= dynamic_buffer_limit {
                             break;
@@ -1137,9 +1316,8 @@ impl ParallelIBD {
 
         // Step 4: BLOCK FEEDER — drains ready_rx into shared buffer so validation can run while buffer fills.
         // Feeder runs on std::thread (crossbeam recv is blocking). Buffer fills while validation works.
-        let dynamic_buffer_limit = mem_guard.buffer_limit(start_height);
         let feeder_state = new_feeder_state();
-        let feeder_buffer_limit = dynamic_buffer_limit;
+        let feeder_buffer_limit = mem_guard.buffer_limit(start_height);
         let feeder_buffer_bytes_limit = mem_guard.feeder_buffer_bytes_limit;
         let feeder_handle = run_feeder_thread(
             ready_rx,
@@ -1159,6 +1337,8 @@ impl ParallelIBD {
         let self_clone_valid = Arc::clone(&self);
         let protocol_valid = Arc::clone(&protocol);
         let utxo_mutex_valid = Arc::clone(&utxo_mutex);
+        let utxo_nominal_max_entries = mem_guard.utxo_max_entries;
+        let utxo_pf = self.config.utxo_prefetch_lookahead.clamp(1, 128) as usize;
         let params = validation_loop::ValidationParams {
             feeder_state: feeder_state_valid,
             ibd_store: ibd_store_v2_valid,
@@ -1171,6 +1351,10 @@ impl ParallelIBD {
             start_height,
             validation_height: Arc::clone(&validation_height),
             mem_guard,
+            max_ahead_live: Arc::clone(&max_ahead_live),
+            nominal_max_ahead: max_ahead_blocks,
+            utxo_nominal_max_entries,
+            utxo_prefetch_lookahead: utxo_pf,
         };
         let validation_handle = std::thread::spawn(move || validation_loop::run_validation_loop(params));
 
@@ -1281,7 +1465,7 @@ impl ParallelIBD {
     /// When BIP54 is active and height is at a period boundary (N % 2016 in {0, 2015}), boundary
     /// timestamps are read from blockstore so timewarp checks can run; otherwise None.
     #[inline]
-    pub(crate) fn validate_block_only(
+    pub(crate) fn validate_block_only<'a>(
         &self,
         blockstore: &BlockStore,
         _protocol: &BitcoinProtocolEngine,
@@ -1294,10 +1478,15 @@ impl ParallelIBD {
         height: u64,
         recent_headers: Option<&[Arc<BlockHeader>]>,
         network_time: u64,
-        precomputed_tx_ids: Option<&[Hash]>,
-    ) -> Result<(Vec<Hash>, Option<blvm_consensus::block::UtxoDelta>)> {
+        precomputed_tx_ids: Option<&'a [Hash]>,
+    ) -> Result<(
+        std::borrow::Cow<'a, [Hash]>,
+        Option<blvm_consensus::block::UtxoDelta>,
+    )> {
         // BIP54 activation from version bits when miners signal (no fixed height required).
-        let bip54_activation_override = recent_headers.and_then(|hdr| {
+        // Merge candidates with `min` so an earlier period’s lock-in is not overwritten by a
+        // later window’s larger computed activation height (see `version_bits` module docs).
+        let candidate = recent_headers.and_then(|hdr| {
             if hdr.len() >= blvm_consensus::version_bits::LOCK_IN_PERIOD as usize {
                 blvm_consensus::version_bits::activation_height_from_headers(
                     hdr,
@@ -1309,6 +1498,11 @@ impl ParallelIBD {
                 None
             }
         });
+        let bip54_activation_override = {
+            let mut g = self.bip54_activation_from_version_bits.lock();
+            *g = blvm_consensus::version_bits::merge_bip54_activation_candidate(*g, candidate);
+            *g
+        };
 
         let bip54_active = blvm_consensus::bip_validation::is_bip54_active_at(
             height,
@@ -1548,7 +1742,7 @@ impl ParallelIBD {
         &self,
         blockstore: &BlockStore,
         _storage: Option<&Arc<Storage>>,
-        pending: &mut Vec<(Arc<Block>, Arc<BlockHeader>, Arc<Vec<Vec<Witness>>>, u64)>,
+        pending: &mut Vec<(Arc<Block>, Arc<Vec<Vec<Witness>>>, u64)>,
     ) -> Result<()> {
         let to_flush = std::mem::take(pending);
         Self::do_flush_to_storage(blockstore, _storage, to_flush)
@@ -1559,7 +1753,7 @@ impl ParallelIBD {
     pub(crate) fn do_flush_to_storage(
         blockstore: &BlockStore,
         _storage: Option<&Arc<Storage>>,
-        pending: Vec<(Arc<Block>, Arc<BlockHeader>, Arc<Vec<Vec<Witness>>>, u64)>,
+        pending: Vec<(Arc<Block>, Arc<Vec<Vec<Witness>>>, u64)>,
     ) -> Result<()> {
         if pending.is_empty() {
             return Ok(());
@@ -1570,34 +1764,41 @@ impl ParallelIBD {
         #[cfg(feature = "profile")]
         let t_serialize = std::time::Instant::now();
 
-        // Unwrap Arcs to get owned Block (sync has completed; refcount should be 1).
-        // Restore header from Arc (we store header_rc separately; block has original header).
-        let mut pending: Vec<(Block, Arc<BlockHeader>, Arc<Vec<Vec<Witness>>>, u64)> = pending
+        // Unwrap Arcs to get owned Block (sync has completed; refcount should be 1 when validation
+        // holds the only Arc after dequeue). Witness Arc is cloned only when try_unwrap fails.
+        let mut pending: Vec<(Block, Arc<Vec<Vec<Witness>>>, u64)> = pending
             .into_iter()
-            .map(|(arc_block, header_rc, w, h)| {
-                let mut block = Arc::try_unwrap(arc_block).unwrap_or_else(|a| (*a).clone());
-                block.header = header_rc.as_ref().clone();
-                (block, header_rc, w, h)
+            .map(|(arc_block, w, h)| {
+                let block = Arc::try_unwrap(arc_block).unwrap_or_else(|a| (*a).clone());
+                (block, w, h)
             })
             .collect();
+
+        let flush_max_height = pending
+            .iter()
+            .map(|(_, _, h)| *h)
+            .max()
+            .unwrap_or(0);
 
         // Pre-compute all block hashes ONCE (avoids 4x redundant double SHA256 per block)
         // Parallelize hash computation and serialization for better CPU utilization
         // header_data uses Arc to avoid cloning Vec on cache hit (batch.put accepts &[u8] via .as_slice())
         let (block_hashes, block_data, header_data): (Vec<Hash>, Vec<Vec<u8>>, Vec<Arc<Vec<u8>>>) = {
+            let _ibd_header_cache_bypass =
+                crate::storage::serialization_cache::IbdHeaderSerializeCacheBypassGuard::enter();
             #[cfg(feature = "rayon")]
             {
                 use blvm_protocol::rayon::iter::IntoParallelRefIterator;
                 use blvm_protocol::rayon::prelude::*;
                 let block_hashes: Vec<Hash> = pending
                     .par_iter()
-                    .map(|(block, _, _, _)| blockstore.get_block_hash(block))
+                    .map(|(block, _, _)| blockstore.get_block_hash(block))
                     .collect();
 
                 // Parallel serialize all block data
                 let block_data: Vec<Vec<u8>> = pending
                     .par_iter()
-                    .map(|(block, _, _, _)| {
+                    .map(|(block, _, _)| {
                         bincode::serialize(block)
                             .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
                     })
@@ -1610,7 +1811,7 @@ impl ParallelIBD {
                 let header_data: Vec<Arc<Vec<u8>>> = pending
                     .par_iter()
                     .zip(block_hashes.par_iter())
-                    .map(|((block, _, _, _), block_hash)| {
+                    .map(|((block, _, _), block_hash)| {
                         if let Some(cached) = get_cached_serialized_header(block_hash) {
                             return Ok(cached); // Arc::clone already done in get; no Vec clone
                         }
@@ -1628,13 +1829,13 @@ impl ParallelIBD {
             {
                 let block_hashes: Vec<Hash> = pending
                     .iter()
-                    .map(|(block, _, _, _)| blockstore.get_block_hash(block))
+                    .map(|(block, _, _)| blockstore.get_block_hash(block))
                     .collect();
 
                 // Pre-serialize all block data
                 let block_data: Vec<Vec<u8>> = pending
                     .iter()
-                    .map(|(block, _, _, _)| {
+                    .map(|(block, _, _)| {
                         bincode::serialize(block)
                             .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
                     })
@@ -1647,7 +1848,7 @@ impl ParallelIBD {
                 let header_data: Vec<Arc<Vec<u8>>> = pending
                     .iter()
                     .zip(block_hashes.iter())
-                    .map(|((block, _, _, _), block_hash)| {
+                    .map(|((block, _, _), block_hash)| {
                         if let Some(cached) = get_cached_serialized_header(block_hash) {
                             return Ok(cached);
                         }
@@ -1667,43 +1868,21 @@ impl ParallelIBD {
         #[cfg(feature = "profile")]
         let t_disk = std::time::Instant::now();
 
-        // Batch write blocks
-        {
-            let blocks_tree = blockstore.blocks_tree()?;
-            let mut batch = blocks_tree.batch();
-            for (i, data) in block_data.iter().enumerate() {
-                batch.put(&block_hashes[i], data);
-            }
-            batch.commit()?;
-        }
+        // Sort flush order by height so LSM writes are monotonic (matches `block_height_row_key`).
+        let mut flush_order: Vec<usize> = (0..pending.len()).collect();
+        flush_order.sort_by_key(|&i| pending[i].2);
 
-        // Batch write headers
-        {
-            let headers_tree = blockstore.headers_tree()?;
-            let mut batch = headers_tree.batch();
-            for (i, data) in header_data.iter().enumerate() {
-                batch.put(&block_hashes[i], data.as_slice());
-            }
-            batch.commit()?;
-        }
-
-        // Batch write witnesses (skip if all empty - common in early chain)
-        // Parallelize witness serialization for better CPU utilization
-        {
-            let has_witnesses = pending.iter().any(|(_, _, w, _)| !w.is_empty());
-            if has_witnesses {
-                let witnesses_tree = blockstore.witnesses_tree()?;
-                let mut batch = witnesses_tree.batch();
-
+        // Pre-serialize witness payloads once (shared by RocksDB unified flush and legacy per-CF batches).
+        let witness_blobs: Vec<Option<Vec<u8>>> =
+            if pending.iter().any(|(_, w, _)| !w.is_empty()) {
                 #[cfg(feature = "rayon")]
                 {
                     use blvm_protocol::rayon::iter::IntoParallelRefIterator;
                     use blvm_protocol::rayon::prelude::*;
-                    // Parallel serialize witnesses
                     let witness_data_vec: Vec<(usize, Vec<u8>)> = pending
                         .par_iter()
                         .enumerate()
-                        .filter_map(|(i, (_, _, witnesses, _))| {
+                        .filter_map(|(i, (_, witnesses, _))| {
                             if !witnesses.is_empty() {
                                 match bincode::serialize(witnesses.as_ref()) {
                                     Ok(data) => Some((i, data)),
@@ -1715,61 +1894,228 @@ impl ParallelIBD {
                         })
                         .collect();
 
+                    let mut v = vec![None; pending.len()];
                     for (i, data) in witness_data_vec {
-                        batch.put(&block_hashes[i], &data);
+                        v[i] = Some(data);
                     }
+                    v
                 }
 
                 #[cfg(not(feature = "rayon"))]
                 {
-                    for (i, (_, _, witnesses, _)) in pending.iter().enumerate() {
+                    let mut v = vec![None; pending.len()];
+                    for i in 0..pending.len() {
+                        let witnesses = &pending[i].1;
                         if !witnesses.is_empty() {
-                            let witness_data =
-                                bincode::serialize(witnesses.as_ref()).map_err(|e| {
-                                    anyhow::anyhow!("Failed to serialize witnesses: {}", e)
-                                })?;
-                            batch.put(&block_hashes[i], &witness_data);
+                            v[i] = Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
+                                anyhow::anyhow!("Failed to serialize witnesses: {}", e)
+                            })?);
                         }
                     }
+                    v
                 }
+            } else {
+                vec![None; pending.len()]
+            };
 
-                batch.commit()?;
-            }
-        }
+        let metadata_blobs: Vec<Vec<u8>> = (0..pending.len())
+            .map(|i| {
+                let metadata = BlockMetadata {
+                    n_tx: pending[i].0.transactions.len() as u32,
+                };
+                bincode::serialize(&metadata).map_err(|e| {
+                    anyhow::anyhow!("Block metadata serialization failed: {}", e)
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        // Batch write height index
+        // Reuse `header_data` from the parallel serialize pass (avoid double bincode of last 11).
+        #[cfg(any(
+            feature = "rocksdb",
+            feature = "redb",
+            feature = "tidesdb"
+        ))]
+        let recent_entries: Vec<(u64, Vec<u8>)> = flush_order
+            .iter()
+            .rev()
+            .take(11)
+            .map(|&idx| {
+                let h = pending[idx].2;
+                let data = header_data[idx].as_slice().to_vec();
+                Ok((h, data))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let heights: Vec<u64> = pending.iter().map(|(_, _, h)| *h).collect();
+
+        let mut storage_unified = false;
+        #[cfg(feature = "rocksdb")]
         {
-            let height_tree = blockstore.height_tree()?;
-            let mut batch = height_tree.batch();
-            for (i, (_, _, _, height)) in pending.iter().enumerate() {
-                let height_key = height.to_be_bytes();
-                batch.put(&height_key, &block_hashes[i]);
+            if blockstore.try_ibd_flush_rocksdb_unified(
+                &flush_order,
+                &heights,
+                &block_hashes,
+                &block_data,
+                &header_data,
+                &witness_blobs,
+                &metadata_blobs,
+                &recent_entries,
+            )? {
+                storage_unified = true;
             }
-            batch.commit()?;
+        }
+        #[cfg(feature = "redb")]
+        {
+            if !storage_unified
+                && blockstore.try_ibd_flush_redb_unified(
+                    &flush_order,
+                    &heights,
+                    &block_hashes,
+                    &block_data,
+                    &header_data,
+                    &witness_blobs,
+                    &metadata_blobs,
+                    &recent_entries,
+                )?
+            {
+                storage_unified = true;
+            }
+        }
+        #[cfg(feature = "tidesdb")]
+        {
+            if !storage_unified
+                && blockstore.try_ibd_flush_tidesdb_unified(
+                    &flush_order,
+                    &heights,
+                    &block_hashes,
+                    &block_data,
+                    &header_data,
+                    &witness_blobs,
+                    &metadata_blobs,
+                    &recent_entries,
+                )?
+            {
+                storage_unified = true;
+            }
         }
 
-        // Store recent headers (needed for MTP calculation)
-        // Only store the last 11 headers (minimal overhead, sequential is fine)
-        for (block, _, _, height) in pending.iter().rev().take(11) {
-            blockstore.store_recent_header(*height, &block.header)?;
+        if !storage_unified {
+            // Per-tree batches (Redb, Sled, TidesDB, or non-Rocks `Arc<dyn Database>`).
+            // Batch write blocks (no WAL — safe for IBD, re-downloads on crash)
+            {
+                let blocks_tree = blockstore.blocks_tree()?;
+                let mut batch = blocks_tree.batch();
+                for &i in &flush_order {
+                    let height = pending[i].2;
+                    let key = block_height_row_key(height, &block_hashes[i]);
+                    batch.put(&key, &block_data[i]);
+                }
+                batch.commit_no_wal()?;
+            }
+
+            // Batch write headers
+            {
+                let headers_tree = blockstore.headers_tree()?;
+                let mut batch = headers_tree.batch();
+                for &i in &flush_order {
+                    let height = pending[i].2;
+                    let key = block_height_row_key(height, &block_hashes[i]);
+                    batch.put(&key, header_data[i].as_slice());
+                }
+                batch.commit_no_wal()?;
+            }
+
+            // Batch write witnesses (skip if all empty — common in early chain)
+            {
+                let has_witnesses = pending.iter().any(|(_, w, _)| !w.is_empty());
+                if has_witnesses {
+                    let witnesses_tree = blockstore.witnesses_tree()?;
+                    let mut batch = witnesses_tree.batch();
+                    for &i in &flush_order {
+                        if let Some(ref data) = witness_blobs[i] {
+                            let height = pending[i].2;
+                            let key = block_height_row_key(height, &block_hashes[i]);
+                            batch.put(&key, data);
+                        }
+                    }
+                    batch.commit_no_wal()?;
+                }
+            }
+
+            // Batch write height index
+            {
+                let height_tree = blockstore.height_tree()?;
+                let mut batch = height_tree.batch();
+                for &i in &flush_order {
+                    let height = pending[i].2;
+                    let height_key = height.to_be_bytes();
+                    batch.put(&height_key, &block_hashes[i]);
+                }
+                batch.commit_no_wal()?;
+            }
+
+            // Reverse index (hash → height) — required for RPC lookups and chain recovery
+            {
+                let ht_tree = blockstore.hash_to_height_tree()?;
+                let mut batch = ht_tree.batch();
+                for &i in &flush_order {
+                    let height_bytes = pending[i].2.to_be_bytes();
+                    batch.put(&block_hashes[i], &height_bytes);
+                }
+                batch.commit_no_wal()?;
+            }
+
+            // Block metadata (same row keys as bodies — keeps RPC n_tx consistent with `store_block_with_witness`)
+            {
+                let meta_tree = blockstore.metadata_tree()?;
+                let mut batch = meta_tree.batch();
+                for &i in &flush_order {
+                    let key = block_height_row_key(pending[i].2, &block_hashes[i]);
+                    batch.put(&key, &metadata_blobs[i]);
+                }
+                batch.commit_no_wal()?;
+            }
+
+            // Store recent headers (needed for MTP calculation) — single batch vs N small writes.
+            let recent_batch: Vec<(u64, &BlockHeader)> = pending
+                .iter()
+                .rev()
+                .take(11)
+                .map(|(block, _, height)| (*height, &block.header))
+                .collect();
+            blockstore.store_recent_headers_ibd_batch(&recent_batch)?;
         }
 
         #[cfg(feature = "profile")]
         {
             let disk_ms = t_disk.elapsed().as_millis() as u64;
-            if serialize_ms > 2 || disk_ms > 2 {
-                blvm_consensus::profile_log!(
-                    "[FLUSH_STORAGE_PERF] blocks={} serialize_ms={} disk_ms={} total_ms={}",
-                    count,
-                    serialize_ms,
-                    disk_ms,
-                    start.elapsed().as_millis()
-                );
-            }
+            blvm_consensus::profile_log!(
+                "[FLUSH_STORAGE_PERF] blocks={} max_height={} serialize_ms={} disk_ms={} total_ms={}",
+                count,
+                flush_max_height,
+                serialize_ms,
+                disk_ms,
+                start.elapsed().as_millis()
+            );
         }
 
         // Skip transaction indexing during IBD - it's not needed until sync is complete
         // and causes massive slowdowns due to individual writes per transaction
+
+        // Chain metadata: parallel IBD bypasses `run_loop`, so `update_tip` must run here
+        // or `get_height()` / restarts see `chain_info` missing despite full block index.
+        if let Some(storage) = _storage {
+            if let Some((idx, _)) = pending
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (_, _, h))| *h)
+            {
+                let block = &pending[idx].0;
+                let tip_height = pending[idx].2;
+                let tip_hash = block_hashes[idx];
+                storage.chain().update_tip(&tip_hash, &block.header, tip_height)?;
+            }
+        }
 
         let elapsed = start.elapsed();
         // Use debug! — this is disk write throughput for one batch, NOT IBD blocks/s.
@@ -2082,13 +2428,11 @@ mod tests {
         let (height, hash) = checkpoints::MAINNET_CHECKPOINTS[0];
         assert_eq!(height, 0);
 
-        // Genesis block hash in little-endian (internal byte order)
-        let expected_genesis = [
-            0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72, 0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63,
-            0xf7, 0x4f, 0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c, 0x68, 0xd6, 0x19, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-        ];
-        assert_eq!(hash, expected_genesis, "Genesis block hash should match");
+        assert_eq!(
+            hash,
+            blvm_consensus::GENESIS_BLOCK_HASH_INTERNAL,
+            "Genesis block hash should match"
+        );
     }
 
     // ============================================================

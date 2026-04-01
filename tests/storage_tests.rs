@@ -403,7 +403,8 @@ fn test_utxo_store_size_queries() {
         let utxo = UTXO {
             value: (1_0000_0000 * (i + 1)) as i64,
             script_pubkey: p2pkh_script(random_hash20()).into(),
-            height: i,
+            height: i as u64,
+            is_coinbase: false,
         };
 
         utxostore.add_utxo(&outpoint, &utxo).unwrap();
@@ -698,7 +699,7 @@ async fn test_utxostore_concurrent_operations() {
     for (outpoint, utxo) in &utxo1 {
         let utxo_struct = UTXO {
             value: utxo.value,
-            script_pubkey: utxo.script_pubkey.clone(),
+            script_pubkey: utxo.script_pubkey.clone().into(),
             height: 100, // Default height for test
 
             is_coinbase: false,
@@ -709,7 +710,7 @@ async fn test_utxostore_concurrent_operations() {
     for (outpoint, utxo) in &utxo2 {
         let utxo_struct = UTXO {
             value: utxo.value,
-            script_pubkey: utxo.script_pubkey.clone(),
+            script_pubkey: utxo.script_pubkey.clone().into(),
             height: 100, // Default height for test
 
             is_coinbase: false,
@@ -887,6 +888,7 @@ async fn test_storage_integration_workflow() {
         value: 1000,
         script_pubkey: p2pkh_script(random_hash20()).into(),
         height: block_height,
+        is_coinbase: false,
     };
     utxostore.add_utxo(&outpoint, &utxo).unwrap();
 
@@ -965,7 +967,8 @@ fn test_block_compression_roundtrip() {
 fn test_module_tree_isolation_redb() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
+    let db: Arc<dyn Database> =
+        Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     // Create two module trees with different module IDs
     let tree1 = db.open_tree("module_abc123_state").unwrap();
@@ -989,7 +992,8 @@ fn test_module_tree_isolation_redb() {
 fn test_module_tree_operations_redb() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
+    let db: Arc<dyn Database> =
+        Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     let tree = db.open_tree("module_test123_cache").unwrap();
 
@@ -1022,7 +1026,8 @@ fn test_module_tree_operations_redb() {
 fn test_module_tree_iter_redb() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
+    let db: Arc<dyn Database> =
+        Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     let tree = db.open_tree("module_test456_data").unwrap();
 
@@ -1046,7 +1051,8 @@ fn test_module_tree_iter_redb() {
 fn test_module_tree_multiple_trees_same_module_redb() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
+    let db: Arc<dyn Database> =
+        Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
     // Create multiple trees for the same module
     let state_tree = db.open_tree("module_mod123_state").unwrap();
@@ -1076,7 +1082,8 @@ fn test_module_tree_multiple_trees_same_module_redb() {
 fn test_module_tree_isolation_sled() {
     let temp_dir = TempDir::new().unwrap();
     use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    let db = Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled, None).unwrap());
+    let db: Arc<dyn Database> =
+        Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled, None).unwrap());
 
     // Create two module trees with different module IDs
     let tree1 = db.open_tree("module_abc123_state").unwrap();
@@ -1105,14 +1112,14 @@ fn test_module_tree_backend_compatibility() {
     use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
 
     // Test with redb
-    let db_redb =
+    let db_redb: Arc<dyn Database> =
         Arc::from(create_database(temp_dir1.path(), DatabaseBackend::Redb, None).unwrap());
     let tree_redb = db_redb.open_tree("module_test_state").unwrap();
     tree_redb.insert(b"key", b"value").unwrap();
     assert_eq!(tree_redb.get(b"key").unwrap(), Some(b"value".to_vec()));
 
     // Test with sled
-    let db_sled =
+    let db_sled: Arc<dyn Database> =
         Arc::from(create_database(temp_dir2.path(), DatabaseBackend::Sled, None).unwrap());
     let tree_sled = db_sled.open_tree("module_test_state").unwrap();
     tree_sled.insert(b"key", b"value").unwrap();
@@ -1123,7 +1130,7 @@ fn test_module_tree_backend_compatibility() {
 #[test]
 fn test_block_compression_ratio() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Arc::from(
+    let db: Arc<dyn blvm_node::storage::database::Database> = Arc::from(
         blvm_node::storage::database::create_database(
             temp_dir.path(),
             blvm_node::storage::database::DatabaseBackend::Sled,

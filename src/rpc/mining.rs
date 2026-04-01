@@ -3,15 +3,29 @@
 //! Implements mining-related JSON-RPC methods for block template generation and mining.
 //! Uses formally verified blvm-consensus mining functions.
 
+use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::node::mempool::MempoolManager;
+use crate::node::sync::SyncCoordinator;
 use crate::rpc::errors::{RpcError, RpcResult, TIP_BLOCK_NOT_FOUND_MSG};
+use crate::rpc::params::{param_str_required, param_u64_default, param_u64_required};
+use crate::rpc::rawtx::address_string_to_script_pubkey;
 use crate::storage::Storage;
 use crate::utils::{current_timestamp, CACHE_REFRESH_TIP};
 use blvm_protocol::mining::BlockTemplate;
 use blvm_protocol::serialization::deserialize_block_with_witnesses;
+use blvm_protocol::serialization::serialize_block_with_witnesses;
 use blvm_protocol::serialization::serialize_transaction;
+use blvm_protocol::segwit::Witness;
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+use blvm_consensus::mining::MiningResult;
 use blvm_consensus::opcodes::{OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY};
+use blvm_consensus::types::Network as ConsensusNetwork;
+use blvm_consensus::{
+    BIP112_CSV_ACTIVATION_MAINNET, BIP112_CSV_ACTIVATION_REGTEST, BIP112_CSV_ACTIVATION_TESTNET,
+    SEGWIT_ACTIVATION_MAINNET, SEGWIT_ACTIVATION_TESTNET, TAPROOT_ACTIVATION_MAINNET,
+    TAPROOT_ACTIVATION_TESTNET,
+};
 use blvm_protocol::{
     types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
     ConsensusProof, ValidationResult,
@@ -32,6 +46,10 @@ pub struct MiningRpc {
     mempool: Option<Arc<MempoolManager>>,
     /// Event publisher for BlockMined, BlockTemplateUpdated (optional)
     event_publisher: Option<Arc<EventPublisher>>,
+    /// When set, `submitblock` queues wire bytes for the node run loop (same as a P2P block).
+    network_manager: Option<Arc<NetworkManager>>,
+    /// Protocol engine (required for `generatetoaddress` regtest mining).
+    protocol_engine: Option<Arc<BitcoinProtocolEngine>>,
 }
 
 impl MiningRpc {
@@ -42,6 +60,8 @@ impl MiningRpc {
             storage: None,
             mempool: None,
             event_publisher: None,
+            network_manager: None,
+            protocol_engine: None,
         }
     }
 
@@ -52,12 +72,26 @@ impl MiningRpc {
             storage: Some(storage),
             mempool: Some(mempool),
             event_publisher: None,
+            network_manager: None,
+            protocol_engine: None,
         }
     }
 
     /// Set event publisher for BlockMined, BlockTemplateUpdated
     pub fn with_event_publisher(mut self, event_publisher: Option<Arc<EventPublisher>>) -> Self {
         self.event_publisher = event_publisher;
+        self
+    }
+
+    /// Attach P2P stack so `submitblock` can extend the local chain via the main run loop.
+    pub fn with_network_manager(mut self, network_manager: Option<Arc<NetworkManager>>) -> Self {
+        self.network_manager = network_manager;
+        self
+    }
+
+    /// Attach protocol engine (needed for `generatetoaddress` on regtest).
+    pub fn with_protocol_engine(mut self, engine: Arc<BitcoinProtocolEngine>) -> Self {
+        self.protocol_engine = Some(engine);
         self
     }
 
@@ -196,10 +230,22 @@ impl MiningRpc {
     pub async fn get_block_template(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getblocktemplate");
 
-        // 1. Get current chainstate
-        let height: Natural = self
-            .get_current_height()?
-            .ok_or_else(|| RpcError::internal_error("Chain not initialized"))?;
+        // 1. Chain tip + height index for the *next* block to mine.
+        // Must match `SyncCoordinator::process_block` / run-loop indexing: the first block
+        // stored on a fresh datadir (genesis in chainstate only) uses height 0; then 1, 2, …
+        // `chain_info.height` stays on the tip header's logical index — using it here was
+        // one block behind after the first connect. Blockstore count matches the next index.
+        let template_block_height: Natural = if let Some(ref storage) = self.storage {
+            storage
+                .blocks()
+                .block_count()
+                .map_err(|e| RpcError::internal_error(format!("Failed to count blocks: {e}")))?
+                as u64
+        } else {
+            return Err(RpcError::internal_error(
+                "getblocktemplate requires storage".to_string(),
+            ));
+        };
         let prev_header = self
             .get_tip_header()?
             .ok_or_else(|| RpcError::internal_error("No chain tip"))?;
@@ -220,7 +266,7 @@ impl MiningRpc {
         let template = match self.consensus.create_block_template(
             &utxo_set,
             &mempool_txs,
-            height,
+            template_block_height,
             &prev_header,
             &prev_headers,
             &coinbase_script,
@@ -239,12 +285,12 @@ impl MiningRpc {
         if let Some(ref ep) = self.event_publisher {
             let prev_hash = prev_header.prev_block_hash;
             let tx_count = template.transactions.len();
-            ep.publish_block_template_updated(&prev_hash, height, tx_count)
+            ep.publish_block_template_updated(&prev_hash, template_block_height, tx_count)
                 .await;
         }
 
         // 6. Convert to JSON-RPC format (BIP 22/23)
-        self.template_to_json_rpc(&template, &prev_header, height)
+        self.template_to_json_rpc(&template, &prev_header, template_block_height)
     }
 
     /// Convert BlockTemplate to JSON-RPC format
@@ -599,27 +645,241 @@ impl MiningRpc {
         subsidy + fees
     }
 
+    /// Active BIP9-style `rules` for `getblocktemplate`, aligned with [`ForkActivationTable`]
+    /// (`blvm-consensus::activation`) and shared activation constants.
     fn get_active_rules(&self, height: Natural) -> Vec<String> {
-        // Determine active BIP 9 rules based on height
-        let mut rules = vec!["csv".to_string()]; // CSV always active after height
+        let network = self.consensus_network_from_storage();
+        // Match `ForkActivationTable::from_network` (Core testnet3 vs mainnet);
+        // regtest activates CSV/segwit/taproot from genesis (0).
+        let (csv_h, segwit_h, taproot_h) = match network {
+            ConsensusNetwork::Mainnet => (
+                BIP112_CSV_ACTIVATION_MAINNET,
+                SEGWIT_ACTIVATION_MAINNET,
+                TAPROOT_ACTIVATION_MAINNET,
+            ),
+            ConsensusNetwork::Testnet => (
+                BIP112_CSV_ACTIVATION_TESTNET,
+                SEGWIT_ACTIVATION_TESTNET,
+                TAPROOT_ACTIVATION_TESTNET,
+            ),
+            ConsensusNetwork::Regtest => (
+                BIP112_CSV_ACTIVATION_REGTEST,
+                0u64,
+                0u64,
+            ),
+        };
 
-        if height >= 481824 {
-            // SegWit activation (mainnet)
+        let mut rules = Vec::new();
+        if height >= csv_h {
+            rules.push("csv".to_string());
+        }
+        if height >= segwit_h {
             rules.push("segwit".to_string());
         }
-
-        if height >= 709632 {
-            // Taproot activation (mainnet)
+        if height >= taproot_h {
             rules.push("taproot".to_string());
         }
-
         rules
+    }
+
+    fn consensus_network_from_storage(&self) -> ConsensusNetwork {
+        let Some(ref storage) = self.storage else {
+            return ConsensusNetwork::Mainnet;
+        };
+        let Ok(Some(info)) = storage.chain().load_chain_info() else {
+            return ConsensusNetwork::Mainnet;
+        };
+        match info.chain_params.network.as_str() {
+            "mainnet" => ConsensusNetwork::Mainnet,
+            "testnet" => ConsensusNetwork::Testnet,
+            "regtest" => ConsensusNetwork::Regtest,
+            _ => ConsensusNetwork::Mainnet,
+        }
     }
 
     fn get_min_time(&self, _height: Natural) -> Natural {
         // Get minimum time (median time of last 11 blocks + 1)
         // For now, return current time
         current_timestamp() as Natural
+    }
+
+    /// BIP34 height in coinbase `scriptSig` (regtest has BIP34 from height 0).
+    fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
+        if height == 0 {
+            return vec![0x00, 0xff];
+        }
+        let mut n = height;
+        let mut height_bytes = Vec::new();
+        while n > 0 {
+            height_bytes.push((n & 0xff) as u8);
+            n >>= 8;
+        }
+        if height_bytes.last().map_or(false, |&b| b & 0x80 != 0) {
+            height_bytes.push(0x00);
+        }
+        let mut script_sig = Vec::with_capacity(1 + height_bytes.len());
+        script_sig.push(height_bytes.len() as u8);
+        script_sig.extend_from_slice(&height_bytes);
+        if script_sig.len() < 2 {
+            script_sig.push(0x00);
+        }
+        script_sig
+    }
+
+    /// Mine blocks on regtest and attach them to the local chain (Core-style `generatetoaddress`).
+    ///
+    /// Params: `[nblocks, address, maxtries?]`. Uses the same block construction path as the
+    /// regtest integration test (`create_new_block`, version 4, `SyncCoordinator::process_block`).
+    pub async fn generate_to_address(&self, params: &Value) -> RpcResult<Value> {
+        debug!("RPC: generatetoaddress");
+
+        const MAX_BLOCKS: u64 = 10_000;
+
+        let protocol = self.protocol_engine.as_ref().ok_or_else(|| {
+            RpcError::internal_error("generatetoaddress requires protocol engine (node misconfigured)")
+        })?;
+        if protocol.get_protocol_version() != ProtocolVersion::Regtest {
+            return Err(RpcError::invalid_params(
+                "generatetoaddress is only supported when the node runs regtest protocol",
+            ));
+        }
+
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("generatetoaddress requires storage"))?;
+
+        let nblocks = param_u64_required(params, 0, "generatetoaddress")?;
+        if nblocks > MAX_BLOCKS {
+            return Err(RpcError::invalid_params(format!(
+                "generatetoaddress: nblocks must be <= {MAX_BLOCKS}"
+            )));
+        }
+
+        let address = param_str_required(params, 1, "generatetoaddress")?;
+        let coinbase_address = address_string_to_script_pubkey(&address)?;
+        let max_tries = param_u64_default(params, 2, 2_000_000);
+
+        let mut coord = SyncCoordinator::new();
+        let mut utxo = storage
+            .utxos()
+            .get_all_utxos()
+            .map_err(|e| RpcError::internal_error(format!("Failed to load UTXO set: {e}")))?;
+
+        let mut out_hashes: Vec<Value> = Vec::with_capacity(nblocks as usize);
+
+        for _ in 0..nblocks {
+            let connect_height = storage
+                .blocks()
+                .block_count()
+                .map_err(|e| RpcError::internal_error(format!("Failed to count blocks: {e}")))?
+                as u64;
+
+            let prev_header = storage
+                .chain()
+                .get_tip_header()
+                .map_err(|e| RpcError::internal_error(format!("Failed to get tip header: {e}")))?
+                .ok_or_else(|| RpcError::internal_error("No chain tip"))?;
+
+            let mut prev_headers = storage
+                .blocks()
+                .get_recent_headers(2016)
+                .unwrap_or_default();
+            if prev_headers.len() < 2 {
+                prev_headers = vec![prev_header.clone(), prev_header.clone()];
+            }
+
+            let coinbase_script = Self::regtest_coinbase_script_sig(connect_height);
+
+            let mut block = self
+                .consensus
+                .create_new_block(
+                    &utxo,
+                    &[],
+                    connect_height,
+                    &prev_header,
+                    &prev_headers,
+                    &coinbase_script,
+                    &coinbase_address,
+                )
+                .map_err(|e| {
+                    RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
+                })?;
+            block.header.version = 4;
+
+            let (mined, result) = self
+                .consensus
+                .mine_block(block, max_tries)
+                .map_err(|e| RpcError::internal_error(format!("generatetoaddress: mine failed: {e}")))?;
+            if !matches!(result, MiningResult::Success) {
+                return Err(RpcError::internal_error(format!(
+                    "generatetoaddress: proof-of-work failed after {max_tries} attempts (height {connect_height})"
+                )));
+            }
+
+            let witnesses: Vec<Vec<Witness>> = mined
+                .transactions
+                .iter()
+                .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+                .collect();
+            let wire = serialize_block_with_witnesses(&mined, &witnesses, true);
+
+            let accepted = coord
+                .process_block(
+                    storage.blocks().as_ref(),
+                    protocol.as_ref(),
+                    Some(storage),
+                    &wire,
+                    connect_height,
+                    &mut utxo,
+                    None,
+                    None,
+                )
+                .map_err(|e| RpcError::internal_error(format!("generatetoaddress: {e}")))?;
+            if !accepted {
+                return Err(RpcError::internal_error(format!(
+                    "generatetoaddress: block rejected at height {connect_height}"
+                )));
+            }
+
+            let block_hash = storage.blocks().as_ref().get_block_hash(&mined);
+            storage
+                .chain()
+                .update_tip(&block_hash, &mined.header, connect_height)
+                .map_err(|e| RpcError::internal_error(format!("Failed to update chain tip: {e}")))?;
+            storage
+                .utxos()
+                .store_utxo_set(&utxo)
+                .map_err(|e| RpcError::internal_error(format!("Failed to store UTXO set: {e}")))?;
+
+            out_hashes.push(Value::String(hex::encode(block_hash)));
+
+            if let Some(ref ep) = self.event_publisher {
+                ep.publish_block_mined(&block_hash, connect_height, None).await;
+            }
+
+            if let Some(ref nm) = self.network_manager {
+                use crate::network::protocol::{BlockMessage, ProtocolMessage, ProtocolParser};
+                let p2p_msg = ProtocolMessage::Block(BlockMessage {
+                    block: mined.clone(),
+                    witnesses: witnesses.clone(),
+                });
+                match ProtocolParser::serialize_message(&p2p_msg) {
+                    Ok(framed) => {
+                        if let Err(e) = nm.broadcast(framed).await {
+                            warn!(
+                                "generatetoaddress: P2P broadcast failed at height {connect_height}: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => warn!(
+                        "generatetoaddress: serialize P2P block message at height {connect_height}: {e}"
+                    ),
+                }
+            }
+        }
+
+        Ok(Value::Array(out_hashes))
     }
 
     /// Submit a block to the network
@@ -659,30 +919,42 @@ impl MiningRpc {
             ));
         }
 
-        // Get current chain state
+        // Full attach path: queue for the main run loop (regtest mining + any submitblock user).
+        if let Some(ref nm) = self.network_manager {
+            if let Some(ref storage) = self.storage {
+                if let Ok(Some(tip)) = storage.chain().get_tip_hash() {
+                    if block.header.prev_block_hash != tip {
+                        return Err(RpcError::invalid_params(
+                            "submitblock: prev_block_hash does not match current chain tip"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            let queued_len = block_bytes.len();
+            nm.queue_block(block_bytes);
+            debug!("submitblock: queued {queued_len} bytes for run-loop processing");
+            if let Some(ref ep) = self.event_publisher {
+                if let Some(ref storage) = self.storage {
+                    let block_hash = storage.blocks().get_block_hash(&block);
+                    let height = self.get_current_height()?.unwrap_or(0);
+                    ep.publish_block_mined(&block_hash, height, None).await;
+                }
+            }
+            return Ok(Value::Null);
+        }
+
+        // Headless / tests: legacy consensus-only check (does not attach to chain).
         let height = self
             .get_current_height()?
             .ok_or_else(|| RpcError::internal_error("Chain not initialized"))?;
         let utxo_set = self.get_utxo_set()?;
 
-        // Validate block using consensus layer
-        // Note: This validates consensus rules, but doesn't check if block extends chain
-        // In production, would also check:
-        // 1. Block extends current tip
-        // 2. Block is not already in chain
-        // 3. Block is not orphaned
-        // For direct RPC validation, use a minimal time context derived from the node's
-        // unified time utility. This keeps consensus validation decoupled from the
-        // underlying clock implementation.
         let network_time = current_timestamp();
         let time_context = Some(blvm_consensus::types::TimeContext {
             network_time,
-            // This RPC path does not compute median time-past; callers that need
-            // full consensus-equivalent validation should use the block processor.
             median_time_past: 0,
         });
-        // Default to mainnet if protocol version cannot be determined
-        // In production, this should come from node configuration
         let network = blvm_consensus::types::Network::Mainnet;
 
         match self.consensus.validate_block_with_time_context(
@@ -694,8 +966,7 @@ impl MiningRpc {
             network,
         ) {
             Ok((ValidationResult::Valid, _)) => {
-                // Block is valid - in production would submit to block processor
-                debug!("Block submitted successfully");
+                debug!("submitblock: validation-only success (no network manager)");
                 if let Some(ref ep) = self.event_publisher {
                     if let Some(ref storage) = self.storage {
                         let block_hash = storage.blocks().get_block_hash(&block);

@@ -10,6 +10,7 @@ use blvm_node::module::registry::client::ModuleRegistry;
 use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
 use blvm_node::payment::processor::PaymentProcessor;
 use blvm_node::payment::state_machine::{PaymentState, PaymentStateMachine};
+use blvm_protocol::address::{BitcoinAddress, Network};
 use blvm_protocol::payment::Payment;
 use secp256k1::{Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
@@ -17,14 +18,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+/// Deterministic valid testnet P2WPKH strings for manifest payment fields.
+fn test_payment_tb1_addresses() -> (String, String) {
+    let author = BitcoinAddress::new(Network::Testnet, 0, vec![0x01; 20]).unwrap();
+    let marketplace = BitcoinAddress::new(Network::Testnet, 0, vec![0x02; 20]).unwrap();
+    (author.encode().unwrap(), marketplace.encode().unwrap())
+}
+
 /// Helper to create a test manifest with payment
 fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
     use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
 
     let secp = Secp256k1::new();
     let test_key = SecretKey::from_slice(&[1; 32]).unwrap();
-    let author_addr = "tb1q0000000000000000000000000000000000";
-    let commons_addr = "tb1q1111111111111111111111111111111111";
+    let (author_addr, commons_addr) = test_payment_tb1_addresses();
     let price_sats = 100000u64;
 
     let message_data = format!("{}||{}||{}", author_addr, commons_addr, price_sats);
@@ -49,9 +56,9 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
         required: true,
         price_sats: Some(price_sats),
         author_payment_code: None,
-        author_address: Some(author_addr.to_string()),
+        author_address: Some(author_addr),
         commons_payment_code: None,
-        commons_address: Some(commons_addr.to_string()),
+        commons_address: Some(commons_addr),
         payment_signature: Some(signature_hex),
     };
 

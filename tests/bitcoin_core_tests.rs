@@ -74,9 +74,9 @@ mod bitcoin_core_tests {
 
         // VarInt code (0 = uncompressed, script length follows)
         data.push(0x00);
-        // Script length VarInt (5 bytes)
-        data.push(0x05);
-        // Script (5 bytes)
+        // Script length VarInt (6 bytes)
+        data.push(0x06);
+        // Script (6 bytes)
         data.extend_from_slice(b"script");
         // Amount (8 bytes, little-endian)
         data.extend_from_slice(&1000000u64.to_le_bytes());
@@ -94,8 +94,8 @@ mod bitcoin_core_tests {
 
     #[test]
     fn test_parse_block_index() {
-        // Create a minimal block index (80+ bytes)
-        let mut data = vec![0u8; 80];
+        // CBlockIndex layout used by parse_block_index needs 104+ bytes
+        let mut data = vec![0u8; 104];
 
         // Height (4 bytes)
         data[0..4].copy_from_slice(&100u32.to_le_bytes());

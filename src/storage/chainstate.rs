@@ -85,18 +85,47 @@ impl ChainState {
         })
     }
 
-    /// Initialize chain state with genesis block
+    /// Initialize chain state with genesis block (mainnet-default `ChainParams`; prefer
+    /// [`Self::initialize_with_params`] for non-mainnet nodes).
     pub fn initialize(&self, genesis_header: &BlockHeader) -> Result<()> {
+        self.initialize_with_params(genesis_header, ChainParams::default())
+    }
+
+    /// Initialize chain state with genesis header and explicit chain parameters.
+    pub fn initialize_with_params(
+        &self,
+        genesis_header: &BlockHeader,
+        chain_params: ChainParams,
+    ) -> Result<()> {
         let chain_info = ChainInfo {
             tip_hash: self.calculate_hash(genesis_header),
             tip_header: genesis_header.clone(),
             height: 0,
             total_work: 0,
-            chain_params: ChainParams::default(),
+            chain_params,
         };
 
         self.store_chain_info(&chain_info)?;
         Ok(())
+    }
+
+    /// Initialize a fresh chain from the genesis header using explicit network metadata
+    /// (used on first boot so `genesis_hash` matches `tip_hash` at height 0).
+    pub fn initialize_from_network_metadata(
+        &self,
+        genesis_header: &BlockHeader,
+        network_name: &str,
+        max_target: u64,
+        subsidy_halving_interval: u64,
+    ) -> Result<()> {
+        let tip_hash = self.calculate_hash(genesis_header);
+        let chain_params = ChainParams {
+            network: network_name.to_string(),
+            genesis_hash: tip_hash,
+            max_target,
+            subsidy_halving_interval,
+        };
+        self.initialize_with_params(genesis_header, chain_params)
     }
 
     /// Store chain information
@@ -166,32 +195,45 @@ impl ChainState {
     /// Update chain tip and calculate incremental chainwork
     /// This should be called when a new block is connected to the chain
     pub fn update_tip(&self, tip_hash: &Hash, tip_header: &BlockHeader, height: u64) -> Result<()> {
-        if let Some(mut info) = self.load_chain_info()? {
-            // Calculate work for this block
-            let block_work = Self::calculate_work_from_bits(tip_header.bits);
-            self.store_work(tip_hash, block_work)?;
-
-            // Calculate cumulative chainwork: chainwork[new] = chainwork[prev] + work[new]
-            let prev_chainwork = if height > 0 {
-                // Get previous block hash
-                if let Ok(Some(prev_hash)) = self.get_prev_block_hash(tip_header) {
-                    self.get_chainwork(&prev_hash)?.unwrap_or(0)
-                } else {
-                    0
+        let mut info = match self.load_chain_info()? {
+            Some(i) => i,
+            None => {
+                // Parallel IBD (and first block after recovery) may commit blocks before
+                // `initialize()` ran; create chain metadata so `get_height()` stays consistent.
+                ChainInfo {
+                    tip_hash: *tip_hash,
+                    tip_header: tip_header.clone(),
+                    height,
+                    total_work: 0,
+                    chain_params: ChainParams::default(),
                 }
+            }
+        };
+
+        // Calculate work for this block
+        let block_work = Self::calculate_work_from_bits(tip_header.bits);
+        self.store_work(tip_hash, block_work)?;
+
+        // Calculate cumulative chainwork: chainwork[new] = chainwork[prev] + work[new]
+        let prev_chainwork = if height > 0 {
+            // Get previous block hash
+            if let Ok(Some(prev_hash)) = self.get_prev_block_hash(tip_header) {
+                self.get_chainwork(&prev_hash)?.unwrap_or(0)
             } else {
-                // Genesis block: chainwork = work
                 0
-            };
+            }
+        } else {
+            // Genesis block: chainwork = work
+            0
+        };
 
-            let new_chainwork = prev_chainwork + block_work as u128;
-            self.store_chainwork(tip_hash, new_chainwork)?;
+        let new_chainwork = prev_chainwork + block_work as u128;
+        self.store_chainwork(tip_hash, new_chainwork)?;
 
-            info.tip_hash = *tip_hash;
-            info.tip_header = tip_header.clone();
-            info.height = height;
-            self.store_chain_info(&info)?;
-        }
+        info.tip_hash = *tip_hash;
+        info.tip_header = tip_header.clone();
+        info.height = height;
+        self.store_chain_info(&info)?;
         Ok(())
     }
 
@@ -207,6 +249,38 @@ impl ChainState {
         } else {
             Ok(None)
         }
+    }
+
+    /// Height at which all IBD UTXOs were last fully flushed to disk.
+    /// Returns `None` on a fresh sync (no flush has occurred yet).
+    pub fn get_utxo_watermark(&self) -> Result<Option<u64>> {
+        if let Some(data) = self.chain_info.get(b"ibd_utxo_watermark")? {
+            if data.len() < 8 {
+                return Ok(None);
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[..8]);
+            Ok(Some(u64::from_be_bytes(bytes)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Advance the IBD UTXO watermark. Monotonically increasing; never moves backward.
+    pub fn set_utxo_watermark(&self, height: u64) -> Result<()> {
+        let current = self.get_utxo_watermark()?.unwrap_or(0);
+        if height > current {
+            self.chain_info
+                .insert(b"ibd_utxo_watermark", &height.to_be_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Set IBD UTXO watermark to an arbitrary height (used when clearing `ibd_utxos` for replay).
+    pub fn force_set_ibd_utxo_watermark(&self, height: u64) -> Result<()> {
+        self.chain_info
+            .insert(b"ibd_utxo_watermark", &height.to_be_bytes())?;
+        Ok(())
     }
 
     /// Get current chain tip hash

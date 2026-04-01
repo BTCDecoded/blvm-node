@@ -311,5 +311,5 @@ readinessProbe:
 ## Related Documentation
 
 - [RPC Reference](RPC_REFERENCE.md) - Complete RPC API
-- [Configuration](CONFIGURATION.md) - Configuration reference
-- [Deployment](../blvm-docs/DEPLOYMENT.md) - Production deployment
+- [Configuration Guide](CONFIGURATION_GUIDE.md) - Node configuration (this repo)
+- [Production mainnet node](../blvm-docs/src/getting-started/first-node.md#production-mainnet-node) (mdBook source in **blvm-docs** sibling repo)

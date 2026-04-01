@@ -1,85 +1,16 @@
 //! Tests for Module API Hub
 
+#[path = "stub_node_api.rs"]
+mod stub_node_api;
+
 use blvm_node::module::api::hub::{AuditEntry, ModuleApiHub};
 use blvm_node::module::ipc::protocol::{RequestMessage, RequestPayload, ResponsePayload};
 use blvm_node::module::security::permissions::{Permission, PermissionSet};
-use blvm_node::module::traits::{ModuleError, NodeAPI};
-use blvm_protocol::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use blvm_node::module::traits::ModuleError;
+use blvm_protocol::{Hash, OutPoint};
 use std::sync::Arc;
 
-// Mock NodeAPI for testing
-struct MockNodeAPI;
-
-#[async_trait::async_trait]
-impl NodeAPI for MockNodeAPI {
-    async fn get_chain_tip(&self) -> Result<Hash, ModuleError> {
-        Ok(Hash::default())
-    }
-
-    async fn get_block(&self, _hash: &Hash) -> Result<Option<Block>, ModuleError> {
-        Ok(Some(Block {
-            header: BlockHeader {
-                version: 1,
-                prev_block_hash: Hash::default(),
-                merkle_root: Hash::default(),
-                timestamp: 0,
-                bits: 0,
-                nonce: 0,
-            },
-            transactions: vec![].into(),
-        }))
-    }
-
-    async fn get_transaction(&self, _hash: &Hash) -> Result<Option<Transaction>, ModuleError> {
-        use blvm_protocol::{ByteString, Integer, Natural};
-        Ok(Some(Transaction {
-            version: Natural::from(1u64),
-            inputs: blvm_protocol::tx_inputs![],
-            outputs: blvm_protocol::tx_outputs![],
-            lock_time: Natural::from(0u64),
-        }))
-    }
-
-    async fn has_transaction(&self, _hash: &Hash) -> Result<bool, ModuleError> {
-        Ok(true)
-    }
-
-    async fn get_utxo(&self, _outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
-        use blvm_protocol::{ByteString, Integer, Natural};
-        Ok(Some(UTXO {
-            value: Integer::from(1000i64),
-            script_pubkey: vec![].into(), // SharedByteString for UTXO
-            height: Natural::from(100u64),
-            is_coinbase: false,
-        }))
-    }
-
-    async fn get_block_height(&self) -> Result<u64, ModuleError> {
-        Ok(100)
-    }
-
-    async fn get_block_header(&self, _hash: &Hash) -> Result<Option<BlockHeader>, ModuleError> {
-        Ok(Some(BlockHeader {
-            version: 1,
-            prev_block_hash: Hash::default(),
-            merkle_root: Hash::default(),
-            timestamp: 0,
-            bits: 0,
-            nonce: 0,
-        }))
-    }
-
-    async fn subscribe_events(
-        &self,
-        _event_types: Vec<blvm_node::module::traits::EventType>,
-    ) -> Result<
-        tokio::sync::mpsc::Receiver<blvm_node::module::ipc::protocol::ModuleMessage>,
-        ModuleError,
-    > {
-        let (_tx, rx) = tokio::sync::mpsc::channel(10);
-        Ok(rx)
-    }
-}
+use stub_node_api::MockNodeAPI;
 
 #[tokio::test]
 async fn test_module_api_hub_new() {
@@ -361,14 +292,13 @@ async fn test_module_api_hub_handle_get_utxo() {
     hub.register_module_permissions("test-module".to_string(), permissions);
 
     use blvm_node::module::ipc::protocol::MessageType;
-    use blvm_protocol::types::Natural;
     let request = RequestMessage {
         correlation_id: 1,
         request_type: MessageType::GetUtxo,
         payload: RequestPayload::GetUtxo {
             outpoint: OutPoint {
                 hash: Hash::default(),
-                index: Natural::from(0u64),
+                index: 0,
             },
         },
     };

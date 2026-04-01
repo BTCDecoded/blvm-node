@@ -15,7 +15,7 @@ use crate::utils::{
     storage_timeout_from_config, with_custom_timeout, CACHE_REFRESH_TIP, POLL_INTERVAL_WAIT_FOR_BLOCK,
 };
 use anyhow::Result;
-use blvm_protocol::BlockHeader;
+use blvm_protocol::{BlockHeader, SEGWIT_ACTIVATION_MAINNET, TAPROOT_ACTIVATION_MAINNET};
 use serde_json::{json, Number, Value};
 use std::path::Path;
 use std::sync::Arc;
@@ -209,12 +209,12 @@ impl BlockchainRpc {
             "segwit": {
                 "type": "buried",
                 "active": true,
-                "height": 481824
+                "height": SEGWIT_ACTIVATION_MAINNET
             },
             "taproot": {
                 "type": "buried",
                 "active": true,
-                "height": 709632
+                "height": TAPROOT_ACTIVATION_MAINNET
             }
         });
 

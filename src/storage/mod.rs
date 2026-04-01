@@ -4,6 +4,7 @@
 //! Supports multiple database backends via feature flags (tidesdb, redb, sled, rocksdb).
 
 pub mod assumeutxo;
+pub mod ibd_autorepair;
 pub mod bitcoin_core_blocks;
 pub mod bitcoin_core_detection;
 pub mod bitcoin_core_format;
@@ -392,6 +393,45 @@ impl Storage {
         Ok(())
     }
 
+    /// If `chain_info` is missing but the block index has blocks (e.g. crash before metadata
+    /// flush, or legacy parallel IBD that never wrote `chain_info`), rebuild tip from the
+    /// highest stored height so `get_height()` and IBD resume match on-disk state.
+    pub fn recover_chain_tip_from_blockstore(&self) -> Result<()> {
+        use crate::storage::chainstate::{ChainInfo, ChainParams};
+
+        if self.chain().load_chain_info()?.is_some() {
+            return Ok(());
+        }
+        let Some(max_h) = self.blockstore.highest_stored_height()? else {
+            return Ok(());
+        };
+        let Some(tip_hash) = self.blockstore.get_hash_by_height(max_h)? else {
+            return Ok(());
+        };
+        let Some(block) = self.blockstore.get_block(&tip_hash)? else {
+            return Ok(());
+        };
+        let genesis_hash = self
+            .blockstore
+            .get_hash_by_height(0)?
+            .unwrap_or_default();
+        let mut params = ChainParams::default();
+        params.genesis_hash = genesis_hash;
+        let info = ChainInfo {
+            tip_hash,
+            tip_header: block.header.clone(),
+            height: max_h,
+            total_work: 0,
+            chain_params: params,
+        };
+        self.chainstate.store_chain_info(&info)?;
+        info!(
+            "Recovered chain_info from block index (tip_height={}, tip_hash prefix {:02x}{:02x}{:02x}{:02x})",
+            max_h, tip_hash[0], tip_hash[1], tip_hash[2], tip_hash[3]
+        );
+        Ok(())
+    }
+
     /// Get the transaction index (as Arc for sharing)
     pub fn transactions(&self) -> Arc<txindex::TxIndex> {
         Arc::clone(&self.txindex)
@@ -408,6 +448,12 @@ impl Storage {
     /// Flush all pending writes to disk
     pub fn flush(&self) -> Result<()> {
         self.db.flush()
+    }
+
+    /// Forward IBD memory pressure to the database backend (RocksDB may reduce background jobs when opted in).
+    #[inline]
+    pub fn ibd_memory_pressure_tick(&self, level_u8: u8) {
+        self.db.ibd_memory_pressure_tick(level_u8);
     }
 
     /// Get approximate disk size used by storage (in bytes)

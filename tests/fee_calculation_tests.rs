@@ -22,7 +22,7 @@ fn test_calculate_transaction_fee() {
 
         is_coinbase: false,
     };
-    utxo_set.insert(outpoint.clone(), utxo);
+    utxo_set.insert(outpoint.clone(), utxo.into());
 
     // Create transaction with 1 input and 1 output
     let tx = Transaction {
@@ -34,7 +34,7 @@ fn test_calculate_transaction_fee() {
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
             value: 99_000_000, // 0.99 BTC (0.01 BTC fee)
-            script_pubkey: vec![0x76, 0xa9, 0x14],
+            script_pubkey: vec![0x76, 0xa9, 0x14].into(),
         }],
         lock_time: 0,
     };
@@ -61,7 +61,7 @@ fn test_calculate_transaction_fee_zero_fee() {
 
         is_coinbase: false,
     };
-    utxo_set.insert(outpoint.clone(), utxo);
+    utxo_set.insert(outpoint.clone(), utxo.into());
 
     // Transaction with same input and output (no fee)
     let tx = Transaction {

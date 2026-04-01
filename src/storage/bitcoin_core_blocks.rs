@@ -161,6 +161,8 @@ impl BitcoinCoreBlockReader {
         let mut offset = 0u64;
 
         loop {
+            let block_start = offset;
+
             // Read magic bytes
             let mut magic_buf = [0u8; 4];
             match file.read_exact(&mut magic_buf) {
@@ -199,6 +201,14 @@ impl BitcoinCoreBlockReader {
                 ));
             }
 
+            if block_size < 80 {
+                return Err(anyhow::anyhow!(
+                    "Block size {} too small for an 80-byte header at offset {}",
+                    block_size,
+                    block_start
+                ));
+            }
+
             // Read block header to compute hash
             let mut header_buf = [0u8; 80];
             file.read_exact(&mut header_buf)
@@ -211,20 +221,22 @@ impl BitcoinCoreBlockReader {
             let mut block_hash = [0u8; 32];
             block_hash.copy_from_slice(&second_hash);
 
-            // Store location
+            // Store location (start of magic bytes for this block)
             let location = BlockLocation {
                 file_path: file_path.to_path_buf(),
-                offset: offset - 88, // Start of block (magic + size + header)
+                offset: block_start,
                 size: block_size,
             };
 
             index.insert(block_hash, location);
 
-            // Skip to next block
-            let remaining = block_size as u64 - 80; // Already read header
+            // Skip rest of block payload (header already consumed)
+            let remaining = (block_size as u64) - 80;
             file.seek(SeekFrom::Current(remaining as i64))
                 .context("Failed to seek to next block")?;
-            offset += remaining;
+            offset = block_start
+                .checked_add(8 + block_size as u64)
+                .ok_or_else(|| anyhow::anyhow!("Block file offset overflow"))?;
         }
 
         Ok(())

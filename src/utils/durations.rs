@@ -24,13 +24,13 @@ pub const AUTH_RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(360
 pub const HANDSHAKE_POLL_SLEEP: Duration = Duration::from_millis(100);
 
 /// Sleep in background message processor loop (avoids busy-loop when no messages).
-pub const MESSAGE_PROCESSOR_POLL_SLEEP: Duration = Duration::from_millis(10);
+pub const MESSAGE_PROCESSOR_POLL_SLEEP: Duration = Duration::from_millis(1);
 
 /// Sleep between mempool loop iterations (prevents busy waiting).
 pub const MEMPOOL_LOOP_SLEEP: Duration = Duration::from_millis(100);
 
 /// Yield sleep in IBD when reorder buffer is full (avoids busy spin).
-pub const IBD_YIELD_SLEEP: Duration = Duration::from_millis(50);
+pub const IBD_YIELD_SLEEP: Duration = Duration::from_millis(1);
 
 /// Backoff when a background task loop has work queued (avoids busy spin).
 pub const BACKGROUND_TASK_BACKOFF_SLEEP: Duration = Duration::from_millis(500);

@@ -1882,7 +1882,13 @@ impl NodeAPI for NodeApiImpl {
             ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
-        let mining_rpc = MiningRpc::with_dependencies(storage, mempool_manager.clone());
+        let mining_rpc = {
+            let m = MiningRpc::with_dependencies(storage, mempool_manager.clone());
+            match &self.network_manager {
+                Some(nm) => m.with_network_manager(Some(Arc::clone(nm))),
+                None => m,
+            }
+        };
 
         // Serialize block to hex using bincode (same as RPC submitblock)
         let block_bytes = bincode::serialize(&block)

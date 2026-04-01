@@ -42,22 +42,9 @@ pub fn store_block_with_context(
     witnesses: &[Vec<Witness>], // CRITICAL FIX: Changed from &[Witness] to &[Vec<Witness>]
     height: u64,
 ) -> Result<()> {
-    // Store block
-    blockstore.store_block(block)?;
-
-    // Store witnesses if present
-    if !witnesses.is_empty() {
-        let block_hash = blockstore.get_block_hash(block);
-        blockstore.store_witness(&block_hash, witnesses)?;
-    }
-
-    // Store header for median time-past calculation
-    blockstore.store_recent_header(height, &block.header)?;
-
-    // Update height index
+    blockstore.store_block_with_witness(block, witnesses, height)?;
     let block_hash = blockstore.get_block_hash(block);
     blockstore.store_height(height, &block_hash)?;
-
     Ok(())
 }
 

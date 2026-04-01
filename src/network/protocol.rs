@@ -1250,7 +1250,15 @@ impl ProtocolParser {
                 )
             }
             ProtocolMessage::GetBlocks(msg) => (cmd::GETBLOCKS, bincode::serialize(msg)?),
-            ProtocolMessage::Block(msg) => (cmd::BLOCK, bincode::serialize(msg)?),
+            ProtocolMessage::Block(msg) => {
+                // Must match `parse_message` cmd::BLOCK: consensus block+witness wire bytes, not bincode.
+                let payload = blvm_protocol::serialization::serialize_block_with_witnesses(
+                    &msg.block,
+                    &msg.witnesses,
+                    true,
+                );
+                (cmd::BLOCK, payload)
+            }
             ProtocolMessage::GetData(msg) => (
                 cmd::GETDATA,
                 serialize_getdata(msg).map_err(|e| anyhow::anyhow!("{}", e))?,

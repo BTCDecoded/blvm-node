@@ -1260,6 +1260,7 @@ impl RpcServer {
             // Mining methods
             "getmininginfo" => self.mining.get_mining_info().await,
             "getblocktemplate" => self.mining.get_block_template(&params).await,
+            "generatetoaddress" => self.mining.generate_to_address(&params).await,
             "submitblock" => self.mining.submit_block(&params).await,
             "estimatesmartfee" => self.mining.estimate_smart_fee(&params).await,
             "prioritisetransaction" => self.mining.prioritise_transaction(&params).await,

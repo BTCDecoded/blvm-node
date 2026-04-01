@@ -33,5 +33,5 @@ Formal verification runs via blvm-spec-lock in CI. See `.github/workflows/ci.yml
 
 ## References
 
-- [blvm-spec-lock Coverage](../../blvm-spec-lock/SPEC_LOCK_COVERAGE.md)
-- [Orange Paper Section 10.6](../../blvm-spec/THE_ORANGE_PAPER.md) – Dandelion++ k-Anonymity
+- [blvm-spec-lock coverage](https://github.com/BTCDecoded/blvm-spec-lock/blob/main/SPEC_LOCK_COVERAGE.md)
+- [Orange paper §10.6](https://github.com/BTCDecoded/blvm-spec/blob/main/THE_ORANGE_PAPER.md) – Dandelion++ k-Anonymity

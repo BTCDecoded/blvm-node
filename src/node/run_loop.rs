@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::utils::{log_error, log_error_async, with_custom_timeout, HANDSHAKE_POLL_SLEEP};
+use crate::utils::{log_error, with_custom_timeout, HANDSHAKE_POLL_SLEEP};
 
 /// Main node run loop. Called from `Node::start()` after components are started.
 pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
@@ -365,14 +365,9 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                 }
             }
 
-            // Process other network messages (non-blocking, processes one message if available)
-            // Note: This is a simplified approach - in production, network processing
-            // would run in a separate task
-            log_error_async(
-                || node.network.process_messages(),
-                "Error processing network messages",
-            )
-            .await;
+            // Peer traffic is drained by the background task spawned in start_components
+            // (`NetworkManager::process_messages`). Do not call it here: it never returns until
+            // the channel closes, which would starve this loop and leave `pending_blocks` undrained.
 
             tokio::time::sleep(HANDSHAKE_POLL_SLEEP).await;
 

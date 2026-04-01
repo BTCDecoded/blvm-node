@@ -143,7 +143,8 @@ impl Node {
             .with_metrics(Arc::clone(&metrics_arc))
             .with_profiler(Arc::clone(&profiler_arc))
             .with_dependencies(Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc))
-            .with_network_manager(Arc::clone(&network_arc));
+            .with_network_manager(Arc::clone(&network_arc))
+            .with_protocol_engine(Arc::clone(&protocol_arc));
         // Note: EventPublisher will be set later in start_components() after it's created
         let sync_coordinator = sync::SyncCoordinator::default();
         let mining_coordinator = miner::MiningCoordinator::new(
@@ -178,7 +179,55 @@ impl Node {
 
     /// Set node configuration
     pub fn with_config(mut self, config: NodeConfig) -> Result<Self> {
-        // Initialize Rayon pool for script verification (uses BLVM_SCRIPT_THREADS)
+        // Wire block validation (assume-valid) to consensus config FIRST.
+        // Must call init_consensus_config before init_rayon (which reads the global config).
+        // Precedence: ENV (BLVM_ASSUME_VALID_HEIGHT) > config > defaults.
+        // Always init (not only when block_validation is Some): otherwise OnceLock fell back to
+        // from_env() without merge, and assume_valid_height could stay 0 (no skip in connect_block).
+        #[cfg(feature = "production")]
+        {
+            let mut consensus_config = blvm_consensus::config::ConsensusConfig::from_env();
+            let assume_valid_from_env = std::env::var("BLVM_ASSUME_VALID_HEIGHT").is_ok();
+            let file_assume_valid_height = config
+                .block_validation
+                .as_ref()
+                .map(|bv| bv.assume_valid_height)
+                .unwrap_or(0);
+            if let Some(ref bv) = config.block_validation {
+                if std::env::var("BLVM_ASSUME_VALID_HEIGHT").is_err() {
+                    consensus_config.block_validation.assume_valid_height = bv.assume_valid_height;
+                    consensus_config.block_validation.assume_valid_hash = bv.assume_valid_hash;
+                }
+            }
+            let height = consensus_config.block_validation.assume_valid_height;
+            let hash = consensus_config.block_validation.assume_valid_hash;
+            blvm_consensus::config::init_consensus_config(consensus_config);
+            let source = if assume_valid_from_env {
+                "env"
+            } else if file_assume_valid_height > 0 {
+                "config"
+            } else if height > 0 {
+                "default"
+            } else {
+                "off"
+            };
+            if height > 0 {
+                let hash_s = hash
+                    .map(|h| hex::encode(h))
+                    .unwrap_or_else(|| "none".to_string());
+                info!(
+                    "Consensus assume-valid: height={} hash={} source={} (blocks before this height may skip script checks per network policy)",
+                    height, hash_s, source
+                );
+            } else {
+                info!(
+                    "Consensus assume-valid: disabled height=0 source={}",
+                    source
+                );
+            }
+        }
+
+        // Initialize Rayon pool for script verification (uses BLVM_SCRIPT_THREADS from consensus config)
         #[cfg(feature = "production")]
         blvm_consensus::config::init_rayon_for_script_verification();
 
@@ -240,14 +289,18 @@ impl Node {
         self.network = network;
         self.config = Some(config.clone());
 
-        // Apply RPC config (max request size, request timeouts, connection limits)
+        // Apply RPC config (max request size, request timeouts, connection limits).
+        // `self.network` was just replaced above; re-wire RPC so MiningRpc/NetworkRpc use the same
+        // NetworkManager instance that receives `network.start()` and peer connections (otherwise
+        // e.g. `generatetoaddress` P2P broadcast targets a stale manager with no peers).
         self.rpc = self
             .rpc
             .with_max_request_size(config.max_request_size_bytes())
             .with_max_connections_per_ip(config.max_connections_per_ip_per_minute())
             .with_batch_rate_multiplier_cap(config.rpc_batch_rate_multiplier_cap())
             .with_connection_rate_limit_window(config.rpc_connection_rate_limit_window_seconds())
-            .with_request_timeouts(config.request_timeouts.clone());
+            .with_request_timeouts(config.request_timeouts.clone())
+            .with_network_manager(Arc::clone(&self.network));
 
         // Apply RBF and mempool policy configurations to mempool manager
         // Uses interior mutability so we can set configs even when mempool is in an Arc
@@ -260,27 +313,11 @@ impl Node {
             self.mempool_manager
                 .set_policy_config(Some(mempool_policy.clone()));
             info!(
-                "Mempool policy configuration applied: max_mempool_mb={}, eviction_strategy={:?}",
-                mempool_policy.max_mempool_mb, mempool_policy.eviction_strategy
+                "Mempool policy configuration applied: max_mempool_mb={}, eviction_strategy={:?}, reject_spam_in_mempool={}",
+                mempool_policy.max_mempool_mb,
+                mempool_policy.eviction_strategy,
+                mempool_policy.reject_spam_in_mempool
             );
-        }
-
-        // Wire block validation (assume-valid) to consensus config.
-        // Must call init_consensus_config before any get_consensus_config() (e.g. block validation).
-        // Precedence: ENV (BLVM_ASSUME_VALID_HEIGHT) > config > defaults.
-        #[cfg(feature = "production")]
-        if let Some(ref bv) = config.block_validation {
-            let mut consensus_config = blvm_consensus::config::ConsensusConfig::from_env();
-            // Only apply config when ENV not set (ENV > config)
-            if std::env::var("BLVM_ASSUME_VALID_HEIGHT").is_err() {
-                consensus_config.block_validation.assume_valid_height = bv.assume_valid_height;
-                consensus_config.block_validation.assume_valid_hash = bv.assume_valid_hash;
-            }
-            let height = consensus_config.block_validation.assume_valid_height;
-            blvm_consensus::config::init_consensus_config(consensus_config);
-            if height > 0 {
-                info!("Assume-valid height set to {} (blocks before this skip signature verification)", height);
-            }
         }
 
         // Governance handled via module system - no direct webhook client needed
@@ -528,6 +565,57 @@ impl Node {
         });
         info!("[START_COMPONENTS] Background message processor spawned");
 
+        // Rebuild `chain_info` from block index if missing (crash mid-flush, legacy IBD path).
+        if let Err(e) = self.storage.recover_chain_tip_from_blockstore() {
+            warn!(
+                "[START_COMPONENTS] recover_chain_tip_from_blockstore failed: {}",
+                e
+            );
+        }
+
+        // Fresh datadir: no `chain_info` yet — anchor with this network's genesis so RPC mining
+        // (`generatetoaddress`, templates) and tip queries work without a prior sync.
+        if self.storage.chain().load_chain_info()?.is_none() {
+            let np = self.protocol.get_network_params();
+            let header = np.genesis_block.header.clone();
+            match self.storage.chain().initialize_from_network_metadata(
+                &header,
+                &np.network_name,
+                np.max_target as u64,
+                np.halving_interval,
+            ) {
+                Ok(()) => info!(
+                    "[START_COMPONENTS] Initialized chainstate from network genesis (fresh datadir)"
+                ),
+                Err(e) => warn!(
+                    "[START_COMPONENTS] Failed to initialize chain with genesis: {}",
+                    e
+                ),
+            }
+        }
+
+        // Header sync starts at height 1 and anchors GetHeaders on `get_hash_by_height(0)`.
+        // Fresh `initialize_from_network_metadata` only wrote chain_info — index genesis here.
+        if let Ok(Some(info)) = self.storage.chain().load_chain_info() {
+            if info.height == 0 {
+                let bs = self.storage.blocks();
+                if matches!(bs.get_hash_by_height(0), Ok(None)) {
+                    match bs
+                        .store_header(&info.tip_hash, &info.tip_header)
+                        .and_then(|_| bs.store_height(0, &info.tip_hash))
+                    {
+                        Ok(()) => info!(
+                            "[START_COMPONENTS] Indexed genesis header in blockstore (height 0)"
+                        ),
+                        Err(e) => warn!(
+                            "[START_COMPONENTS] Failed to index genesis in blockstore: {}",
+                            e
+                        ),
+                    }
+                }
+            }
+        }
+
         // AssumeUTXO: if -assumeutxo=<blockhash> and empty chain, try to load snapshot
         let mut current_height = match self.storage.chain().get_height() {
             Ok(Some(h)) => {
@@ -626,19 +714,78 @@ impl Node {
             }
         }
 
-        let target_height = match self.network.get_highest_peer_start_height() {
-            Some(peer_height) => peer_height.max(current_height),
-            None => current_height + 1_000_000,
+        #[cfg(feature = "production")]
+        {
+            let data_dir = self.data_dir.as_path();
+            if let Err(e) =
+                crate::storage::ibd_autorepair::apply_ibd_utxo_autorepair_if_needed(
+                    self.storage.as_ref(),
+                    data_dir,
+                )
+            {
+                warn!(
+                    "IBD UTXO autorepair (marker-based) failed: {} — continuing with existing state",
+                    e
+                );
+            }
+        }
+
+        // Determine the effective resume point. Two heights matter:
+        //   chain_tip      — the last block index height written (chain_info.height)
+        //   utxo_watermark — the last height at which ALL UTXOs were guaranteed flushed to disk
+        //
+        // After a clean shutdown they are equal. After an unclean shutdown the watermark may lag
+        // the chain tip. We restart from watermark so the UTXO store matches the height told to
+        // validation. Blocks watermark+1..chain_tip are already on disk and re-fetched from a
+        // local peer quickly.
+        //
+        // Fresh DB: get_height() returns None → start from genesis (synced_tip=0, first_block=0).
+        // Existing DB: get_height() returns Some(H) → effective_tip = min(H, watermark).
+        let (synced_tip, ibd_first_block_height) = match self.storage.chain().get_height() {
+            Ok(None) => (0u64, 0u64), // fresh DB — start from genesis
+            Ok(Some(chain_tip)) => {
+                let watermark = self
+                    .storage
+                    .chain()
+                    .get_utxo_watermark()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                let effective_tip = chain_tip.min(watermark);
+                if effective_tip < chain_tip {
+                    warn!(
+                        "[START_COMPONENTS] UTXO watermark ({}) < chain tip ({}); \
+                         IBD will re-validate {} block(s) from height {} to restore UTXO consistency",
+                        watermark,
+                        chain_tip,
+                        chain_tip - effective_tip,
+                        effective_tip + 1,
+                    );
+                }
+                (effective_tip, effective_tip.saturating_add(1))
+            }
+            Err(e) => {
+                warn!(
+                    "[START_COMPONENTS] get_height failed: {}, treating as fresh sync",
+                    e
+                );
+                (0u64, 0u64)
+            }
         };
-        let is_ibd = current_height < target_height;
+
+        let target_height = match self.network.get_highest_peer_start_height() {
+            Some(peer_height) => peer_height.max(synced_tip),
+            None => synced_tip.saturating_add(1_000_000),
+        };
+        let is_ibd = synced_tip < target_height;
 
         info!(
-            "[START_COMPONENTS] IBD check: current_height={}, target_height={}, is_ibd={}",
-            current_height, target_height, is_ibd
+            "[START_COMPONENTS] IBD check: synced_tip={}, ibd_first_block_height={}, target_height={}, is_ibd={}",
+            synced_tip, ibd_first_block_height, target_height, is_ibd
         );
 
         if is_ibd {
-            info!("[START_COMPONENTS] Need to sync (height {} < target {}), checking for parallel IBD support...", current_height, target_height);
+            info!("[START_COMPONENTS] Need to sync (synced_tip {} < target {}), checking for parallel IBD support...", synced_tip, target_height);
 
             info!(
                 "[START_COMPONENTS] IBD: Found {} peer addresses: {:?}",
@@ -667,8 +814,8 @@ impl Node {
                 );
 
                 info!(
-                    "[START_COMPONENTS] Starting parallel IBD: current_height={}, target_height={}",
-                    current_height, target_height
+                    "[START_COMPONENTS] Starting parallel IBD: synced_tip={}, first_block={}, target_height={}",
+                    synced_tip, ibd_first_block_height, target_height
                 );
 
                 // Attempt parallel IBD (initial_utxo_set is snapshot when AssumeUTXO loaded, else empty)
@@ -681,7 +828,8 @@ impl Node {
                 match self
                     .sync_coordinator
                     .start_parallel_ibd(
-                        current_height,
+                        synced_tip,
+                        ibd_first_block_height,
                         target_height,
                         blockstore,
                         Some(storage_arc),
@@ -691,11 +839,24 @@ impl Node {
                         peer_addresses,
                         ibd_config_owned.as_ref(),
                         self.rpc.event_publisher(),
+                        Some(self.data_dir.as_path()),
                     )
                     .await
                 {
                     Ok(true) => {
                         info!("[START_COMPONENTS] Parallel IBD completed successfully");
+                        if let Err(e) =
+                            crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
+                                self.data_dir.as_path(),
+                            )
+                        {
+                            warn!(
+                                "Failed to clear IBD UTXO autorepair marker: {} (safe to delete {} manually)",
+                                e,
+                                crate::storage::ibd_autorepair::repair_marker_path(self.data_dir.as_path())
+                                    .display()
+                            );
+                        }
                         // Update current height after parallel IBD
                         let new_height = self.storage.chain().get_height()?.unwrap_or(0);
                         info!(
@@ -716,8 +877,8 @@ impl Node {
             }
         } else {
             info!(
-                "[START_COMPONENTS] Not in IBD (current_height={}), skipping IBD",
-                current_height
+                "[START_COMPONENTS] Not in IBD (synced_tip={}), skipping IBD",
+                synced_tip
             );
         }
 

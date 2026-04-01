@@ -1538,16 +1538,13 @@ impl NetworkManager {
     pub fn try_recv_block(&self) -> Option<Vec<u8>> {
         // Use the dedicated pending_blocks queue instead of draining the main channel
         // This preserves PeerConnected, RawMessageReceived, etc. for proper processing
-        let mut blocks = match self.pending_blocks.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => return None,
-        };
+        let mut blocks = self.pending_blocks.lock().ok()?;
         blocks.pop_front()
     }
 
     /// Queue a block for processing (called when BlockReceived is received in process_messages)
     pub fn queue_block(&self, data: Vec<u8>) {
-        if let Ok(mut blocks) = self.pending_blocks.try_lock() {
+        if let Ok(mut blocks) = self.pending_blocks.lock() {
             blocks.push_back(data);
         }
     }
@@ -2360,6 +2357,12 @@ impl NetworkManager {
         &self,
     ) -> &Arc<Mutex<HashMap<SocketAddr, (u32, u64, f64)>>> {
         &self.peer_reconnection_queue
+    }
+
+    pub(crate) fn persistent_peers_lock(
+        &self,
+    ) -> &Arc<Mutex<HashSet<SocketAddr>>> {
+        &self.persistent_peers
     }
 
     pub(crate) fn connections_per_ip(

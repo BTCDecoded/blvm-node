@@ -1,83 +1,78 @@
-//! Governance feature tests
+//! Tests for governance-related configuration (`GovernanceConfig`) and ban-list sharing.
 //!
-//! Tests for governance features when the "governance" feature is enabled.
-//! These tests are conditionally compiled based on feature flags.
+//! `GovernanceConfig` exists under `blvm_node::config` when the `governance` feature is enabled.
 
 #[cfg(feature = "governance")]
-use blvm_node::governance::webhook::GovernanceWebhookClient;
-#[cfg(feature = "governance")]
-use blvm_protocol::Block;
+mod governance_on {
+    use blvm_node::config::GovernanceConfig;
 
-#[cfg(feature = "governance")]
-#[test]
-fn test_governance_webhook_client_creation() {
-    // Create webhook client without URL (disabled)
-    let _client = GovernanceWebhookClient::new(None, None);
-    // Should create successfully
-    assert!(true);
+    #[test]
+    fn governance_config_default_disables_relay() {
+        let c = GovernanceConfig::default();
+        assert!(!c.enabled);
+        assert!(c.commons_url.is_none());
+        assert!(c.api_key.is_none());
+    }
+
+    #[test]
+    fn governance_config_toml_parses_optional_fields() {
+        let src = r#"
+enabled = true
+commons_url = "http://10.0.0.2:8080"
+api_key = "test-key"
+"#;
+        let c: GovernanceConfig = toml::from_str(src).expect("parse governance TOML");
+        assert!(c.enabled);
+        assert_eq!(c.commons_url.as_deref(), Some("http://10.0.0.2:8080"));
+        assert_eq!(c.api_key.as_deref(), Some("test-key"));
+    }
+
+    #[test]
+    fn governance_config_toml_omitted_optionals_use_defaults() {
+        let c: GovernanceConfig = toml::from_str("").expect("empty table defaults");
+        assert!(!c.enabled);
+        assert!(c.commons_url.is_none());
+        assert!(c.api_key.is_none());
+    }
 }
 
 #[cfg(feature = "governance")]
 #[test]
-fn test_governance_webhook_client_with_url() {
-    // Create webhook client with URL (enabled)
-    let _client =
-        GovernanceWebhookClient::new(Some("http://localhost:8080/webhook".to_string()), None);
-    // Should create successfully
-    assert!(true);
+fn ban_list_sharing_defaults_match_config() {
+    use blvm_node::config::{BanListSharingConfig, BanShareMode};
+
+    let c = BanListSharingConfig::default();
+    assert!(c.enabled);
+    assert!(matches!(c.share_mode, BanShareMode::Periodic));
+    assert_eq!(c.periodic_interval_seconds, 300);
+    assert_eq!(c.min_ban_duration_to_share, 3600);
 }
 
 #[cfg(feature = "governance")]
 #[test]
-fn test_governance_webhook_client_with_node_id() {
-    // Create webhook client with node ID
-    let _client = GovernanceWebhookClient::new(
-        Some("http://localhost:8080/webhook".to_string()),
-        Some("test-node-id".to_string()),
-    );
-    // Should create successfully
-    assert!(true);
+fn ban_list_sharing_toml_share_mode_lowercase() {
+    use blvm_node::config::{BanListSharingConfig, BanShareMode};
+
+    let c: BanListSharingConfig = toml::from_str(
+        r#"
+enabled = false
+share_mode = "immediate"
+periodic_interval_seconds = 60
+min_ban_duration_to_share = 0
+"#,
+    )
+    .expect("parse ban list TOML");
+    assert!(!c.enabled);
+    assert!(matches!(c.share_mode, BanShareMode::Immediate));
+    assert_eq!(c.periodic_interval_seconds, 60);
+    assert_eq!(c.min_ban_duration_to_share, 0);
 }
 
-#[cfg(feature = "governance")]
-#[test]
-fn test_governance_webhook_client_from_env() {
-    // Test creation from environment variables
-    // Note: This will use actual env vars if set, or create disabled client
-    let _client = GovernanceWebhookClient::from_env();
-    // Should create successfully
-    assert!(true);
-}
-
-#[cfg(feature = "governance")]
-#[tokio::test]
-async fn test_governance_webhook_client_notify_block_disabled() {
-    // Create disabled client
-    let client = GovernanceWebhookClient::new(None, None);
-
-    // Create a test block
-    let block = Block {
-        header: blvm_protocol::BlockHeader {
-            version: 1,
-            prev_block_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            timestamp: 1231006505,
-            bits: 0x1d00ffff,
-            nonce: 0,
-        },
-        transactions: vec![].into_boxed_slice(),
-    };
-
-    // Should succeed silently when disabled
-    let result = client.notify_block(&block, 0).await;
-    assert!(result.is_ok());
-}
-
-// Tests that verify feature is properly gated
 #[cfg(not(feature = "governance"))]
 #[test]
-fn test_governance_feature_not_enabled() {
-    // When governance feature is not enabled, these types should not be available
-    // This test verifies the feature gating works correctly
-    assert!(true);
+fn governance_feature_disabled_build_has_ban_list_config() {
+    use blvm_node::config::BanListSharingConfig;
+
+    let c = BanListSharingConfig::default();
+    assert!(c.enabled);
 }

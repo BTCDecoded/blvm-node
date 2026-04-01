@@ -1,60 +1,21 @@
 //! Tests for IPC client (module-side communication)
 
 #[cfg(unix)]
+#[path = "stub_node_api.rs"]
+mod stub_node_api;
+
+#[cfg(unix)]
 mod tests {
     use blvm_node::module::ipc::client::ModuleIpcClient;
     use blvm_node::module::ipc::protocol::RequestMessage;
     use blvm_node::module::ipc::server::ModuleIpcServer;
-    use blvm_node::module::traits::{EventType, ModuleError, NodeAPI};
-    use blvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+    use blvm_node::module::traits::ModuleError;
+    use blvm_node::Hash;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::time::{sleep, Duration};
 
-    // Mock NodeAPI for testing
-    struct MockNodeAPI;
-
-    #[async_trait::async_trait]
-    impl NodeAPI for MockNodeAPI {
-        async fn get_block(&self, _hash: &Hash) -> Result<Option<Block>, ModuleError> {
-            Ok(None)
-        }
-
-        async fn get_block_header(&self, _hash: &Hash) -> Result<Option<BlockHeader>, ModuleError> {
-            Ok(None)
-        }
-
-        async fn get_transaction(&self, _hash: &Hash) -> Result<Option<Transaction>, ModuleError> {
-            Ok(None)
-        }
-
-        async fn has_transaction(&self, _hash: &Hash) -> Result<bool, ModuleError> {
-            Ok(false)
-        }
-
-        async fn get_chain_tip(&self) -> Result<Hash, ModuleError> {
-            Ok([0u8; 32])
-        }
-
-        async fn get_block_height(&self) -> Result<u64, ModuleError> {
-            Ok(0)
-        }
-
-        async fn get_utxo(&self, _outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
-            Ok(None)
-        }
-
-        async fn subscribe_events(
-            &self,
-            _event_types: Vec<EventType>,
-        ) -> Result<
-            tokio::sync::mpsc::Receiver<blvm_node::module::ipc::protocol::ModuleMessage>,
-            ModuleError,
-        > {
-            let (_tx, rx) = tokio::sync::mpsc::channel(100);
-            Ok(rx)
-        }
-    }
+    use super::stub_node_api::MockNodeAPI;
 
     fn setup_test_socket() -> (TempDir, std::path::PathBuf) {
         let temp_dir = TempDir::new().unwrap();

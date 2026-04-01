@@ -229,6 +229,35 @@ impl ChunkAssigner {
             .push_back((start, end, exclude_peer));
     }
 
+    /// When validation/coordinator stalls on a missing height, workers may have no in-flight chunk
+    /// covering that height (chunk was already marked complete after a bad download). Re-queue the
+    /// static chunk that contains `height` so a worker can re-fetch it. Idempotent if already queued.
+    pub(crate) fn requeue_chunk_containing_height(&self, height: u64) {
+        let Some(&(start, end)) = self
+            .chunks
+            .iter()
+            .find(|(s, e)| height >= *s && height <= *e)
+        else {
+            tracing::warn!(
+                "stall recovery: height {} not in any assigner chunk (chunks={})",
+                height,
+                self.chunks.len()
+            );
+            return;
+        };
+        let mut rq = self.retry_queue.lock().unwrap();
+        if rq.iter().any(|(s, e, _)| *s == start && *e == end) {
+            return;
+        }
+        rq.push_back((start, end, None));
+        tracing::warn!(
+            "stall recovery: requeued chunk {}-{} for missing height {}",
+            start,
+            end,
+            height
+        );
+    }
+
     pub(crate) fn is_done(&self) -> bool {
         let idx = self.next_index.load(Ordering::Relaxed);
         idx >= self.chunks.len() && self.retry_queue.lock().unwrap().is_empty()

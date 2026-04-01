@@ -1,5 +1,6 @@
 //! Tests for MempoolManager refactoring
 
+use blvm_node::config::MempoolPolicyConfig;
 use blvm_node::node::mempool::MempoolManager;
 use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
 
@@ -144,4 +145,44 @@ async fn test_mempool_remove_transaction() {
     let removed = mempool.remove_transaction(&tx_hash);
     assert!(removed);
     assert_eq!(mempool.size(), 0);
+}
+
+/// All outputs below dust threshold (546 sats) => `SpamType::Dust` with default filter.
+fn dust_spam_tx() -> Transaction {
+    Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout: OutPoint {
+                hash: [0u8; 32],
+                index: 0,
+            },
+            script_sig: vec![],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 100,
+            script_pubkey: vec![0x51],
+        }],
+        lock_time: 0,
+    }
+}
+
+#[tokio::test]
+async fn test_reject_spam_in_mempool_rejects_classified_spam() {
+    let mempool = MempoolManager::new();
+    let mut policy = MempoolPolicyConfig::default();
+    policy.reject_spam_in_mempool = true;
+    mempool.set_policy_config(Some(policy));
+
+    let added = mempool.add_transaction(dust_spam_tx()).unwrap();
+    assert!(!added, "expected spam tx rejected when reject_spam_in_mempool is true");
+    assert_eq!(mempool.size(), 0);
+}
+
+#[tokio::test]
+async fn test_reject_spam_in_mempool_disabled_accepts_same_tx() {
+    let mempool = MempoolManager::new();
+    let added = mempool.add_transaction(dust_spam_tx()).unwrap();
+    assert!(added, "default policy should still accept tx classified as spam by heuristics");
+    assert_eq!(mempool.size(), 1);
 }

@@ -118,6 +118,7 @@ async fn test_bip47_derivation_error_paths() {
             author_address: None, // No fallback address
             commons_payment_code: Some("PM8TJTLJbPRGxSbc8EJi42Wrr6QbNSaSSVJ5Y3E4pbCYiTHUskHg13935Ubb7q8tx9GVgc2NZK5LXiAtWVt2SN3AoRcTHMihqVh2V9Gns5T7HHmNq".to_string()),
             commons_address: None, // No fallback address
+            payment_signature: None,
         }),
     };
 

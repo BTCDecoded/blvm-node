@@ -526,6 +526,7 @@ impl ControlRpc {
                 "listbanned",
                 "getmininginfo",
                 "getblocktemplate",
+                "generatetoaddress",
                 "submitblock",
                 "estimatesmartfee",
                 "stop",

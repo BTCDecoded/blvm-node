@@ -1,5 +1,6 @@
 //! Tests for BIP70 Payment Protocol Handler
 
+use blvm_node::config::PaymentConfig;
 use blvm_node::network::bip70_handler::{
     handle_get_payment_request, handle_payment, validate_payment_ack_message,
     validate_payment_request_message,
@@ -7,11 +8,17 @@ use blvm_node::network::bip70_handler::{
 use blvm_node::network::protocol::{
     GetPaymentRequestMessage, PaymentACKMessage, PaymentMessage, PaymentRequestMessage,
 };
+use blvm_node::payment::processor::PaymentProcessor;
 use blvm_protocol::payment::{Payment, PaymentOutput, PaymentRequest};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
-type PaymentRequestStore = Arc<Mutex<HashMap<String, PaymentRequest>>>;
+/// Same key scheme as `PaymentProcessor::generate_payment_id`.
+fn processor_payment_id(request: &PaymentRequest) -> String {
+    let serialized = bincode::serialize(request).unwrap_or_default();
+    let hash = Sha256::digest(&serialized);
+    hex::encode(&hash[..16])
+}
 
 fn create_test_payment_request() -> PaymentRequest {
     PaymentRequest::new(
@@ -43,33 +50,44 @@ async fn test_handle_get_payment_request_not_found() {
 
     let result = handle_get_payment_request(&request, None).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("not found") || msg.contains("not available"),
+        "unexpected error: {msg}"
+    );
 }
 
 #[tokio::test]
 async fn test_handle_get_payment_request_found() {
+    let config = PaymentConfig::default();
+    let processor = Arc::new(PaymentProcessor::new(config).expect("payment processor"));
+
+    let payment_request = processor
+        .create_payment_request(
+            vec![PaymentOutput {
+                script: vec![0x76, 0xa9, 0x14],
+                amount: Some(100000),
+            }],
+            None,
+            None,
+        )
+        .await
+        .expect("create payment request");
+
+    let key = processor_payment_id(&payment_request);
+    let payment_id_bytes = hex::decode(&key).expect("payment id hex");
+
     let request = GetPaymentRequestMessage {
         network: "mainnet".to_string(),
         merchant_pubkey: vec![4, 5, 6],
-        payment_id: vec![1, 2, 3],
+        payment_id: payment_id_bytes.clone(),
     };
 
-    let payment_request = create_test_payment_request();
-    let mut store = HashMap::new();
-    let key = format!(
-        "{}_{}",
-        hex::encode(&request.payment_id),
-        hex::encode(&request.merchant_pubkey)
-    );
-    store.insert(key, payment_request.clone());
-    let store: PaymentRequestStore = Arc::new(Mutex::new(store));
-
-    let result = handle_get_payment_request(&request, Some(&store)).await;
+    let result = handle_get_payment_request(&request, Some(processor)).await;
     assert!(result.is_ok());
 
     let response = result.unwrap();
-    assert_eq!(response.payment_id, request.payment_id);
-    assert_eq!(response.merchant_pubkey, request.merchant_pubkey);
+    assert_eq!(response.payment_id, payment_id_bytes);
 }
 
 #[tokio::test]
@@ -82,7 +100,11 @@ async fn test_handle_payment_not_found() {
 
     let result = handle_payment(&payment_msg, None, None).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("not found") || msg.contains("not available"),
+        "unexpected error: {msg}"
+    );
 }
 
 #[tokio::test]

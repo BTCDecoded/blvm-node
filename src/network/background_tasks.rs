@@ -4,11 +4,9 @@
 //! peer eviction, ping, ping timeout, peer reconnection.
 
 use crate::network::network_manager::NetworkManager;
-use crate::network::transport::{Transport, TransportAddr};
+use crate::network::transport::TransportAddr;
 use crate::network::NetworkMessage;
-use crate::utils::{
-    current_timestamp, retry_async_with_backoff, RetryConfig, BACKGROUND_TASK_BACKOFF_SLEEP,
-};
+use crate::utils::{current_timestamp, BACKGROUND_TASK_BACKOFF_SLEEP};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -345,7 +343,10 @@ impl NetworkManager {
         let peer_tx = self.peer_tx().clone();
         let tcp_transport = self.tcp_transport().clone();
         let ban_list = Arc::clone(self.ban_list());
+        let persistent_peers = Arc::clone(self.persistent_peers_lock());
         let secs = self.background_task_config().peer_reconnection_interval_secs;
+        let connect_timeout = self.request_timeout_config().connect_timeout_secs;
+        let max_msg_len = self.protocol_limits().max_protocol_message_length;
 
         tokio::spawn(async move {
             let mut interval =
@@ -355,8 +356,7 @@ impl NetworkManager {
                 interval.tick().await;
 
                 let now = current_timestamp();
-
-                let mut queue = reconnection_queue.lock().await;
+                let persistent_set = persistent_peers.lock().await.clone();
 
                 let (current_peers, max_peers) = {
                     let pm = peer_manager.lock().await;
@@ -364,18 +364,40 @@ impl NetworkManager {
                 };
 
                 let min_peers = std::cmp::max(1, max_peers / 2);
+                let try_persistent_only = current_peers >= min_peers;
 
-                if current_peers >= min_peers {
-                    queue
-                        .retain(|_, (_, last_attempt, _)| {
-                            now.saturating_sub(*last_attempt) < 3600
-                        });
-                    continue;
+                let disconnected_persistent: std::collections::HashSet<std::net::SocketAddr> = {
+                    let pm = peer_manager.lock().await;
+                    persistent_set
+                        .iter()
+                        .copied()
+                        .filter(|a| {
+                            pm.get_peer(&TransportAddr::Tcp(*a))
+                                .map(|p| p.is_connected())
+                                != Some(true)
+                        })
+                        .collect()
+                };
+
+                let mut queue = reconnection_queue.lock().await;
+
+                if try_persistent_only {
+                    queue.retain(|addr, (_, last_attempt, _)| {
+                        now.saturating_sub(*last_attempt) < 3600
+                            || persistent_set.contains(addr)
+                    });
                 }
 
                 let now = current_timestamp();
+                // When outbound count is "high", still process: (1) disconnected persistent peers,
+                // (2) any other queued TCP peer (e.g. IBD added the addr after GetData "not found").
                 let mut peers_to_reconnect: Vec<(std::net::SocketAddr, u32, f64, u64)> = queue
                     .iter()
+                    .filter(|(addr, _)| {
+                        !try_persistent_only
+                            || disconnected_persistent.contains(addr)
+                            || !persistent_set.contains(addr)
+                    })
                     .map(|(addr, (attempts, last_attempt, quality))| {
                         (*addr, *attempts, *quality, *last_attempt)
                     })
@@ -410,7 +432,7 @@ impl NetworkManager {
                         continue;
                     }
 
-                    if *attempts >= 10 {
+                    if *attempts >= 10 && !persistent_set.contains(addr) {
                         debug!(
                             "Removing peer {} from reconnection queue (max attempts reached)",
                             addr
@@ -418,8 +440,15 @@ impl NetworkManager {
                         queue.remove(addr);
                         continue;
                     }
+                    if *attempts >= 10 && persistent_set.contains(addr) {
+                        if let Some((ref mut att, _, _)) = queue.get_mut(addr) {
+                            *att = 0;
+                        }
+                    }
 
-                    if current_peers >= max_peers {
+                    // At capacity, still try persistent peers (IBD / operator-configured) — same slot
+                    // may have been freed; `add_peer` will fail if we are truly full.
+                    if current_peers >= max_peers && !persistent_set.contains(addr) {
                         break;
                     }
 
@@ -442,25 +471,25 @@ impl NetworkManager {
                     let peer_manager_clone = Arc::clone(&peer_manager);
                     let tcp_transport_clone = tcp_transport.clone();
                     let reconnection_queue_clone = Arc::clone(&reconnection_queue);
+                    let ct = connect_timeout;
+                    let mml = max_msg_len;
 
                     tokio::spawn(async move {
                         use crate::network::peer::Peer;
 
-                        let connect_result = retry_async_with_backoff(
-                            &RetryConfig::network(),
-                            || tcp_transport_clone.connect(TransportAddr::Tcp(addr_clone)),
-                        )
-                        .await;
+                        let connect_result = tcp_transport_clone
+                            .connect_stream_with_timeout(addr_clone, ct)
+                            .await;
 
                         match connect_result {
-                            Ok(conn) => {
+                            Ok(stream) => {
                                 info!("Successfully reconnected to peer {}", addr_clone);
 
-                                let peer = Peer::from_transport_connection(
-                                    conn,
+                                let peer = Peer::from_tcp_stream_split(
+                                    stream,
                                     addr_clone,
-                                    TransportAddr::Tcp(addr_clone),
                                     peer_tx_clone.clone(),
+                                    mml,
                                 );
 
                                 let mut pm = peer_manager_clone.lock().await;
@@ -472,6 +501,9 @@ impl NetworkManager {
                                         TransportAddr::Tcp(addr_clone),
                                     ));
                                 } else {
+                                    let _ = peer_tx_clone.send(NetworkMessage::PeerConnected(
+                                        TransportAddr::Tcp(addr_clone),
+                                    ));
                                     let mut queue = reconnection_queue_clone.lock().await;
                                     queue.remove(&addr_clone);
                                     info!("Peer {} successfully reconnected and added", addr_clone);

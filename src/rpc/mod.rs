@@ -36,6 +36,7 @@ use crate::node::metrics::MetricsCollector;
 use crate::node::performance::PerformanceProfiler;
 use crate::storage::Storage;
 use anyhow::Result;
+use blvm_protocol::BitcoinProtocolEngine;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -92,6 +93,8 @@ pub struct RpcManager {
     request_timeouts: Option<RequestTimeoutConfig>,
     /// Module manager for load/unload/reload RPC (optional)
     module_manager: Option<Arc<tokio::sync::Mutex<ModuleManager>>>,
+    /// Protocol engine for mining RPC (`generatetoaddress` on regtest).
+    protocol_engine: Option<Arc<BitcoinProtocolEngine>>,
 }
 
 impl RpcManager {
@@ -129,6 +132,7 @@ impl RpcManager {
             connection_rate_limit_window_seconds: 60,
             request_timeouts: None,
             module_manager: None,
+            protocol_engine: None,
         }
     }
 
@@ -300,6 +304,12 @@ impl RpcManager {
         self
     }
 
+    /// Set protocol engine (enables `generatetoaddress` on regtest).
+    pub fn with_protocol_engine(mut self, engine: Arc<BitcoinProtocolEngine>) -> Self {
+        self.protocol_engine = Some(engine);
+        self
+    }
+
     /// Set payment processor for BIP70 HTTP endpoints
     #[cfg(feature = "bip70-http")]
     pub fn with_payment_processor(
@@ -354,6 +364,7 @@ impl RpcManager {
             connection_rate_limit_window_seconds: 60,
             request_timeouts: None,
             module_manager: None,
+            protocol_engine: None,
         }
     }
 
@@ -426,10 +437,20 @@ impl RpcManager {
                 )
                 .with_request_timeouts(self.request_timeouts.clone()),
             );
-            let mining = Arc::new(
-                mining::MiningRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool))
-                    .with_event_publisher(self.event_publisher.clone()),
-            );
+            let mining = Arc::new({
+                let mut m = mining::MiningRpc::with_dependencies(
+                    Arc::clone(storage),
+                    Arc::clone(mempool),
+                )
+                .with_event_publisher(self.event_publisher.clone());
+                if let Some(ref pe) = self.protocol_engine {
+                    m = m.with_protocol_engine(Arc::clone(pe));
+                }
+                match &self.network_manager {
+                    Some(nm) => m.with_network_manager(Some(Arc::clone(nm))),
+                    None => m,
+                }
+            });
             let network = if let Some(ref network_manager) = self.network_manager {
                 Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(
                     network_manager,
@@ -583,13 +604,20 @@ impl RpcManager {
                     None,
                     None,
                 ));
-                let mining = Arc::new(
-                    mining::MiningRpc::with_dependencies(
+                let mining = Arc::new({
+                    let mut m = mining::MiningRpc::with_dependencies(
                         Arc::clone(storage),
                         Arc::clone(mempool),
                     )
-                    .with_event_publisher(self.event_publisher.clone()),
-                );
+                    .with_event_publisher(self.event_publisher.clone());
+                    if let Some(ref pe) = self.protocol_engine {
+                        m = m.with_protocol_engine(Arc::clone(pe));
+                    }
+                    match &self.network_manager {
+                        Some(nm) => m.with_network_manager(Some(Arc::clone(nm))),
+                        None => m,
+                    }
+                });
                 let network = if let Some(ref network_manager) = self.network_manager {
                     Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(
                         network_manager,

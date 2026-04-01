@@ -70,7 +70,8 @@ pub fn init_logging(filter: Option<&str>) {
     // - Include target (module path) for better debugging
     // - Thread IDs disabled by default (can be noisy)
     // - ANSI colors enabled (can be disabled via NO_COLOR env var)
-    tracing_subscriber::registry()
+    // try_init: only one global subscriber per process; ignore if already set (e.g. integration tests).
+    let _ = tracing_subscriber::registry()
         .with(
             fmt::layer()
                 .with_target(true) // Include module path - useful for debugging
@@ -78,7 +79,7 @@ pub fn init_logging(filter: Option<&str>) {
                 .with_ansi(std::env::var("NO_COLOR").is_err()), // Respect NO_COLOR standard
         )
         .with(env_filter)
-        .init();
+        .try_init();
 }
 
 /// Initialize logging for a module
@@ -126,7 +127,7 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
     // - Include target (module path) for better debugging
     // - Module-specific filter for isolation
     // - Can still see node module communication logs
-    tracing_subscriber::registry()
+    let _ = tracing_subscriber::registry()
         .with(
             fmt::layer()
                 .with_target(true) // Include module path - useful for module debugging
@@ -134,7 +135,7 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
                 .with_ansi(std::env::var("NO_COLOR").is_err()), // Respect NO_COLOR standard
         )
         .with(env_filter)
-        .init();
+        .try_init();
 }
 
 /// Initialize logging with JSON output (for production/monitoring)
@@ -185,12 +186,12 @@ pub fn init_json_logging(filter: Option<&str>) {
     // - JSON format for log aggregation systems
     // - Include target, spans, and span lists for full context
     // - Standard structured logging practice
-    tracing_subscriber::registry()
+    let _ = tracing_subscriber::registry()
         .with(
             fmt::layer().with_target(true), // Include module path in JSON
         )
         .with(env_filter)
-        .init();
+        .try_init();
 }
 
 /// Initialize logging from NodeConfig

@@ -37,32 +37,33 @@ async fn test_rpc_concurrent_different_methods() {
     let blockchain = Arc::new(BlockchainRpc::new());
     let control = Arc::new(ControlRpc::new());
 
-    // Concurrent calls to different methods
-    let mut handles = vec![];
-
-    // Blockchain calls
+    let mut blockchain_handles = vec![];
     for _ in 0..10 {
         let blockchain_clone = Arc::clone(&blockchain);
-        handles.push(tokio::spawn(async move {
+        blockchain_handles.push(tokio::spawn(async move {
             blockchain_clone.get_blockchain_info().await
         }));
     }
 
-    // Control calls
+    let mut control_handles = vec![];
     for _ in 0..10 {
         let control_clone = Arc::clone(&control);
-        handles.push(tokio::spawn(async move {
+        control_handles.push(tokio::spawn(async move {
             control_clone.uptime(&json!([])).await
         }));
     }
 
-    // Wait for all calls
-    let results: Vec<_> = futures::future::join_all(handles).await;
-    assert_eq!(results.len(), 20);
+    let bc_results: Vec<_> = futures::future::join_all(blockchain_handles).await;
+    let ctl_results: Vec<_> = futures::future::join_all(control_handles).await;
+    assert_eq!(bc_results.len() + ctl_results.len(), 20);
 
-    // All should complete
-    for result in results {
+    for result in bc_results {
         assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+    }
+    for result in ctl_results {
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
     }
 }
 
@@ -121,7 +122,7 @@ async fn test_rpc_batch_request_handling() {
             if i % 2 == 0 {
                 blockchain_clone.get_blockchain_info().await
             } else {
-                blockchain_clone.get_block_hash(i as i64).await
+                blockchain_clone.get_block_hash(i as u64).await
             }
         }));
     }

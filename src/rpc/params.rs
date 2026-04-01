@@ -36,6 +36,15 @@ pub fn param_u64_default(params: &Value, index: usize, default: u64) -> u64 {
     param_u64(params, index).unwrap_or(default)
 }
 
+/// Get u64 at `params[index]`, or error with a consistent message for the method.
+pub fn param_u64_required(params: &Value, index: usize, method_name: &str) -> Result<u64, RpcError> {
+    param_u64(params, index).ok_or_else(|| {
+        RpcError::invalid_params(format!(
+            "Expected non-negative integer at params[{index}] for {method_name}"
+        ))
+    })
+}
+
 /// Get bool at `params[index]`, or `None` if missing/wrong type.
 #[inline]
 pub fn param_bool(params: &Value, index: usize) -> Option<bool> {

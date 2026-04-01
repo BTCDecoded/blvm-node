@@ -203,6 +203,7 @@ async fn test_module_payment_request_missing_payment_section() {
         author: None,
         capabilities: Vec::new(),
         dependencies: HashMap::new(),
+        optional_dependencies: HashMap::new(),
         entry_point: "no-payment-module.so".to_string(),
         config_schema: HashMap::new(),
         binary: None,

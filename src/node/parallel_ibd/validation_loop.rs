@@ -6,12 +6,11 @@
 #![cfg(feature = "production")]
 
 use super::feeder::FeederState;
-use super::memory::MemoryGuard;
-use super::types::FEEDER_BLOCK_BYTES_ESTIMATE;
+use super::memory::{self, MemoryGuard, PressureLevel};
 use crate::storage::blockstore::BlockStore;
 use crate::storage::disk_utxo::{
-    block_input_keys_batch_into_arc, block_input_keys_into, key_to_outpoint, outpoint_to_key,
-    OutPointKey,
+    block_input_keys_batch_into_arc, block_input_keys_into_filtered, key_to_outpoint,
+    outpoint_to_key, OutPointKey,
 };
 use crate::storage::ibd_utxo_store::IbdUtxoStore;
 use crate::storage::Storage;
@@ -20,12 +19,101 @@ use blvm_consensus::bip_validation::Bip30Index;
 use blvm_protocol::{
     segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet,
 };
+use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 
+/// Reuse `Arc<Vec<Vec<Witness>>>` of empty stacks for pre-segwit blocks (same `n` as tx count).
+/// Validation runs on one thread — `thread_local` avoids a global mutex on this hot path.
+thread_local! {
+    static EMPTY_WITNESS_STACKS: RefCell<FxHashMap<usize, Arc<Vec<Vec<Witness>>>>> =
+        RefCell::new(FxHashMap::default());
+}
+
+fn shared_empty_witness_stacks(n_tx: usize) -> Arc<Vec<Vec<Witness>>> {
+    EMPTY_WITNESS_STACKS.with(|cell| {
+        let mut g = cell.borrow_mut();
+        if let Some(a) = g.get(&n_tx) {
+            return Arc::clone(a);
+        }
+        let arc = Arc::new(vec![Vec::new(); n_tx]);
+        if g.len() > 512 {
+            g.clear();
+        }
+        g.insert(n_tx, Arc::clone(&arc));
+        arc
+    })
+}
+
+/// Wall-clock ms at last `mi_collect` / `malloc_trim` (lock-free throttle for RSS-pressure path).
+static LAST_IBD_HEAP_TRIM_WALL_MS: AtomicU64 = AtomicU64::new(0);
+const IBD_HEAP_TRIM_MIN_INTERVAL_MS: u64 = 10_000;
+
+fn ibd_maybe_heap_trim() {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    loop {
+        let prev = LAST_IBD_HEAP_TRIM_WALL_MS.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(prev) < IBD_HEAP_TRIM_MIN_INTERVAL_MS {
+            return;
+        }
+        if LAST_IBD_HEAP_TRIM_WALL_MS
+            .compare_exchange_weak(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            break;
+        }
+    }
+    #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 use super::ParallelIBD;
+
+/// True when this height should emit a profile sample line for interval `sample`.
+/// `sample == 0` means interval sampling is off (e.g. only `disk` / `blocked` in BLVM_IBD_DEBUG)
+/// — never use `% sample` in that case.
+#[cfg(feature = "profile")]
+#[inline]
+fn ibd_profile_height_matches_sample(sample: u64, height: u64) -> bool {
+    sample == 1 || (sample > 0 && height % sample == 0)
+}
+
+#[inline]
+fn dynamic_utxo_cap(level: PressureLevel, nominal: usize) -> usize {
+    if nominal == usize::MAX {
+        return usize::MAX;
+    }
+    match level {
+        PressureLevel::Emergency => (nominal / 4).max(8_192),
+        PressureLevel::Critical => (nominal * 2 / 3).max(nominal / 2),
+        PressureLevel::Elevated => (nominal * 9 / 10).max(nominal * 4 / 5),
+        PressureLevel::None => nominal,
+    }
+}
+
+#[inline]
+fn dynamic_prefetch_lookahead(level: PressureLevel, nominal: usize) -> usize {
+    let n = nominal.clamp(1, 128);
+    match level {
+        PressureLevel::Emergency => 8,
+        PressureLevel::Critical => (n / 2).max(12).min(48),
+        PressureLevel::Elevated => ((n * 2 / 3).max(24)).min(n),
+        PressureLevel::None => n,
+    }
+}
 
 /// Parameters for the validation loop. Holds all captured state from the spawn closure.
 pub struct ValidationParams {
@@ -40,6 +128,12 @@ pub struct ValidationParams {
     pub start_height: u64,
     pub validation_height: Arc<std::sync::atomic::AtomicU64>,
     pub mem_guard: MemoryGuard,
+    pub max_ahead_live: Arc<std::sync::atomic::AtomicU64>,
+    pub nominal_max_ahead: u64,
+    /// Resolved **nominal** UTXO cache cap (from [`MemoryGuard::utxo_max_entries`] at IBD start).
+    pub utxo_nominal_max_entries: usize,
+    /// UTXO prefetch lookahead: **env > ibd.toml > default** (see [`super::ParallelIBDConfig::from_config`]).
+    pub utxo_prefetch_lookahead: usize,
 }
 
 /// Run the IBD validation loop. Called from std::thread::spawn.
@@ -55,6 +149,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let start_height = params.start_height;
     let validation_height = params.validation_height;
     let mut mem_guard = params.mem_guard;
+    let max_ahead_live = params.max_ahead_live;
+    let nominal_max_ahead = params.nominal_max_ahead;
+    let utxo_nominal_max_entries = params.utxo_nominal_max_entries;
+    let nominal_prefetch_lookahead = params.utxo_prefetch_lookahead.clamp(1, 128);
+    let utxo_prefetch_lookahead_live =
+        AtomicUsize::new(nominal_prefetch_lookahead);
 
     //
     // Blocks may arrive out of order. We maintain a small reorder buffer
@@ -92,8 +192,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     blocked_log = true;
                 } else if p == "profile" {
                     sample = sample.max(1);
-                } else if p.starts_with("profile:") {
-                    let rest: Vec<&str> = p[7..].split(':').collect();
+                } else if let Some(rest_s) = p.strip_prefix("profile:") {
+                    // Skip full "profile:" (8 chars); p[7..] wrongly kept a leading ':' and broke "profile:100"
+                    let rest: Vec<&str> = rest_s.split(':').collect();
                     if !rest.is_empty() && !rest[0].is_empty() {
                         if let Ok(n) = rest[0].parse::<u64>() {
                             if rest.len() >= 2 && !rest[1].is_empty() {
@@ -154,27 +255,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // DEFERRED STORAGE: Buffer validated blocks for batch commit
     // Keep flush interval small to avoid OOM on systems with limited RAM (16GB)
     let storage_flush_interval = mem_guard.storage_flush_interval;
-    let mut pending_blocks: Vec<(
-        Arc<Block>,
-        Arc<BlockHeader>,
-        Arc<Vec<Vec<Witness>>>,
-        u64,
-    )> = Vec::with_capacity(storage_flush_interval);
+    let mut pending_blocks: Vec<(Arc<Block>, Arc<Vec<Vec<Witness>>>, u64)> =
+        Vec::with_capacity(storage_flush_interval);
+    /// Sum of feeder `est_bytes` for entries in `pending_blocks` (same heuristic as [`super::types::estimate_block_bytes`]; pressure-path flush only).
+    let mut pending_storage_bytes: u64 = 0;
     let skip_storage = false;
-    let dynamic_buffer_limit = mem_guard.buffer_limit(start_height);
-
-    // Batched lookahead prefetch: load UTXOs for N+1..N+K in one TidesDB round-trip.
-    // Reduces spawn_blocking overhead and amortizes disk access across multiple blocks.
-    // Tunable via BLVM_UTXO_PREFETCH_LOOKAHEAD (default 64; 96 at 100k+ when blocks have 2–3k inputs).
-    let utxo_prefetch_lookahead: usize = std::env::var("BLVM_UTXO_PREFETCH_LOOKAHEAD")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(64)
-        .clamp(1, 128);
+    let initial_buffer_limit = mem_guard.buffer_limit(start_height);
 
     info!(
-        "Validation loop starting (deferred storage enabled, flush every {} blocks, buffer limit: {}, utxo_prefetch_lookahead: {})...",
-        storage_flush_interval, dynamic_buffer_limit, utxo_prefetch_lookahead
+        "Validation loop starting (deferred storage: flush every ~{} blocks [pressure-scaled], extra flush under Critical/Emergency when pending bytes exceed budget cap, initial buffer limit: {}, utxo_prefetch_lookahead_nominal: {})...",
+        storage_flush_interval,
+        initial_buffer_limit,
+        nominal_prefetch_lookahead,
     );
 
     let mut next_validation_height = start_height;
@@ -185,20 +277,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // FEEDER BUFFER: Block feeder drains ready_rx into shared state. We read next block and
     // lookahead blocks for protect_keys. Buffer fills while validation runs.
 
-    // Async flush: run on std::thread (validation runs off tokio — dedicated thread).
+    // Async flush: block batches on std::thread (validation runs off tokio).
     let mut flush_handles: VecDeque<std::thread::JoinHandle<Result<()>>> = VecDeque::new();
     let mut utxo_flush_handles: VecDeque<std::thread::JoinHandle<Result<()>>> = VecDeque::new();
-    // 10K BPS: 1024 flushes × 750 blocks = 768k buffered. Validation rarely blocks on handle.join().
-    const MAX_FLUSHES_IN_FLIGHT: usize = 1024;
     const MAX_UTXO_FLUSHES_IN_FLIGHT: usize = 1024;
-    /// When RSS > trigger, cap in-flight flushes so batches drain before we add more.
     const MAX_UTXO_FLUSHES_UNDER_RSS_PRESSURE: usize = 2;
+    let max_block_flushes_in_flight = mem_guard.max_block_flushes;
 
     let ibd_defer_flush = mem_guard.defer_flush;
     let ibd_defer_checkpoint = mem_guard.defer_checkpoint_interval;
 
     // Reusable buffers for protect_keys (avoids 2–4 Vec+HashSet allocs per block).
-    let mut blocks_buf: Vec<Arc<Block>> = Vec::with_capacity(utxo_prefetch_lookahead);
+    let mut blocks_buf: Vec<Arc<Block>> = Vec::with_capacity(nominal_prefetch_lookahead.max(8));
     let mut keys_buf: Vec<OutPointKey> = Vec::new();
     let mut keys_seen: rustc_hash::FxHashSet<OutPointKey> = rustc_hash::FxHashSet::default();
     // IBD v2: reuse buffer for block_input_keys (avoids ~80KB alloc per block).
@@ -209,9 +299,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     let mut keys_missing_buf: Vec<OutPointKey> = Vec::new();
     let mut supplement_cache_buf: Vec<OutPointKey> = Vec::new();
-
     // Cache BLVM_IBD_SNAPSHOT_DIR once at loop init (was std::env::var per block)
     let snapshot_dir_base: Option<String> = std::env::var("BLVM_IBD_SNAPSHOT_DIR").ok();
+    // Same for optional BPS CSV (read on periodic IBD log intervals only, but avoid env lookup each time)
+    let ibd_bps_csv_path: Option<String> = std::env::var("BLVM_IBD_BPS_CSV").ok();
     // #48: Tunable yield interval (default 500 for 5–10K BPS; fewer yields = less validation interruption)
     let yield_interval: u64 = std::env::var("BLVM_IBD_YIELD_INTERVAL")
         .ok()
@@ -226,6 +317,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // 5a: Adaptive mi_collect — run more often when RSS grows fast
     let mut last_rss_mb: u64 = 0;
     let mut last_collect_block: u64 = 0;
+    // EMA of utxo-base build time for prefetch lookahead (single validation thread — no mutex).
+    let mut prefetch_base_ema: Option<f64> = None;
 
     // Incremental UTXO commitment during IBD (Core-style; no full scan)
     #[cfg(all(feature = "utxo-commitments", feature = "production"))]
@@ -252,22 +345,28 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         // Use wait_timeout (5s) so we can log when stalled — helps diagnose freezes around 90k+.
         const FEEDER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let next_block = loop {
-            let mut guard = feeder_state.0.lock().unwrap();
-            if let Some((arc_b, w, u, tx_ids)) = guard.0.remove(&next_validation_height) {
-                guard.2 = guard.2.saturating_sub(FEEDER_BLOCK_BYTES_ESTIMATE);
+            let mut guard = feeder_state.0.lock();
+            if let Some((arc_b, w, mut input_keys, u, tx_ids, est_bytes)) =
+                guard.0.remove(next_validation_height)
+            {
+                guard.2 = guard.2.saturating_sub(est_bytes);
                 feeder_state.1.notify_one();
-                break Some((next_validation_height, arc_b, w, u, tx_ids));
+                break Some((
+                    next_validation_height,
+                    arc_b,
+                    w,
+                    input_keys,
+                    u,
+                    tx_ids,
+                    est_bytes,
+                ));
             }
             if guard.1 && guard.0.is_empty() {
                 break None;
             }
             #[cfg(feature = "profile")]
             let wait_start = std::time::Instant::now();
-            let (g, timeout_result) = feeder_state
-                .1
-                .wait_timeout(guard, FEEDER_WAIT_TIMEOUT)
-                .unwrap();
-            guard = g;
+            let wait = feeder_state.1.wait_for(&mut guard, FEEDER_WAIT_TIMEOUT);
             #[cfg(feature = "profile")]
             if ibd_profile {
                 let wait_ms = wait_start.elapsed().as_millis() as u64;
@@ -283,19 +382,26 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     );
                 }
             }
-            if timeout_result.timed_out() {
-                let cur_min = guard.0.keys().next().copied();
+            if wait.timed_out() {
+                let cur_min = guard.0.min_buffered_height();
                 warn!(
                     "[IBD_STALL] Validation waiting for block {} (buffer has {} blocks, min_height={:?}) — coordinator/feeder may be blocked",
                     next_validation_height, guard.0.len(), cur_min
                 );
             }
         };
-        let (next_height, block_arc, witnesses, prefetched_utxos, tx_ids_precomputed) =
-            match next_block {
-                Some(t) => t,
-                None => break, // Channel closed, buffer drained
-            };
+        let (
+            next_height,
+            block_arc,
+            witnesses,
+            mut input_keys_from_feeder,
+            prefetched_utxos,
+            tx_ids_precomputed,
+            feeder_est_bytes,
+        ) = match next_block {
+            Some(t) => t,
+            None => break, // Channel closed, buffer drained
+        };
         next_validation_height = next_height + 1;
         if blocks_synced == 0 {
             info!("Validation: first block received, height {}", next_height);
@@ -305,16 +411,19 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let need_blocks_buf = ibd_store_v2_for_validation.is_dynamic_eviction();
         if need_blocks_buf {
             blocks_buf.clear();
-            let guard = feeder_state.0.lock().unwrap();
-            for off in 1..=utxo_prefetch_lookahead {
+            let guard = feeder_state.0.lock();
+            let prefetch_look = utxo_prefetch_lookahead_live
+                .load(Ordering::Relaxed)
+                .clamp(1, 128);
+            for off in 1..=prefetch_look {
                 let h = next_height + off as u64;
-                if let Some((b, _, _, _)) = guard.0.get(&h) {
+                if let Some((b, _, _, _, _, _)) = guard.0.get(h) {
                     blocks_buf.push(Arc::clone(b));
                 }
             }
         }
 
-        // #21: tx_ids precomputed in feeder — shared by collect_gaps and connect_block_ibd (saves 2–4k hashes/block).
+        // #21: tx_ids precomputed once in coordinator — feeder forwards; connect_block_ibd skips duplicate hash pass.
 
         // IBD v2: prefetch provides full map — no gap-fill needed.
         let prefetched_for_v2 = prefetched_utxos;
@@ -332,30 +441,21 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             Some(recent_headers_buf.as_slices().0)
         };
 
-        // Resolve witnesses: for pre-SegWit, build a shared Arc of empty witnesses once
-        // per block shape (avoids thousands of empty Vec allocs + deep clone every block).
-        let witnesses_arc: Option<std::sync::Arc<Vec<Vec<blvm_consensus::segwit::Witness>>>> =
-            if witnesses.is_empty() {
-                let empty: Vec<Vec<blvm_consensus::segwit::Witness>> = block_arc
-                    .transactions
-                    .iter()
-                    .map(|tx| vec![blvm_consensus::segwit::Witness::default(); tx.inputs.len()])
-                    .collect();
-                Some(std::sync::Arc::new(empty))
-            } else if witnesses.len() != block_arc.transactions.len() {
-                return Err(anyhow::anyhow!(
-                    "Witness count mismatch at height {}: {} witnesses for {} transactions",
-                    next_height,
-                    witnesses.len(),
-                    block_arc.transactions.len()
-                ));
-            } else {
-                Some(std::sync::Arc::new(witnesses))
-            };
-        let empty_witnesses_fallback: Vec<Vec<blvm_consensus::segwit::Witness>> = Vec::new();
-        let witnesses_to_use: &[Vec<blvm_consensus::segwit::Witness>] = witnesses_arc
-            .as_deref()
-            .unwrap_or(&empty_witnesses_fallback);
+        // One Arc<Vec<…>> per block: shared by connect (avoids `to_vec` in consensus) and block flush.
+        let witnesses_storage: Arc<Vec<Vec<Witness>>> = if witnesses.is_empty() {
+            shared_empty_witness_stacks(block_arc.transactions.len())
+        } else if witnesses.len() != block_arc.transactions.len() {
+            return Err(anyhow::anyhow!(
+                "Witness count mismatch at height {}: {} witnesses for {} transactions",
+                next_height,
+                witnesses.len(),
+                block_arc.transactions.len()
+            ));
+        } else {
+            Arc::new(witnesses)
+        };
+        let witnesses_to_use: &[Vec<Witness>] = witnesses_storage.as_slice();
+        let witnesses_arc_for_connect: Option<&Arc<Vec<Vec<Witness>>>> = Some(&witnesses_storage);
 
         // Validate + sync/evict (validation runs on dedicated thread — no tokio).
         #[cfg(feature = "profile")]
@@ -372,9 +472,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             sync_ms,
             evict_ms,
             validation_time,
+            utxo_base_ms,
+            apply_utxo_ms,
             utxo_flush_batch,
-            _pipelined_sync_spawned,
             rss_pressure,
+            utxo_base_tune_ms,
         ) = {
             let prefetch_ms = 0u64;
             #[cfg(feature = "profile")]
@@ -382,9 +484,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             #[cfg(not(feature = "profile"))]
             let apply_pending_ms = 0u64;
 
-            let (validation_result, validation_time) = {
-                // Build at validation time. Use prefetched map when available to avoid N get()+clone.
-                block_input_keys_into(block_arc.as_ref(), &mut keys_v2_buf);
+            let (validation_result, validation_time, utxo_base_ms, utxo_base_tune_ms_holder) = {
+                // Reuse coordinator/prefetch input keys — avoids a second O(inputs) scan per block.
+                // Coordinator already filters intra-block spends; fallback replicates that filter.
+                if input_keys_from_feeder.is_empty() {
+                    block_input_keys_into_filtered(block_arc.as_ref(), &mut keys_v2_buf);
+                } else {
+                    std::mem::swap(&mut keys_v2_buf, &mut input_keys_from_feeder);
+                }
                 let keys_v2 = &keys_v2_buf;
                 let store = &ibd_store_v2_for_validation;
                 if next_height <= 200 {
@@ -396,6 +503,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     );
                 }
                 let prefetched = &prefetched_for_v2;
+                let t_utxo_base = std::time::Instant::now();
                 if prefetched.is_empty() {
                     store.build_utxo_map_into_with_buf(
                         keys_v2,
@@ -423,6 +531,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         );
                     }
                 }
+                let utxo_base_tune_ms_holder = t_utxo_base.elapsed().as_millis() as u64;
+                #[cfg(feature = "profile")]
+                let utxo_base_ms = utxo_base_tune_ms_holder;
+                #[cfg(not(feature = "profile"))]
+                let utxo_base_ms = 0u64;
                 if next_height <= 200 && utxo_base_buf.len() < keys_v2.len() {
                     let first_missing = keys_v2
                         .iter()
@@ -461,21 +574,31 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     block_arc.as_ref(),
                     Some(Arc::clone(&block_arc)),
                     witnesses_to_use,
-                    witnesses_arc.as_ref(),
+                    witnesses_arc_for_connect,
                     next_height,
                     recent_headers_opt,
                     cached_network_time,
                     Some(&tx_ids_precomputed),
                 );
-                (r, validation_start.elapsed())
+                (
+                    r,
+                    validation_start.elapsed(),
+                    utxo_base_ms,
+                    utxo_base_tune_ms_holder,
+                )
             };
 
-            let (sync_ms, evict_ms, utxo_flush_batch, pipelined_sync_spawned, rss_pressure) =
-                match &validation_result {
-                    Ok((_tx_ids, utxo_delta)) => {
-                        if let Some(ref delta) = utxo_delta {
+            let (sync_ms, evict_ms, utxo_flush_batch, rss_pressure, apply_utxo_ms, validation_result) =
+                match validation_result {
+                    Ok((tx_ids_cow, utxo_delta_opt)) => {
+                        #[cfg(feature = "profile")]
+                        let t_apply_utxo = std::time::Instant::now();
+                        #[cfg(feature = "profile")]
+                        let mut protect_evict_ms: u64 = 0;
+                        #[cfg(not(feature = "profile"))]
+                        let protect_evict_ms: u64 = 0;
+                        let flush = if let Some(delta) = utxo_delta_opt {
                             let store = &ibd_store_v2_for_validation;
-                            // Apply delta to commitment tree BEFORE store (remove needs UTXO from store)
                             #[cfg(all(
                                 feature = "utxo-commitments",
                                 feature = "production"
@@ -483,10 +606,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             if let (Some(ref mut tree), Some(_)) =
                                 (&mut commitment_tree_opt, &commitment_store_opt)
                             {
-                                for op in &delta.deletions {
-                                    let key = outpoint_to_key(op);
+                                for dk in &delta.deletions {
+                                    let op =
+                                        blvm_consensus::utxo_overlay::utxo_deletion_key_to_outpoint(
+                                            dk,
+                                        );
+                                    let key = outpoint_to_key(&op);
                                     if let Some(utxo) = store.get(&key) {
-                                        if let Err(e) = tree.remove(op, &utxo) {
+                                        if let Err(e) = tree.remove(&op, &utxo) {
                                             warn!(
                                                 "IBD commitment: remove failed at height {}: {}",
                                                 next_height, e
@@ -503,9 +630,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                     }
                                 }
                             }
-                            store.apply_utxo_delta(delta);
-                            // Dynamic eviction: protect keys for next blocks, then evict
+                            store.apply_utxo_delta(delta, next_height);
                             if store.is_dynamic_eviction() {
+                                #[cfg(feature = "profile")]
+                                let t_protect_evict = std::time::Instant::now();
                                 block_input_keys_batch_into_arc(
                                     &blocks_buf,
                                     &mut keys_buf,
@@ -513,8 +641,16 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 );
                                 store.protect_keys_for_next_blocks(&keys_buf);
                                 store.evict_if_needed(next_height);
+                                #[cfg(feature = "profile")]
+                                {
+                                    protect_evict_ms =
+                                        t_protect_evict.elapsed().as_millis() as u64;
+                                }
                             }
-                            let rss_pressure = mem_guard.should_flush();
+                            let pressure_level = mem_guard.should_flush(
+                                Some((&max_ahead_live, nominal_max_ahead)),
+                            );
+                            let rss_pressure = pressure_level >= PressureLevel::Elevated;
                             if rss_pressure {
                                 info!(
                                     "[IBD_V2] height={} RSS pressure (cache={}, pending={}), forcing flush",
@@ -523,21 +659,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                     store.pending_len()
                                 );
                                 let batch = store.take_flush_batch_force();
-                                // Non-blocking: force a flush batch (async, same as normal path)
-                                // and return freed mimalloc pages. Do NOT sync-wait or evict —
-                                // the UTXO cache (~1GB) is a small fraction of RSS; evicting it
-                                // doesn't help but tanks BPS from cache misses + sync I/O.
-                                #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
-                                unsafe {
-                                    libmimalloc_sys::mi_collect(true);
-                                }
-                                (
-                                    0u64,
-                                    0u64,
-                                    batch,
-                                    None::<std::thread::JoinHandle<Result<()>>>,
-                                    true,
-                                )
+                                ibd_maybe_heap_trim();
+                                (0u64, protect_evict_ms, batch, true)
                             } else if ibd_defer_flush {
                                 let at_checkpoint =
                                     next_height > 0 && next_height % ibd_defer_checkpoint == 0;
@@ -546,16 +669,32 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 } else {
                                     None
                                 };
-                                (0u64, 0u64, batch, None, false)
+                                (0u64, protect_evict_ms, batch, false)
                             } else {
                                 let batch = store.maybe_take_flush_batch();
-                                (0u64, 0u64, batch, None, false)
+                                (0u64, protect_evict_ms, batch, false)
                             }
                         } else {
-                            (0u64, 0u64, None, None, false)
-                        }
+                            (0u64, 0u64, None, false)
+                        };
+                        #[cfg(feature = "profile")]
+                        let apply_utxo_ms = (t_apply_utxo.elapsed().as_millis())
+                            .saturating_sub(protect_evict_ms as u128) as u64;
+                        #[cfg(not(feature = "profile"))]
+                        let apply_utxo_ms = 0u64;
+                        (
+                            flush.0,
+                            flush.1,
+                            flush.2,
+                            flush.3,
+                            apply_utxo_ms,
+                            Ok((
+                                tx_ids_cow,
+                                None::<blvm_consensus::block::UtxoDelta>,
+                            )),
+                        )
                     }
-                    Err(_) => (0u64, 0u64, None, None, false),
+                    Err(e) => (0u64, 0u64, None, false, 0u64, Err(e)),
                 };
 
             (
@@ -565,21 +704,54 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 sync_ms,
                 evict_ms,
                 validation_time,
+                utxo_base_ms,
+                apply_utxo_ms,
                 utxo_flush_batch,
-                pipelined_sync_spawned,
                 rss_pressure,
+                utxo_base_tune_ms_holder,
             )
         };
+
+        // One read per block: should_flush (inside validation) may have updated the atomic.
+        let ibd_pressure = memory::last_reported_pressure_level(&mem_guard);
+
+        // Prefetch lookahead: EMA on utxo-base build time (no /proc); widen when supplement is slow.
+        let ms = utxo_base_tune_ms as f64;
+        let ema = match prefetch_base_ema {
+            None => {
+                prefetch_base_ema = Some(ms);
+                ms
+            }
+            Some(prev) => {
+                let n = prev * (63.0 / 64.0) + ms * (1.0 / 64.0);
+                prefetch_base_ema = Some(n);
+                n
+            }
+        };
+        let mut target = nominal_prefetch_lookahead;
+        if ema > 12.0 {
+            target = (nominal_prefetch_lookahead + 32).min(128);
+        } else if ema > 8.0 {
+            target = (nominal_prefetch_lookahead * 4 / 3).min(128);
+        } else if ema > 5.0 {
+            target = (nominal_prefetch_lookahead + 16).min(128);
+        } else if ema < 0.75 && blocks_synced > 1_000 {
+            target = nominal_prefetch_lookahead.saturating_sub(8).max(48);
+        }
+        let with_pressure = dynamic_prefetch_lookahead(ibd_pressure, target);
+        utxo_prefetch_lookahead_live.store(with_pressure, Ordering::Relaxed);
 
         // V2: no pipelined sync (overlay delta applied directly).
 
         #[cfg(feature = "profile")]
         if ibd_blocked_log {
             blvm_consensus::profile_log!(
-                "[IBD_VALIDATION] height={} phase=end apply_pending_ms={} validation_ms={} sync_ms={} evict_ms={}",
+                "[IBD_VALIDATION] height={} phase=end utxo_base_ms={} validation_ms={} apply_utxo_ms={} apply_pending_ms={} sync_ms={} evict_ms={}",
                 next_height,
-                apply_pending_ms,
+                utxo_base_ms,
                 validation_time.as_millis(),
+                apply_utxo_ms,
+                apply_pending_ms,
                 sync_ms,
                 evict_ms
             );
@@ -630,8 +802,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     .map(|tx| tx.inputs.len())
                     .sum();
 
-                // Async UTXO flush: spawn batch without blocking validation
-                if let Some(batch) = utxo_flush_batch {
+                // Async UTXO flush: spawn per batch (parallel disk commits; overlaps validation).
+                if let Some(pkg) = utxo_flush_batch {
                     let store = &ibd_store_v2_for_validation;
                     let flush_limit = if rss_pressure {
                         MAX_UTXO_FLUSHES_UNDER_RSS_PRESSURE
@@ -639,11 +811,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         MAX_UTXO_FLUSHES_IN_FLIGHT
                     };
                     while utxo_flush_handles.len() >= flush_limit {
-                        let in_flight = utxo_flush_handles.len();
-                        debug!(
-                            "[IBD_DEBUG] Block {}: awaiting UTXO flush slot (in_flight={}, batch_size={})",
-                            next_height, in_flight, batch.len()
-                        );
                         let handle = utxo_flush_handles.pop_front().expect("non-empty");
                         match handle.join() {
                             Ok(Ok(())) => {}
@@ -654,10 +821,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         }
                     }
                     let store_clone = Arc::clone(store);
-                    let batch_clone = Arc::clone(&batch);
-                    let batch_size = batch.len();
+                    let batch_size = pkg.ops.len();
                     utxo_flush_handles.push_back(std::thread::spawn(move || {
-                        store_clone.flush_pending_batch(&batch_clone).map(|_| ())
+                        let prepared = pkg.prepare_for_disk()?;
+                        store_clone.flush_prepared_package(&prepared)?;
+                        store_clone.note_utxo_flush_completed(prepared.max_block_height);
+                        Ok(())
                     }));
                     debug!(
                         "[IBD_DEBUG] Block {}: spawned UTXO flush (batch_size={}, in_flight={})",
@@ -667,16 +836,16 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     );
                 }
 
-                // Track recent headers for BIP113 MTP (keep last 11)
+                // Track recent headers for BIP113 MTP (keep last 11). Clone header before moving
+                // `block_arc` into `pending_blocks` so flush `Arc::try_unwrap` usually succeeds.
                 let header_rc = Arc::new(block_arc.header.clone());
                 if !skip_storage {
+                    pending_storage_bytes =
+                        pending_storage_bytes.saturating_add(feeder_est_bytes as u64);
                     pending_blocks.push((
-                        Arc::clone(&block_arc),
-                        Arc::clone(&header_rc),
-                        witnesses_arc
-                            .clone()
-                            .unwrap_or_else(|| Arc::new(Vec::new())),
-                        next_height - 1,
+                        block_arc,
+                        Arc::clone(&witnesses_storage),
+                        next_height,
                     ));
                 }
                 recent_headers_buf.push_back(header_rc);
@@ -687,12 +856,20 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 // Update shared validation height (allows download workers to track progress)
                 validation_height.store(next_height, Ordering::Relaxed);
 
-                let flush_ms = if !skip_storage
-                    && pending_blocks.len() >= storage_flush_interval
+                let flush_interval_live = mem_guard.storage_flush_interval_live(ibd_pressure);
+                let byte_cap = mem_guard.storage_flush_pending_bytes_pressure_cap(ibd_pressure);
+                let pressure_min_blocks =
+                    MemoryGuard::storage_flush_pressure_min_blocks(flush_interval_live);
+                let flush_by_interval = pending_blocks.len() >= flush_interval_live;
+                let flush_by_pressure_bytes = byte_cap.is_some_and(|cap| {
+                    pending_storage_bytes >= cap && pending_blocks.len() >= pressure_min_blocks
+                });
+                let (flush_ms, flushed_block_count) = if !skip_storage
+                    && (flush_by_interval || flush_by_pressure_bytes)
                 {
                     let flush_start = std::time::Instant::now();
-                    // Fully overlapped async flush: await only when 2 flushes in flight (backpressure)
-                    while flush_handles.len() >= MAX_FLUSHES_IN_FLIGHT {
+                    // Fully overlapped async flush: backpressure when at MemoryGuard cap
+                    while flush_handles.len() >= max_block_flushes_in_flight {
                         let in_flight = flush_handles.len();
                         let wait_start = std::time::Instant::now();
                         debug!(
@@ -713,7 +890,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 if ibd_blocked_log && waited_ms > 0 {
                                     blvm_consensus::profile_log!(
                                         "[IBD_BLOCKED]                                                 phase=block_flush_await height={} duration_ms={} in_flight={} utxo_flush={} (validation waited for block storage write)",
-                                        next_height, waited_ms, in_flight, utxo_flush_handles.len()
+                                        next_height,
+                                        waited_ms,
+                                        in_flight,
+                                        utxo_flush_handles.len()
                                     );
                                 }
                             }
@@ -726,20 +906,22 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             }
                         }
                     }
+                    // UTXO flushes run in parallel (fire-and-forget); no barrier here.
+                    // On crash, min(chain_tip, watermark) rewinds to the last safe point.
                     let to_flush = std::mem::take(&mut pending_blocks);
+                    pending_storage_bytes = 0;
                     let blockstore_clone = Arc::clone(&blockstore);
                     let storage_for_flush = storage_clone.clone();
                     let to_flush_count = to_flush.len();
                     #[cfg(feature = "profile")]
                     if ibd_profile
-                        && (ibd_profile_sample == 1 || next_height % ibd_profile_sample == 0)
+                        && ibd_profile_height_matches_sample(ibd_profile_sample, next_height)
                     {
                         blvm_consensus::profile_log!(
-                            "[IBD_BLOCK_FLUSH_SPAWN] height={} blocks={} in_flight={} utxo_flush={}",
+                            "[IBD_BLOCK_FLUSH_SPAWN] height={} blocks={} in_flight={}",
                             next_height,
                             to_flush_count,
                             flush_handles.len(),
-                            utxo_flush_handles.len()
                         );
                     }
                     flush_handles.push_back(std::thread::spawn(move || {
@@ -757,14 +939,17 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         flush_handles.len(),
                         flush_elapsed
                     );
-                    flush_elapsed
+                    (flush_elapsed, to_flush_count)
                 } else {
-                    0
+                    (0, 0)
                 };
                 if !skip_storage && pending_blocks.is_empty() && flush_ms > 0 {
                     debug!(
-                        "Started async flush of {} blocks (overlapped, {} in flight)",
-                        storage_flush_interval,
+                        "Started async flush ({} blocks, interval_live={}, pressure={:?}, by_bytes={}, {} in flight)",
+                        flushed_block_count,
+                        flush_interval_live,
+                        ibd_pressure,
+                        flush_by_pressure_bytes,
                         flush_handles.len()
                     );
                 }
@@ -778,7 +963,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     let total_ms = prefetch_await_ms
                         + gap_fill_ms
                         + prefetch_ms
+                        + utxo_base_ms
                         + val_ms
+                        + apply_utxo_ms
                         + sync_ms
                         + evict_ms
                         + flush_ms;
@@ -788,8 +975,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         + sync_ms
                         + evict_ms
                         + flush_ms;
-                    let should_log = (ibd_profile_sample == 1
-                        || next_height % ibd_profile_sample == 0)
+                    let should_log = ibd_profile_height_matches_sample(ibd_profile_sample, next_height)
                         || (ibd_disk_profile
                             && (prefetch_await_ms > 0
                                 || gap_fill_ms > 0
@@ -800,14 +986,29 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             && (prefetch_await_ms >= ibd_profile_slow_ms
                                 || gap_fill_ms >= ibd_profile_slow_ms
                                 || prefetch_ms >= ibd_profile_slow_ms
+                                || utxo_base_ms >= ibd_profile_slow_ms
                                 || val_ms >= ibd_profile_slow_ms
+                                || apply_utxo_ms >= ibd_profile_slow_ms
                                 || sync_ms >= ibd_profile_slow_ms
                                 || evict_ms >= ibd_profile_slow_ms
                                 || flush_ms >= ibd_profile_slow_ms));
                     if should_log && total_ms > 0 {
                         blvm_consensus::profile_log!(
-                            "[IBD_PROFILE] height={} total_ms={} prefetch_await={} gap_fill={} prefetch={} validation={} sync={} evict={} flush={} disk_total={} txs={} inputs={}",
-                            next_height, total_ms, prefetch_await_ms, gap_fill_ms, prefetch_ms, val_ms, sync_ms, evict_ms, flush_ms, disk_total, n_txs, n_inputs
+                            "[IBD_PROFILE] height={} total_ms={} prefetch_await={} gap_fill={} prefetch={} utxo_base={} validation={} apply_utxo={} sync={} evict={} flush_coord={} disk_total={} txs={} inputs={}",
+                            next_height,
+                            total_ms,
+                            prefetch_await_ms,
+                            gap_fill_ms,
+                            prefetch_ms,
+                            utxo_base_ms,
+                            val_ms,
+                            apply_utxo_ms,
+                            sync_ms,
+                            evict_ms,
+                            flush_ms,
+                            disk_total,
+                            n_txs,
+                            n_inputs
                         );
                         let (dl, ch, ev, _ph) = ibd_store_v2_for_validation.stats();
                         let utxo_stats =
@@ -844,7 +1045,27 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     "Failed to validate block at height {}: {}",
                     next_height, e
                 );
-                block_input_keys_into(block_arc.as_ref(), &mut keys_v2_buf);
+                // Diagnostic: identify which UTXOs were missing from utxo_base_buf
+                // keys_v2_buf already filled in the validation path above
+                {
+                    let store = &ibd_store_v2_for_validation;
+                    let prefetched = &prefetched_for_v2;
+                    for k in keys_v2_buf.iter() {
+                        let op = key_to_outpoint(k);
+                        let in_base = utxo_base_buf.contains_key(&op);
+                        if !in_base {
+                            let in_prefetch = prefetched.contains_key(k);
+                            let in_cache = store.cache_get(k).is_some();
+                            error!(
+                                "[IBD_MISSING_UTXO] height={} key={} in_prefetch={} in_cache={} (not in utxo_base_buf at validation time)",
+                                next_height,
+                                hex::encode(k),
+                                in_prefetch,
+                                in_cache,
+                            );
+                        }
+                    }
+                }
                 let utxo_for_dump =
                     ibd_store_v2_for_validation.build_utxo_map(&keys_v2_buf);
                 ParallelIBD::dump_failed_block(
@@ -863,7 +1084,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         if yield_interval > 0 && blocks_synced % yield_interval == 0 {
             #[cfg(feature = "profile")]
             if ibd_profile
-                && (ibd_profile_sample == 1 || next_height % ibd_profile_sample == 0)
+                && ibd_profile_height_matches_sample(ibd_profile_sample, next_height)
             {
                 blvm_consensus::profile_log!(
                     "[IBD_YIELD] blocks_synced={} utxo_flush={} block_flush={} (yielding to runtime)",
@@ -877,26 +1098,29 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
         // Periodic mimalloc page return. 5a: adaptive — every 1000 blocks, or sooner
         // when RSS grew >50MB since last collect (high allocation phase).
-        if blocks_synced > 0 && blocks_synced % 100 == 0 {
+        if blocks_synced > 0 && blocks_synced % 500 == 0 {
             #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
             {
                 let current_rss_mb = mem_guard.current_rss_mb();
                 let rss_growth_mb = current_rss_mb.saturating_sub(last_rss_mb);
                 let blocks_since_collect = blocks_synced.saturating_sub(last_collect_block);
                 if rss_growth_mb > 50 || blocks_since_collect >= 1000 {
-                    unsafe {
-                        libmimalloc_sys::mi_collect(true);
-                    }
+                    ibd_maybe_heap_trim();
                     last_rss_mb = mem_guard.current_rss_mb();
                     last_collect_block = blocks_synced;
                 }
             }
         }
 
-        // Progress logging: early (1, 10, 100) then every 1000 blocks
+        // Progress logging: early (1, 10, 100), then every 100 until 10k (so monitors/logs
+        // aren't stuck showing ~99 for hundreds of blocks), then every 1000.
         let should_log = blocks_synced == 1
             || blocks_synced == 10
             || blocks_synced == 100
+            || (blocks_synced > 100
+                && blocks_synced < 10_000
+                && blocks_synced % 100 == 0
+                && blocks_synced % 1000 != 0)
             || (blocks_synced > 0 && blocks_synced % 1000 == 0);
         if should_log {
             cached_network_time = crate::utils::time::current_timestamp();
@@ -927,7 +1151,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             } else {
                 f64::INFINITY
             };
-            let buffer_size = feeder_state.0.lock().unwrap().0.len();
+            let buffer_size = feeder_state.0.lock().0.len();
 
             // Show avg (sustained) rate: blocks/total_time. Matches actual throughput.
             // Add recent rate so user sees: when height creeps slowly, recent << avg; when bursting, recent ≈ avg.
@@ -997,16 +1221,16 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 );
             }
             // BPS CSV for Core-comparable metrics (height,elapsed_sec) — same format as bitcoin-core-ibd-bench.sh
-            if let Ok(path) = std::env::var("BLVM_IBD_BPS_CSV") {
+            if let Some(ref path) = ibd_bps_csv_path {
                 let elapsed_sec = validation_start.elapsed().as_secs();
-                let create_header = !std::path::Path::new(&path).exists()
-                    || std::fs::metadata(&path)
+                let create_header = !std::path::Path::new(path).exists()
+                    || std::fs::metadata(path)
                         .map(|m| m.len() == 0)
                         .unwrap_or(true);
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&path)
+                    .open(path)
                 {
                     use std::io::Write;
                     if create_header {
@@ -1050,14 +1274,30 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
     }
 
-    // Join all in-flight UTXO flushes, then block storage flushes
+    // Final UTXO flush: drain remaining pending ops, then join all in-flight handles.
+    if let Some(pkg) = ibd_store_v2_for_validation.take_remaining_flush_package() {
+        let store_clone = Arc::clone(&ibd_store_v2_for_validation);
+        utxo_flush_handles.push_back(std::thread::spawn(move || {
+            let prepared = pkg.prepare_for_disk()?;
+            store_clone.flush_prepared_package(&prepared)?;
+            store_clone.note_utxo_flush_completed(prepared.max_block_height);
+            Ok(())
+        }));
+    }
     for handle in utxo_flush_handles.drain(..) {
         match handle.join() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
-            Err(e) => return Err(anyhow::anyhow!("UTXO flush thread panicked: {:?}", e)),
+            Err(e) => {
+                return Err(anyhow::anyhow!("UTXO flush panicked at shutdown: {:?}", e));
+            }
         }
     }
+    let last_validated = next_validation_height.saturating_sub(1);
+    if let Err(e) = ibd_store_v2_for_validation.flush_disk() {
+        warn!("Failed to flush ibd_utxos memtable at final shutdown (height {}): {}", last_validated, e);
+    }
+
     for handle in flush_handles.drain(..) {
         match handle.join() {
             Ok(Ok(())) => {}
@@ -1079,15 +1319,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         )?;
     }
 
-    // Flush IBD v2 remaining pending
-    let remaining = ibd_store_v2_for_validation.take_remaining_pending();
-    if !remaining.is_empty() {
-        info!("Flushing remaining {} UTXO operations...", remaining.len());
-        match ibd_store_v2_for_validation.flush_pending_batch(&remaining) {
-            Ok(count) => info!("Flushed {} UTXO operations to disk", count),
-            Err(e) => warn!("Failed to flush UTXO: {}", e),
-        }
-    }
+    let tip = storage_clone.chain().get_height().ok().flatten().unwrap_or(0);
+    let _ = storage_clone.chain().set_utxo_watermark(tip);
 
     Ok(())
 }

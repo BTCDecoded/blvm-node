@@ -1331,7 +1331,10 @@ mod tests {
 
         let tx = coinbase.unwrap();
         assert_eq!(tx.version, 1);
-        assert!(tx.inputs.is_empty()); // Coinbase has no inputs
+        // Bitcoin coinbase: exactly one input, null prevout + 0xffffffff index (BIP30/BIP34).
+        assert_eq!(tx.inputs.len(), 1);
+        assert_eq!(tx.inputs[0].prevout.hash, [0u8; 32]);
+        assert_eq!(tx.inputs[0].prevout.index, 0xffff_ffff);
         assert_eq!(tx.outputs.len(), 1);
         // Should be 50 BTC (subsidy) at height 0, with no fees
         assert_eq!(tx.outputs[0].value, 5000000000); // 50 BTC

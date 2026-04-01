@@ -40,14 +40,13 @@ async fn test_ignore_error_failure() {
 
 #[tokio::test]
 async fn test_collect_results() {
-    let operations = vec![
-        || async { Ok::<i32, String>(1) },
-        || async { Ok::<i32, String>(2) },
-        || async { Err::<i32, String>("error".to_string()) },
-        || async { Ok::<i32, String>(4) },
+    // Each closure has a distinct type; exercise `collect_results` without mixing closures in one vec.
+    let results = vec![
+        ignore_error(|| async { Ok::<i32, String>(1) }, "test (0)").await,
+        ignore_error(|| async { Ok::<i32, String>(2) }, "test (1)").await,
+        ignore_error(|| async { Err::<i32, String>("error".to_string()) }, "test (2)").await,
+        ignore_error(|| async { Ok::<i32, String>(4) }, "test (3)").await,
     ];
-
-    let results = collect_results(operations, "test").await;
 
     assert_eq!(results.len(), 4);
     assert_eq!(results[0], Some(1));

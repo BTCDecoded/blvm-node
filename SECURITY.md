@@ -163,7 +163,7 @@ This document defines the security boundaries, threat model, and limitations of 
 - [x] Add storage bounds checking (prevents overflow, warns when approaching limits)
 
 #### Phase 2.5: RPC Security Hardening (Complete)
-- [x] Rate limiting when auth disabled (see [RPC Security Remediation Plan](docs/RPC_SECURITY_REMEDIATION_PLAN.md))
+- [x] Rate limiting when auth disabled
 - [x] Quinn RPC auth and rate limiting
 - [x] Batch RPC rate limiting
 - [x] RPC connection rate limiting

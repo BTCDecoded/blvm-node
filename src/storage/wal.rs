@@ -475,6 +475,10 @@ mod tests {
     }
 
     impl Database for MockDb {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
             Ok(Box::new(MockTree {
                 name: name.to_string(),

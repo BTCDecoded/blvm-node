@@ -5,6 +5,8 @@
 #[cfg(feature = "utxo-commitments")]
 use blvm_node::network::utxo_commitments_client::UtxoCommitmentsClient;
 #[cfg(feature = "utxo-commitments")]
+use blvm_protocol::utxo_commitments::UtxoCommitmentsNetworkClient;
+#[cfg(feature = "utxo-commitments")]
 use blvm_protocol::types::Hash;
 #[cfg(feature = "utxo-commitments")]
 use std::sync::Arc;

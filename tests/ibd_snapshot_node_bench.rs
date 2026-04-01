@@ -159,8 +159,8 @@ fn node_hot_path_once(
 
     // 7. apply_utxo_delta (direct, no SyncBatch)
     let t_delta = Instant::now();
-    if let Some(ref delta) = utxo_delta {
-        store.apply_utxo_delta(delta);
+    if let Some(delta) = utxo_delta {
+        store.apply_utxo_delta(delta, height);
     }
     let delta_ms = t_delta.elapsed().as_secs_f64() * 1000.0;
 

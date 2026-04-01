@@ -289,7 +289,7 @@ async fn test_createrawtransaction_sequence() {
         {
             "txid": "0000000000000000000000000000000000000000000000000000000000000000",
             "vout": 0,
-            "sequence": 0xFFFFFFFD // MAX_BIP125_RBF_SEQUENCE
+            "sequence": 0xFFFFFFFD_u64 // MAX_BIP125_RBF_SEQUENCE
         }
     ]);
 

@@ -265,7 +265,7 @@ Potential future improvements:
 
 ## See Also
 
-- [Event System Documentation](../docs/MODULE_SYSTEM.md)
-- [Configuration Reference](../docs/CONFIGURATION.md)
+- [Event System Documentation](MODULE_SYSTEM.md)
+- [Configuration Guide](CONFIGURATION_GUIDE.md)
 - [ZeroMQ Documentation](https://zeromq.org/)
 

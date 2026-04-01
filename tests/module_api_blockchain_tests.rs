@@ -326,7 +326,7 @@ async fn test_get_utxo_with_data() {
 
     let utxo = UTXO {
         value: 1000000,
-        script_pubkey: vec![0x51], // OP_1
+        script_pubkey: vec![0x51].into(), // OP_1
         height: 0,
         is_coinbase: false,
     };
@@ -354,7 +354,7 @@ async fn test_has_utxo_with_data() {
 
     let utxo = UTXO {
         value: 1000000,
-        script_pubkey: vec![0x51],
+        script_pubkey: vec![0x51].into(),
         height: 0,
         is_coinbase: false,
     };

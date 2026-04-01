@@ -2,6 +2,8 @@
 //!
 //! Extracted from parallel_ibd/mod.rs for Phase 2 of complexity remediation.
 
+use blvm_consensus::GENESIS_BLOCK_HASH_INTERNAL;
+
 /// Bitcoin mainnet checkpoints for parallel header download
 ///
 /// These are well-known block hashes at specific heights that allow us to
@@ -11,14 +13,7 @@
 /// Format: (height, hash in internal byte order)
 pub(crate) const MAINNET_CHECKPOINTS: &[(u64, [u8; 32])] = &[
     // Genesis block
-    (
-        0,
-        [
-            0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72, 0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63,
-            0xf7, 0x4f, 0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c, 0x68, 0xd6, 0x19, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-        ],
-    ),
+    (0, GENESIS_BLOCK_HASH_INTERNAL),
     // Block 11111
     (
         11111,

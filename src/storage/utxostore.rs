@@ -115,13 +115,13 @@ impl UtxoStore {
                         if let Some(serialized) = cached.peek(&cache_key) {
                             serialized.clone() // Clone cached result
                         } else {
-                            // Cache miss - serialize and cache
+                            // Cache miss: must drop read guard before write or we deadlock (RwLock).
+                            drop(cached);
                             let serialized = bincode::serialize(utxo.as_ref())
                                 .map_err(|e| anyhow::anyhow!("Serialization failed: {}", e))?;
 
-                            // Store in cache
-                            if let Ok(mut cache) = cache.write() {
-                                cache.put(cache_key, serialized.clone());
+                            if let Ok(mut w) = cache.write() {
+                                w.put(cache_key, serialized.clone());
                             }
 
                             serialized
@@ -171,12 +171,11 @@ impl UtxoStore {
                         if let Some(serialized) = cached.peek(&cache_key) {
                             serialized.clone() // Clone cached result
                         } else {
-                            // Cache miss - serialize and cache
+                            drop(cached);
                             let serialized = bincode::serialize(utxo.as_ref())?;
 
-                            // Store in cache
-                            if let Ok(mut cache) = cache.write() {
-                                cache.put(cache_key, serialized.clone());
+                            if let Ok(mut w) = cache.write() {
+                                w.put(cache_key, serialized.clone());
                             }
 
                             serialized
@@ -253,12 +252,11 @@ impl UtxoStore {
                 if let Some(serialized) = cached.peek(&cache_key) {
                     serialized.clone() // Clone cached result
                 } else {
-                    // Cache miss - serialize and cache
+                    drop(cached);
                     let serialized = bincode::serialize(utxo)?;
 
-                    // Store in cache
-                    if let Ok(mut cache) = cache.write() {
-                        cache.put(cache_key, serialized.clone());
+                    if let Ok(mut w) = cache.write() {
+                        w.put(cache_key, serialized.clone());
                     }
 
                     serialized
@@ -381,23 +379,29 @@ impl UtxoStore {
 
     /// Convert outpoint to storage key
     fn outpoint_key(&self, outpoint: &OutPoint) -> Vec<u8> {
-        let mut key = Vec::new();
+        let mut key = Vec::with_capacity(40);
         key.extend_from_slice(&outpoint.hash);
-        key.extend_from_slice(&outpoint.index.to_be_bytes());
+        // Always 8-byte big-endian vout so keys match outpoint_from_key (was 4-byte u32 → load failed).
+        key.extend_from_slice(&(outpoint.index as u64).to_be_bytes());
         key
     }
 
     /// Convert storage key to outpoint
     fn outpoint_from_key(&self, key: &[u8]) -> Result<OutPoint> {
-        if key.len() < 32 + 8 {
+        if key.len() < 36 {
             return Err(anyhow::anyhow!("Invalid outpoint key length"));
         }
 
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&key[0..32]);
-        let index = u64::from_be_bytes([
-            key[32], key[33], key[34], key[35], key[36], key[37], key[38], key[39],
-        ]) as u32;
+        let index = if key.len() >= 40 {
+            u64::from_be_bytes([
+                key[32], key[33], key[34], key[35], key[36], key[37], key[38], key[39],
+            ]) as u32
+        } else {
+            // Legacy keys: 32-byte txid + 4-byte vout
+            u32::from_be_bytes([key[32], key[33], key[34], key[35]])
+        };
 
         Ok(OutPoint { hash, index })
     }

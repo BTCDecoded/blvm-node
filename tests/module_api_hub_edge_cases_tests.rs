@@ -2,57 +2,16 @@
 //!
 //! Additional edge cases for module API hub: concurrent requests, timeouts, error recovery.
 
+#[path = "stub_node_api.rs"]
+mod stub_node_api;
+
 use blvm_node::module::api::hub::ModuleApiHub;
 use blvm_node::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
 use blvm_node::module::security::permissions::{Permission, PermissionSet};
-use blvm_node::module::traits::{ModuleError, NodeAPI};
-use blvm_protocol::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use blvm_node::module::traits::ModuleError;
 use std::sync::Arc;
 
-// Mock NodeAPI for testing
-struct MockNodeAPI;
-
-#[async_trait::async_trait]
-impl NodeAPI for MockNodeAPI {
-    async fn get_block(&self, _hash: &Hash) -> Result<Option<Block>, ModuleError> {
-        Ok(None)
-    }
-
-    async fn get_block_header(&self, _hash: &Hash) -> Result<Option<BlockHeader>, ModuleError> {
-        Ok(None)
-    }
-
-    async fn get_transaction(&self, _hash: &Hash) -> Result<Option<Transaction>, ModuleError> {
-        Ok(None)
-    }
-
-    async fn has_transaction(&self, _hash: &Hash) -> Result<bool, ModuleError> {
-        Ok(false)
-    }
-
-    async fn get_chain_tip(&self) -> Result<Hash, ModuleError> {
-        Ok([0; 32])
-    }
-
-    async fn get_block_height(&self) -> Result<u64, ModuleError> {
-        Ok(0)
-    }
-
-    async fn get_utxo(&self, _outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
-        Ok(None)
-    }
-
-    async fn subscribe_events(
-        &self,
-        _event_types: Vec<blvm_node::module::traits::EventType>,
-    ) -> Result<
-        tokio::sync::mpsc::Receiver<blvm_node::module::ipc::protocol::ModuleMessage>,
-        ModuleError,
-    > {
-        let (_tx, rx) = tokio::sync::mpsc::channel(10);
-        Ok(rx)
-    }
-}
+use stub_node_api::MockNodeAPI;
 
 #[tokio::test]
 async fn test_concurrent_requests() {

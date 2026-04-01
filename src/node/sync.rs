@@ -191,14 +191,18 @@ impl SyncCoordinator {
         Ok(())
     }
 
-    /// Start parallel IBD sync (if enabled and peers available)
+    /// Start parallel IBD sync (if enabled and peers available).
     ///
     /// Attempts to use parallel IBD for faster initial block download.
     /// Sequential sync is not supported; IBD must succeed in parallel mode.
+    ///
+    /// - `synced_chain_height`: last flushed tip `H` from `Storage::chain().get_height()` (0 if none).
+    /// - `first_block_height`: first block to validate this session — `0` if no tip yet, else `H + 1`.
     #[cfg(feature = "production")]
     pub async fn start_parallel_ibd(
         &mut self,
-        current_height: u64,
+        synced_chain_height: u64,
+        first_block_height: u64,
         target_height: u64,
         blockstore: Arc<BlockStore>,
         storage: Option<Arc<Storage>>,
@@ -208,6 +212,7 @@ impl SyncCoordinator {
         peer_addresses: Vec<String>,
         ibd_config: Option<&crate::config::IbdConfig>,
         event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
+        ibd_data_dir: Option<&std::path::Path>,
     ) -> Result<bool> {
         use crate::node::parallel_ibd::{ParallelIBD, ParallelIBDConfig};
 
@@ -224,17 +229,18 @@ impl SyncCoordinator {
         }
 
         // Check if we're actually in IBD (significant height difference)
-        if target_height <= current_height {
+        if target_height <= synced_chain_height {
             debug!(
-                "Already synced (height {} >= target {}), skipping parallel IBD",
-                current_height, target_height
+                "Already synced (synced tip {} >= target {}), skipping parallel IBD",
+                synced_chain_height, target_height
             );
             return Ok(false);
         }
 
         info!(
-            "Attempting parallel IBD from height {} to {} with {} peers",
-            current_height,
+            "Attempting parallel IBD from block height {} (synced tip {}) to {} with {} peers",
+            first_block_height,
+            synced_chain_height,
             target_height,
             peer_addresses.len()
         );
@@ -255,7 +261,7 @@ impl SyncCoordinator {
         let ep_for_completion = event_publisher.clone();
         match parallel_ibd
             .sync_parallel(
-                current_height,
+                first_block_height,
                 target_height,
                 &peer_addresses,
                 blockstore,
@@ -276,6 +282,18 @@ impl SyncCoordinator {
                 Ok(true)
             }
             Err(e) => {
+                if let Some(dir) = ibd_data_dir {
+                    if crate::storage::ibd_autorepair::validation_error_suggests_utxo_repair(&e) {
+                        if let Err(flag_e) =
+                            crate::storage::ibd_autorepair::set_ibd_utxo_repair_flag(dir)
+                        {
+                            tracing::warn!(
+                                "Could not write IBD UTXO repair marker: {}",
+                                flag_e
+                            );
+                        }
+                    }
+                }
                 error!("Parallel IBD failed: {}. Sequential sync is not supported - IBD must succeed in parallel mode.", e);
                 Err(e)
             }
@@ -285,7 +303,8 @@ impl SyncCoordinator {
     #[cfg(not(feature = "production"))]
     pub async fn start_parallel_ibd(
         &mut self,
-        _current_height: u64,
+        _synced_chain_height: u64,
+        _first_block_height: u64,
         _target_height: u64,
         _blockstore: Arc<BlockStore>,
         _storage: Option<Arc<Storage>>,
@@ -295,6 +314,7 @@ impl SyncCoordinator {
         _peer_addresses: Vec<String>,
         _ibd_config: Option<&crate::config::IbdConfig>,
         _event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
+        _ibd_data_dir: Option<&std::path::Path>,
     ) -> Result<bool> {
         // Parallel IBD not available without production feature
         Ok(false)
