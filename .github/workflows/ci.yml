@@ -72,10 +72,10 @@ jobs:
         run: |
           CACHE_ROOT="/tmp/runner-cache"
           
-          # Generate cache keys from Cargo.lock hashes (using temp directories)
-          DEPS_KEY=$(sha256sum Cargo.lock | cut -d' ' -f1)
-          CONSENSUS_DEPS_KEY=$(sha256sum _temp-blvm-consensus/Cargo.lock | cut -d' ' -f1)
-          PROTOCOL_DEPS_KEY=$(sha256sum _temp-blvm-protocol/Cargo.lock | cut -d' ' -f1)
+          # Generate cache keys from Cargo.toml (sibling libraries do not commit Cargo.lock)
+          DEPS_KEY=$(sha256sum Cargo.toml | cut -d' ' -f1)
+          CONSENSUS_DEPS_KEY=$(sha256sum _temp-blvm-consensus/Cargo.toml | cut -d' ' -f1)
+          PROTOCOL_DEPS_KEY=$(sha256sum _temp-blvm-protocol/Cargo.toml | cut -d' ' -f1)
           
           # Include toolchain version in cache key
           TOOLCHAIN=$(grep -E '^channel|rust-version' rust-toolchain.toml Cargo.toml 2>/dev/null | head -1 | sha256sum | cut -d' ' -f1 || echo "1.88.0")
@@ -944,8 +944,11 @@ jobs:
             Z3_VERSION=$(z3 --version 2>&1 | head -1 || echo "unknown")
           fi
           
-          # Hash Cargo.lock
-          CARGO_LOCK_HASH=$(sha256sum Cargo.lock | cut -d' ' -f1)
+          if [ -f Cargo.lock ]; then
+            CARGO_LOCK_HASH=$(sha256sum Cargo.lock | cut -d' ' -f1)
+          else
+            CARGO_LOCK_HASH=$(sha256sum Cargo.toml | cut -d' ' -f1)
+          fi
           
           # Check if debug assertions are enabled (check Cargo.toml or build flags)
           DEBUG_ASSERTIONS="false"
