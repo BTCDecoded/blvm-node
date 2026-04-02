@@ -32,6 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
       - name: Cleanup any leftover dependency directories
         run: |
           # Remove any leftover dependency directories from previous jobs
@@ -55,36 +58,13 @@ jobs:
           echo "CARGO_CACHE_DIR=$CARGO_CACHE_DIR" >> $GITHUB_ENV
           echo "TARGET_CACHE_DIR=$TARGET_CACHE_DIR" >> $GITHUB_ENV
       
-      - name: Restore registry
-        run: |
-          if [ -d "$CARGO_CACHE_DIR/registry" ] && [ "$(ls -A $CARGO_CACHE_DIR/registry 2>/dev/null)" ]; then
-            mkdir -p "$HOME/.cargo/registry"
-            rsync -a --delete "$CARGO_CACHE_DIR/registry/" "$HOME/.cargo/registry/" || true
-          else
-            echo "💿 No Cargo registry cache found"
-          fi
-      
-      - name: Restore git
-        run: |
-          if [ -d "$CARGO_CACHE_DIR/git" ] && [ "$(ls -A $CARGO_CACHE_DIR/git 2>/dev/null)" ]; then
-            mkdir -p "$HOME/.cargo/git"
-            rsync -a --delete "$CARGO_CACHE_DIR/git/" "$HOME/.cargo/git/" || true
-          else
-            echo "💿 No Cargo git cache found"
-          fi
-      
-      - name: Restore target
-        run: |
-          if [ -d "$TARGET_CACHE_DIR" ] && [ "$(ls -A $TARGET_CACHE_DIR 2>/dev/null)" ]; then
-            rsync -a --delete "$TARGET_CACHE_DIR/" ./target/ || true
-          else
-            echo "💿 No target cache found, will build from scratch"
-          fi
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
-          toolchain: 1.88.0
+          operation: restore
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Run tests with coverage
         id: coverage
@@ -131,30 +111,12 @@ jobs:
           name: codecov-blvm-node
           fail_ci_if_error: false
       
-      - name: Cache registry
+      - name: Save Cargo cache
         if: always()
-        run: |
-          if [ -d "$HOME/.cargo/registry" ] && [ "$CARGO_CACHE_DIR" != "" ]; then
-            mkdir -p "$CARGO_CACHE_DIR/registry"
-            rsync -a --delete "$HOME/.cargo/registry/" "$CARGO_CACHE_DIR/registry/" || true
-          fi
-      
-      - name: Cache git
-        if: always()
-        run: |
-          if [ -d "$HOME/.cargo/git" ] && [ "$CARGO_CACHE_DIR" != "" ]; then
-            mkdir -p "$CARGO_CACHE_DIR/git"
-            rsync -a --delete "$HOME/.cargo/git/" "$CARGO_CACHE_DIR/git/" || true
-          fi
-      
-      - name: Cache target
-        if: always()
-        run: |
-          if [ -d "./target" ] && [ "$TARGET_CACHE_DIR" != "" ]; then
-            mkdir -p "$TARGET_CACHE_DIR"
-            rsync -a --delete "./target/" "$TARGET_CACHE_DIR/" || true
-          fi
-      
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: save
+
       - name: Coverage Summary
         if: always()
         run: |

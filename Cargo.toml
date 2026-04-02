@@ -20,10 +20,10 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-# Protocol abstraction — path in monorepo; published versions: see README (crates.io).
-blvm-protocol = { path = "../blvm-protocol" }
-blvm-consensus = { path = "../blvm-consensus", optional = true }
-blvm-spec-lock = { path = "../blvm-spec-lock", optional = true, default-features = false }
+# Protocol / consensus / spec-lock from crates.io (monorepo: checkout siblings for local iteration).
+blvm-protocol = { version = ">=0.1, <1" }
+blvm-consensus = { version = ">=0.1, <1", optional = true }
+blvm-spec-lock = { version = ">=0.1, <1", optional = true, default-features = false }
 blvm-muhash = { version = ">=0.1, <1" }
 
 # Storage layer - EXACT VERSIONS for security
@@ -244,16 +244,22 @@ compression = ["block-compression", "utxo-compression", "witness-compression"]
 [patch.crates-io]
 quinn-proto = { git = "https://github.com/quinn-rs/quinn", tag = "quinn-proto-0.11.14" }
 time = { git = "https://github.com/time-rs/time", tag = "v0.3.47" }
+# Local monorepo: sibling paths override the blvm-* version pins above.
+blvm-protocol = { path = "../blvm-protocol" }
+blvm-consensus = { path = "../blvm-consensus" }
+blvm-spec-lock = { path = "../blvm-spec-lock" }
+blvm-sdk = { path = "../blvm-sdk" }
+blvm-muhash = { path = "../blvm-muhash" }
 
 [dev-dependencies]
-blvm-consensus = { path = "../blvm-consensus", features = ["test-utils"] }
+blvm-consensus = { version = ">=0.1, <1", features = ["test-utils"] }
 tempfile = "=3.8.1"
 rand = "0.8"
 # Use default features (node) for tests that need module APIs.
 # This creates a cycle when building with wasm-modules, so tests requiring
 # blvm_sdk::module must be run via: cargo test -p blvm-node --no-default-features --features "..." 
 # or from a separate integration crate. For wasm-modules build, we use only wasm-modules.
-blvm-sdk = { path = "../blvm-sdk", default-features = false, features = ["wasm-modules"] }
+blvm-sdk = { version = ">=0.1, <1", default-features = false, features = ["wasm-modules"] }
 cargo-tarpaulin = "0.27"
 criterion = "0.5"
 proptest = "1.4.0"
