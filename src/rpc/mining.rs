@@ -12,24 +12,26 @@ use crate::rpc::params::{param_str_required, param_u64_default, param_u64_requir
 use crate::rpc::rawtx::address_string_to_script_pubkey;
 use crate::storage::Storage;
 use crate::utils::{current_timestamp, CACHE_REFRESH_TIP};
-use blvm_protocol::mining::BlockTemplate;
-use blvm_protocol::serialization::deserialize_block_with_witnesses;
-use blvm_protocol::serialization::serialize_block_with_witnesses;
-use blvm_protocol::serialization::serialize_transaction;
-use blvm_protocol::segwit::Witness;
-use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use blvm_consensus::mining::MiningResult;
-use blvm_consensus::opcodes::{OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY};
+use blvm_consensus::opcodes::{
+    OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY, OP_CHECKSIG, OP_CHECKSIGVERIFY,
+};
 use blvm_consensus::types::Network as ConsensusNetwork;
 use blvm_consensus::{
     BIP112_CSV_ACTIVATION_MAINNET, BIP112_CSV_ACTIVATION_REGTEST, BIP112_CSV_ACTIVATION_TESTNET,
     SEGWIT_ACTIVATION_MAINNET, SEGWIT_ACTIVATION_TESTNET, TAPROOT_ACTIVATION_MAINNET,
     TAPROOT_ACTIVATION_TESTNET,
 };
+use blvm_protocol::mining::BlockTemplate;
+use blvm_protocol::segwit::Witness;
+use blvm_protocol::serialization::deserialize_block_with_witnesses;
+use blvm_protocol::serialization::serialize_block_with_witnesses;
+use blvm_protocol::serialization::serialize_transaction;
 use blvm_protocol::{
     types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
     ConsensusProof, ValidationResult,
 };
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use hex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -662,11 +664,7 @@ impl MiningRpc {
                 SEGWIT_ACTIVATION_TESTNET,
                 TAPROOT_ACTIVATION_TESTNET,
             ),
-            ConsensusNetwork::Regtest => (
-                BIP112_CSV_ACTIVATION_REGTEST,
-                0u64,
-                0u64,
-            ),
+            ConsensusNetwork::Regtest => (BIP112_CSV_ACTIVATION_REGTEST, 0u64, 0u64),
         };
 
         let mut rules = Vec::new();
@@ -736,7 +734,9 @@ impl MiningRpc {
         const MAX_BLOCKS: u64 = 10_000;
 
         let protocol = self.protocol_engine.as_ref().ok_or_else(|| {
-            RpcError::internal_error("generatetoaddress requires protocol engine (node misconfigured)")
+            RpcError::internal_error(
+                "generatetoaddress requires protocol engine (node misconfigured)",
+            )
         })?;
         if protocol.get_protocol_version() != ProtocolVersion::Regtest {
             return Err(RpcError::invalid_params(
@@ -807,10 +807,9 @@ impl MiningRpc {
                 })?;
             block.header.version = 4;
 
-            let (mined, result) = self
-                .consensus
-                .mine_block(block, max_tries)
-                .map_err(|e| RpcError::internal_error(format!("generatetoaddress: mine failed: {e}")))?;
+            let (mined, result) = self.consensus.mine_block(block, max_tries).map_err(|e| {
+                RpcError::internal_error(format!("generatetoaddress: mine failed: {e}"))
+            })?;
             if !matches!(result, MiningResult::Success) {
                 return Err(RpcError::internal_error(format!(
                     "generatetoaddress: proof-of-work failed after {max_tries} attempts (height {connect_height})"
@@ -846,7 +845,9 @@ impl MiningRpc {
             storage
                 .chain()
                 .update_tip(&block_hash, &mined.header, connect_height)
-                .map_err(|e| RpcError::internal_error(format!("Failed to update chain tip: {e}")))?;
+                .map_err(|e| {
+                    RpcError::internal_error(format!("Failed to update chain tip: {e}"))
+                })?;
             storage
                 .utxos()
                 .store_utxo_set(&utxo)
@@ -855,7 +856,8 @@ impl MiningRpc {
             out_hashes.push(Value::String(hex::encode(block_hash)));
 
             if let Some(ref ep) = self.event_publisher {
-                ep.publish_block_mined(&block_hash, connect_height, None).await;
+                ep.publish_block_mined(&block_hash, connect_height, None)
+                    .await;
             }
 
             if let Some(ref nm) = self.network_manager {

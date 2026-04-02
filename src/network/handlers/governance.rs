@@ -49,9 +49,10 @@ impl NetworkManager {
             );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
-        if let Err(e) =
-            super::super::replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600)
-        {
+        if let Err(e) = super::super::replay_protection::ReplayProtection::validate_timestamp(
+            msg.timestamp,
+            3600,
+        ) {
             warn!(
                 "Replay protection: Invalid timestamp in EconomicNodeRegistration from {}: {}",
                 peer_addr, e
@@ -213,9 +214,10 @@ impl NetworkManager {
             );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
-        if let Err(e) =
-            super::super::replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600)
-        {
+        if let Err(e) = super::super::replay_protection::ReplayProtection::validate_timestamp(
+            msg.timestamp,
+            3600,
+        ) {
             warn!(
                 "Replay protection: Invalid timestamp in EconomicNodeVeto from {}: {}",
                 peer_addr, e
@@ -401,8 +403,8 @@ impl NetworkManager {
                                     .get("registered_at")
                                     .and_then(|v| v.as_i64())
                                     .ok_or_else(|| {
-                                        anyhow::anyhow!("Missing or invalid registered_at")
-                                    })?,
+                                    anyhow::anyhow!("Missing or invalid registered_at")
+                                })?,
                                 last_verified_at: data
                                     .get("last_verified_at")
                                     .and_then(|v| v.as_i64()),
@@ -419,9 +421,7 @@ impl NetworkManager {
                         };
 
                         let pm = self.peer_manager_mutex().lock().await;
-                        if let Some(peer) =
-                            pm.get_peer(&TransportAddr::Tcp(peer_addr))
-                        {
+                        if let Some(peer) = pm.get_peer(&TransportAddr::Tcp(peer_addr)) {
                             let msg_bytes = bincode::serialize(
                                 &crate::network::protocol::ProtocolMessage::EconomicNodeStatus(
                                     response_msg,
@@ -510,9 +510,10 @@ impl NetworkManager {
             );
             return Err(anyhow::anyhow!("Replay protection: {}", e));
         }
-        if let Err(e) =
-            super::super::replay_protection::ReplayProtection::validate_timestamp(msg.timestamp, 3600)
-        {
+        if let Err(e) = super::super::replay_protection::ReplayProtection::validate_timestamp(
+            msg.timestamp,
+            3600,
+        ) {
             warn!(
                 "Replay protection: Invalid timestamp in EconomicNodeForkDecision from {}: {}",
                 peer_addr, e

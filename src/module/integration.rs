@@ -4,11 +4,11 @@
 //! Handles connection, handshake, and provides NodeAPI + event receiver.
 
 use crate::module::api::NodeApiIpc;
-use crate::module::ipc::ModuleIpcClient;
 use crate::module::ipc::protocol::{
-    CliSpec, InvocationMessage, InvocationResultMessage, MessageType, ModuleMessage, RequestMessage,
-    RequestPayload, ResponsePayload,
+    CliSpec, InvocationMessage, InvocationResultMessage, MessageType, ModuleMessage,
+    RequestMessage, RequestPayload, ResponsePayload,
 };
+use crate::module::ipc::ModuleIpcClient;
 use crate::module::traits::{EventType, ModuleError, NodeAPI};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,7 +21,8 @@ pub struct ModuleIntegration {
     node_api: Arc<dyn NodeAPI>,
     event_receiver: tokio::sync::broadcast::Receiver<ModuleMessage>,
     /// Receiver for CLI/RPC invocations from the node (module handles and sends result)
-    invocation_receiver: Option<mpsc::Receiver<(InvocationMessage, oneshot::Sender<InvocationResultMessage>)>>,
+    invocation_receiver:
+        Option<mpsc::Receiver<(InvocationMessage, oneshot::Sender<InvocationResultMessage>)>>,
 }
 
 impl ModuleIntegration {

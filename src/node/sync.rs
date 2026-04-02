@@ -219,7 +219,11 @@ impl SyncCoordinator {
         // Check if we have enough peers for parallel IBD.
         // Allow 1 peer when preferred_peers is set (e.g. LAN-only IBD).
         let config = ParallelIBDConfig::from_config(ibd_config);
-        let min_peers = if config.preferred_peers.is_empty() { 2 } else { 1 };
+        let min_peers = if config.preferred_peers.is_empty() {
+            2
+        } else {
+            1
+        };
         if peer_addresses.len() < min_peers {
             debug!(
                 "Not enough peers for parallel IBD (have {}, need {}). Sequential sync is not supported.",
@@ -287,10 +291,7 @@ impl SyncCoordinator {
                         if let Err(flag_e) =
                             crate::storage::ibd_autorepair::set_ibd_utxo_repair_flag(dir)
                         {
-                            tracing::warn!(
-                                "Could not write IBD UTXO repair marker: {}",
-                                flag_e
-                            );
+                            tracing::warn!("Could not write IBD UTXO repair marker: {}", flag_e);
                         }
                     }
                 }

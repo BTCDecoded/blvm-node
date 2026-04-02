@@ -676,8 +676,8 @@ impl MempoolManager {
         target_size_mb: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use blvm_protocol::spam_filter::SpamFilter;
         use blvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::spam_filter::SpamFilter;
 
         // Get all transactions, classify as spam or not
         let spam_filter = SpamFilter::new();
@@ -686,7 +686,10 @@ impl MempoolManager {
 
         let entries: Vec<(Hash, Transaction)> = {
             let pool = self.pool_lock();
-            pool.transactions.iter().map(|(h, t)| (*h, t.clone())).collect()
+            pool.transactions
+                .iter()
+                .map(|(h, t)| (*h, t.clone()))
+                .collect()
         };
         let fee_cache = self.fee_cache.read().unwrap();
         for (hash, tx) in &entries {
@@ -1441,11 +1444,7 @@ impl MempoolManager {
 
         let all_prevouts: Vec<(Hash, OutPoint)> = txs_snapshot
             .iter()
-            .flat_map(|(tx_hash, tx)| {
-                tx.inputs
-                    .iter()
-                    .map(move |input| (*tx_hash, input.prevout))
-            })
+            .flat_map(|(tx_hash, tx)| tx.inputs.iter().map(move |input| (*tx_hash, input.prevout)))
             .collect();
 
         let mut utxo_cache: HashMap<&OutPoint, u64> = HashMap::with_capacity(all_prevouts.len());

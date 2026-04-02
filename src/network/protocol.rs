@@ -1315,7 +1315,9 @@ impl ProtocolParser {
             ProtocolMessage::GetBanList(msg) => (cmd::GETBANLIST, bincode::serialize(msg)?),
             ProtocolMessage::BanList(msg) => (cmd::BANLIST, bincode::serialize(msg)?),
             // Governance messages
-            ProtocolMessage::EconomicNodeRegistration(msg) => (cmd::ECONREG, bincode::serialize(msg)?),
+            ProtocolMessage::EconomicNodeRegistration(msg) => {
+                (cmd::ECONREG, bincode::serialize(msg)?)
+            }
             ProtocolMessage::EconomicNodeVeto(msg) => (cmd::ECONVETO, bincode::serialize(msg)?),
             ProtocolMessage::EconomicNodeStatus(msg) => (cmd::ECONSTATUS, bincode::serialize(msg)?),
             ProtocolMessage::EconomicNodeForkDecision(msg) => {
@@ -1327,7 +1329,9 @@ impl ProtocolParser {
             // Module Registry
             ProtocolMessage::GetModule(msg) => (cmd::GETMODULE, bincode::serialize(msg)?),
             ProtocolMessage::Module(msg) => (cmd::MODULE, bincode::serialize(msg)?),
-            ProtocolMessage::GetModuleByHash(msg) => (cmd::GETMODULEBYHASH, bincode::serialize(msg)?),
+            ProtocolMessage::GetModuleByHash(msg) => {
+                (cmd::GETMODULEBYHASH, bincode::serialize(msg)?)
+            }
             ProtocolMessage::ModuleByHash(msg) => (cmd::MODULEBYHASH, bincode::serialize(msg)?),
             ProtocolMessage::ModuleInv(msg) => (cmd::MODULEINV, bincode::serialize(msg)?),
             ProtocolMessage::GetModuleList(msg) => (cmd::GETMODULELIST, bincode::serialize(msg)?),

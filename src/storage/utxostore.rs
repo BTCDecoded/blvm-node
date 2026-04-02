@@ -19,7 +19,8 @@ use std::sync::{OnceLock, RwLock};
 /// Caches serialized UTXO bytes to avoid re-serializing the same UTXO.
 /// Cache key is the OutPoint hash.
 #[cfg(feature = "production")]
-static SERIALIZATION_CACHE: OnceLock<RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>>> = OnceLock::new();
+static SERIALIZATION_CACHE: OnceLock<RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>>> =
+    OnceLock::new();
 
 #[cfg(feature = "production")]
 fn get_serialization_cache() -> &'static RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>> {

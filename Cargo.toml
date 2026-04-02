@@ -20,16 +20,11 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-# Protocol abstraction layer - Use local path for development
-# This transitively provides blvm-consensus, so we only need this one dependency
-# For local development, use path dependency
+# Protocol abstraction — path in monorepo; published versions: see README (crates.io).
 blvm-protocol = { path = "../blvm-protocol" }
-# Direct dependency on blvm-consensus for CTV feature (CTV functions not re-exported by protocol)
 blvm-consensus = { path = "../blvm-consensus", optional = true }
-# Spec-lock for #[spec_locked("10.6")] Dandelion verification (Orange Paper)
 blvm-spec-lock = { path = "../blvm-spec-lock", optional = true, default-features = false }
-# MuHash3072 for AssumeUTXO (Core-compatible gettxoutsetinfo / hash_serialized)
-blvm-muhash = { path = "../blvm-muhash" }
+blvm-muhash = { version = ">=0.1, <1" }
 
 # Storage layer - EXACT VERSIONS for security
 sled = { version = "=0.34.7", optional = true }

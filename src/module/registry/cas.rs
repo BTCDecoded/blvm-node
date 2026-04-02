@@ -23,9 +23,8 @@ impl ContentAddressableStorage {
         let storage_dir = storage_dir.as_ref().to_path_buf();
 
         // Create storage directory if it doesn't exist
-        std::fs::create_dir_all(&storage_dir).map_err(|e| {
-            ModuleError::op_err("Failed to create CAS directory", e)
-        })?;
+        std::fs::create_dir_all(&storage_dir)
+            .map_err(|e| ModuleError::op_err("Failed to create CAS directory", e))?;
 
         // Load existing index
         let index = Self::load_index(&storage_dir)?;

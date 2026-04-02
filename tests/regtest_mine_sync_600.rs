@@ -1,12 +1,12 @@
 //! Regtest: mine 600 blocks on one in-memory node, then replay the same wire bytes on a
 //! second node (sync). Exercises consensus mining + `SyncCoordinator::process_block` end-to-end.
 
-use blvm_consensus::ConsensusProof;
 use blvm_consensus::mining::MiningResult;
+use blvm_consensus::ConsensusProof;
 use blvm_node::node::sync::SyncCoordinator;
 use blvm_node::storage::Storage;
-use blvm_protocol::serialization::serialize_block_with_witnesses;
 use blvm_protocol::segwit::Witness;
+use blvm_protocol::serialization::serialize_block_with_witnesses;
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, UtxoSet};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -89,7 +89,10 @@ async fn regtest_mine_600_blocks_then_sync_follower() -> anyhow::Result<()> {
             .get_tip_header()?
             .ok_or_else(|| anyhow::anyhow!("missing tip header"))?;
 
-        let mut prev_headers = storage_m.blocks().get_recent_headers(2016).unwrap_or_default();
+        let mut prev_headers = storage_m
+            .blocks()
+            .get_recent_headers(2016)
+            .unwrap_or_default();
         if prev_headers.len() < 2 {
             prev_headers = vec![prev_header.clone(), prev_header.clone()];
         }

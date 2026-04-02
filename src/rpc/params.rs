@@ -13,15 +13,17 @@ pub fn param_str(params: &Value, index: usize) -> Option<&str> {
 }
 
 /// Get string at `params[index]`, or error with consistent message for the method.
-pub fn param_str_required(params: &Value, index: usize, method_name: &str) -> Result<String, RpcError> {
-    param_str(params, index)
-        .map(String::from)
-        .ok_or_else(|| {
-            RpcError::invalid_params(format!(
-                "Expected string at params[{}] for {}",
-                index, method_name
-            ))
-        })
+pub fn param_str_required(
+    params: &Value,
+    index: usize,
+    method_name: &str,
+) -> Result<String, RpcError> {
+    param_str(params, index).map(String::from).ok_or_else(|| {
+        RpcError::invalid_params(format!(
+            "Expected string at params[{}] for {}",
+            index, method_name
+        ))
+    })
 }
 
 /// Get u64 at `params[index]`, or `None` if missing/wrong type.
@@ -37,7 +39,11 @@ pub fn param_u64_default(params: &Value, index: usize, default: u64) -> u64 {
 }
 
 /// Get u64 at `params[index]`, or error with a consistent message for the method.
-pub fn param_u64_required(params: &Value, index: usize, method_name: &str) -> Result<u64, RpcError> {
+pub fn param_u64_required(
+    params: &Value,
+    index: usize,
+    method_name: &str,
+) -> Result<u64, RpcError> {
     param_u64(params, index).ok_or_else(|| {
         RpcError::invalid_params(format!(
             "Expected non-negative integer at params[{index}] for {method_name}"

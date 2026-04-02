@@ -8,7 +8,7 @@
 //! - Get congestion metrics
 
 use crate::payment::state_machine::PaymentStateMachine;
-use crate::rpc::rest::types::{rest_error_failed, error_response, success_response};
+use crate::rpc::rest::types::{error_response, rest_error_failed, success_response};
 use crate::utils::current_timestamp;
 use blvm_protocol::payment::PaymentOutput;
 use bytes::Bytes;

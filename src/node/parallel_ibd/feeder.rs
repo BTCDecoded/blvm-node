@@ -14,7 +14,7 @@ use parking_lot::{Condvar, Mutex};
 use crossbeam_channel::Receiver;
 
 // Static buffer limits passed at startup; no dynamic recalculation needed.
-use super::types::{FeederBufferValue, ReadyItem, estimate_block_bytes};
+use super::types::{estimate_block_bytes, FeederBufferValue, ReadyItem};
 
 /// Height-partitioned pending blocks. With one shard this matches a single `BTreeMap`.
 pub(crate) struct FeederBuffer {
@@ -80,8 +80,7 @@ fn feeder_shard_count() -> usize {
 
 /// Shared state between feeder thread and validation thread.
 /// `(buffer, channel_closed, total_estimated_bytes)`
-pub(crate) type FeederState =
-    Arc<(Mutex<(FeederBuffer, bool, usize)>, Condvar)>;
+pub(crate) type FeederState = Arc<(Mutex<(FeederBuffer, bool, usize)>, Condvar)>;
 
 /// Create new feeder state. Caller passes the Arc to both feeder and validation.
 pub(crate) fn new_feeder_state() -> FeederState {

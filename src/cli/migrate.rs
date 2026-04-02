@@ -21,12 +21,9 @@ pub fn run_migrate_core_cli(
     let core_dir = if let Some(dir) = source {
         dir
     } else {
-        BitcoinCoreDetection::detect_data_dir(network)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Bitcoin Core data directory not found. Use --source to specify path."
-                )
-            })?
+        BitcoinCoreDetection::detect_data_dir(network)?.ok_or_else(|| {
+            anyhow::anyhow!("Bitcoin Core data directory not found. Use --source to specify path.")
+        })?
     };
 
     run_migrate_core(MigrateCoreArgs {

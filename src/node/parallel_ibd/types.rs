@@ -20,10 +20,13 @@ pub const PREFETCH_LOOKAHEAD: usize = 10;
 /// the count cap at 300+.
 pub fn estimate_block_bytes(block: &Block, witnesses: &[Vec<Witness>]) -> usize {
     let base = 80;
-    let tx_bytes: usize = block.transactions.iter().map(|tx| {
-        32 + tx.inputs.len() * 48 + tx.outputs.len() * 40
-    }).sum();
-    let wit_bytes: usize = witnesses.iter()
+    let tx_bytes: usize = block
+        .transactions
+        .iter()
+        .map(|tx| 32 + tx.inputs.len() * 48 + tx.outputs.len() * 40)
+        .sum();
+    let wit_bytes: usize = witnesses
+        .iter()
         .flat_map(|tw| tw.iter())
         .flat_map(|w| w.iter())
         .map(|elem| elem.len() + 1)

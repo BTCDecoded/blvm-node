@@ -175,9 +175,9 @@ impl ModuleProcessSpawner {
         }
 
         // Connect to the node IPC (modules connect to node; spawner connects for heartbeat)
-        let mut ipc_client = ModuleIpcClient::connect(&socket_path).await.map_err(|e| {
-            ModuleError::IpcError(format!("Failed to connect to node IPC: {e}"))
-        })?;
+        let mut ipc_client = ModuleIpcClient::connect(&socket_path)
+            .await
+            .map_err(|e| ModuleError::IpcError(format!("Failed to connect to node IPC: {e}")))?;
 
         // Send handshake so node registers this connection (for heartbeat)
         let version = context
@@ -194,9 +194,10 @@ impl ModuleProcessSpawner {
                 version,
             },
         };
-        let response = ipc_client.request(handshake).await.map_err(|e| {
-            ModuleError::IpcError(format!("Failed to send handshake: {e}"))
-        })?;
+        let response = ipc_client
+            .request(handshake)
+            .await
+            .map_err(|e| ModuleError::IpcError(format!("Failed to send handshake: {e}")))?;
         if !response.success {
             return Err(ModuleError::IpcError(
                 response

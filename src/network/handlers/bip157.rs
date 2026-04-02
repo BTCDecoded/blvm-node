@@ -1,7 +1,9 @@
 //! BIP157/158 block filter handlers (GetCfilters, GetCfheaders, GetCfcheckpt).
 
 use crate::network::bandwidth_protection::ServiceType;
-use crate::network::bip157_handler::{handle_getcfilters, handle_getcfheaders, handle_getcfcheckpt};
+use crate::network::bip157_handler::{
+    handle_getcfcheckpt, handle_getcfheaders, handle_getcfilters,
+};
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{ProtocolMessage, ProtocolParser};
 use crate::network::transport::TransportAddr;

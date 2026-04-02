@@ -134,7 +134,9 @@ impl ModuleIpcClient {
                     .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
                 Ok(Some(message))
             }
-            Some(Err(e)) => Err(ModuleError::IpcError(format!("Failed to read message: {e}"))),
+            Some(Err(e)) => Err(ModuleError::IpcError(format!(
+                "Failed to read message: {e}"
+            ))),
             None => Ok(None),
         }
     }

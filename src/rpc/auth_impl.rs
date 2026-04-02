@@ -2,13 +2,13 @@
 //!
 //! This file contains the full RpcAuthManager implementation with constant-time token comparison.
 
+use crate::utils::current_timestamp;
 use anyhow::Result;
 use constant_time_eq::constant_time_eq;
 use hyper::HeaderMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use crate::utils::current_timestamp;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -480,7 +480,8 @@ impl RpcAuthManager {
         const STALE_THRESHOLD_SECS: u64 = 3600; // 1 hour
         let now = current_timestamp();
         let mut limiters = self.rate_limiters.lock().await;
-        limiters.retain(|_, limiter| now.saturating_sub(limiter.last_refill()) < STALE_THRESHOLD_SECS);
+        limiters
+            .retain(|_, limiter| now.saturating_sub(limiter.last_refill()) < STALE_THRESHOLD_SECS);
     }
 }
 

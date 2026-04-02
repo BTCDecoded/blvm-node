@@ -9,10 +9,10 @@
 use crate::payment::covenant::{CovenantEngine, CovenantProof};
 use crate::payment::processor::PaymentError;
 use crate::rpc::errors::STORAGE_NOT_AVAILABLE_MSG;
+use crate::utils::current_timestamp;
 use crate::Hash;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::utils::current_timestamp;
 use tracing::info;
 
 /// Vault configuration

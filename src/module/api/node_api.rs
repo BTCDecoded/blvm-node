@@ -13,7 +13,6 @@ thread_local! {
 }
 
 use crate::module::api::events::EventManager;
-use hex;
 use crate::module::hooks::HookManager;
 use crate::module::ipc::protocol::EventPayload;
 use crate::module::ipc::protocol::ModuleMessage;
@@ -26,6 +25,7 @@ use crate::network::{transport::TransportAddr, NetworkManager};
 use crate::node::mempool::MempoolManager;
 use crate::storage::Storage;
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use hex;
 
 /// Node API implementation for modules
 pub struct NodeApiImpl {
@@ -350,9 +350,10 @@ impl NodeAPI for NodeApiImpl {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.blocks().get_header(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to get block header", e)
-                })
+                storage
+                    .blocks()
+                    .get_header(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get block header", e))
             }
         })
         .await
@@ -365,9 +366,10 @@ impl NodeAPI for NodeApiImpl {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.transactions().get_transaction(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to get transaction", e)
-                })
+                storage
+                    .transactions()
+                    .get_transaction(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get transaction", e))
             }
         })
         .await
@@ -380,9 +382,10 @@ impl NodeAPI for NodeApiImpl {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.transactions().has_transaction(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to check transaction existence", e)
-                })
+                storage
+                    .transactions()
+                    .has_transaction(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to check transaction existence", e))
             }
         })
         .await
@@ -397,11 +400,11 @@ impl NodeAPI for NodeApiImpl {
                 storage
                     .chain()
                     .get_height()
-                    .map_err(|e| {
-                        ModuleError::op_err("Failed to get block height", e)
-                    })?
+                    .map_err(|e| ModuleError::op_err("Failed to get block height", e))?
                     .ok_or_else(|| {
-                        ModuleError::OperationError(module_error_msg::CHAIN_NOT_YET_INITIALIZED.to_string())
+                        ModuleError::OperationError(
+                            module_error_msg::CHAIN_NOT_YET_INITIALIZED.to_string(),
+                        )
                     })
             }
         })
@@ -417,11 +420,11 @@ impl NodeAPI for NodeApiImpl {
                 storage
                     .chain()
                     .get_tip_hash()
-                    .map_err(|e| {
-                        ModuleError::op_err("Failed to get chain tip", e)
-                    })?
+                    .map_err(|e| ModuleError::op_err("Failed to get chain tip", e))?
                     .ok_or_else(|| {
-                        ModuleError::OperationError(module_error_msg::CHAIN_NOT_YET_INITIALIZED.to_string())
+                        ModuleError::OperationError(
+                            module_error_msg::CHAIN_NOT_YET_INITIALIZED.to_string(),
+                        )
                     })
             }
         })
@@ -649,8 +652,7 @@ impl NodeAPI for NodeApiImpl {
             move || {
                 // Get tip header to calculate difficulty
                 let difficulty = if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
-                    blvm_consensus::pow::difficulty_from_bits(tip_header.bits)
-                        .unwrap_or(1.0) as u32
+                    blvm_consensus::pow::difficulty_from_bits(tip_header.bits).unwrap_or(1.0) as u32
                 } else {
                     0
                 };
@@ -728,7 +730,9 @@ impl NodeAPI for NodeApiImpl {
         payment_id: &str,
     ) -> Result<Option<PaymentState>, ModuleError> {
         let payment_state_machine = self.payment_state_machine.as_ref().ok_or_else(|| {
-            ModuleError::OperationError(module_error_msg::PAYMENT_STATE_MACHINE_NOT_AVAILABLE.to_string())
+            ModuleError::OperationError(
+                module_error_msg::PAYMENT_STATE_MACHINE_NOT_AVAILABLE.to_string(),
+            )
         })?;
 
         match payment_state_machine.get_payment_state(payment_id).await {
@@ -912,19 +916,17 @@ impl NodeAPI for NodeApiImpl {
         method: String,
         description: String,
     ) -> Result<(), ModuleError> {
-        let rpc_server = self
-            .rpc_server
-            .as_ref()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string()))?;
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
 
-        let ipc_server = self
-            .ipc_server
-            .as_ref()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::IPC_SERVER_NOT_AVAILABLE.to_string()))?;
+        let ipc_server = self.ipc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::IPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
 
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
 
         // Get RPC request channel for this module
         let ipc_server_guard = ipc_server.lock().await;
@@ -947,18 +949,15 @@ impl NodeAPI for NodeApiImpl {
         rpc_server
             .register_module_endpoint(method.clone(), handler)
             .await
-            .map_err(|e| {
-                ModuleError::op_err("Failed to register RPC endpoint", e)
-            })?;
+            .map_err(|e| ModuleError::op_err("Failed to register RPC endpoint", e))?;
 
         Ok(())
     }
 
     async fn unregister_rpc_endpoint(&self, method: &str) -> Result<(), ModuleError> {
-        let rpc_server = self
-            .rpc_server
-            .as_ref()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string()))?;
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
 
         rpc_server
             .unregister_module_endpoint(method)
@@ -1053,9 +1052,9 @@ impl NodeAPI for NodeApiImpl {
 
     // === Filesystem API Methods ===
     async fn read_file(&self, path: String) -> Result<Vec<u8>, ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1096,9 +1095,9 @@ impl NodeAPI for NodeApiImpl {
     }
 
     async fn write_file(&self, path: String, data: Vec<u8>) -> Result<(), ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1133,9 +1132,9 @@ impl NodeAPI for NodeApiImpl {
 
         // Create parent directory if needed
         if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                ModuleError::op_err("Failed to create directory", e)
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to create directory", e))?;
         }
 
         tokio::fs::write(&full_path, data)
@@ -1144,9 +1143,9 @@ impl NodeAPI for NodeApiImpl {
     }
 
     async fn delete_file(&self, path: String) -> Result<(), ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1185,9 +1184,9 @@ impl NodeAPI for NodeApiImpl {
     }
 
     async fn list_directory(&self, path: String) -> Result<Vec<String>, ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1225,9 +1224,11 @@ impl NodeAPI for NodeApiImpl {
             .await
             .map_err(|e| ModuleError::op_err("Failed to read directory", e))?;
 
-        while let Some(entry) = dir.next_entry().await.map_err(|e| {
-            ModuleError::op_err("Failed to read directory entry", e)
-        })? {
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to read directory entry", e))?
+        {
             if let Some(name) = entry.file_name().to_str() {
                 entries.push(name.to_string());
             }
@@ -1237,9 +1238,9 @@ impl NodeAPI for NodeApiImpl {
     }
 
     async fn create_directory(&self, path: String) -> Result<(), ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1281,9 +1282,9 @@ impl NodeAPI for NodeApiImpl {
         &self,
         path: String,
     ) -> Result<crate::module::ipc::protocol::FileMetadata, ModuleError> {
-        let module_id = self
-            .get_module_id()
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string()))?;
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
 
         let sandbox = {
             let sandboxes = self.module_filesystem_sandboxes.read().await;
@@ -1316,9 +1317,9 @@ impl NodeAPI for NodeApiImpl {
             sandbox.validate_path(&joined)?
         };
 
-        let metadata = tokio::fs::metadata(&full_path).await.map_err(|e| {
-            ModuleError::op_err("Failed to get file metadata", e)
-        })?;
+        let metadata = tokio::fs::metadata(&full_path)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to get file metadata", e))?;
 
         let modified = metadata
             .modified()
@@ -1500,7 +1501,9 @@ impl NodeAPI for NodeApiImpl {
         api: Arc<dyn crate::module::inter_module::api::ModuleAPI>,
     ) -> Result<(), ModuleError> {
         let registry = self.module_api_registry.as_ref().ok_or_else(|| {
-            ModuleError::OperationError(module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string())
+            ModuleError::OperationError(
+                module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string(),
+            )
         })?;
 
         let module_id = self
@@ -1519,7 +1522,9 @@ impl NodeAPI for NodeApiImpl {
 
     async fn unregister_module_api(&self) -> Result<(), ModuleError> {
         let registry = self.module_api_registry.as_ref().ok_or_else(|| {
-            ModuleError::OperationError(module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string())
+            ModuleError::OperationError(
+                module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string(),
+            )
         })?;
 
         let module_id = self
@@ -1568,9 +1573,7 @@ impl NodeAPI for NodeApiImpl {
             network_manager
                 .send_to_peer(socket_addr, packet_data)
                 .await
-                .map_err(|e| {
-                    ModuleError::op_err("Failed to send mesh packet", e)
-                })?;
+                .map_err(|e| ModuleError::op_err("Failed to send mesh packet", e))?;
         } else {
             // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
             use crate::network::transport::TransportAddr;
@@ -1586,9 +1589,7 @@ impl NodeAPI for NodeApiImpl {
                     addr_str
                         .parse::<std::net::SocketAddr>()
                         .map(TransportAddr::Quinn)
-                        .map_err(|e| {
-                            ModuleError::op_err("Invalid Quinn address", e)
-                        })?
+                        .map_err(|e| ModuleError::op_err("Invalid Quinn address", e))?
                 }
                 #[cfg(not(feature = "quinn"))]
                 return Err(ModuleError::OperationError(
@@ -1599,9 +1600,8 @@ impl NodeAPI for NodeApiImpl {
                 {
                     use iroh::net::NodeId;
                     let node_id_str = &peer_addr[5..];
-                    let node_id_bytes = hex::decode(node_id_str).map_err(|e| {
-                        ModuleError::op_err("Invalid Iroh node ID hex", e)
-                    })?;
+                    let node_id_bytes = hex::decode(node_id_str)
+                        .map_err(|e| ModuleError::op_err("Invalid Iroh node ID hex", e))?;
                     if node_id_bytes.len() != 32 {
                         return Err(ModuleError::OperationError(
                             "Iroh node ID must be 32 bytes".to_string(),
@@ -1625,9 +1625,7 @@ impl NodeAPI for NodeApiImpl {
             network_manager
                 .send_to_peer_by_transport(transport_addr, packet_data)
                 .await
-                .map_err(|e| {
-                    ModuleError::op_err("Failed to send mesh packet", e)
-                })?;
+                .map_err(|e| ModuleError::op_err("Failed to send mesh packet", e))?;
         }
 
         Ok(())
@@ -1647,12 +1645,14 @@ impl NodeAPI for NodeApiImpl {
         if let Ok(socket_addr) = peer_addr.parse::<std::net::SocketAddr>() {
             // Send via SocketAddr (checks stratum_connections first, then P2P peers)
             #[cfg(feature = "stratum-v2")]
-            let result = network_manager.send_stratum_v2_to_peer(socket_addr, message_data).await;
+            let result = network_manager
+                .send_stratum_v2_to_peer(socket_addr, message_data)
+                .await;
             #[cfg(not(feature = "stratum-v2"))]
-            let result = network_manager.send_to_peer(socket_addr, message_data).await;
-            result.map_err(|e| {
-                ModuleError::op_err("Failed to send Stratum V2 message", e)
-            })?;
+            let result = network_manager
+                .send_to_peer(socket_addr, message_data)
+                .await;
+            result.map_err(|e| ModuleError::op_err("Failed to send Stratum V2 message", e))?;
         } else {
             // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
             use crate::network::transport::TransportAddr;
@@ -1668,9 +1668,7 @@ impl NodeAPI for NodeApiImpl {
                     addr_str
                         .parse::<std::net::SocketAddr>()
                         .map(TransportAddr::Quinn)
-                        .map_err(|e| {
-                            ModuleError::op_err("Invalid Quinn address", e)
-                        })?
+                        .map_err(|e| ModuleError::op_err("Invalid Quinn address", e))?
                 }
                 #[cfg(not(feature = "quinn"))]
                 return Err(ModuleError::OperationError(
@@ -1681,9 +1679,8 @@ impl NodeAPI for NodeApiImpl {
                 {
                     use iroh::net::NodeId;
                     let node_id_str = &peer_addr[5..];
-                    let node_id_bytes = hex::decode(node_id_str).map_err(|e| {
-                        ModuleError::op_err("Invalid Iroh node ID hex", e)
-                    })?;
+                    let node_id_bytes = hex::decode(node_id_str)
+                        .map_err(|e| ModuleError::op_err("Invalid Iroh node ID hex", e))?;
                     if node_id_bytes.len() != 32 {
                         return Err(ModuleError::OperationError(
                             "Iroh node ID must be 32 bytes".to_string(),
@@ -1707,9 +1704,7 @@ impl NodeAPI for NodeApiImpl {
             network_manager
                 .send_to_peer_by_transport(transport_addr, message_data)
                 .await
-                .map_err(|e| {
-                    ModuleError::op_err("Failed to send Stratum V2 message", e)
-                })?;
+                .map_err(|e| ModuleError::op_err("Failed to send Stratum V2 message", e))?;
         }
 
         Ok(())
@@ -1799,7 +1794,9 @@ impl NodeAPI for NodeApiImpl {
             .chain()
             .get_height()
             .map_err(|e| ModuleError::op_err("Failed to get height", e))?
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string()))?;
+            .ok_or_else(|| {
+                ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string())
+            })?;
 
         // Get tip header
         let prev_header = self
@@ -1807,7 +1804,9 @@ impl NodeAPI for NodeApiImpl {
             .chain()
             .get_tip_header()
             .map_err(|e| ModuleError::op_err("Failed to get tip header", e))?
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::NO_CHAIN_TIP.to_string()))?;
+            .ok_or_else(|| {
+                ModuleError::OperationError(module_error_msg::NO_CHAIN_TIP.to_string())
+            })?;
 
         // Get headers for difficulty adjustment
         let prev_headers = if let Ok(recent) = self.storage.blocks().get_recent_headers(2016) {

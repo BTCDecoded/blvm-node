@@ -13,7 +13,12 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         message: crate::network::protocol::GetPaymentRequestMessage,
     ) -> Result<()> {
-        let processor = self.payment_processor().lock().await.as_ref().map(std::sync::Arc::clone);
+        let processor = self
+            .payment_processor()
+            .lock()
+            .await
+            .as_ref()
+            .map(std::sync::Arc::clone);
         let response_msg = handle_get_payment_request(&message, processor).await?;
         let response = ProtocolMessage::PaymentRequest(response_msg);
         let wire_msg = ProtocolParser::serialize_message(&response)?;
@@ -27,7 +32,12 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         message: crate::network::protocol::PaymentMessage,
     ) -> Result<()> {
-        let processor = self.payment_processor().lock().await.as_ref().map(std::sync::Arc::clone);
+        let processor = self
+            .payment_processor()
+            .lock()
+            .await
+            .as_ref()
+            .map(std::sync::Arc::clone);
         let merchant_key_guard = self.merchant_key().lock().await;
         let merchant_key = merchant_key_guard.as_ref();
         let response_msg = handle_payment(&message, processor, merchant_key).await?;

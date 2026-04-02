@@ -97,11 +97,9 @@ impl ModuleProcessMonitor {
                     payload: RequestPayload::GetChainTip,
                 };
 
-                let heartbeat_result = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    client.request(heartbeat_request),
-                )
-                .await;
+                let heartbeat_result =
+                    tokio::time::timeout(Duration::from_secs(2), client.request(heartbeat_request))
+                        .await;
 
                 match heartbeat_result {
                     Ok(Ok(_)) => debug!("Module {} heartbeat OK", module_name),

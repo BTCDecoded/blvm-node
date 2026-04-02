@@ -366,7 +366,8 @@ fn payment_state_to_json(state: &PaymentState) -> Value {
             })
         }
         #[cfg(not(feature = "ctv"))]
-        PaymentState::ProofCreated { request_id, .. } | PaymentState::ProofBroadcast { request_id, .. } => {
+        PaymentState::ProofCreated { request_id, .. }
+        | PaymentState::ProofBroadcast { request_id, .. } => {
             json!({ "state": "proof_pending", "request_id": request_id })
         }
     }

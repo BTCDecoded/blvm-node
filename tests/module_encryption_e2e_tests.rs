@@ -95,9 +95,7 @@ async fn create_test_registry(
     let cas = Arc::new(tokio::sync::RwLock::new(
         ContentAddressableStorage::new(&cas_dir).unwrap(),
     ));
-    let cache = Arc::new(tokio::sync::RwLock::new(
-        LocalCache::new(),
-    ));
+    let cache = Arc::new(tokio::sync::RwLock::new(LocalCache::new()));
 
     let manifest = create_test_manifest_with_payment(module_name);
     let manifest_toml = toml::to_string(&manifest).unwrap();
@@ -220,7 +218,12 @@ async fn test_full_encrypted_module_purchase_flow() {
 
         // Step 8: Verify decryption works
         let decrypted = encryption
-            .decrypt_module(&encrypted_binary, &metadata.nonce, &payment_id, &module_hash)
+            .decrypt_module(
+                &encrypted_binary,
+                &metadata.nonce,
+                &payment_id,
+                &module_hash,
+            )
             .unwrap();
         assert_eq!(decrypted, module_binary);
     }

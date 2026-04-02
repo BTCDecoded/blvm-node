@@ -11,11 +11,11 @@ use crate::payment::covenant::{CovenantEngine, CovenantProof};
 use crate::payment::processor::PaymentError;
 use crate::rpc::errors::STORAGE_NOT_AVAILABLE_MSG;
 use crate::storage::Storage;
+use crate::utils::current_timestamp;
 use blvm_protocol::payment::PaymentOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::utils::current_timestamp;
 use tracing::{debug, info};
 
 /// Transaction priority
@@ -396,9 +396,7 @@ impl CongestionManager {
                 })?;
 
                 batch.ready_to_broadcast = true;
-                batch.broadcast_at = Some(
-                    current_timestamp(),
-                );
+                batch.broadcast_at = Some(current_timestamp());
 
                 covenant.clone()
             };

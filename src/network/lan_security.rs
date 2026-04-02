@@ -671,9 +671,7 @@ impl InternetCheckpointValidator {
 
         let timeout_duration = checkpoint_timeout.unwrap_or(CHECKPOINT_REQUEST_TIMEOUT);
         for peer in internet_peers.iter().take(MIN_CHECKPOINT_PEERS + 2) {
-            match tokio::time::timeout(timeout_duration, get_block_hash_fn(*peer, height))
-                .await
-            {
+            match tokio::time::timeout(timeout_duration, get_block_hash_fn(*peer, height)).await {
                 Ok(Some(hash)) => {
                     internet_hashes.push(hash);
                 }
@@ -914,30 +912,29 @@ impl DiscoveryVerifier {
             addr
         );
 
-        let (proto_timeout, headers_timeout) = timeouts
-            .unwrap_or((PROTOCOL_VERIFY_TIMEOUT, HEADERS_VERIFY_TIMEOUT));
-        let handshake_result =
-            match tokio::time::timeout(proto_timeout, do_handshake(addr)).await {
-                Ok(Some((version, user_agent, height))) => {
-                    debug!(
-                        "LAN peer {} handshake OK: version={}, agent={}, height={}",
-                        addr, version, user_agent, height
-                    );
-                    ProtocolVerifyResult::Valid {
-                        protocol_version: version,
-                        user_agent,
-                        start_height: height,
-                    }
+        let (proto_timeout, headers_timeout) =
+            timeouts.unwrap_or((PROTOCOL_VERIFY_TIMEOUT, HEADERS_VERIFY_TIMEOUT));
+        let handshake_result = match tokio::time::timeout(proto_timeout, do_handshake(addr)).await {
+            Ok(Some((version, user_agent, height))) => {
+                debug!(
+                    "LAN peer {} handshake OK: version={}, agent={}, height={}",
+                    addr, version, user_agent, height
+                );
+                ProtocolVerifyResult::Valid {
+                    protocol_version: version,
+                    user_agent,
+                    start_height: height,
                 }
-                Ok(None) => {
-                    warn!("LAN peer {} failed protocol handshake", addr);
-                    return (false, "Protocol handshake failed".to_string());
-                }
-                Err(_) => {
-                    warn!("LAN peer {} protocol handshake timed out", addr);
-                    return (false, "Protocol handshake timeout".to_string());
-                }
-            };
+            }
+            Ok(None) => {
+                warn!("LAN peer {} failed protocol handshake", addr);
+                return (false, "Protocol handshake failed".to_string());
+            }
+            Err(_) => {
+                warn!("LAN peer {} protocol handshake timed out", addr);
+                return (false, "Protocol handshake timeout".to_string());
+            }
+        };
 
         // Step 2: Headers verification (only if we have an internet tip)
         let internet_tip = match self.get_internet_tip() {
@@ -955,8 +952,7 @@ impl DiscoveryVerifier {
             addr, internet_tip.height
         );
 
-        let peer_tip = match tokio::time::timeout(headers_timeout, get_peer_tip(addr)).await
-        {
+        let peer_tip = match tokio::time::timeout(headers_timeout, get_peer_tip(addr)).await {
             Ok(Some((height, hash))) => (height, hash),
             Ok(None) => {
                 warn!("LAN peer {} didn't provide chain tip", addr);

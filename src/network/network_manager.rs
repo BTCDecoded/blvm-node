@@ -15,8 +15,8 @@ use blvm_protocol::mempool::Mempool;
 use blvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -248,7 +248,8 @@ pub struct NetworkManager {
     /// Stratum V2 connections (miners on dedicated port 3333)
     /// Maps peer SocketAddr to channel for sending responses
     #[cfg(feature = "stratum-v2")]
-    stratum_connections: Arc<tokio::sync::RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
+    stratum_connections:
+        Arc<tokio::sync::RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
 }
 
 /// Pending request metadata (pub(crate) for utxo_commitments_client)
@@ -297,14 +298,16 @@ impl NetworkManager {
             .and_then(|c| c.dos_protection.as_ref())
             .unwrap_or(&dos_config_default);
 
-        let dos_protection = Arc::new(super::dos_protection::DosProtectionManager::with_ban_settings(
-            dos_config.max_connections_per_window,
-            dos_config.window_seconds,
-            dos_config.max_message_queue_size,
-            dos_config.max_active_connections,
-            dos_config.auto_ban_threshold,
-            dos_config.ban_duration_seconds,
-        ));
+        let dos_protection = Arc::new(
+            super::dos_protection::DosProtectionManager::with_ban_settings(
+                dos_config.max_connections_per_window,
+                dos_config.window_seconds,
+                dos_config.max_message_queue_size,
+                dos_config.max_active_connections,
+                dos_config.auto_ban_threshold,
+                dos_config.ban_duration_seconds,
+            ),
+        );
 
         // Initialize IBD protection (bandwidth exhaustion attack mitigation)
         let ibd_protection = if let Some(ibd_config) =
@@ -342,9 +345,11 @@ impl NetworkManager {
         };
 
         // Initialize unified bandwidth protection (extends IBD protection)
-        let bandwidth_protection = Arc::new(super::bandwidth_protection::BandwidthProtectionManager::new(
-            Arc::clone(&ibd_protection),
-        ));
+        let bandwidth_protection = Arc::new(
+            super::bandwidth_protection::BandwidthProtectionManager::new(Arc::clone(
+                &ibd_protection,
+            )),
+        );
 
         // Use config for address database
         let addr_db_config_default = crate::config::AddressDatabaseConfig::default();
@@ -352,10 +357,12 @@ impl NetworkManager {
             .and_then(|c| c.address_database.as_ref())
             .unwrap_or(&addr_db_config_default);
 
-        let address_database = Arc::new(RwLock::new(super::address_db::AddressDatabase::with_expiration(
-            addr_db_config.max_addresses,
-            addr_db_config.expiration_seconds,
-        )));
+        let address_database = Arc::new(RwLock::new(
+            super::address_db::AddressDatabase::with_expiration(
+                addr_db_config.max_addresses,
+                addr_db_config.expiration_seconds,
+            ),
+        ));
 
         // Use config for request timeouts
         let timeout_config_default = crate::config::RequestTimeoutConfig::default();
@@ -370,7 +377,8 @@ impl NetworkManager {
             .and_then(|c| c.protocol_limits.as_ref())
             .unwrap_or(&limits_config_default);
         let protocol_limits = Arc::new(limits_config.clone());
-        let tcp_transport = TcpTransport::with_max_message_length(limits_config.max_protocol_message_length);
+        let tcp_transport =
+            TcpTransport::with_max_message_length(limits_config.max_protocol_message_length);
 
         // Use config for background task intervals
         let bg_config_default = crate::config::BackgroundTaskConfig::default();
@@ -684,8 +692,7 @@ impl NetworkManager {
                 && !Self::is_local_address(&peer_addr)
                 && !Self::is_onion_address(&peer_addr)
             {
-                let ban_until = current_timestamp()
-                    + 24 * 60 * 60;
+                let ban_until = current_timestamp() + 24 * 60 * 60;
                 let mut ban_list = self.ban_list.write().await;
                 ban_list.insert(peer_addr, ban_until);
                 drop(ban_list);
@@ -697,7 +704,9 @@ impl NetworkManager {
             }
             let _ = self
                 .peer_tx
-                .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(peer_addr)));
+                .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                    peer_addr,
+                )));
             Err(anyhow::anyhow!("{}", violation_msg))
         } else {
             warn!(
@@ -783,8 +792,7 @@ impl NetworkManager {
         if data.len() <= 4 {
             return false;
         }
-        if let Ok(tx_msg) =
-            bincode::deserialize::<crate::network::protocol::TxMessage>(&data[4..])
+        if let Ok(tx_msg) = bincode::deserialize::<crate::network::protocol::TxMessage>(&data[4..])
         {
             let tx = &tx_msg.transaction;
             let spam_filter = SpamFilter::new();
@@ -799,8 +807,8 @@ impl NetworkManager {
 
                 if let Some(ban_config) = self.spam_ban_config.as_ref() {
                     if current_count >= ban_config.spam_ban_threshold {
-                        let unban_timestamp =
-                            crate::utils::current_timestamp() + ban_config.spam_ban_duration_seconds;
+                        let unban_timestamp = crate::utils::current_timestamp()
+                            + ban_config.spam_ban_duration_seconds;
                         warn!(
                             "Auto-banning peer {} for spam violations ({} violations, unban at {})",
                             peer_addr, current_count, unban_timestamp
@@ -1326,16 +1334,12 @@ impl NetworkManager {
     /// Send Stratum V2 message to peer. Checks stratum_connections first (port 3333),
     /// then falls back to P2P peer manager (port 8333).
     #[cfg(feature = "stratum-v2")]
-    pub async fn send_stratum_v2_to_peer(
-        &self,
-        addr: SocketAddr,
-        message: Vec<u8>,
-    ) -> Result<()> {
+    pub async fn send_stratum_v2_to_peer(&self, addr: SocketAddr, message: Vec<u8>) -> Result<()> {
         let conns = self.stratum_connections.read().await;
         if let Some(send_tx) = conns.get(&addr) {
-            send_tx.send(message).map_err(|e| {
-                anyhow::anyhow!("Stratum V2 send failed for {}: {}", addr, e)
-            })?;
+            send_tx
+                .send(message)
+                .map_err(|e| anyhow::anyhow!("Stratum V2 send failed for {}: {}", addr, e))?;
             return Ok(());
         }
         drop(conns);
@@ -1397,7 +1401,9 @@ impl NetworkManager {
 
         // Extract message type for event publishing (before message is moved)
         let msg_type = if message_len >= 16 {
-            String::from_utf8_lossy(&message[4..16]).trim_end_matches('\0').to_string()
+            String::from_utf8_lossy(&message[4..16])
+                .trim_end_matches('\0')
+                .to_string()
         } else {
             "raw".to_string()
         };
@@ -1905,7 +1911,8 @@ impl NetworkManager {
             }
         }
 
-        self.dispatch_protocol_message(peer_addr, &parsed, data).await
+        self.dispatch_protocol_message(peer_addr, &parsed, data)
+            .await
     }
 
     /// Submit validated transactions to the mempool
@@ -2281,49 +2288,39 @@ impl NetworkManager {
 
     pub(crate) fn module_registry(
         &self,
-    ) -> &Arc<tokio::sync::Mutex<Option<Arc<crate::module::registry::client::ModuleRegistry>>>> {
+    ) -> &Arc<tokio::sync::Mutex<Option<Arc<crate::module::registry::client::ModuleRegistry>>>>
+    {
         &self.module_registry
     }
 
     pub(crate) fn payment_processor(
         &self,
-    ) -> &Arc<
-        tokio::sync::Mutex<Option<Arc<crate::payment::processor::PaymentProcessor>>>,
-    > {
+    ) -> &Arc<tokio::sync::Mutex<Option<Arc<crate::payment::processor::PaymentProcessor>>>> {
         &self.payment_processor
     }
 
     pub(crate) fn payment_state_machine(
         &self,
-    ) -> &Arc<
-        tokio::sync::Mutex<Option<Arc<crate::payment::state_machine::PaymentStateMachine>>>,
-    > {
+    ) -> &Arc<tokio::sync::Mutex<Option<Arc<crate::payment::state_machine::PaymentStateMachine>>>>
+    {
         &self.payment_state_machine
     }
 
     pub(crate) fn module_encryption(
         &self,
-    ) -> &Arc<
-        tokio::sync::Mutex<Option<Arc<crate::module::encryption::ModuleEncryption>>>,
-    > {
+    ) -> &Arc<tokio::sync::Mutex<Option<Arc<crate::module::encryption::ModuleEncryption>>>> {
         &self.module_encryption
     }
 
-    pub(crate) fn modules_dir(
-        &self,
-    ) -> &Arc<tokio::sync::Mutex<Option<std::path::PathBuf>>> {
+    pub(crate) fn modules_dir(&self) -> &Arc<tokio::sync::Mutex<Option<std::path::PathBuf>>> {
         &self.modules_dir
     }
 
-    pub(crate) fn node_payment_script(
-        &self,
-    ) -> &Arc<tokio::sync::Mutex<Option<Vec<u8>>>> {
+    pub(crate) fn node_payment_script(&self) -> &Arc<tokio::sync::Mutex<Option<Vec<u8>>>> {
         &self.node_payment_script
     }
 
-    pub(crate) fn merchant_key(
-        &self,
-    ) -> &Arc<tokio::sync::Mutex<Option<secp256k1::SecretKey>>> {
+    pub(crate) fn merchant_key(&self) -> &Arc<tokio::sync::Mutex<Option<secp256k1::SecretKey>>> {
         &self.merchant_key
     }
 
@@ -2359,21 +2356,15 @@ impl NetworkManager {
         &self.peer_reconnection_queue
     }
 
-    pub(crate) fn persistent_peers_lock(
-        &self,
-    ) -> &Arc<Mutex<HashSet<SocketAddr>>> {
+    pub(crate) fn persistent_peers_lock(&self) -> &Arc<Mutex<HashSet<SocketAddr>>> {
         &self.persistent_peers
     }
 
-    pub(crate) fn connections_per_ip(
-        &self,
-    ) -> &Arc<Mutex<HashMap<std::net::IpAddr, usize>>> {
+    pub(crate) fn connections_per_ip(&self) -> &Arc<Mutex<HashMap<std::net::IpAddr, usize>>> {
         &self.connections_per_ip
     }
 
-    pub(crate) fn peer_message_rates(
-        &self,
-    ) -> &Arc<Mutex<HashMap<SocketAddr, PeerRateLimiter>>> {
+    pub(crate) fn peer_message_rates(&self) -> &Arc<Mutex<HashMap<SocketAddr, PeerRateLimiter>>> {
         &self.peer_message_rates
     }
 
@@ -2389,9 +2380,7 @@ impl NetworkManager {
         &self.peer_tx_byte_rate_limiters
     }
 
-    pub(crate) fn peer_spam_violations(
-        &self,
-    ) -> &Arc<Mutex<HashMap<SocketAddr, usize>>> {
+    pub(crate) fn peer_spam_violations(&self) -> &Arc<Mutex<HashMap<SocketAddr, usize>>> {
         &self.peer_spam_violations
     }
 
@@ -2414,12 +2403,16 @@ impl NetworkManager {
     }
 
     /// Socket-to-transport mapping (for utxo_commitments_client)
-    pub(crate) fn socket_to_transport(&self) -> &Arc<Mutex<HashMap<SocketAddr, super::transport::TransportAddr>>> {
+    pub(crate) fn socket_to_transport(
+        &self,
+    ) -> &Arc<Mutex<HashMap<SocketAddr, super::transport::TransportAddr>>> {
         &self.socket_to_transport
     }
 
     /// Peer states (for utxo_commitments_client)
-    pub(crate) fn peer_states(&self) -> &Arc<RwLock<HashMap<SocketAddr, blvm_protocol::network::PeerState>>> {
+    pub(crate) fn peer_states(
+        &self,
+    ) -> &Arc<RwLock<HashMap<SocketAddr, blvm_protocol::network::PeerState>>> {
         &self.peer_states
     }
 
@@ -2607,4 +2600,3 @@ impl NetworkManager {
 // This is a workaround for ZMQ's Socket type not being Sync, but the actual usage is safe.
 #[cfg(feature = "zmq")]
 unsafe impl Sync for NetworkManager {}
-

@@ -93,8 +93,13 @@ impl std::fmt::Display for MemorySnapshot {
         write!(
             f,
             "rss={}MB(anon={}MB file={}MB shm={}MB) vm={}MB mem_total={}MB sys_avail={}MB",
-            self.rss_mb, self.rss_anon_mb, self.rss_file_mb, self.rss_shmem_mb,
-            self.vm_size_mb, self.mem_total_mb, self.sys_avail_mb,
+            self.rss_mb,
+            self.rss_anon_mb,
+            self.rss_file_mb,
+            self.rss_shmem_mb,
+            self.vm_size_mb,
+            self.mem_total_mb,
+            self.sys_avail_mb,
         )
     }
 }
@@ -257,7 +262,10 @@ impl MemoryGuard {
         if total_gb <= 16 {
             utxo_cache_mb = utxo_cache_mb.min(128);
         }
-        if let Some(mb) = std::env::var("BLVM_UTXO_CACHE_MAX_MB").ok().and_then(|s| s.parse::<usize>().ok()) {
+        if let Some(mb) = std::env::var("BLVM_UTXO_CACHE_MAX_MB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
             if mb > 0 {
                 utxo_cache_mb = utxo_cache_mb.min(mb);
             }
@@ -539,9 +547,7 @@ impl MemoryGuard {
 
     fn log_pressure_transition_if_changed(&self, level: PressureLevel, snap: &MemorySnapshot) {
         let new = level as u8;
-        let prev = self
-            .last_reported_pressure
-            .swap(new, Ordering::Relaxed);
+        let prev = self.last_reported_pressure.swap(new, Ordering::Relaxed);
         if prev == new {
             return;
         }
@@ -566,7 +572,11 @@ impl MemoryGuard {
     }
 
     fn pressure_level_for(&self, snap: &MemorySnapshot, current: PressureLevel) -> PressureLevel {
-        let t = if snap.mem_total_mb > 0 { snap.mem_total_mb } else { self.total_mb };
+        let t = if snap.mem_total_mb > 0 {
+            snap.mem_total_mb
+        } else {
+            self.total_mb
+        };
         let r = snap.rss_mb;
         let a = snap.sys_avail_mb;
         if r == 0 {
@@ -579,42 +589,61 @@ impl MemoryGuard {
             let crit_rss = self.crit_rss_threshold_mb;
             let emerg_up = r >= 2000 || (a > 0 && a < 2048);
             let crit_up = r >= crit_rss || (a > 0 && a < 2560);
-            let elev_up  = r >= 1200 || (a > 0 && a < 3072);
+            let elev_up = r >= 1200 || (a > 0 && a < 3072);
             // Exit thresholds (150-200 MB lower -- must clear before descending):
             let emerg_dn = r < 1800 && (a == 0 || a >= 2200);
-            let crit_dn  = r < 1450 && (a == 0 || a >= 2700);
-            let elev_dn  = r < 1050 && (a == 0 || a >= 3200);
+            let crit_dn = r < 1450 && (a == 0 || a >= 2700);
+            let elev_dn = r < 1050 && (a == 0 || a >= 3200);
 
             return match current {
                 PressureLevel::Emergency => {
                     if emerg_dn {
                         // Re-evaluate downward without hysteresis so rapid large drops work.
-                        if crit_up { PressureLevel::Critical }
-                        else if elev_up { PressureLevel::Elevated }
-                        else { PressureLevel::None }
+                        if crit_up {
+                            PressureLevel::Critical
+                        } else if elev_up {
+                            PressureLevel::Elevated
+                        } else {
+                            PressureLevel::None
+                        }
                     } else {
                         PressureLevel::Emergency
                     }
                 }
                 PressureLevel::Critical => {
-                    if emerg_up { PressureLevel::Emergency }
-                    else if crit_dn {
-                        if elev_up { PressureLevel::Elevated } else { PressureLevel::None }
+                    if emerg_up {
+                        PressureLevel::Emergency
+                    } else if crit_dn {
+                        if elev_up {
+                            PressureLevel::Elevated
+                        } else {
+                            PressureLevel::None
+                        }
                     } else {
                         PressureLevel::Critical
                     }
                 }
                 PressureLevel::Elevated => {
-                    if emerg_up { PressureLevel::Emergency }
-                    else if crit_up { PressureLevel::Critical }
-                    else if elev_dn { PressureLevel::None }
-                    else { PressureLevel::Elevated }
+                    if emerg_up {
+                        PressureLevel::Emergency
+                    } else if crit_up {
+                        PressureLevel::Critical
+                    } else if elev_dn {
+                        PressureLevel::None
+                    } else {
+                        PressureLevel::Elevated
+                    }
                 }
                 PressureLevel::None => {
-                    if emerg_up { PressureLevel::Emergency }
-                    else if crit_up { PressureLevel::Critical }
-                    else if elev_up { PressureLevel::Elevated }
-                    else { PressureLevel::None }
+                    if emerg_up {
+                        PressureLevel::Emergency
+                    } else if crit_up {
+                        PressureLevel::Critical
+                    } else if elev_up {
+                        PressureLevel::Elevated
+                    } else {
+                        PressureLevel::None
+                    }
                 }
             };
         }
@@ -622,53 +651,72 @@ impl MemoryGuard {
         // >16 GiB: percentage-based thresholds with a 5% hysteresis gap on exit.
         let avail_emerg_up: u64 = if t <= 24 * 1024 { 1536 } else { 768 };
         let rss_emerg_pct_up: u64 = if t <= 24 * 1024 { 60 } else { 72 };
-        let avail_crit_up: u64  = if t <= 24 * 1024 { 1792 } else { 1024 };
-        let rss_crit_pct_up: u64  = if t <= 24 * 1024 { 55 } else { 65 };
-        let avail_elev_up: u64  = if t <= 24 * 1024 { 2048 } else { 1536 };
-        let rss_elev_pct_up: u64  = if t <= 24 * 1024 { 45 } else { 55 };
+        let avail_crit_up: u64 = if t <= 24 * 1024 { 1792 } else { 1024 };
+        let rss_crit_pct_up: u64 = if t <= 24 * 1024 { 55 } else { 65 };
+        let avail_elev_up: u64 = if t <= 24 * 1024 { 2048 } else { 1536 };
+        let rss_elev_pct_up: u64 = if t <= 24 * 1024 { 45 } else { 55 };
         let avail_emerg_dn: u64 = avail_emerg_up + avail_emerg_up / 4;
-        let avail_crit_dn: u64  = avail_crit_up  + avail_crit_up  / 4;
-        let avail_elev_dn: u64  = avail_elev_up  + avail_elev_up  / 4;
+        let avail_crit_dn: u64 = avail_crit_up + avail_crit_up / 4;
+        let avail_elev_dn: u64 = avail_elev_up + avail_elev_up / 4;
         let rss_emerg_pct_dn: u64 = rss_emerg_pct_up.saturating_sub(5);
-        let rss_crit_pct_dn: u64  = rss_crit_pct_up.saturating_sub(5);
-        let rss_elev_pct_dn: u64  = rss_elev_pct_up.saturating_sub(5);
+        let rss_crit_pct_dn: u64 = rss_crit_pct_up.saturating_sub(5);
+        let rss_elev_pct_dn: u64 = rss_elev_pct_up.saturating_sub(5);
 
         let emerg_up = (a > 0 && a < avail_emerg_up) || r > t * rss_emerg_pct_up / 100;
-        let crit_up  = (a > 0 && a < avail_crit_up)  || r > t * rss_crit_pct_up  / 100;
-        let elev_up  = (a > 0 && a < avail_elev_up)  || r > t * rss_elev_pct_up  / 100;
+        let crit_up = (a > 0 && a < avail_crit_up) || r > t * rss_crit_pct_up / 100;
+        let elev_up = (a > 0 && a < avail_elev_up) || r > t * rss_elev_pct_up / 100;
         let emerg_dn = (a == 0 || a >= avail_emerg_dn) && r <= t * rss_emerg_pct_dn / 100;
-        let crit_dn  = (a == 0 || a >= avail_crit_dn)  && r <= t * rss_crit_pct_dn  / 100;
-        let elev_dn  = (a == 0 || a >= avail_elev_dn)  && r <= t * rss_elev_pct_dn  / 100;
+        let crit_dn = (a == 0 || a >= avail_crit_dn) && r <= t * rss_crit_pct_dn / 100;
+        let elev_dn = (a == 0 || a >= avail_elev_dn) && r <= t * rss_elev_pct_dn / 100;
 
         match current {
             PressureLevel::Emergency => {
                 if emerg_dn {
-                    if crit_up { PressureLevel::Critical }
-                    else if elev_up { PressureLevel::Elevated }
-                    else { PressureLevel::None }
+                    if crit_up {
+                        PressureLevel::Critical
+                    } else if elev_up {
+                        PressureLevel::Elevated
+                    } else {
+                        PressureLevel::None
+                    }
                 } else {
                     PressureLevel::Emergency
                 }
             }
             PressureLevel::Critical => {
-                if emerg_up { PressureLevel::Emergency }
-                else if crit_dn {
-                    if elev_up { PressureLevel::Elevated } else { PressureLevel::None }
+                if emerg_up {
+                    PressureLevel::Emergency
+                } else if crit_dn {
+                    if elev_up {
+                        PressureLevel::Elevated
+                    } else {
+                        PressureLevel::None
+                    }
                 } else {
                     PressureLevel::Critical
                 }
             }
             PressureLevel::Elevated => {
-                if emerg_up { PressureLevel::Emergency }
-                else if crit_up { PressureLevel::Critical }
-                else if elev_dn { PressureLevel::None }
-                else { PressureLevel::Elevated }
+                if emerg_up {
+                    PressureLevel::Emergency
+                } else if crit_up {
+                    PressureLevel::Critical
+                } else if elev_dn {
+                    PressureLevel::None
+                } else {
+                    PressureLevel::Elevated
+                }
             }
             PressureLevel::None => {
-                if emerg_up { PressureLevel::Emergency }
-                else if crit_up { PressureLevel::Critical }
-                else if elev_up { PressureLevel::Elevated }
-                else { PressureLevel::None }
+                if emerg_up {
+                    PressureLevel::Emergency
+                } else if crit_up {
+                    PressureLevel::Critical
+                } else if elev_up {
+                    PressureLevel::Elevated
+                } else {
+                    PressureLevel::None
+                }
             }
         }
     }
@@ -689,7 +737,9 @@ impl MemoryGuard {
                 if cur > target {
                     tracing::warn!(
                         "MemoryGuard: EMERGENCY — download ahead {} → {} ({})",
-                        cur, target, snap
+                        cur,
+                        target,
+                        snap
                     );
                     live.store(target, Ordering::Relaxed);
                 }
@@ -703,7 +753,9 @@ impl MemoryGuard {
                 if cur > target {
                     tracing::warn!(
                         "MemoryGuard: CRITICAL — download ahead {} → {} ({})",
-                        cur, target, snap
+                        cur,
+                        target,
+                        snap
                     );
                     live.store(target, Ordering::Relaxed);
                 }
@@ -713,7 +765,9 @@ impl MemoryGuard {
                 if cur > target {
                     tracing::info!(
                         "MemoryGuard: elevated — download ahead {} → {} ({})",
-                        cur, target, snap
+                        cur,
+                        target,
+                        snap
                     );
                     live.store(target, Ordering::Relaxed);
                 }
@@ -723,9 +777,8 @@ impl MemoryGuard {
                 // nominal when free memory is ample. More pipeline depth increases prefetch
                 // parallelism and hides per-block multi_get latency variance.
                 // On <=16 GiB, growth ceilings must track tier cap (nominal can be 256+, not legacy 64).
-                let tier_cap = Self::tier_max_download_ahead_blocks_from_gb(
-                    (self.total_mb + 512) / 1024,
-                );
+                let tier_cap =
+                    Self::tier_max_download_ahead_blocks_from_gb((self.total_mb + 512) / 1024);
                 let ceil = if self.total_mb <= 16 * 1024 {
                     if snap.sys_avail_mb > 7_000 {
                         nominal.saturating_mul(2).min(tier_cap)
@@ -873,9 +926,7 @@ impl MemoryGuard {
         let scaled = (feeder_buffer_bytes_limit as u64 * tier / 100) as usize;
         let buf = Self::buffer_limit_for(block_buffer_base, total_mb, current_height);
         let cap_by_est_blocks = buf.saturating_mul(900_000);
-        scaled
-            .min(cap_by_est_blocks)
-            .max(32 * 1024 * 1024)
+        scaled.min(cap_by_est_blocks).max(32 * 1024 * 1024)
     }
 
     /// Diagnostic: current RSS and available memory (MB).

@@ -67,8 +67,8 @@ pub(crate) async fn start_stratum_v2_listener(
                             if reader.read_exact(&mut buf).await.is_err() {
                                 break;
                             }
-                            let frame_len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
-                                as usize;
+                            let frame_len =
+                                u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
                             if frame_len < 6 || frame_len > MAX_FRAME_SIZE {
                                 warn!(
                                     "Invalid Stratum V2 frame length {} from {}",

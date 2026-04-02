@@ -83,9 +83,8 @@ impl LocalCache {
         let cache_dir = cache_dir.as_ref();
 
         // Create cache directory if it doesn't exist
-        std::fs::create_dir_all(cache_dir).map_err(|e| {
-            ModuleError::op_err("Failed to create cache directory", e)
-        })?;
+        std::fs::create_dir_all(cache_dir)
+            .map_err(|e| ModuleError::op_err("Failed to create cache directory", e))?;
 
         let cache_file = cache_dir.join("registry_cache.json");
         let contents = serde_json::to_string_pretty(self)

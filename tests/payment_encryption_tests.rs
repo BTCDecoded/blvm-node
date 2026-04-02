@@ -92,9 +92,7 @@ async fn create_test_registry_with_module(
     let cas = Arc::new(tokio::sync::RwLock::new(
         ContentAddressableStorage::new(&cas_dir).unwrap(),
     ));
-    let cache = Arc::new(tokio::sync::RwLock::new(
-        LocalCache::new(),
-    ));
+    let cache = Arc::new(tokio::sync::RwLock::new(LocalCache::new()));
 
     let manifest = create_test_manifest_with_payment(module_name);
     let manifest_toml = toml::to_string(&manifest).unwrap();

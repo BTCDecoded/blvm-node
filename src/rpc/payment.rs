@@ -7,12 +7,12 @@
 //! - Settlement monitoring
 
 use crate::payment::processor::PaymentError;
-use crate::rpc::params::{param_bool_default, param_str};
 use crate::payment::state_machine::{PaymentState, PaymentStateMachine};
+use crate::rpc::params::{param_bool_default, param_str};
+use crate::utils::current_timestamp;
 use blvm_protocol::payment::PaymentOutput;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use crate::utils::current_timestamp;
 use tracing::{debug, error};
 
 /// Default number of confirmations before considering a payment "safe for release" (RPC and REST).
@@ -140,11 +140,9 @@ impl PaymentRpc {
 
         let state_machine = self.get_state_machine()?;
 
-        let payment_request_id = param_str(params, 0)
-            .map(String::from)
-            .ok_or_else(|| {
-                PaymentError::ProcessingError("Missing 'payment_request_id' parameter".to_string())
-            })?;
+        let payment_request_id = param_str(params, 0).map(String::from).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'payment_request_id' parameter".to_string())
+        })?;
 
         let state = state_machine.get_payment_state(payment_request_id).await?;
 
@@ -653,7 +651,9 @@ impl PaymentRpc {
         let mut distribution = Vec::new();
         for d in distribution_array {
             let d_arr = d.as_array().ok_or_else(|| {
-                PaymentError::ProcessingError("Each distribution entry must be an array".to_string())
+                PaymentError::ProcessingError(
+                    "Each distribution entry must be an array".to_string(),
+                )
             })?;
             if d_arr.len() < 2 {
                 return Err(PaymentError::ProcessingError(

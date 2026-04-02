@@ -94,20 +94,12 @@ impl WasmInvoker for ManagerWasmInvoker {
         module_name: &str,
         subcommand: &str,
         args: Vec<String>,
-    ) -> Result<
-        crate::module::ipc::protocol::InvocationResultPayload,
-        ModuleError,
-    > {
+    ) -> Result<crate::module::ipc::protocol::InvocationResultPayload, ModuleError> {
         let wasm_guard = {
             let modules = self.modules.lock().await;
-            let managed = modules
-                .get(module_name)
-                .ok_or_else(|| {
-                    ModuleError::OperationError(format!(
-                        "No WASM module '{}' is loaded",
-                        module_name
-                    ))
-                })?;
+            let managed = modules.get(module_name).ok_or_else(|| {
+                ModuleError::OperationError(format!("No WASM module '{}' is loaded", module_name))
+            })?;
             #[cfg(feature = "wasm-modules")]
             match &managed.wasm_instance {
                 Some(inst) => inst.clone(),
@@ -120,9 +112,8 @@ impl WasmInvoker for ManagerWasmInvoker {
             }
         };
         let instance_guard = wasm_guard.lock().await;
-        let result = tokio::task::block_in_place(|| {
-            (**instance_guard).invoke_cli(subcommand, args)
-        });
+        let result =
+            tokio::task::block_in_place(|| (**instance_guard).invoke_cli(subcommand, args));
         result
     }
 
@@ -134,14 +125,9 @@ impl WasmInvoker for ManagerWasmInvoker {
     ) -> Result<serde_json::Value, ModuleError> {
         let wasm_guard = {
             let modules = self.modules.lock().await;
-            let managed = modules
-                .get(module_name)
-                .ok_or_else(|| {
-                    ModuleError::OperationError(format!(
-                        "No WASM module '{}' is loaded",
-                        module_name
-                    ))
-                })?;
+            let managed = modules.get(module_name).ok_or_else(|| {
+                ModuleError::OperationError(format!("No WASM module '{}' is loaded", module_name))
+            })?;
             #[cfg(feature = "wasm-modules")]
             match &managed.wasm_instance {
                 Some(inst) => inst.clone(),
@@ -154,9 +140,7 @@ impl WasmInvoker for ManagerWasmInvoker {
             }
         };
         let instance_guard = wasm_guard.lock().await;
-        let result = tokio::task::block_in_place(|| {
-            (**instance_guard).invoke_rpc(method, params)
-        });
+        let result = tokio::task::block_in_place(|| (**instance_guard).invoke_rpc(method, params));
         result
     }
 }
@@ -209,10 +193,7 @@ impl ModuleManager {
 
     /// Set node config overrides for modules ([modules.<name>] from config.toml).
     /// Merged over module's config.toml when loading. Node values take precedence.
-    pub fn set_module_config_overrides(
-        &self,
-        overrides: HashMap<String, HashMap<String, String>>,
-    ) {
+    pub fn set_module_config_overrides(&self, overrides: HashMap<String, HashMap<String, String>>) {
         if let Ok(mut guard) = self.module_config_overrides.write() {
             *guard = overrides;
         }
@@ -381,7 +362,10 @@ impl ModuleManager {
                     .publish_event(EventType::ModuleStateChanged, payload)
                     .await
                 {
-                    warn!("Failed to publish ModuleStateChanged for crashed module: {}", e);
+                    warn!(
+                        "Failed to publish ModuleStateChanged for crashed module: {}",
+                        e
+                    );
                 }
                 let payload = EventPayload::ModuleHealthChanged {
                     module_name: module_name.clone(),
@@ -392,7 +376,10 @@ impl ModuleManager {
                     .publish_event(EventType::ModuleHealthChanged, payload)
                     .await
                 {
-                    warn!("Failed to publish ModuleHealthChanged for crashed module: {}", e);
+                    warn!(
+                        "Failed to publish ModuleHealthChanged for crashed module: {}",
+                        e
+                    );
                 }
 
                 // Publish ModuleCrashed event (specific to abnormal exit)
@@ -565,32 +552,28 @@ impl ModuleManager {
         if is_wasm {
             #[cfg(feature = "wasm-modules")]
             {
-                let loader = self
-                    .wasm_loader
-                    .as_ref()
-                    .ok_or_else(|| {
-                        ModuleError::InitializationError(
-                            "WASM loader not configured. Pass WasmModuleLoader when creating the node.".to_string(),
-                        )
-                    })?;
+                let loader = self.wasm_loader.as_ref().ok_or_else(|| {
+                    ModuleError::InitializationError(
+                        "WASM loader not configured. Pass WasmModuleLoader when creating the node."
+                            .to_string(),
+                    )
+                })?;
                 let data_dir = data_dir.to_path_buf();
                 let instance = loader
                     .load(binary_path, &data_dir, config_for_wasm)
                     .map_err(|e| {
-                        ModuleError::InitializationError(format!(
-                            "Failed to load WASM module: {e}"
-                        ))
+                        ModuleError::InitializationError(format!("Failed to load WASM module: {e}"))
                     })?;
-                let cli_spec = instance.cli_spec().unwrap_or_else(|| {
-                    crate::module::ipc::protocol::CliSpec {
-                        version: 1,
-                        name: module_name.to_string(),
-                        about: None,
-                        subcommands: vec![],
-                    }
-                });
-                let wasm_instance =
-                    Some(Arc::new(tokio::sync::Mutex::new(instance)));
+                let cli_spec =
+                    instance
+                        .cli_spec()
+                        .unwrap_or_else(|| crate::module::ipc::protocol::CliSpec {
+                            version: 1,
+                            name: module_name.to_string(),
+                            about: None,
+                            subcommands: vec![],
+                        });
+                let wasm_instance = Some(Arc::new(tokio::sync::Mutex::new(instance)));
 
                 if let Some(ref api_hub) = self.api_hub {
                     let permissions = Self::parse_permissions_from_metadata(&metadata);
@@ -1327,16 +1310,19 @@ impl ModuleManager {
             use crate::module::traits::EventType;
             for module in &discovered_modules {
                 let payload = EventPayload::ModuleDiscovered {
-                module_name: module.manifest.name.clone(),
-                version: module.manifest.version.clone(),
-                source: "filesystem".to_string(),
-            };
+                    module_name: module.manifest.name.clone(),
+                    version: module.manifest.version.clone(),
+                    source: "filesystem".to_string(),
+                };
                 if let Err(e) = self
                     .event_manager
                     .publish_event(EventType::ModuleDiscovered, payload)
                     .await
                 {
-                    warn!("Failed to publish ModuleDiscovered for {}: {}", module.manifest.name, e);
+                    warn!(
+                        "Failed to publish ModuleDiscovered for {}: {}",
+                        module.manifest.name, e
+                    );
                 }
             }
         }
@@ -1370,7 +1356,9 @@ impl ModuleManager {
         module_name: &str,
     ) -> Result<(), ModuleError> {
         let registry = self.module_registry.as_ref().ok_or_else(|| {
-            ModuleError::OperationError(crate::module::traits::module_error_msg::MODULE_REGISTRY_NOT_AVAILABLE.to_string())
+            ModuleError::OperationError(
+                crate::module::traits::module_error_msg::MODULE_REGISTRY_NOT_AVAILABLE.to_string(),
+            )
         })?;
 
         info!("Fetching module {} from registry", module_name);

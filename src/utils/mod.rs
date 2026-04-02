@@ -38,7 +38,8 @@ pub use option::{map_or_default, option_to_result, or_else, unwrap_or_default_wi
 pub use retry::{retry_async_with_backoff, retry_with_backoff, RetryConfig};
 pub use signal::{create_shutdown_receiver, wait_for_shutdown_signal};
 pub use time::{
-    current_timestamp, current_timestamp_duration, current_timestamp_millis, current_timestamp_nanos,
+    current_timestamp, current_timestamp_duration, current_timestamp_millis,
+    current_timestamp_nanos,
 };
 pub use timeout::{
     network_timeout_from_config, rpc_timeout_from_config, storage_timeout_from_config,

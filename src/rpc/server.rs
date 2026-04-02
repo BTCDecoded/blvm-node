@@ -1675,9 +1675,9 @@ mod tests {
         // Read response
         let mut response = vec![0u8; 4096];
         let n = tokio::time::timeout(RPC_CLIENT_READ_TIMEOUT, client.read(&mut response))
-        .await
-        .unwrap()
-        .unwrap();
+            .await
+            .unwrap()
+            .unwrap();
 
         let response_str = String::from_utf8_lossy(&response[..n]);
 

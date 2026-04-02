@@ -98,7 +98,9 @@ impl NetworkManager {
     /// Start periodic task to clean up expired bans
     pub(crate) fn start_ban_cleanup_task(&self) {
         let ban_list = Arc::clone(self.ban_list());
-        let secs = self.background_task_config().ban_cleanup_outer_interval_secs;
+        let secs = self
+            .background_task_config()
+            .ban_cleanup_outer_interval_secs;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
             loop {
@@ -138,7 +140,8 @@ impl NetworkManager {
         let timeout_secs = bg.chain_sync_timeout_secs;
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
 
             loop {
                 interval.tick().await;
@@ -207,8 +210,7 @@ impl NetworkManager {
         let secs = self.background_task_config().peer_eviction_interval_secs;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(secs));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
             use crate::network::peer_manager::MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT;
 
             loop {
@@ -270,11 +272,12 @@ impl NetworkManager {
     pub(crate) fn start_ping_timeout_check_task(&self) {
         let peer_manager = Arc::clone(self.peer_manager_mutex());
         let peer_tx = self.peer_tx().clone();
-        let secs = self.background_task_config().ping_timeout_check_interval_secs;
+        let secs = self
+            .background_task_config()
+            .ping_timeout_check_interval_secs;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(secs));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
 
             loop {
                 interval.tick().await;
@@ -304,8 +307,7 @@ impl NetworkManager {
         let secs = self.background_task_config().ping_interval_secs;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(secs));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
 
             loop {
                 interval.tick().await;
@@ -344,13 +346,14 @@ impl NetworkManager {
         let tcp_transport = self.tcp_transport().clone();
         let ban_list = Arc::clone(self.ban_list());
         let persistent_peers = Arc::clone(self.persistent_peers_lock());
-        let secs = self.background_task_config().peer_reconnection_interval_secs;
+        let secs = self
+            .background_task_config()
+            .peer_reconnection_interval_secs;
         let connect_timeout = self.request_timeout_config().connect_timeout_secs;
         let max_msg_len = self.protocol_limits().max_protocol_message_length;
 
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(secs));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
 
             loop {
                 interval.tick().await;
@@ -383,8 +386,7 @@ impl NetworkManager {
 
                 if try_persistent_only {
                     queue.retain(|addr, (_, last_attempt, _)| {
-                        now.saturating_sub(*last_attempt) < 3600
-                            || persistent_set.contains(addr)
+                        now.saturating_sub(*last_attempt) < 3600 || persistent_set.contains(addr)
                     });
                 }
 
@@ -493,9 +495,7 @@ impl NetworkManager {
                                 );
 
                                 let mut pm = peer_manager_clone.lock().await;
-                                if let Err(e) =
-                                    pm.add_peer(TransportAddr::Tcp(addr_clone), peer)
-                                {
+                                if let Err(e) = pm.add_peer(TransportAddr::Tcp(addr_clone), peer) {
                                     warn!("Failed to add reconnected peer {}: {}", addr_clone, e);
                                     let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(
                                         TransportAddr::Tcp(addr_clone),

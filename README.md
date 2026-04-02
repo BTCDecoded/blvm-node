@@ -1,5 +1,10 @@
 # Bitcoin Commons Node
 
+[![crates.io](https://img.shields.io/crates/v/blvm-node.svg)](https://crates.io/crates/blvm-node)
+[![docs.rs](https://docs.rs/blvm-node/badge.svg)](https://docs.rs/blvm-node)
+[![CI](https://github.com/BTCDecoded/blvm-node/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/BTCDecoded/blvm-node/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 Minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for consensus decisions.
 
 > **📚 Comprehensive Documentation**: See [blvm-docs](../blvm-docs/) for complete system documentation.  
@@ -185,7 +190,14 @@ Additional hardening required for production mainnet use.
 
 ## Dependencies
 
-- **blvm-consensus**: All consensus logic (git dependency)
+**Monorepo vs crates.io:** In-tree builds use **path** dependencies for `blvm-protocol`, `blvm-consensus`, `blvm-muhash`, and optional `blvm-spec-lock`. From [crates.io](https://crates.io/crates/blvm-node):
+
+```toml
+[dependencies]
+blvm-node = "0.1.0"
+```
+
+- **blvm-consensus**: All consensus logic (via `blvm-protocol` or direct optional dep)
 - **tokio**: Async runtime for networking
 - **serde**: Serialization
 - **anyhow/thiserror**: Error handling

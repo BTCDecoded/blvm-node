@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use crate::module::api::events::EventManager;
 use crate::module::api::hub::ModuleApiHub;
 use crate::module::ipc::protocol::{
-    CliSpec, InvocationMessage, InvocationResultMessage, InvocationResultPayload,
-    InvocationType, ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
+    CliSpec, InvocationMessage, InvocationResultMessage, InvocationResultPayload, InvocationType,
+    ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
 use crate::module::traits::{module_error_msg, EventType, ModuleError, NodeAPI};
 use tokio::sync::oneshot;
@@ -72,21 +72,17 @@ pub struct ModuleIpcServer {
     /// CLI specs (module_id -> spec) registered by modules on connect
     cli_registry: Arc<tokio::sync::RwLock<HashMap<String, CliSpec>>>,
     /// Outgoing channel per module (for invoke_cli; module_id -> tx)
-    outgoing_tx_by_module: Arc<tokio::sync::RwLock<HashMap<String, mpsc::UnboundedSender<bytes::Bytes>>>>,
+    outgoing_tx_by_module:
+        Arc<tokio::sync::RwLock<HashMap<String, mpsc::UnboundedSender<bytes::Bytes>>>>,
     /// Pending CLI/RPC invocations (correlation_id -> response sender)
-    pending_invocations: Arc<
-        tokio::sync::Mutex<
-            HashMap<u64, oneshot::Sender<InvocationResultMessage>>,
-        >,
-    >,
+    pending_invocations:
+        Arc<tokio::sync::Mutex<HashMap<u64, oneshot::Sender<InvocationResultMessage>>>>,
     /// Pending RPC responses from IpcRpcHandler (correlation_id -> response sender)
     rpc_pending: Arc<
         tokio::sync::Mutex<
             HashMap<
                 u64,
-                mpsc::UnboundedSender<
-                    Result<serde_json::Value, crate::rpc::errors::RpcError>,
-                >,
+                mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
             >,
         >,
     >,
@@ -240,21 +236,18 @@ impl ModuleIpcServer {
                 ModuleError::OperationError(module_error_msg::MODULE_CONNECTION_CLOSED.to_string())
             })?;
 
-            let result = tokio::time::timeout(
-                tokio::time::Duration::from_secs(60),
-                rx,
-            )
-            .await
-            .map_err(|_| {
-                ModuleError::OperationError(
-                    module_error_msg::MODULE_DID_NOT_RESPOND_CLI_60S.to_string(),
-                )
-            })?
-            .map_err(|_| {
-                ModuleError::OperationError(
-                    module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
-                )
-            })?;
+            let result = tokio::time::timeout(tokio::time::Duration::from_secs(60), rx)
+                .await
+                .map_err(|_| {
+                    ModuleError::OperationError(
+                        module_error_msg::MODULE_DID_NOT_RESPOND_CLI_60S.to_string(),
+                    )
+                })?
+                .map_err(|_| {
+                    ModuleError::OperationError(
+                        module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
+                    )
+                })?;
 
             if !result.success {
                 return Err(ModuleError::Cli(
@@ -325,21 +318,18 @@ impl ModuleIpcServer {
                 ModuleError::OperationError(module_error_msg::MODULE_CONNECTION_CLOSED.to_string())
             })?;
 
-            let result = tokio::time::timeout(
-                tokio::time::Duration::from_secs(60),
-                rx,
-            )
-            .await
-            .map_err(|_| {
-                ModuleError::OperationError(
-                    module_error_msg::MODULE_DID_NOT_RESPOND_RPC_60S.to_string(),
-                )
-            })?
-            .map_err(|_| {
-                ModuleError::OperationError(
-                    module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
-                )
-            })?;
+            let result = tokio::time::timeout(tokio::time::Duration::from_secs(60), rx)
+                .await
+                .map_err(|_| {
+                    ModuleError::OperationError(
+                        module_error_msg::MODULE_DID_NOT_RESPOND_RPC_60S.to_string(),
+                    )
+                })?
+                .map_err(|_| {
+                    ModuleError::OperationError(
+                        module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
+                    )
+                })?;
 
             if !result.success {
                 return Err(ModuleError::OperationError(
@@ -427,7 +417,8 @@ impl ModuleIpcServer {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     debug!("New module connection");
-                    self.handle_connection(stream, Arc::clone(&node_api)).await?;
+                    self.handle_connection(stream, Arc::clone(&node_api))
+                        .await?;
                 }
                 Err(e) => error!("Failed to accept module connection: {}", e),
             }
@@ -458,12 +449,17 @@ impl ModuleIpcServer {
                 .await
                 .map_err(|e| ModuleError::IpcError(format!("Failed to connect pipe: {e}")))?;
             debug!("New module connection (named pipe)");
-            self.handle_connection(server, Arc::clone(&node_api)).await?;
+            self.handle_connection(server, Arc::clone(&node_api))
+                .await?;
         }
     }
 
     /// Handle a new module connection (generic over stream type)
-    async fn handle_connection<S, A>(&mut self, stream: S, node_api: Arc<A>) -> Result<(), ModuleError>
+    async fn handle_connection<S, A>(
+        &mut self,
+        stream: S,
+        node_api: Arc<A>,
+    ) -> Result<(), ModuleError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         A: NodeAPI + Send + Sync,
@@ -660,23 +656,14 @@ impl ModuleIpcServer {
             while let Some((correlation_id, method, params, response_tx)) =
                 rpc_request_rx.recv().await
             {
-                rpc_pending
-                    .lock()
-                    .await
-                    .insert(correlation_id, response_tx);
+                rpc_pending.lock().await.insert(correlation_id, response_tx);
 
                 let invocation = InvocationMessage {
                     correlation_id,
-                    invocation_type: InvocationType::Rpc {
-                        method,
-                        params,
-                    },
+                    invocation_type: InvocationType::Rpc { method, params },
                 };
                 if let Ok(bytes) = bincode::serialize(&ModuleMessage::Invocation(invocation)) {
-                    if outgoing_tx_for_rpc
-                        .send(bytes::Bytes::from(bytes))
-                        .is_err()
-                    {
+                    if outgoing_tx_for_rpc.send(bytes::Bytes::from(bytes)).is_err() {
                         break; // Connection closed
                     }
                 }
@@ -1176,7 +1163,7 @@ impl ModuleIpcServer {
                 // The module would need to send a "timer_fire" request when the timer should fire
                 // For now, return an error indicating this needs a callback mechanism
                 Err(ModuleError::OperationError(
-                    module_error_msg::TIMER_REGISTRATION_REQUIRES_CALLBACK_IPC.to_string()
+                    module_error_msg::TIMER_REGISTRATION_REQUIRES_CALLBACK_IPC.to_string(),
                 ))
             }
             RequestPayload::CancelTimer { timer_id: _ } => {
@@ -1190,7 +1177,7 @@ impl ModuleIpcServer {
                 // Note: Task callbacks cannot be serialized over IPC
                 // Similar to timers, this needs a different approach
                 Err(ModuleError::OperationError(
-                    module_error_msg::TASK_SCHEDULING_REQUIRES_CALLBACK_IPC.to_string()
+                    module_error_msg::TASK_SCHEDULING_REQUIRES_CALLBACK_IPC.to_string(),
                 ))
             }
             // Metrics and Telemetry

@@ -14,7 +14,9 @@ use crate::node::mempool::MempoolManager;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 use crate::rpc::errors::{RpcError, RpcErrorCode, RpcResult};
-use crate::rpc::params::{param_array, param_bool_default, param_f64, param_str, param_u64_default};
+use crate::rpc::params::{
+    param_array, param_bool_default, param_f64, param_str, param_u64_default,
+};
 use crate::storage::Storage;
 use crate::utils::{storage_timeout_from_config, with_custom_timeout};
 use hex;
@@ -160,8 +162,8 @@ impl RawTxRpc {
         )?;
 
         // Parse optional parameters
-        let maxfeerate_btc_per_kvb: Option<f64> =
-            param_f64(params, 1).or_else(|| param_str(params, 1).and_then(|s| s.parse::<f64>().ok()));
+        let maxfeerate_btc_per_kvb: Option<f64> = param_f64(params, 1)
+            .or_else(|| param_str(params, 1).and_then(|s| s.parse::<f64>().ok()));
 
         let allowhighfees: bool = param_bool_default(params, 2, false);
 
@@ -1131,35 +1133,41 @@ impl RawTxRpc {
 
             // Check storage with timeout to prevent hanging (wrap sync operations)
             let timeout_dur = self.storage_timeout();
-            match with_custom_timeout(async {
-                tokio::task::spawn_blocking({
-                    let storage = storage.clone();
-                    move || storage.utxos().get_utxo(&outpoint)
-                })
-                .await
-            }, timeout_dur)
+            match with_custom_timeout(
+                async {
+                    tokio::task::spawn_blocking({
+                        let storage = storage.clone();
+                        move || storage.utxos().get_utxo(&outpoint)
+                    })
+                    .await
+                },
+                timeout_dur,
+            )
             .await
             {
                 Ok(Ok(Ok(Some(utxo)))) => {
                     // UTXO found - get chain info with timeout
                     let timeout_dur2 = self.storage_timeout();
-                    let (best_hash, tip_height) = match with_custom_timeout(async {
-                        tokio::task::spawn_blocking({
-                            let storage = storage.clone();
-                            move || -> Result<([u8; 32], u64), anyhow::Error> {
-                                let best_hash = storage
-                                    .chain()
-                                    .get_tip_hash()
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or([0u8; 32]);
-                                let tip_height =
-                                    storage.chain().get_height().ok().flatten().unwrap_or(0);
-                                Ok((best_hash, tip_height))
-                            }
-                        })
-                        .await
-                    }, timeout_dur2)
+                    let (best_hash, tip_height) = match with_custom_timeout(
+                        async {
+                            tokio::task::spawn_blocking({
+                                let storage = storage.clone();
+                                move || -> Result<([u8; 32], u64), anyhow::Error> {
+                                    let best_hash = storage
+                                        .chain()
+                                        .get_tip_hash()
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or([0u8; 32]);
+                                    let tip_height =
+                                        storage.chain().get_height().ok().flatten().unwrap_or(0);
+                                    Ok((best_hash, tip_height))
+                                }
+                            })
+                            .await
+                        },
+                        timeout_dur2,
+                    )
                     .await
                     {
                         Ok(Ok(Ok((hash, height)))) => (hash, height),
@@ -1169,39 +1177,42 @@ impl RawTxRpc {
                     // Find block height containing this transaction (with timeout protection)
                     // Use blocking task with timeout to prevent hanging
                     let timeout_dur3 = self.storage_timeout();
-                    let tx_height = match with_custom_timeout(async {
-                        tokio::task::spawn_blocking({
-                            let storage = storage.clone();
-                            let outpoint_hash = outpoint.hash;
-                            let search_limit = tip_height.min(1000); // Limit search
-                            move || -> Result<Option<u64>, anyhow::Error> {
-                                let mut tx_height: Option<u64> = None;
-                                for h in 0..=search_limit {
-                                    if let Ok(Some(block_hash)) =
-                                        storage.blocks().get_hash_by_height(h)
-                                    {
-                                        if let Ok(Some(block)) =
-                                            storage.blocks().get_block(&block_hash)
+                    let tx_height = match with_custom_timeout(
+                        async {
+                            tokio::task::spawn_blocking({
+                                let storage = storage.clone();
+                                let outpoint_hash = outpoint.hash;
+                                let search_limit = tip_height.min(1000); // Limit search
+                                move || -> Result<Option<u64>, anyhow::Error> {
+                                    let mut tx_height: Option<u64> = None;
+                                    for h in 0..=search_limit {
+                                        if let Ok(Some(block_hash)) =
+                                            storage.blocks().get_hash_by_height(h)
                                         {
-                                            for tx in &block.transactions {
-                                                use blvm_protocol::block::calculate_tx_id;
-                                                let txid = calculate_tx_id(tx);
-                                                if txid == outpoint_hash {
-                                                    tx_height = Some(h);
-                                                    break;
+                                            if let Ok(Some(block)) =
+                                                storage.blocks().get_block(&block_hash)
+                                            {
+                                                for tx in &block.transactions {
+                                                    use blvm_protocol::block::calculate_tx_id;
+                                                    let txid = calculate_tx_id(tx);
+                                                    if txid == outpoint_hash {
+                                                        tx_height = Some(h);
+                                                        break;
+                                                    }
                                                 }
                                             }
-                                        }
-                                        if tx_height.is_some() {
-                                            break;
+                                            if tx_height.is_some() {
+                                                break;
+                                            }
                                         }
                                     }
+                                    Ok(tx_height)
                                 }
-                                Ok(tx_height)
-                            }
-                        })
-                        .await
-                    }, timeout_dur3)
+                            })
+                            .await
+                        },
+                        timeout_dur3,
+                    )
                     .await
                     {
                         Ok(Ok(Ok(height))) => height,
@@ -1848,12 +1859,8 @@ impl RawTxRpc {
             ));
         }
 
-        let tx_bytes = Self::serialize_createrawtransaction_bytes(
-            version,
-            tx_inputs,
-            tx_outputs,
-            locktime,
-        )?;
+        let tx_bytes =
+            Self::serialize_createrawtransaction_bytes(version, tx_inputs, tx_outputs, locktime)?;
         // Bitcoin Core returns the raw transaction as a single hex string.
         Ok(Value::String(hex::encode(&tx_bytes)))
     }
@@ -1861,30 +1868,28 @@ impl RawTxRpc {
 
 /// Build Transaction for createrawtransaction; production uses SmallVec, non-production uses Vec.
 macro_rules! createrawtransaction_tx {
-    ($version:expr, $inputs:expr, $outputs:expr, $locktime:expr) => {
+    ($version:expr, $inputs:expr, $outputs:expr, $locktime:expr) => {{
+        use blvm_protocol::Transaction;
+        #[cfg(feature = "production")]
         {
-            use blvm_protocol::Transaction;
-            #[cfg(feature = "production")]
-            {
-                use smallvec::SmallVec;
-                Transaction {
-                    version: $version,
-                    inputs: SmallVec::from_vec($inputs),
-                    outputs: SmallVec::from_vec($outputs),
-                    lock_time: $locktime,
-                }
-            }
-            #[cfg(not(feature = "production"))]
-            {
-                Transaction {
-                    version: $version,
-                    inputs: $inputs,
-                    outputs: $outputs,
-                    lock_time: $locktime,
-                }
+            use smallvec::SmallVec;
+            Transaction {
+                version: $version,
+                inputs: SmallVec::from_vec($inputs),
+                outputs: SmallVec::from_vec($outputs),
+                lock_time: $locktime,
             }
         }
-    };
+        #[cfg(not(feature = "production"))]
+        {
+            Transaction {
+                version: $version,
+                inputs: $inputs,
+                outputs: $outputs,
+                lock_time: $locktime,
+            }
+        }
+    }};
 }
 
 impl RawTxRpc {

@@ -7,10 +7,10 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::network::protocol::cmd;
-use crate::utils::current_timestamp;
 use super::transport::{TransportAddr, TransportConnection};
 use super::NetworkMessage;
+use crate::network::protocol::cmd;
+use crate::utils::current_timestamp;
 
 /// Peer connection state
 ///

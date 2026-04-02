@@ -44,7 +44,11 @@ async fn test_collect_results() {
     let results = vec![
         ignore_error(|| async { Ok::<i32, String>(1) }, "test (0)").await,
         ignore_error(|| async { Ok::<i32, String>(2) }, "test (1)").await,
-        ignore_error(|| async { Err::<i32, String>("error".to_string()) }, "test (2)").await,
+        ignore_error(
+            || async { Err::<i32, String>("error".to_string()) },
+            "test (2)",
+        )
+        .await,
         ignore_error(|| async { Ok::<i32, String>(4) }, "test (3)").await,
     ];
 

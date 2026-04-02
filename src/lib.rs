@@ -54,7 +54,7 @@ pub mod utils;
 #[cfg(feature = "production")]
 pub mod validation;
 #[cfg(feature = "zmq")]
-extern crate zeromq;  // zeromq = { package = "zmq" } in Cargo.toml
+extern crate zeromq; // zeromq = { package = "zmq" } in Cargo.toml
 #[cfg(feature = "zmq")]
 pub mod zmq;
 

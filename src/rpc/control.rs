@@ -12,9 +12,9 @@
 use crate::module::manager::ModuleManager;
 use crate::module::registry::discovery::ModuleDiscovery;
 use crate::rpc::cache::ThreadLocalTimedCache;
-use crate::utils::{CACHE_REFRESH_MEMORY, CACHE_REFRESH_UPTIME};
 use crate::rpc::errors::{RpcError, RpcResult};
 use crate::rpc::params::param_str;
+use crate::utils::{CACHE_REFRESH_MEMORY, CACHE_REFRESH_UPTIME};
 use serde_json::{json, Number, Value};
 use std::sync::Arc;
 use std::time::Instant;
@@ -147,12 +147,8 @@ impl ControlRpc {
         debug!("RPC: uptime");
 
         let start_time = self.start_time;
-        let uptime = CACHED_UPTIME.with(|c| {
-            c.get_or_refresh(
-                CACHE_REFRESH_UPTIME,
-                || start_time.elapsed().as_secs(),
-            )
-        });
+        let uptime = CACHED_UPTIME
+            .with(|c| c.get_or_refresh(CACHE_REFRESH_UPTIME, || start_time.elapsed().as_secs()));
         Ok(Value::Number(Number::from(uptime)))
     }
 
@@ -293,10 +289,9 @@ impl ControlRpc {
             .module_manager
             .as_ref()
             .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
-        let name = params
-            .get(0)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError::invalid_params("loadmodule requires module name".to_string()))?;
+        let name = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+            RpcError::invalid_params("loadmodule requires module name".to_string())
+        })?;
         let mut manager = mgr.lock().await;
         let discovery = ModuleDiscovery::new(manager.modules_dir());
         let discovered = discovery
@@ -327,10 +322,9 @@ impl ControlRpc {
             .module_manager
             .as_ref()
             .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
-        let name = params
-            .get(0)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError::invalid_params("unloadmodule requires module name".to_string()))?;
+        let name = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+            RpcError::invalid_params("unloadmodule requires module name".to_string())
+        })?;
         let mut manager = mgr.lock().await;
         manager
             .unload_module(name)
@@ -347,10 +341,9 @@ impl ControlRpc {
             .module_manager
             .as_ref()
             .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
-        let name = params
-            .get(0)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError::invalid_params("reloadmodule requires module name".to_string()))?;
+        let name = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+            RpcError::invalid_params("reloadmodule requires module name".to_string())
+        })?;
         let mut manager = mgr.lock().await;
         let discovery = ModuleDiscovery::new(manager.modules_dir());
         let discovered = discovery
@@ -428,14 +421,12 @@ impl ControlRpc {
         let ipc_server = manager
             .ipc_server()
             .ok_or_else(|| RpcError::internal_error("IPC server not available".to_string()))?;
-        let module_name = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("runmodulecli requires module_name".to_string()))?;
-        let subcommand = params
-            .get(1)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("runmodulecli requires subcommand".to_string()))?;
+        let module_name = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
+            RpcError::invalid_params("runmodulecli requires module_name".to_string())
+        })?;
+        let subcommand = params.get(1).and_then(|p| p.as_str()).ok_or_else(|| {
+            RpcError::invalid_params("runmodulecli requires subcommand".to_string())
+        })?;
         let args: Vec<String> = params
             .as_array()
             .map(|a| {

@@ -44,23 +44,20 @@ impl ModuleDiscovery {
                 "Modules directory does not exist, creating: {:?}",
                 self.modules_dir
             );
-            fs::create_dir_all(&self.modules_dir).map_err(|e| {
-                ModuleError::op_err("Failed to create modules directory", e)
-            })?;
+            fs::create_dir_all(&self.modules_dir)
+                .map_err(|e| ModuleError::op_err("Failed to create modules directory", e))?;
             return Ok(Vec::new());
         }
 
         let mut modules = Vec::new();
 
         // Scan directory for module subdirectories
-        let entries = fs::read_dir(&self.modules_dir).map_err(|e| {
-            ModuleError::op_err("Failed to read modules directory", e)
-        })?;
+        let entries = fs::read_dir(&self.modules_dir)
+            .map_err(|e| ModuleError::op_err("Failed to read modules directory", e))?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| {
-                ModuleError::op_err("Failed to read directory entry", e)
-            })?;
+            let entry =
+                entry.map_err(|e| ModuleError::op_err("Failed to read directory entry", e))?;
 
             let path = entry.path();
             if !path.is_dir() {
@@ -162,10 +159,7 @@ impl ModuleDiscovery {
                 }
 
                 // Check if executable (on Unix) — skip for .wasm (loaded by wasmtime, not exec'd)
-                let is_wasm = candidate
-                    .extension()
-                    .map(|e| e == "wasm")
-                    .unwrap_or(false);
+                let is_wasm = candidate.extension().map(|e| e == "wasm").unwrap_or(false);
                 if is_wasm {
                     return Ok(canonical_binary);
                 }

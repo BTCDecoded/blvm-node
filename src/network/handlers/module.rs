@@ -53,14 +53,24 @@ impl NetworkManager {
         }
 
         let registry = self.module_registry().lock().await.as_ref().map(Arc::clone);
-        let payment_processor = self.payment_processor().lock().await.as_ref().map(Arc::clone);
+        let payment_processor = self
+            .payment_processor()
+            .lock()
+            .await
+            .as_ref()
+            .map(Arc::clone);
         let payment_state_machine = self
             .payment_state_machine()
             .lock()
             .await
             .as_ref()
             .map(Arc::clone);
-        let encryption = self.module_encryption().lock().await.as_ref().map(Arc::clone);
+        let encryption = self
+            .module_encryption()
+            .lock()
+            .await
+            .as_ref()
+            .map(Arc::clone);
         let modules_dir = self.modules_dir().lock().await.clone();
         let node_script = self.node_payment_script().lock().await.clone();
 

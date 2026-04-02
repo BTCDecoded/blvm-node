@@ -157,7 +157,10 @@ impl NetworkManager {
             }
         }
 
-        info!("Connected to {} new Iroh peers from address database", connected);
+        info!(
+            "Connected to {} new Iroh peers from address database",
+            connected
+        );
         Ok(connected)
     }
 
@@ -278,7 +281,10 @@ impl NetworkManager {
         }
 
         if !config.persistent_peers.is_empty() {
-            if let Err(e) = self.connect_persistent_peers(&config.persistent_peers).await {
+            if let Err(e) = self
+                .connect_persistent_peers(&config.persistent_peers)
+                .await
+            {
                 warn!("Failed to connect to some persistent peers: {}", e);
             }
         }

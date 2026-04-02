@@ -74,7 +74,10 @@ async fn test_fibre_block_assembly() {
         }
     }
     let assembled = assembled.expect("Block should assemble from all chunks");
-    assert_eq!(assembled.header.prev_block_hash, block.header.prev_block_hash);
+    assert_eq!(
+        assembled.header.prev_block_hash,
+        block.header.prev_block_hash
+    );
     assert_eq!(assembled.header.merkle_root, block.header.merkle_root);
 }
 
@@ -92,7 +95,10 @@ async fn test_fibre_fec_recovery() {
     let block = create_test_block();
 
     let encoded = relay.encode_block(block.clone()).unwrap();
-    assert!(encoded.chunk_count >= 2, "Need multiple chunks for FEC test");
+    assert!(
+        encoded.chunk_count >= 2,
+        "Need multiple chunks for FEC test"
+    );
 
     // Drop first data chunk, keep parity chunks - FEC should recover
     let data_chunks = encoded.data_chunks as usize;
@@ -113,7 +119,10 @@ async fn test_fibre_fec_recovery() {
         }
     }
     let assembled = assembled.expect("FEC should recover block with 1 missing data chunk");
-    assert_eq!(assembled.header.prev_block_hash, block.header.prev_block_hash);
+    assert_eq!(
+        assembled.header.prev_block_hash,
+        block.header.prev_block_hash
+    );
 }
 
 #[tokio::test]
@@ -203,12 +212,21 @@ async fn test_fibre_two_node_block_relay() {
 
     // Node B: bind first (port 0 = OS assigns)
     let mut relay_b = FibreRelay::new();
-    let chunk_rx_b = relay_b.initialize_udp("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let relay_b_addr = relay_b.udp_local_addr().await.expect("B should have UDP transport");
+    let chunk_rx_b = relay_b
+        .initialize_udp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let relay_b_addr = relay_b
+        .udp_local_addr()
+        .await
+        .expect("B should have UDP transport");
 
     // Node A: bind, register B, encode and send
     let mut relay_a = FibreRelay::new();
-    relay_a.initialize_udp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    relay_a
+        .initialize_udp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
     relay_a.register_fibre_peer("node_b".to_string(), Some(relay_b_addr));
 
     let encoded = relay_a.encode_block(block.clone()).unwrap();

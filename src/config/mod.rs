@@ -125,8 +125,12 @@ where
                         "module_configs" => module_configs = map.next_value().unwrap_or_default(),
                         "watch_enabled" => watch_enabled = map.next_value().unwrap_or(true),
                         "watch_auto_load" => watch_auto_load = map.next_value().unwrap_or(false),
-                        "watch_auto_unload" => watch_auto_unload = map.next_value().unwrap_or(false),
-                        _ => { let _: toml::Value = map.next_value()?; }
+                        "watch_auto_unload" => {
+                            watch_auto_unload = map.next_value().unwrap_or(false)
+                        }
+                        _ => {
+                            let _: toml::Value = map.next_value()?;
+                        }
                     }
                 } else {
                     // [modules.<name>] - per-module override table (e.g. [modules.selective-sync])
@@ -158,8 +162,15 @@ where
 
 /// Known keys in [modules] section (not per-module config tables)
 const MODULE_CONFIG_KNOWN_KEYS: &[&str] = &[
-    "enabled", "modules_dir", "data_dir", "socket_dir", "enabled_modules",
-    "module_configs", "watch_enabled", "watch_auto_load", "watch_auto_unload",
+    "enabled",
+    "modules_dir",
+    "data_dir",
+    "socket_dir",
+    "enabled_modules",
+    "module_configs",
+    "watch_enabled",
+    "watch_auto_load",
+    "watch_auto_unload",
 ];
 
 /// Module system configuration
@@ -804,7 +815,11 @@ fn expand_tilde_path(s: &str) -> String {
     }
     if s.starts_with("~/") || s.starts_with("~\\") {
         if let Some(home) = dirs::home_dir() {
-            let rest = if s.starts_with("~/") { &s[2..] } else { &s[2..] };
+            let rest = if s.starts_with("~/") {
+                &s[2..]
+            } else {
+                &s[2..]
+            };
             return home.join(rest).to_string_lossy().into_owned();
         }
     }
@@ -1030,25 +1045,25 @@ impl NodeConfig {
     /// Maximum RPC/REST request body size in bytes.
     /// ENV BLVM_RPC_MAX_REQUEST_SIZE_BYTES overrides config.
     pub fn max_request_size_bytes(&self) -> usize {
-        crate::utils::env_int::<usize>("BLVM_RPC_MAX_REQUEST_SIZE_BYTES")
-            .unwrap_or_else(|| {
-                self.rpc
-                    .as_ref()
-                    .map(|r| r.max_request_size_bytes)
-                    .unwrap_or(1_048_576)
-            })
+        crate::utils::env_int::<usize>("BLVM_RPC_MAX_REQUEST_SIZE_BYTES").unwrap_or_else(|| {
+            self.rpc
+                .as_ref()
+                .map(|r| r.max_request_size_bytes)
+                .unwrap_or(1_048_576)
+        })
     }
 
     /// Max RPC connections per IP per minute.
     /// ENV BLVM_RPC_MAX_CONNECTIONS_PER_IP_PER_MINUTE overrides config.
     pub fn max_connections_per_ip_per_minute(&self) -> u32 {
-        crate::utils::env_int::<u32>("BLVM_RPC_MAX_CONNECTIONS_PER_IP_PER_MINUTE")
-            .unwrap_or_else(|| {
+        crate::utils::env_int::<u32>("BLVM_RPC_MAX_CONNECTIONS_PER_IP_PER_MINUTE").unwrap_or_else(
+            || {
                 self.rpc
                     .as_ref()
                     .map(|r| r.max_connections_per_ip_per_minute)
                     .unwrap_or(10)
-            })
+            },
+        )
     }
 
     /// When auth disabled, still apply IP rate limiting.
@@ -1067,49 +1082,43 @@ impl NodeConfig {
     /// IP rate limit burst when auth disabled.
     /// ENV BLVM_RPC_IP_RATE_LIMIT_BURST overrides config.
     pub fn rpc_ip_rate_limit_burst(&self) -> u32 {
-        crate::utils::env_int::<u32>("BLVM_RPC_IP_RATE_LIMIT_BURST")
-            .unwrap_or_else(|| {
-                self.rpc
-                    .as_ref()
-                    .map(|r| r.ip_rate_limit_burst)
-                    .unwrap_or(50)
-            })
+        crate::utils::env_int::<u32>("BLVM_RPC_IP_RATE_LIMIT_BURST").unwrap_or_else(|| {
+            self.rpc
+                .as_ref()
+                .map(|r| r.ip_rate_limit_burst)
+                .unwrap_or(50)
+        })
     }
 
     /// IP rate limit per second when auth disabled.
     /// ENV BLVM_RPC_IP_RATE_LIMIT_RATE overrides config.
     pub fn rpc_ip_rate_limit_rate(&self) -> u32 {
         crate::utils::env_int::<u32>("BLVM_RPC_IP_RATE_LIMIT_RATE")
-            .unwrap_or_else(|| {
-                self.rpc
-                    .as_ref()
-                    .map(|r| r.ip_rate_limit_rate)
-                    .unwrap_or(5)
-            })
+            .unwrap_or_else(|| self.rpc.as_ref().map(|r| r.ip_rate_limit_rate).unwrap_or(5))
     }
 
     /// Batch rate limit multiplier cap: min(batch_len, this) tokens consumed.
     /// ENV BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP overrides config.
     pub fn rpc_batch_rate_multiplier_cap(&self) -> u32 {
-        crate::utils::env_int::<u32>("BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP")
-            .unwrap_or_else(|| {
-                self.rpc
-                    .as_ref()
-                    .map(|r| r.batch_rate_multiplier_cap)
-                    .unwrap_or(10)
-            })
+        crate::utils::env_int::<u32>("BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP").unwrap_or_else(|| {
+            self.rpc
+                .as_ref()
+                .map(|r| r.batch_rate_multiplier_cap)
+                .unwrap_or(10)
+        })
     }
 
     /// Connection rate limit window in seconds.
     /// ENV BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS overrides config.
     pub fn rpc_connection_rate_limit_window_seconds(&self) -> u64 {
-        crate::utils::env_int::<u64>("BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS")
-            .unwrap_or_else(|| {
+        crate::utils::env_int::<u64>("BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS").unwrap_or_else(
+            || {
                 self.rpc
                     .as_ref()
                     .map(|r| r.connection_rate_limit_window_seconds)
                     .unwrap_or(60)
-            })
+            },
+        )
     }
 }
 

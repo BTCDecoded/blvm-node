@@ -102,20 +102,20 @@ impl ProcessSandbox {
         use std::ptr::null_mut;
 
         #[allow(unused_imports)]
+        use windows_sys::core::PCWSTR;
+        #[allow(unused_imports)]
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
         #[allow(unused_imports)]
         use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOBOBJECT_BASIC_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_BASIC_LIMIT_INFORMATION,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY,
         };
         #[allow(unused_imports)]
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
         };
-        #[allow(unused_imports)]
-        use windows_sys::core::PCWSTR;
 
         let job_name: Vec<u16> = format!("blvm-module-{}", pid)
             .encode_utf16()
@@ -125,7 +125,11 @@ impl ProcessSandbox {
         let job_handle = unsafe { CreateJobObjectW(null_mut(), PCWSTR(job_name.as_ptr())) };
 
         if job_handle == 0 || job_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-            warn!("Failed to create Windows job object for PID {}: {}", pid, std::io::Error::last_os_error());
+            warn!(
+                "Failed to create Windows job object for PID {}: {}",
+                pid,
+                std::io::Error::last_os_error()
+            );
             return Err(ModuleError::op_err(
                 "Failed to create job object",
                 std::io::Error::last_os_error(),
@@ -156,7 +160,11 @@ impl ProcessSandbox {
         };
 
         if result == 0 {
-            warn!("Failed to set job object limits for PID {}: {}", pid, std::io::Error::last_os_error());
+            warn!(
+                "Failed to set job object limits for PID {}: {}",
+                pid,
+                std::io::Error::last_os_error()
+            );
             return Err(ModuleError::op_err(
                 "Failed to set job limits",
                 std::io::Error::last_os_error(),
@@ -171,8 +179,14 @@ impl ProcessSandbox {
             )
         };
 
-        if process_handle == 0 || process_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-            warn!("Failed to open process {} for job assignment: {}", pid, std::io::Error::last_os_error());
+        if process_handle == 0
+            || process_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
+        {
+            warn!(
+                "Failed to open process {} for job assignment: {}",
+                pid,
+                std::io::Error::last_os_error()
+            );
             return Err(ModuleError::op_err(
                 "Failed to open process",
                 std::io::Error::last_os_error(),
@@ -180,17 +194,26 @@ impl ProcessSandbox {
         }
 
         let assign_result = unsafe { AssignProcessToJobObject(job_handle, process_handle) };
-        unsafe { CloseHandle(process_handle); }
+        unsafe {
+            CloseHandle(process_handle);
+        }
 
         if assign_result == 0 {
-            warn!("Failed to assign process {} to job object: {}", pid, std::io::Error::last_os_error());
+            warn!(
+                "Failed to assign process {} to job object: {}",
+                pid,
+                std::io::Error::last_os_error()
+            );
             return Err(ModuleError::op_err(
                 "Failed to assign process to job",
                 std::io::Error::last_os_error(),
             ));
         }
 
-        debug!("Applied Windows job object limits for PID {} (memory: {:?})", pid, limits.max_memory_bytes);
+        debug!(
+            "Applied Windows job object limits for PID {} (memory: {:?})",
+            pid, limits.max_memory_bytes
+        );
         Ok(())
     }
 
@@ -314,8 +337,9 @@ impl ProcessSandbox {
                         #[cfg(feature = "nix")]
                         {
                             use nix::sys::resource::{setrlimit, Resource};
-                            setrlimit(Resource::RLIMIT_NOFILE, soft_limit, hard_limit)
-                                .map_err(|e| ModuleError::op_err("Failed to set file descriptor limit", e))?;
+                            setrlimit(Resource::RLIMIT_NOFILE, soft_limit, hard_limit).map_err(
+                                |e| ModuleError::op_err("Failed to set file descriptor limit", e),
+                            )?;
                         }
                         #[cfg(not(feature = "nix"))]
                         {
@@ -332,8 +356,9 @@ impl ProcessSandbox {
                             use nix::sys::resource::{setrlimit, Resource};
                             let soft_limit = max_children as u64;
                             let hard_limit = max_children as u64;
-                            setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit)
-                                .map_err(|e| ModuleError::op_err("Failed to set process limit", e))?;
+                            setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit).map_err(
+                                |e| ModuleError::op_err("Failed to set process limit", e),
+                            )?;
                         }
                         #[cfg(not(feature = "nix"))]
                         {

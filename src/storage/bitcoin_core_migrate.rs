@@ -54,8 +54,12 @@ pub fn run_migrate_core(args: MigrateCoreArgs) -> Result<()> {
         anyhow::bail!("Invalid Bitcoin Core database format in {:?}", chainstate);
     }
 
-    std::fs::create_dir_all(&args.destination)
-        .with_context(|| format!("Failed to create destination directory {:?}", args.destination))?;
+    std::fs::create_dir_all(&args.destination).with_context(|| {
+        format!(
+            "Failed to create destination directory {:?}",
+            args.destination
+        )
+    })?;
 
     let migrator = Migrator::new(&args.source, &args.destination, args.network)?;
     migrator.migrate(args.verify)?;
@@ -240,9 +244,8 @@ impl Migrator {
             if hash_bytes.len() != 32 {
                 continue;
             }
-            let hash: Hash = TryFrom::try_from(hash_bytes.as_ref()).map_err(|_| {
-                anyhow::anyhow!("Invalid hash length in height_index")
-            })?;
+            let hash: Hash = TryFrom::try_from(hash_bytes.as_ref())
+                .map_err(|_| anyhow::anyhow!("Invalid hash length in height_index"))?;
 
             if let Ok(Some(block)) = reader.read_block(&hash) {
                 if blockstore.store_block(&block).is_err() {
@@ -252,7 +255,9 @@ impl Migrator {
                     );
                 } else {
                     count += 1;
-                    self.progress.blocks_migrated.store(count, Ordering::Relaxed);
+                    self.progress
+                        .blocks_migrated
+                        .store(count, Ordering::Relaxed);
 
                     if count % 1000 == 0 {
                         info!("Migrated {} / {} blocks...", count, total);

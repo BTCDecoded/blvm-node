@@ -48,7 +48,8 @@ pub(crate) async fn init_iroh_transport(nm: &NetworkManager) -> Result<()> {
         return Ok(());
     }
     let max_msg_len = nm.protocol_limits().max_protocol_message_length;
-    match crate::network::iroh_transport::IrohTransport::with_max_message_length(max_msg_len).await {
+    match crate::network::iroh_transport::IrohTransport::with_max_message_length(max_msg_len).await
+    {
         Ok(iroh) => {
             if let Ok(mut guard) = nm.iroh_transport().lock() {
                 *guard = Some(iroh);
@@ -100,8 +101,7 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
                                 ip
                             );
                             let ban_duration = dos_protection.ban_duration_seconds();
-                            let unban_timestamp = crate::utils::current_timestamp()
-                                + ban_duration;
+                            let unban_timestamp = crate::utils::current_timestamp() + ban_duration;
                             let mut ban_list_guard = ban_list.write().await;
                             ban_list_guard.insert(socket_addr, unban_timestamp);
                         }
@@ -166,7 +166,10 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
 
 /// Start Quinn listener if available
 #[cfg(feature = "quinn")]
-pub(crate) async fn start_quinn_listener(nm: &NetworkManager, listen_addr: SocketAddr) -> Result<()> {
+pub(crate) async fn start_quinn_listener(
+    nm: &NetworkManager,
+    listen_addr: SocketAddr,
+) -> Result<()> {
     let quinn_transport = nm
         .quinn_transport()
         .lock()
@@ -282,7 +285,10 @@ pub(crate) async fn start_quinn_listener(nm: &NetworkManager, listen_addr: Socke
 
 /// Start Iroh listener if available
 #[cfg(feature = "iroh")]
-pub(crate) async fn start_iroh_listener(nm: &NetworkManager, listen_addr: SocketAddr) -> Result<()> {
+pub(crate) async fn start_iroh_listener(
+    nm: &NetworkManager,
+    listen_addr: SocketAddr,
+) -> Result<()> {
     let iroh_transport = nm.iroh_transport().lock().ok().and_then(|g| g.as_ref());
 
     let Some(iroh_transport) = iroh_transport else {
@@ -340,25 +346,23 @@ pub(crate) async fn start_iroh_listener(nm: &NetworkManager, listen_addr: Socket
                             let socket_to_transport_clone = Arc::clone(&socket_to_transport);
                             let address_database_clone = Arc::clone(&address_database);
                             tokio::spawn(async move {
-                                let placeholder_socket =
-                                    if let TransportAddr::Iroh(ref key) = iroh_addr_clone {
-                                        let ip_bytes = if key.len() >= 4 {
-                                            [key[0], key[1], key[2], key[3]]
-                                        } else {
-                                            [0, 0, 0, 0]
-                                        };
-                                        let port = if key.len() >= 6 {
-                                            u16::from_be_bytes([
-                                                key[key.len() - 2],
-                                                key[key.len() - 1],
-                                            ])
-                                        } else {
-                                            0
-                                        };
-                                        std::net::SocketAddr::from((ip_bytes, port))
+                                let placeholder_socket = if let TransportAddr::Iroh(ref key) =
+                                    iroh_addr_clone
+                                {
+                                    let ip_bytes = if key.len() >= 4 {
+                                        [key[0], key[1], key[2], key[3]]
                                     } else {
-                                        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+                                        [0, 0, 0, 0]
                                     };
+                                    let port = if key.len() >= 6 {
+                                        u16::from_be_bytes([key[key.len() - 2], key[key.len() - 1]])
+                                    } else {
+                                        0
+                                    };
+                                    std::net::SocketAddr::from((ip_bytes, port))
+                                } else {
+                                    std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+                                };
 
                                 let peer = peer::Peer::from_transport_connection(
                                     conn,

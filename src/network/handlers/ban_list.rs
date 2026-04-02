@@ -4,7 +4,9 @@ use crate::network::ban_list_merging::{
     calculate_ban_list_hash, validate_ban_entry, verify_ban_list_hash,
 };
 use crate::network::network_manager::NetworkManager;
-use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress, ProtocolMessage, ProtocolParser};
+use crate::network::protocol::{
+    BanEntry, BanListMessage, NetworkAddress, ProtocolMessage, ProtocolParser,
+};
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::{IpAddr, SocketAddr};
@@ -106,9 +108,10 @@ impl NetworkManager {
             msg.ban_entries.len()
         );
 
-        if let Err(e) =
-            crate::network::replay_protection::ReplayProtection::validate_timestamp(msg.timestamp as i64, 86400)
-        {
+        if let Err(e) = crate::network::replay_protection::ReplayProtection::validate_timestamp(
+            msg.timestamp as i64,
+            86400,
+        ) {
             warn!(
                 "Replay protection: Invalid timestamp in BanList from {}: {}",
                 peer_addr, e

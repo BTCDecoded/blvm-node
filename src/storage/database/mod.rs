@@ -14,7 +14,6 @@ use std::sync::Arc;
 mod known_trees;
 pub use known_trees::KNOWN_TREE_NAMES;
 
-
 /// Database abstraction trait
 ///
 /// Provides a unified interface for key-value storage operations
@@ -762,16 +761,24 @@ pub(crate) mod redb_impl {
             use crate::storage::blockstore::block_height_row_key;
 
             let n = flush_order.len();
-            let mut blocks_ops: Vec<([u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN], usize)> =
-                Vec::with_capacity(n);
-            let mut headers_ops: Vec<([u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN], usize)> =
-                Vec::with_capacity(n);
-            let mut witness_ops: Vec<([u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN], usize)> =
-                Vec::new();
+            let mut blocks_ops: Vec<(
+                [u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN],
+                usize,
+            )> = Vec::with_capacity(n);
+            let mut headers_ops: Vec<(
+                [u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN],
+                usize,
+            )> = Vec::with_capacity(n);
+            let mut witness_ops: Vec<(
+                [u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN],
+                usize,
+            )> = Vec::new();
             let mut height_ops: Vec<([u8; 8], usize)> = Vec::with_capacity(n);
             let mut h2h_ops: Vec<(usize, [u8; 8])> = Vec::with_capacity(n);
-            let mut meta_ops: Vec<([u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN], usize)> =
-                Vec::with_capacity(n);
+            let mut meta_ops: Vec<(
+                [u8; crate::storage::blockstore::BLOCK_HEIGHT_ROW_KEY_LEN],
+                usize,
+            )> = Vec::with_capacity(n);
 
             for &i in flush_order {
                 let height = heights[i];
@@ -1140,28 +1147,62 @@ pub mod rocksdb_impl {
             let parallelism: i32 = storage_config
                 .and_then(|s| s.rocksdb.as_ref())
                 .and_then(|r| r.parallelism)
-                .or_else(|| std::env::var("BLVM_ROCKSDB_PARALLELISM").ok().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    std::env::var("BLVM_ROCKSDB_PARALLELISM")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                })
                 .unwrap_or(default_parallelism);
             opts.increase_parallelism(parallelism);
-            let max_open = if total_ram_gb >= 32 { 256 } else if total_ram_gb >= 24 { 192 } else { 64 };
+            let max_open = if total_ram_gb >= 32 {
+                256
+            } else if total_ram_gb >= 24 {
+                192
+            } else {
+                64
+            };
             opts.set_max_open_files(max_open);
 
             // Each compaction thread holds ~64MB of input/output buffers in memory.
             // 16 GB: 1+1=2 bg jobs to keep ~64 MB in compaction instead of ~128 MB.
-            let default_compactions = if total_ram_gb >= 32 { 4 } else if total_ram_gb >= 24 { 2 } else { 1 };
-            let default_flushes = if total_ram_gb >= 32 { 4 } else if total_ram_gb >= 24 { 2 } else { 1 };
+            let default_compactions = if total_ram_gb >= 32 {
+                4
+            } else if total_ram_gb >= 24 {
+                2
+            } else {
+                1
+            };
+            let default_flushes = if total_ram_gb >= 32 {
+                4
+            } else if total_ram_gb >= 24 {
+                2
+            } else {
+                1
+            };
             let rocksdb_cfg = storage_config.and_then(|s| s.rocksdb.as_ref());
             let max_compactions: i32 = rocksdb_cfg
                 .and_then(|r| r.max_background_compactions)
-                .or_else(|| std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS").ok().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                })
                 .unwrap_or(default_compactions);
             let max_flushes: i32 = rocksdb_cfg
                 .and_then(|r| r.max_background_flushes)
-                .or_else(|| std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES").ok().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                })
                 .unwrap_or(default_flushes);
             let level0_trigger: i32 = rocksdb_cfg
                 .map(|r| r.level0_compaction_trigger)
-                .or_else(|| std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER").ok().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                })
                 .unwrap_or(8);
             // RocksDB uses max_background_jobs; it allocates between flushes and compactions
             opts.set_max_background_jobs(max_compactions + max_flushes);
@@ -1209,7 +1250,11 @@ pub mod rocksdb_impl {
             // Precedence: config > ENV > default
             let db_write_buffer_mb: usize = rocksdb_cfg
                 .and_then(|r| r.write_buffer_mb)
-                .or_else(|| std::env::var("BLVM_ROCKSDB_WRITE_BUFFER_MB").ok().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    std::env::var("BLVM_ROCKSDB_WRITE_BUFFER_MB")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                })
                 .unwrap_or(default_write_buffer);
             opts.set_db_write_buffer_size(db_write_buffer_mb * 1024 * 1024);
 
@@ -1222,7 +1267,11 @@ pub mod rocksdb_impl {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_else(|| {
                     let from_config = storage_config.map(|s| s.dbcache_mb).unwrap_or(0);
-                    if from_config > 0 { from_config.min(default_block_cache) } else { default_block_cache }
+                    if from_config > 0 {
+                        from_config.min(default_block_cache)
+                    } else {
+                        default_block_cache
+                    }
                 });
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let cache = Cache::new_lru_cache(dbcache_bytes);
@@ -1231,7 +1280,11 @@ pub mod rocksdb_impl {
             block_opts.set_cache_index_and_filter_blocks(true);
             block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
             opts.set_block_based_table_factory(&block_opts);
-            tracing::info!("[ROCKSDB] block_cache={}MB (ram={}GB)", dbcache_mb, total_ram_gb);
+            tracing::info!(
+                "[ROCKSDB] block_cache={}MB (ram={}GB)",
+                dbcache_mb,
+                total_ram_gb
+            );
 
             // WriteBufferManager: hard cap on total memtable memory across ALL CFs.
             // allow_stall=true blocks writes instead of exceeding the cap.
@@ -1244,9 +1297,13 @@ pub mod rocksdb_impl {
             } else {
                 32
             };
-            let wbm = rocksdb::WriteBufferManager::new_write_buffer_manager(wbm_mb * 1024 * 1024, true);
+            let wbm =
+                rocksdb::WriteBufferManager::new_write_buffer_manager(wbm_mb * 1024 * 1024, true);
             opts.set_write_buffer_manager(&wbm);
-            tracing::info!("[ROCKSDB] WriteBufferManager: {}MB memtable cap (allow_stall=true)", wbm_mb);
+            tracing::info!(
+                "[ROCKSDB] WriteBufferManager: {}MB memtable cap (allow_stall=true)",
+                wbm_mb
+            );
 
             // Dedicated block cache for ibd_utxos/utxos CFs.
             // The shared `cache` above covers all other CFs. A separate UTXO cache prevents
@@ -1272,7 +1329,11 @@ pub mod rocksdb_impl {
                     }
                 });
             let utxo_cache = Cache::new_lru_cache(utxo_block_cache_mb * 1024 * 1024);
-            tracing::info!("[ROCKSDB] utxo_block_cache={}MB (dedicated, ram={}GB)", utxo_block_cache_mb, total_ram_gb);
+            tracing::info!(
+                "[ROCKSDB] utxo_block_cache={}MB (dedicated, ram={}GB)",
+                utxo_block_cache_mb,
+                total_ram_gb
+            );
 
             // Per-CF options for IBD-hot column families.
             let make_utxo_cf_opts = |uc: &Cache| -> Options {
@@ -1283,11 +1344,21 @@ pub mod rocksdb_impl {
                 bbo.set_cache_index_and_filter_blocks(true);
                 bbo.set_pin_l0_filter_and_index_blocks_in_cache(true);
                 o.set_block_based_table_factory(&bbo);
-                let wb = if total_ram_gb >= 32 { 256 } else if total_ram_gb >= 24 { 128 } else if total_ram_gb >= 16 { 8 } else { 4 };
+                let wb = if total_ram_gb >= 32 {
+                    256
+                } else if total_ram_gb >= 24 {
+                    128
+                } else if total_ram_gb >= 16 {
+                    8
+                } else {
+                    4
+                };
                 o.set_write_buffer_size(wb * 1024 * 1024);
                 o.set_max_write_buffer_number(2);
                 o.set_level_zero_file_num_compaction_trigger(12);
-                o.set_target_file_size_base(if total_ram_gb >= 32 { 128 } else { 64 } * 1024 * 1024);
+                o.set_target_file_size_base(
+                    if total_ram_gb >= 32 { 128 } else { 64 } * 1024 * 1024,
+                );
                 o.set_compression_type(rocksdb::DBCompressionType::Zstd);
                 o.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
                 o
@@ -1298,7 +1369,15 @@ pub mod rocksdb_impl {
                 bbo.set_block_cache(cache);
                 bbo.set_cache_index_and_filter_blocks(true);
                 o.set_block_based_table_factory(&bbo);
-                let wb = if total_ram_gb >= 32 { 64 } else if total_ram_gb >= 24 { 32 } else if total_ram_gb >= 16 { 8 } else { 4 };
+                let wb = if total_ram_gb >= 32 {
+                    64
+                } else if total_ram_gb >= 24 {
+                    32
+                } else if total_ram_gb >= 16 {
+                    8
+                } else {
+                    4
+                };
                 o.set_write_buffer_size(wb * 1024 * 1024);
                 o.set_level_zero_file_num_compaction_trigger(12);
                 o.set_compression_type(rocksdb::DBCompressionType::Zstd);
@@ -1308,7 +1387,9 @@ pub mod rocksdb_impl {
             let cf_opts_for = |name: &str| -> Options {
                 match name {
                     "ibd_utxos" | "utxos" => make_utxo_cf_opts(&utxo_cache),
-                    "blocks" | "headers" | "witnesses" | "height_index" => make_bulk_cf_opts(&cache),
+                    "blocks" | "headers" | "witnesses" | "height_index" => {
+                        make_bulk_cf_opts(&cache)
+                    }
                     _ => Options::default(),
                 }
             };
@@ -1406,22 +1487,18 @@ pub mod rocksdb_impl {
                 .db
                 .cf_handle("witnesses")
                 .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"witnesses\" not found"))?;
-            let cf_height = self
-                .db
-                .cf_handle("height_index")
-                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"height_index\" not found"))?;
-            let cf_h2h = self
-                .db
-                .cf_handle("hash_to_height")
-                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"hash_to_height\" not found"))?;
-            let cf_meta = self
-                .db
-                .cf_handle("block_metadata")
-                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"block_metadata\" not found"))?;
-            let cf_recent = self
-                .db
-                .cf_handle("recent_headers")
-                .ok_or_else(|| anyhow::anyhow!("RocksDB column family \"recent_headers\" not found"))?;
+            let cf_height = self.db.cf_handle("height_index").ok_or_else(|| {
+                anyhow::anyhow!("RocksDB column family \"height_index\" not found")
+            })?;
+            let cf_h2h = self.db.cf_handle("hash_to_height").ok_or_else(|| {
+                anyhow::anyhow!("RocksDB column family \"hash_to_height\" not found")
+            })?;
+            let cf_meta = self.db.cf_handle("block_metadata").ok_or_else(|| {
+                anyhow::anyhow!("RocksDB column family \"block_metadata\" not found")
+            })?;
+            let cf_recent = self.db.cf_handle("recent_headers").ok_or_else(|| {
+                anyhow::anyhow!("RocksDB column family \"recent_headers\" not found")
+            })?;
 
             let mut batch = rocksdb::WriteBatch::default();
 
@@ -1473,7 +1550,9 @@ pub mod rocksdb_impl {
                 if let Ok(()) = self.db.set_options(&[("max_background_jobs", "1")]) {
                     self.db.cancel_all_background_work(false);
                     THROTTLED.store(true, Ordering::Relaxed);
-                    tracing::warn!("[ROCKSDB] EMERGENCY: max_background_jobs -> 1, cancelled pending bg work");
+                    tracing::warn!(
+                        "[ROCKSDB] EMERGENCY: max_background_jobs -> 1, cancelled pending bg work"
+                    );
                 }
             } else if critical_plus && !throttled {
                 if let Ok(()) = self.db.set_options(&[("max_background_jobs", "1")]) {
@@ -1827,15 +1906,19 @@ pub(crate) mod tidesdb_impl {
             }
             for &(height, ref header_bytes) in recent_entries {
                 let height_bytes = height.to_be_bytes();
-                txn.put(&cf_recent, height_bytes.as_slice(), header_bytes.as_slice(), -1)?;
+                txn.put(
+                    &cf_recent,
+                    height_bytes.as_slice(),
+                    header_bytes.as_slice(),
+                    -1,
+                )?;
                 if height > 11 {
                     let rm = (height - 12).to_be_bytes();
                     txn.delete(&cf_recent, rm.as_slice())?;
                 }
             }
-            txn.commit().map_err(|e| {
-                anyhow::anyhow!("TidesDB IBD blockstore flush commit failed: {}", e)
-            })
+            txn.commit()
+                .map_err(|e| anyhow::anyhow!("TidesDB IBD blockstore flush commit failed: {}", e))
         }
     }
 

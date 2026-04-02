@@ -843,9 +843,7 @@ impl FibreRelay {
 
         // Validate FEC params before creating assembly (prevents panic from malicious peer)
         let data_shards = chunk.data_chunks as usize;
-        let parity_shards = chunk
-            .total_chunks
-            .saturating_sub(chunk.data_chunks) as usize;
+        let parity_shards = chunk.total_chunks.saturating_sub(chunk.data_chunks) as usize;
         const MAX_TOTAL_SHARDS: usize = 1024;
         if data_shards == 0
             || chunk.total_chunks < chunk.data_chunks
@@ -862,8 +860,7 @@ impl FibreRelay {
         // Get or create assembly and add chunk
         let should_reconstruct = {
             if !self.receiving_blocks.contains_key(&block_hash) {
-                let fec_encoder =
-                    FecEncoder::new(data_shards, parity_shards, shard_size)?;
+                let fec_encoder = FecEncoder::new(data_shards, parity_shards, shard_size)?;
                 self.receiving_blocks.insert(
                     block_hash,
                     BlockAssembly {

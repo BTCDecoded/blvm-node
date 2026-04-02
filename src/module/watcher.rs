@@ -172,7 +172,10 @@ impl ModuleWatcher {
     async fn try_unload(&self, name: &str) -> Result<(), ModuleError> {
         let mut manager = self.module_manager.lock().await;
         if manager.list_modules().await.contains(&name.to_string()) {
-            info!("Module watcher: auto-unloading {} after directory removal", name);
+            info!(
+                "Module watcher: auto-unloading {} after directory removal",
+                name
+            );
             manager.unload_module(name).await
         } else {
             Ok(())
@@ -209,11 +212,13 @@ impl ModuleWatcher {
             info!("Module watcher: auto-loading {} after file change", name);
             manager.auto_load_modules().await
         } else {
-            debug!("Module {} not loaded, skipping watcher (watch_auto_load=false)", name);
+            debug!(
+                "Module {} not loaded, skipping watcher (watch_auto_load=false)",
+                name
+            );
             Ok(())
         }
     }
-
 }
 
 #[cfg(not(feature = "module-watcher"))]

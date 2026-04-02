@@ -9,15 +9,17 @@ use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{NetworkAddress, ProtocolMessage, ProtocolParser};
 use crate::network::transport::TransportAddr;
 use crate::network::NetworkMessage;
-use anyhow::Result;
 use crate::utils::{current_timestamp, ignore_error};
+use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// Publish a network event if an event publisher is configured. Logs at debug on failure.
 async fn publish_network_event_if_configured(
-    event_publisher: &Arc<tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>>,
+    event_publisher: &Arc<
+        tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>,
+    >,
     event_type: EventType,
     payload: EventPayload,
     log_context: &str,
@@ -29,7 +31,10 @@ async fn publish_network_event_if_configured(
 }
 
 /// Handle a single network message (full dispatch for process_messages loop)
-pub(crate) async fn handle_network_message(nm: &NetworkManager, message: NetworkMessage) -> Result<()> {
+pub(crate) async fn handle_network_message(
+    nm: &NetworkManager,
+    message: NetworkMessage,
+) -> Result<()> {
     match message {
         NetworkMessage::PeerConnected(addr) => {
             handle_peer_connected(nm, addr).await;

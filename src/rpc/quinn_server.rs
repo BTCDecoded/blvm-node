@@ -178,16 +178,22 @@ impl QuinnRpcServer {
                     }
 
                     let parsed = serde_json::from_str::<serde_json::Value>(&request).ok();
-                    let (method_name, rate_limit_n) = match parsed.as_ref().and_then(|v| v.as_array()) {
-                        Some(requests) => ("batch".to_string(), requests.len().min(batch_rate_multiplier_cap as usize) as u32),
-                        _ => (
-                            parsed
-                                .as_ref()
-                                .and_then(|req| req.get("method").and_then(|m| m.as_str()).map(String::from))
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            1u32,
-                        ),
-                    };
+                    let (method_name, rate_limit_n) =
+                        match parsed.as_ref().and_then(|v| v.as_array()) {
+                            Some(requests) => (
+                                "batch".to_string(),
+                                requests.len().min(batch_rate_multiplier_cap as usize) as u32,
+                            ),
+                            _ => (
+                                parsed
+                                    .as_ref()
+                                    .and_then(|req| {
+                                        req.get("method").and_then(|m| m.as_str()).map(String::from)
+                                    })
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                                1u32,
+                            ),
+                        };
                     let endpoint = format!("quinn:rpc:{method_name}");
 
                     if let Some(ref user_id) = auth_result.user_id {
@@ -275,7 +281,10 @@ impl QuinnRpcServer {
     }
 
     #[allow(dead_code)]
-    pub fn with_auth_manager(self, _auth_manager: std::sync::Arc<super::auth::RpcAuthManager>) -> Self {
+    pub fn with_auth_manager(
+        self,
+        _auth_manager: std::sync::Arc<super::auth::RpcAuthManager>,
+    ) -> Self {
         self
     }
 

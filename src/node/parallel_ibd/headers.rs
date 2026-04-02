@@ -154,8 +154,8 @@ pub(crate) async fn download_headers_parallel(
             peer_ids,
             blockstore,
             Some(network),
-            30,  // headers_timeout_secs (default when parallel path delegates)
-            10,  // headers_max_failures
+            30,   // headers_timeout_secs (default when parallel path delegates)
+            10,   // headers_max_failures
             None, // event_publisher (parallel path fallback has no publisher)
         )
         .await;
@@ -254,15 +254,13 @@ pub(crate) async fn download_headers_parallel(
         let parent_h = start_height
             .checked_sub(1)
             .ok_or_else(|| anyhow::anyhow!("parallel header merge: invalid start_height"))?;
-        blockstore
-            .get_hash_by_height(parent_h)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Cannot merge parallel headers at height {}: missing parent hash at {}",
-                    start_height,
-                    parent_h
-                )
-            })?
+        blockstore.get_hash_by_height(parent_h)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot merge parallel headers at height {}: missing parent hash at {}",
+                start_height,
+                parent_h
+            )
+        })?
     };
 
     for (range_start, headers) in all_headers {
@@ -394,9 +392,9 @@ pub(crate) async fn download_headers(
             version: 1,
             prev_block_hash: [0u8; 32],
             merkle_root: [
-                0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67,
-                0x76, 0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f,
-                0xb8, 0xaa, 0x4b, 0x1e, 0x5e, 0x4a,
+                0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67, 0x76,
+                0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
+                0x4b, 0x1e, 0x5e, 0x4a,
             ],
             timestamp: 1231006505,
             bits: 0x1d00ffff,
@@ -437,16 +435,14 @@ pub(crate) async fn download_headers(
         let parent_h = start_height
             .checked_sub(1)
             .ok_or_else(|| anyhow::anyhow!("header sync: invalid start_height"))?;
-        last_hash = blockstore
-            .get_hash_by_height(parent_h)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Cannot resume header sync at height {}: missing parent hash at height {}. \
+        last_hash = blockstore.get_hash_by_height(parent_h)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot resume header sync at height {}: missing parent hash at height {}. \
                      Sync from genesis or repair height_index (data may be inconsistent).",
-                    start_height,
-                    parent_h
-                )
-            })?;
+                start_height,
+                parent_h
+            )
+        })?;
         current_height = start_height;
         info!(
             "Resuming header sync at height {} (GetHeaders locator = parent {})",
@@ -480,15 +476,14 @@ pub(crate) async fn download_headers(
             hash_stop: [0; 32],
         };
 
-        let wire_msg = match ProtocolParser::serialize_message(&ProtocolMessage::GetHeaders(
-            get_headers,
-        )) {
-            Ok(msg) => msg,
-            Err(e) => {
-                warn!("Failed to serialize GetHeaders: {}", e);
-                return Err(anyhow::anyhow!("Serialization failed"));
-            }
-        };
+        let wire_msg =
+            match ProtocolParser::serialize_message(&ProtocolMessage::GetHeaders(get_headers)) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    warn!("Failed to serialize GetHeaders: {}", e);
+                    return Err(anyhow::anyhow!("Serialization failed"));
+                }
+            };
 
         let headers_rx = network.register_headers_request(peer_addr);
         let request_start = std::time::Instant::now();
@@ -566,8 +561,7 @@ pub(crate) async fn download_headers(
                     header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
                     header_data[4..36].copy_from_slice(&header.prev_block_hash);
                     header_data[36..68].copy_from_slice(&header.merkle_root);
-                    header_data[68..72]
-                        .copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+                    header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
                     header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
                     header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
                     let header_hash = double_sha256(&header_data);
@@ -598,8 +592,7 @@ pub(crate) async fn download_headers(
                     store_start.elapsed()
                 );
 
-                if current_height > last_progress_log
-                    && current_height - last_progress_log >= 20000
+                if current_height > last_progress_log && current_height - last_progress_log >= 20000
                 {
                     let elapsed = start_time.elapsed().as_secs_f64();
                     let synced = current_height - start_height;

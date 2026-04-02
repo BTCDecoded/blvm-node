@@ -7,7 +7,9 @@
 //! - Get vault state
 
 use crate::payment::state_machine::PaymentStateMachine;
-use crate::rpc::rest::types::{rest_error_failed, rest_error_invalid, error_response, success_response};
+use crate::rpc::rest::types::{
+    error_response, rest_error_failed, rest_error_invalid, success_response,
+};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};

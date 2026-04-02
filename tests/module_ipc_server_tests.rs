@@ -3,11 +3,11 @@
 #[cfg(unix)]
 mod tests {
     use blvm_node::module::api::events::EventManager;
+    use blvm_node::module::inter_module::api::ModuleAPI;
     use blvm_node::module::ipc::client::ModuleIpcClient;
+    use blvm_node::module::ipc::protocol::{EventPayload, FileMetadata};
     use blvm_node::module::ipc::protocol::{RequestMessage, ResponsePayload};
     use blvm_node::module::ipc::server::ModuleIpcServer;
-    use blvm_node::module::inter_module::api::ModuleAPI;
-    use blvm_node::module::ipc::protocol::{EventPayload, FileMetadata};
     use blvm_node::module::metrics::manager::Metric;
     use blvm_node::module::process::monitor::ModuleHealth;
     use blvm_node::module::timers::manager::{TaskCallback, TaskId, TimerCallback, TimerId};
@@ -215,9 +215,7 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn get_all_metrics(
-            &self,
-        ) -> Result<HashMap<String, Vec<Metric>>, ModuleError> {
+        async fn get_all_metrics(&self) -> Result<HashMap<String, Vec<Metric>>, ModuleError> {
             Ok(HashMap::new())
         }
 
@@ -265,7 +263,10 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn get_module_info(&self, _module_id: &str) -> Result<Option<ModuleInfo>, ModuleError> {
+        async fn get_module_info(
+            &self,
+            _module_id: &str,
+        ) -> Result<Option<ModuleInfo>, ModuleError> {
             Ok(None)
         }
 
@@ -330,9 +331,7 @@ mod tests {
             Ok(None)
         }
 
-        async fn get_all_module_health(
-            &self,
-        ) -> Result<Vec<(String, ModuleHealth)>, ModuleError> {
+        async fn get_all_module_health(&self) -> Result<Vec<(String, ModuleHealth)>, ModuleError> {
             Ok(vec![])
         }
 
@@ -346,7 +345,9 @@ mod tests {
             _coinbase_script: Option<Vec<u8>>,
             _coinbase_address: Option<String>,
         ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
-            Err(ModuleError::OperationError("stub get_block_template".into()))
+            Err(ModuleError::OperationError(
+                "stub get_block_template".into(),
+            ))
         }
 
         async fn submit_block(&self, _block: Block) -> Result<SubmitBlockResult, ModuleError> {

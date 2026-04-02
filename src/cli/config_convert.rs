@@ -8,11 +8,7 @@ use std::path::Path;
 use crate::config::{generate_toml_config, parse_bitcoin_conf};
 
 /// Run config convert-core: convert bitcoin.conf to config.toml.
-pub fn run_config_convert_core(
-    input: &Path,
-    output: &Path,
-    verbose: bool,
-) -> Result<()> {
+pub fn run_config_convert_core(input: &Path, output: &Path, verbose: bool) -> Result<()> {
     if !input.exists() {
         anyhow::bail!("Input file '{}' not found", input.display());
     }

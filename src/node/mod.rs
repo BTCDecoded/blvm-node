@@ -449,8 +449,7 @@ impl Node {
             if let Some(ref rpc_auth) = config.rpc_auth {
                 self.rpc.with_auth_config(rpc_auth.clone()).await;
                 info!("[START_COMPONENTS] RPC auth config applied (tokens/certs from rpc_auth)");
-            } else if config.rpc_rate_limit_when_auth_disabled()
-            {
+            } else if config.rpc_rate_limit_when_auth_disabled() {
                 let burst = config.rpc_ip_rate_limit_burst();
                 let rate = config.rpc_ip_rate_limit_rate();
                 self.rpc
@@ -465,9 +464,12 @@ impl Node {
 
         // Start RPC server
         info!("[START_COMPONENTS] Starting RPC server...");
-        if log_error_async(|| self.rpc.start(), "[START_COMPONENTS] Failed to start RPC server")
-            .await
-            .is_some()
+        if log_error_async(
+            || self.rpc.start(),
+            "[START_COMPONENTS] Failed to start RPC server",
+        )
+        .await
+        .is_some()
         {
             info!(
                 "[START_COMPONENTS] RPC server started on {}",
@@ -494,16 +496,14 @@ impl Node {
 
         // Start Stratum V2 listener on dedicated port when configured
         #[cfg(feature = "stratum-v2")]
-        if let Some(ref stratum_config) = self.config_sub(|c| c.stratum_v2.as_ref())
-        {
+        if let Some(ref stratum_config) = self.config_sub(|c| c.stratum_v2.as_ref()) {
             if stratum_config.enabled {
                 if let Some(addr) = stratum_config.listen_addr {
-                    if let Err(e) =
-                        crate::network::stratum_v2_listener::start_stratum_v2_listener(
-                            &self.network,
-                            addr,
-                        )
-                        .await
+                    if let Err(e) = crate::network::stratum_v2_listener::start_stratum_v2_listener(
+                        &self.network,
+                        addr,
+                    )
+                    .await
                     {
                         warn!(
                             "[START_COMPONENTS] Failed to start Stratum V2 listener on {}: {}",
@@ -636,9 +636,7 @@ impl Node {
         };
         let mut initial_utxo_set = blvm_protocol::UtxoSet::default();
         if current_height == 0 {
-            if let Some(block_hash) = self
-                .config_sub(|c| c.assumeutxo_blockhash.as_ref())
-            {
+            if let Some(block_hash) = self.config_sub(|c| c.assumeutxo_blockhash.as_ref()) {
                 use crate::storage::assumeutxo::{
                     height_for_blockhash, write_base_blockhash_marker, AssumeUtxoManager,
                 };
@@ -717,12 +715,10 @@ impl Node {
         #[cfg(feature = "production")]
         {
             let data_dir = self.data_dir.as_path();
-            if let Err(e) =
-                crate::storage::ibd_autorepair::apply_ibd_utxo_autorepair_if_needed(
-                    self.storage.as_ref(),
-                    data_dir,
-                )
-            {
+            if let Err(e) = crate::storage::ibd_autorepair::apply_ibd_utxo_autorepair_if_needed(
+                self.storage.as_ref(),
+                data_dir,
+            ) {
                 warn!(
                     "IBD UTXO autorepair (marker-based) failed: {} — continuing with existing state",
                     e
@@ -845,11 +841,9 @@ impl Node {
                 {
                     Ok(true) => {
                         info!("[START_COMPONENTS] Parallel IBD completed successfully");
-                        if let Err(e) =
-                            crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
-                                self.data_dir.as_path(),
-                            )
-                        {
+                        if let Err(e) = crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
+                            self.data_dir.as_path(),
+                        ) {
                             warn!(
                                 "Failed to clear IBD UTXO autorepair marker: {} (safe to delete {} manually)",
                                 e,
@@ -973,9 +967,7 @@ impl Node {
             self.module_subsystem
                 .get_or_insert_with(Default::default)
                 .module_registry = Some(Arc::clone(&arc));
-            self.network
-                .set_module_registry(Arc::clone(&arc))
-                .await;
+            self.network.set_module_registry(Arc::clone(&arc)).await;
             Some(arc)
         } else {
             None
@@ -1030,7 +1022,9 @@ impl Node {
             let socket_path = self
                 .config_sub(|c| c.modules.as_ref())
                 .map(|mc| PathBuf::from(&mc.socket_dir).join("node.sock"))
-                .unwrap_or_else(|| PathBuf::from(env_or_default("MODULE_SOCKET_DIR", "data/modules/socket")));
+                .unwrap_or_else(|| {
+                    PathBuf::from(env_or_default("MODULE_SOCKET_DIR", "data/modules/socket"))
+                });
 
             if let Some(ref module_registry_arc) = module_registry_arc {
                 module_manager
@@ -1059,9 +1053,7 @@ impl Node {
                                 processor.with_module_encryption(Arc::clone(&module_encryption));
 
                             // Add modules directory for storing encrypted/decrypted modules
-                            if let Some(module_config) =
-                                self.config_sub(|c| c.modules.as_ref())
-                            {
+                            if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
                                 let modules_dir = PathBuf::from(&module_config.modules_dir);
                                 processor = processor.with_modules_dir(modules_dir);
                             }
@@ -1146,13 +1138,15 @@ impl Node {
                                         match (addr.witness_version, addr.witness_program.len()) {
                                             // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
                                             (0, 20) | (0, 32) => {
-                                                let mut script = vec![blvm_consensus::opcodes::OP_0];
+                                                let mut script =
+                                                    vec![blvm_consensus::opcodes::OP_0];
                                                 script.extend_from_slice(&addr.witness_program);
                                                 Some(script)
                                             }
                                             // Taproot v1: P2TR (32 bytes)
                                             (1, 32) => {
-                                                let mut script = vec![blvm_consensus::opcodes::OP_1];
+                                                let mut script =
+                                                    vec![blvm_consensus::opcodes::OP_1];
                                                 script.extend_from_slice(&addr.witness_program);
                                                 Some(script)
                                             }
@@ -1166,9 +1160,7 @@ impl Node {
                             self.network
                                 .set_module_encryption(Arc::clone(&module_encryption))
                                 .await;
-                            if let Some(module_config) =
-                                self.config_sub(|c| c.modules.as_ref())
-                            {
+                            if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
                                 self.network
                                     .set_modules_dir(PathBuf::from(&module_config.modules_dir))
                                     .await;
@@ -1524,9 +1516,7 @@ impl Node {
 
     /// Storage timeout from config or default
     fn storage_timeout(&self) -> std::time::Duration {
-        crate::utils::storage_timeout_from_config(
-            self.config_sub(|c| c.request_timeouts.as_ref()),
-        )
+        crate::utils::storage_timeout_from_config(self.config_sub(|c| c.request_timeouts.as_ref()))
     }
 
     /// Check node health with graceful error handling
@@ -1540,7 +1530,8 @@ impl Node {
         // Check storage with timeout and graceful degradation
         let timeout_dur = self.storage_timeout();
         use crate::utils::with_custom_timeout;
-        match with_custom_timeout(async { self.storage.blocks().block_count() }, timeout_dur).await {
+        match with_custom_timeout(async { self.storage.blocks().block_count() }, timeout_dur).await
+        {
             Ok(Ok(blocks)) => {
                 if blocks == 0 {
                     warn!("No blocks in storage");
@@ -1597,7 +1588,7 @@ impl Node {
         // Fallback when sysinfo unavailable or path not found on any disk
         let _ = path;
         let total_bytes = 1_000_000_000_000u64; // 1TB placeholder
-        let available_bytes = total_bytes / 5;  // 20% free
+        let available_bytes = total_bytes / 5; // 20% free
         let percent_free = 20.0;
         (total_bytes, available_bytes, percent_free)
     }
@@ -1612,10 +1603,10 @@ impl Node {
 
             // Publish DiskSpaceLow event to modules
             if let Some(ref event_publisher) = self
-                    .module_subsystem
-                    .as_ref()
-                    .and_then(|s| s.event_publisher.as_ref())
-                {
+                .module_subsystem
+                .as_ref()
+                .and_then(|s| s.event_publisher.as_ref())
+            {
                 let (total_bytes, available_bytes, percent_free) =
                     Self::get_disk_space_for_path(&self.data_dir);
                 let disk_path = self.data_dir.to_string_lossy().to_string();
@@ -1705,10 +1696,10 @@ impl Node {
 
         // Publish NodeShutdown event to modules (give them time to clean up)
         if let Some(ref event_publisher) = self
-                    .module_subsystem
-                    .as_ref()
-                    .and_then(|s| s.event_publisher.as_ref())
-                {
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+        {
             event_publisher
                 .publish_node_shutdown("graceful".to_string(), 30)
                 .await;
@@ -1718,10 +1709,10 @@ impl Node {
 
         // Publish DataMaintenance event to modules (high urgency flush for shutdown)
         if let Some(ref event_publisher) = self
-                    .module_subsystem
-                    .as_ref()
-                    .and_then(|s| s.event_publisher.as_ref())
-                {
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+        {
             event_publisher
                 .publish_data_maintenance(
                     "flush".to_string(),    // Flush pending writes
@@ -1760,10 +1751,10 @@ impl Node {
 
         // Publish shutdown completed event
         if let Some(ref event_publisher) = self
-                    .module_subsystem
-                    .as_ref()
-                    .and_then(|s| s.event_publisher.as_ref())
-                {
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+        {
             use crate::module::ipc::protocol::EventPayload;
             use crate::module::traits::EventType;
             let payload = EventPayload::NodeShutdownCompleted {

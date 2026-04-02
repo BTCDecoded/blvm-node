@@ -8,6 +8,7 @@ pub mod ban_list_merging;
 pub mod ban_list_signing;
 pub mod bandwidth_protection;
 pub mod chain_access;
+pub mod connection_manager;
 pub mod dns_seeds;
 pub mod dos_protection;
 #[cfg(feature = "erlay")]
@@ -18,9 +19,8 @@ pub mod lan_discovery;
 pub mod lan_security;
 pub mod message_bridge;
 pub mod module_registry_extensions;
-pub mod peer;
-pub mod connection_manager;
 pub mod network_manager;
+pub mod peer;
 pub mod peer_manager;
 pub mod peer_scoring;
 pub mod protocol;
@@ -44,9 +44,9 @@ pub mod utxo_commitments_client;
 pub mod compact_blocks;
 
 // Block Filter Service (BIP157/158)
+mod background_tasks;
 pub mod bip157_handler;
 pub mod filter_service;
-mod background_tasks;
 mod handlers;
 mod network_message_dispatch;
 mod peer_connections;
@@ -60,10 +60,10 @@ pub mod bip70_handler;
 pub mod dandelion; // Dandelion++ privacy-preserving transaction relay
 #[cfg(feature = "fibre")]
 pub mod fibre; // FIBRE-style Fast Relay Network
-#[cfg(feature = "stratum-v2")]
-pub(crate) mod stratum_v2_listener;
 pub mod package_relay; // BIP 331 Package Relay
 pub mod package_relay_handler; // BIP 331 handlers
+#[cfg(feature = "stratum-v2")]
+pub(crate) mod stratum_v2_listener;
 pub mod txhash; // Non-consensus hashing helpers for relay
 
 use std::net::SocketAddr;
@@ -122,7 +122,6 @@ pub enum NetworkMessage {
     // Mesh networking packets
     MeshPacketReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
 }
-
 
 #[cfg(test)]
 mod tests {

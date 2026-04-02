@@ -467,8 +467,7 @@ impl ChainState {
 
         let txouts = utxo_set.len() as u64;
         let total_amount: u128 = utxo_set.values().map(|utxo| utxo.value as u128).sum();
-        let muhash = AssumeUtxoManager::calculate_utxo_hash(utxo_set)
-            .unwrap_or_else(|_| [0u8; 32]);
+        let muhash = AssumeUtxoManager::calculate_utxo_hash(utxo_set).unwrap_or_else(|_| [0u8; 32]);
 
         let stats = UTXOStats {
             height,

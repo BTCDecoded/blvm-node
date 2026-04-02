@@ -78,7 +78,9 @@ where
 /// Storage timeout duration from config, or default when config is None.
 /// Use with `with_custom_timeout(operation, storage_timeout_from_config(config)).await`.
 #[inline]
-pub fn storage_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+pub fn storage_timeout_from_config(
+    config: Option<&crate::config::RequestTimeoutConfig>,
+) -> Duration {
     config
         .map(|c| Duration::from_secs(c.storage_timeout_seconds))
         .unwrap_or(DEFAULT_STORAGE_TIMEOUT)
@@ -86,7 +88,9 @@ pub fn storage_timeout_from_config(config: Option<&crate::config::RequestTimeout
 
 /// Network timeout duration from config, or default when config is None.
 #[inline]
-pub fn network_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+pub fn network_timeout_from_config(
+    config: Option<&crate::config::RequestTimeoutConfig>,
+) -> Duration {
     config
         .map(|c| Duration::from_secs(c.network_timeout_seconds))
         .unwrap_or(DEFAULT_NETWORK_TIMEOUT)
@@ -102,7 +106,9 @@ pub fn rpc_timeout_from_config(config: Option<&crate::config::RequestTimeoutConf
 
 /// Handshake timeout from config (default 10s).
 #[inline]
-pub fn handshake_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+pub fn handshake_timeout_from_config(
+    config: Option<&crate::config::RequestTimeoutConfig>,
+) -> Duration {
     config
         .map(|c| Duration::from_secs(c.handshake_timeout_secs))
         .unwrap_or(Duration::from_secs(10))
@@ -110,7 +116,9 @@ pub fn handshake_timeout_from_config(config: Option<&crate::config::RequestTimeo
 
 /// Checkpoint request timeout from config (default 5s). For lan_security.
 #[inline]
-pub fn checkpoint_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+pub fn checkpoint_timeout_from_config(
+    config: Option<&crate::config::RequestTimeoutConfig>,
+) -> Duration {
     config
         .map(|c| Duration::from_secs(c.checkpoint_request_timeout_secs))
         .unwrap_or(Duration::from_secs(5))
@@ -118,7 +126,9 @@ pub fn checkpoint_timeout_from_config(config: Option<&crate::config::RequestTime
 
 /// Protocol verify timeout from config (default 5s). For lan_security DiscoveryVerifier.
 #[inline]
-pub fn protocol_verify_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+pub fn protocol_verify_timeout_from_config(
+    config: Option<&crate::config::RequestTimeoutConfig>,
+) -> Duration {
     config
         .map(|c| Duration::from_secs(c.protocol_verify_timeout_secs))
         .unwrap_or(Duration::from_secs(5))
@@ -126,7 +136,9 @@ pub fn protocol_verify_timeout_from_config(config: Option<&crate::config::Reques
 
 /// Headers verify timeout from config (default 10s). For lan_security.
 #[inline]
-pub fn headers_verify_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
+pub fn headers_verify_timeout_from_config(
+    config: Option<&crate::config::RequestTimeoutConfig>,
+) -> Duration {
     config
         .map(|c| Duration::from_secs(c.headers_verify_timeout_secs))
         .unwrap_or(Duration::from_secs(10))

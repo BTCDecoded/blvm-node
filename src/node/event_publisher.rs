@@ -1208,12 +1208,7 @@ impl EventPublisher {
     }
 
     /// Publish IBD block filtered event
-    pub async fn publish_ibd_block_filtered(
-        &self,
-        block_hash: &Hash,
-        height: u64,
-        reason: &str,
-    ) {
+    pub async fn publish_ibd_block_filtered(&self, block_hash: &Hash, height: u64, reason: &str) {
         let payload = EventPayload::IBDBlockFiltered {
             block_hash: *block_hash,
             height,

@@ -4,12 +4,12 @@
 //! Provides cryptographic commitment to payment structure without requiring instant settlement.
 
 use crate::payment::processor::PaymentError;
+use crate::utils::current_timestamp;
 use crate::{Hash, Transaction};
 #[cfg(feature = "ctv")]
 use blvm_consensus::bip119::calculate_template_hash;
 use blvm_protocol::payment::PaymentOutput;
 use serde::{Deserialize, Serialize};
-use crate::utils::current_timestamp;
 
 /// CTV covenant proof for payment commitment
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

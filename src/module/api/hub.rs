@@ -498,7 +498,8 @@ impl ModuleApiHub {
             RequestPayload::RegisterTimer { .. } => {
                 return Err(crate::module::traits::ModuleError::OperationError(
                     "Timer registration requires a callback which cannot be serialized over IPC. \
-                     Use module-side timer management (e.g. tokio::spawn with sleep).".to_string(),
+                     Use module-side timer management (e.g. tokio::spawn with sleep)."
+                        .to_string(),
                 ));
             }
             RequestPayload::CancelTimer { .. } => {
@@ -510,7 +511,8 @@ impl ModuleApiHub {
             RequestPayload::ScheduleTask { .. } => {
                 return Err(crate::module::traits::ModuleError::OperationError(
                     "Task scheduling requires a callback which cannot be serialized over IPC. \
-                     Use module-side task management (e.g. tokio::spawn).".to_string(),
+                     Use module-side task management (e.g. tokio::spawn)."
+                        .to_string(),
                 ));
             }
             #[allow(unreachable_patterns)]

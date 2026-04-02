@@ -6,9 +6,9 @@
 //! Supports both SocketAddr-based addresses (TCP/Quinn) and Iroh NodeIds.
 
 use crate::network::protocol::NetworkAddress;
+use crate::utils::current_timestamp;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use crate::utils::current_timestamp;
 
 #[cfg(feature = "iroh")]
 use iroh::PublicKey;

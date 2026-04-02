@@ -420,9 +420,7 @@ pub(crate) async fn download_chunk(
         while let Some((block, block_witnesses)) = received.remove(&next_to_send) {
             if let Some(ref tx) = block_tx {
                 let t0 = std::time::Instant::now();
-                let send_r = tx
-                    .send((next_to_send, block, block_witnesses))
-                    .await;
+                let send_r = tx.send((next_to_send, block, block_witnesses)).await;
                 let wait_ms = t0.elapsed().as_millis() as u64;
                 if wait_ms >= 10 {
                     info!(
@@ -453,12 +451,9 @@ pub(crate) async fn download_chunk(
                     ),
                     None => None,
                 };
-                if let Some((block, block_witnesses)) = try_load_local_ibd_block(
-                    blockstore,
-                    next_height,
-                    next_hash,
-                    protocol_version,
-                )? {
+                if let Some((block, block_witnesses)) =
+                    try_load_local_ibd_block(blockstore, next_height, next_hash, protocol_version)?
+                {
                     let request_start = std::time::Instant::now();
                     in_flight.push(Box::pin(async move {
                         let r = Ok(Ok((block, block_witnesses)));
@@ -495,9 +490,7 @@ pub(crate) async fn download_chunk(
     while let Some((block, block_witnesses)) = received.remove(&next_to_send) {
         if let Some(ref tx) = block_tx {
             let t0 = std::time::Instant::now();
-            let send_r = tx
-                .send((next_to_send, block, block_witnesses))
-                .await;
+            let send_r = tx.send((next_to_send, block, block_witnesses)).await;
             let wait_ms = t0.elapsed().as_millis() as u64;
             if wait_ms >= 10 {
                 info!(
@@ -532,10 +525,6 @@ pub(crate) async fn download_chunk(
 
     Ok(DownloadChunkResult {
         blocks,
-        streamed_block_count: if streaming {
-            streamed_block_count
-        } else {
-            0
-        },
+        streamed_block_count: if streaming { streamed_block_count } else { 0 },
     })
 }

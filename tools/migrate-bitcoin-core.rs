@@ -45,9 +45,7 @@ fn main() -> Result<()> {
             args.network,
         )?
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Bitcoin Core data directory not found. Use --source to specify path."
-            )
+            anyhow::anyhow!("Bitcoin Core data directory not found. Use --source to specify path.")
         })?
     };
 

@@ -4,15 +4,16 @@
 
 use crate::config::RequestTimeoutConfig;
 use crate::node::event_publisher::EventPublisher;
-use crate::rpc::params::{param_str_required, param_u64, param_u64_default};
 use crate::rpc::errors::{
     BlockNotFoundError, RpcError, BLOCK_HASH_PARAM_REQUIRED_MSG, BLOCK_NOT_FOUND_MSG,
     HEIGHT_PARAM_REQUIRED_MSG, STORAGE_NOT_AVAILABLE_MSG,
 };
+use crate::rpc::params::{param_str_required, param_u64, param_u64_default};
 use crate::storage::assumeutxo::AssumeUtxoManager;
 use crate::storage::Storage;
 use crate::utils::{
-    storage_timeout_from_config, with_custom_timeout, CACHE_REFRESH_TIP, POLL_INTERVAL_WAIT_FOR_BLOCK,
+    storage_timeout_from_config, with_custom_timeout, CACHE_REFRESH_TIP,
+    POLL_INTERVAL_WAIT_FOR_BLOCK,
 };
 use anyhow::Result;
 use blvm_protocol::{BlockHeader, SEGWIT_ACTIVATION_MAINNET, TAPROOT_ACTIVATION_MAINNET};
@@ -223,11 +224,9 @@ impl BlockchainRpc {
             let block_count = storage.blocks().block_count().unwrap_or(0);
 
             let best_hash_hex = CACHED_TIP_HASH_HEX.with(|c| {
-                c.get_or_refresh(
-                    CACHE_REFRESH_TIP,
-                    &(best_hash, height),
-                    || hex::encode(best_hash),
-                )
+                c.get_or_refresh(CACHE_REFRESH_TIP, &(best_hash, height), || {
+                    hex::encode(best_hash)
+                })
             });
 
             // Calculate difficulty from tip header (single lookup)
@@ -339,14 +338,17 @@ impl BlockchainRpc {
         if let Some(ref storage) = self.storage {
             // Use timeout to prevent hanging on slow storage (wrap sync operation)
             let timeout_dur = self.storage_timeout();
-            match with_custom_timeout(async {
-                tokio::task::spawn_blocking({
-                    let storage = storage.clone();
-                    let hash_array = hash_array;
-                    move || storage.blocks().get_block(&hash_array)
-                })
-                .await
-            }, timeout_dur)
+            match with_custom_timeout(
+                async {
+                    tokio::task::spawn_blocking({
+                        let storage = storage.clone();
+                        let hash_array = hash_array;
+                        move || storage.blocks().get_block(&hash_array)
+                    })
+                    .await
+                },
+                timeout_dur,
+            )
             .await
             {
                 Ok(Ok(Ok(Some(block)))) => {
@@ -354,10 +356,13 @@ impl BlockchainRpc {
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
 
                     let tip_height = CACHED_TIP_HEIGHT.with(|c| {
-                        c.get_or_refresh(
-                            CACHE_REFRESH_TIP,
-                            || storage.chain().get_height().map(|h| h.unwrap_or(0)).unwrap_or(0),
-                        )
+                        c.get_or_refresh(CACHE_REFRESH_TIP, || {
+                            storage
+                                .chain()
+                                .get_height()
+                                .map(|h| h.unwrap_or(0))
+                                .unwrap_or(0)
+                        })
                     });
 
                     let confirmations = block_height
@@ -486,7 +491,10 @@ impl BlockchainRpc {
 
         // Graceful degradation: return error if storage unavailable or block not found
         // (Don't return fake data - that's misleading)
-        Err(anyhow::anyhow!("{} or storage unavailable", BLOCK_NOT_FOUND_MSG))
+        Err(anyhow::anyhow!(
+            "{} or storage unavailable",
+            BLOCK_NOT_FOUND_MSG
+        ))
     }
 
     /// Get block hash by height
@@ -536,10 +544,13 @@ impl BlockchainRpc {
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
 
                     let tip_height = CACHED_TIP_HEIGHT.with(|c| {
-                        c.get_or_refresh(
-                            CACHE_REFRESH_TIP,
-                            || storage.chain().get_height().map(|h| h.unwrap_or(0)).unwrap_or(0),
-                        )
+                        c.get_or_refresh(CACHE_REFRESH_TIP, || {
+                            storage
+                                .chain()
+                                .get_height()
+                                .map(|h| h.unwrap_or(0))
+                                .unwrap_or(0)
+                        })
                     });
 
                     let confirmations = block_height
@@ -647,11 +658,9 @@ impl BlockchainRpc {
 
             if let Ok(Some(hash)) = storage.chain().get_tip_hash() {
                 let hex_str = CACHED_TIP_HASH_HEX.with(|c| {
-                    c.get_or_refresh(
-                        CACHE_REFRESH_TIP,
-                        &(hash, current_height),
-                        || hex::encode(hash),
-                    )
+                    c.get_or_refresh(CACHE_REFRESH_TIP, &(hash, current_height), || {
+                        hex::encode(hash)
+                    })
                 });
                 Ok(Value::String(hex_str))
             } else {
@@ -688,19 +697,15 @@ impl BlockchainRpc {
         if let Some(ref storage) = self.storage {
             let current_height = storage.chain().get_height()?.unwrap_or(0);
             let difficulty = CACHED_DIFFICULTY.with(|c| {
-                c.get_or_refresh(
-                    CACHE_REFRESH_TIP,
-                    &current_height,
-                    || {
-                        storage
-                            .chain()
-                            .get_tip_header()
-                            .ok()
-                            .flatten()
-                            .map(|h| Self::calculate_difficulty(h.bits))
-                            .unwrap_or(1.0)
-                    },
-                )
+                c.get_or_refresh(CACHE_REFRESH_TIP, &current_height, || {
+                    storage
+                        .chain()
+                        .get_tip_header()
+                        .ok()
+                        .flatten()
+                        .map(|h| Self::calculate_difficulty(h.bits))
+                        .unwrap_or(1.0)
+                })
             });
             Ok(Value::Number(
                 Number::from_f64(difficulty).unwrap_or_else(|| Number::from(1)),
@@ -1362,9 +1367,7 @@ impl BlockchainRpc {
             Ok(Value::Null)
         } else {
             // Graceful degradation: return informative error instead of failing silently
-            Err(anyhow::anyhow!(
-                STORAGE_NOT_AVAILABLE_MSG
-            ))
+            Err(anyhow::anyhow!(STORAGE_NOT_AVAILABLE_MSG))
         }
     }
 
@@ -1392,9 +1395,7 @@ impl BlockchainRpc {
             Ok(Value::Null)
         } else {
             // Graceful degradation: return informative error instead of failing silently
-            Err(anyhow::anyhow!(
-                STORAGE_NOT_AVAILABLE_MSG
-            ))
+            Err(anyhow::anyhow!(STORAGE_NOT_AVAILABLE_MSG))
         }
     }
 
@@ -1470,8 +1471,8 @@ impl BlockchainRpc {
     pub async fn wait_for_block(&self, params: &Value) -> Result<Value> {
         debug!("RPC: waitforblock");
 
-        let blockhash = param_str_required(params, 0, "waitforblock")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let blockhash =
+            param_str_required(params, 0, "waitforblock").map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let timeout_secs = param_u64(params, 1);
         let hash =
@@ -1492,8 +1493,8 @@ impl BlockchainRpc {
             return Err(BlockNotFoundError::new("").into());
         }
 
-        let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs.unwrap_or(0));
+        let deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_secs(timeout_secs.unwrap_or(0));
         let poll_interval = POLL_INTERVAL_WAIT_FOR_BLOCK;
 
         while tokio::time::Instant::now() < deadline {
@@ -1547,8 +1548,8 @@ impl BlockchainRpc {
             ));
         }
 
-        let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs.unwrap_or(0));
+        let deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_secs(timeout_secs.unwrap_or(0));
         let poll_interval = POLL_INTERVAL_WAIT_FOR_BLOCK;
 
         while tokio::time::Instant::now() < deadline {
@@ -1630,9 +1631,7 @@ impl BlockchainRpc {
             }
         } else {
             // Graceful degradation: return informative error instead of failing silently
-            Err(anyhow::anyhow!(
-                STORAGE_NOT_AVAILABLE_MSG
-            ))
+            Err(anyhow::anyhow!(STORAGE_NOT_AVAILABLE_MSG))
         }
     }
 

@@ -174,7 +174,9 @@ impl ModuleRegistry {
         name: &str,
     ) -> Result<ModuleEntry, ModuleError> {
         let network_manager = self.network_manager.as_ref().ok_or_else(|| {
-            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_SET_P2P_FETCHING.to_string())
+            ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_SET_P2P_FETCHING.to_string(),
+            )
         })?;
 
         // Convert TransportAddr to SocketAddr for network manager
@@ -217,8 +219,8 @@ impl ModuleRegistry {
             .await
             .map_err(|_| ModuleError::Timeout)?
             .map_err(|_| {
-            ModuleError::OperationError(module_error_msg::RESPONSE_CHANNEL_CLOSED.to_string())
-        })?;
+                ModuleError::OperationError(module_error_msg::RESPONSE_CHANNEL_CLOSED.to_string())
+            })?;
 
         // Parse Module response
         let parsed = ProtocolParser::parse_message(&response_data)
@@ -268,23 +270,20 @@ impl ModuleRegistry {
             .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-            ModuleError::OperationError(module_error_msg::MISSING_NAME_FIELD.to_string())
-        })?
+                ModuleError::OperationError(module_error_msg::MISSING_NAME_FIELD.to_string())
+            })?
             .to_string();
 
         let version = data
             .get("version")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-            ModuleError::OperationError(module_error_msg::MISSING_VERSION_FIELD.to_string())
-        })?
+                ModuleError::OperationError(module_error_msg::MISSING_VERSION_FIELD.to_string())
+            })?
             .to_string();
 
         // Parse hashes (hex-encoded)
-        let hash_str = data
-            .get("hash")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
+        let hash_str = data.get("hash").and_then(|v| v.as_str()).ok_or_else(|| {
             ModuleError::OperationError(module_error_msg::MISSING_HASH_FIELD.to_string())
         })?;
 
@@ -301,9 +300,7 @@ impl ModuleRegistry {
             .get("binary_hash")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ModuleError::OperationError(
-                    module_error_msg::MISSING_BINARY_HASH_FIELD.to_string(),
-                )
+                ModuleError::OperationError(module_error_msg::MISSING_BINARY_HASH_FIELD.to_string())
             })?;
 
         // Decode hashes from hex
@@ -413,9 +410,10 @@ impl ModuleRegistry {
 
         // Load binary if path exists
         let binary = if cached.local_path.exists() {
-            Some(std::fs::read(&cached.local_path).map_err(|e| {
-                ModuleError::op_err("Failed to read cached binary", e)
-            })?)
+            Some(
+                std::fs::read(&cached.local_path)
+                    .map_err(|e| ModuleError::op_err("Failed to read cached binary", e))?,
+            )
         } else {
             None
         };
@@ -443,9 +441,8 @@ impl ModuleRegistry {
     /// Cache a verified module entry
     async fn cache_entry(&self, entry: &ModuleEntry) -> Result<(), ModuleError> {
         // Store manifest in CAS if not already present
-        let manifest_data = toml::to_string(&entry.manifest).map_err(|e| {
-            ModuleError::op_err("Failed to serialize manifest", e)
-        })?;
+        let manifest_data = toml::to_string(&entry.manifest)
+            .map_err(|e| ModuleError::op_err("Failed to serialize manifest", e))?;
 
         let mut cas = self.cas.write().await;
         if !cas.has(&entry.manifest_hash) {
@@ -487,9 +484,8 @@ impl ModuleRegistry {
     pub async fn verify_entry(&self, entry: &ModuleEntry) -> Result<(), ModuleError> {
         // 1. Verify manifest signatures if present
         if entry.manifest.has_signatures() {
-            let manifest_data = toml::to_string(&entry.manifest).map_err(|e| {
-                ModuleError::op_err("Failed to serialize manifest", e)
-            })?;
+            let manifest_data = toml::to_string(&entry.manifest)
+                .map_err(|e| ModuleError::op_err("Failed to serialize manifest", e))?;
 
             let signatures = entry.manifest.get_signatures();
             let public_keys = entry.manifest.get_public_keys();
@@ -513,9 +509,8 @@ impl ModuleRegistry {
         }
 
         // 2. Verify manifest hash
-        let manifest_data = toml::to_string(&entry.manifest).map_err(|e| {
-            ModuleError::op_err("Failed to serialize manifest", e)
-        })?;
+        let manifest_data = toml::to_string(&entry.manifest)
+            .map_err(|e| ModuleError::op_err("Failed to serialize manifest", e))?;
 
         let cas = self.cas.read().await;
         if !cas.verify(manifest_data.as_bytes(), &entry.manifest_hash) {

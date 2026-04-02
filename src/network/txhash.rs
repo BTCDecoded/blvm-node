@@ -11,10 +11,7 @@ use sha2::{Digest, Sha256};
 /// When witnesses is None or all empty, returns txid (wtxid == txid for non-SegWit).
 /// witnesses: one witness stack per input, each stack is Vec<Vec<u8>> (witness elements).
 #[cfg(any(feature = "production", feature = "profile"))]
-pub fn calculate_wtxid(
-    tx: &Transaction,
-    witnesses: Option<&[Vec<Vec<u8>>]>,
-) -> Hash {
+pub fn calculate_wtxid(tx: &Transaction, witnesses: Option<&[Vec<Vec<u8>>]>) -> Hash {
     use blvm_protocol::block::calculate_tx_id;
 
     let txid = calculate_tx_id(tx);

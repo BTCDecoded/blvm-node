@@ -1153,7 +1153,10 @@ impl EventPayload {
 
     pub fn as_module_loaded(&self) -> Option<(&str, &str)> {
         match self {
-            Self::ModuleLoaded { module_name, version } => Some((module_name.as_str(), version.as_str())),
+            Self::ModuleLoaded {
+                module_name,
+                version,
+            } => Some((module_name.as_str(), version.as_str())),
             _ => None,
         }
     }

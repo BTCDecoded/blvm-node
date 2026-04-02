@@ -60,7 +60,10 @@ impl OrderedReadyBridge {
 
     /// Call before sending height `h` to prefetch or gap-fill workers (same order as drain).
     pub(crate) fn coordinator_will_send_height(&self, h: u64) {
-        let mut g = self.inner.lock().expect("OrderedReadyBridge mutex poisoned");
+        let mut g = self
+            .inner
+            .lock()
+            .expect("OrderedReadyBridge mutex poisoned");
         if g.next_expected.is_none() {
             g.next_expected = Some(h);
         }
@@ -68,7 +71,10 @@ impl OrderedReadyBridge {
 
     /// Worker finished prefetch, or coordinator used direct-to-feeder fallback (same as a completion).
     pub(crate) fn worker_complete(&self, h: u64, item: ReadyItem) {
-        let mut g = self.inner.lock().expect("OrderedReadyBridge mutex poisoned");
+        let mut g = self
+            .inner
+            .lock()
+            .expect("OrderedReadyBridge mutex poisoned");
         g.pending.insert(h, item);
         Self::flush_unlocked(&self.out, &mut g);
     }
@@ -93,8 +99,7 @@ pub(crate) fn prefetch_build_utxo_map(
     store: &IbdUtxoStore,
     keys: &[OutPointKey],
 ) -> FxHashMap<OutPointKey, Arc<UTXO>> {
-    let mut full_map =
-        FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
+    let mut full_map = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
     let mut to_load: Vec<OutPointKey> = Vec::new();
     for key in keys {
         if let Some(ref r) = store.cache_get(key) {
@@ -149,8 +154,8 @@ pub(crate) fn run_prefetch_worker(
         // Log aggregate stats every 5000 blocks processed by this worker.
         if local_blocks % 5_000 == 0 {
             let total_blocks = PREFETCH_TOTAL_BLOCKS.load(Ordering::Relaxed);
-            let total_reads  = PREFETCH_TOTAL_DISK_READS.load(Ordering::Relaxed);
-            let total_ms     = PREFETCH_TOTAL_DISK_MS.load(Ordering::Relaxed);
+            let total_reads = PREFETCH_TOTAL_DISK_READS.load(Ordering::Relaxed);
+            let total_ms = PREFETCH_TOTAL_DISK_MS.load(Ordering::Relaxed);
             let avg_ms_per_read = if total_reads > 0 {
                 total_ms as f64 / total_reads as f64
             } else {

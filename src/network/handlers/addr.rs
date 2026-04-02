@@ -33,11 +33,7 @@ impl NetworkManager {
     }
 
     /// Handle Addr message - store addresses and optionally relay
-    pub(crate) async fn handle_addr(
-        &self,
-        peer_addr: SocketAddr,
-        msg: AddrMessage,
-    ) -> Result<()> {
+    pub(crate) async fn handle_addr(&self, peer_addr: SocketAddr, msg: AddrMessage) -> Result<()> {
         let max_addr = self.protocol_limits().max_addr_to_send;
         if msg.addresses.len() > max_addr {
             warn!(

@@ -137,7 +137,10 @@ impl NodeAPI for MockNodeAPI {
         Ok(None)
     }
 
-    async fn get_payment_state(&self, _payment_id: &str) -> Result<Option<PaymentState>, ModuleError> {
+    async fn get_payment_state(
+        &self,
+        _payment_id: &str,
+    ) -> Result<Option<PaymentState>, ModuleError> {
         Ok(None)
     }
 
@@ -189,9 +192,7 @@ impl NodeAPI for MockNodeAPI {
         Ok(vec![])
     }
 
-    async fn get_all_metrics(
-        &self,
-    ) -> Result<HashMap<String, Vec<Metric>>, ModuleError> {
+    async fn get_all_metrics(&self) -> Result<HashMap<String, Vec<Metric>>, ModuleError> {
         Ok(HashMap::new())
     }
 
@@ -297,13 +298,14 @@ impl NodeAPI for MockNodeAPI {
         Ok(())
     }
 
-    async fn get_module_health(&self, _module_id: &str) -> Result<Option<ModuleHealth>, ModuleError> {
+    async fn get_module_health(
+        &self,
+        _module_id: &str,
+    ) -> Result<Option<ModuleHealth>, ModuleError> {
         Ok(None)
     }
 
-    async fn get_all_module_health(
-        &self,
-    ) -> Result<Vec<(String, ModuleHealth)>, ModuleError> {
+    async fn get_all_module_health(&self) -> Result<Vec<(String, ModuleHealth)>, ModuleError> {
         Ok(vec![])
     }
 
@@ -317,7 +319,9 @@ impl NodeAPI for MockNodeAPI {
         _coinbase_script: Option<Vec<u8>>,
         _coinbase_address: Option<String>,
     ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
-        Err(ModuleError::OperationError("stub get_block_template".into()))
+        Err(ModuleError::OperationError(
+            "stub get_block_template".into(),
+        ))
     }
 
     async fn submit_block(&self, _block: Block) -> Result<SubmitBlockResult, ModuleError> {

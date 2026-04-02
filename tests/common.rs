@@ -267,10 +267,7 @@ impl TestUtxoSetBuilder {
         script_pubkey: ByteString,
     ) -> Self {
         self.utxos.insert(
-            OutPoint {
-                hash,
-                index,
-            },
+            OutPoint { hash, index },
             TransactionOutput {
                 value: value as i64,
                 script_pubkey,

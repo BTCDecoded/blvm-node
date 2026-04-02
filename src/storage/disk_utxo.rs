@@ -98,8 +98,7 @@ pub(crate) fn load_keys_from_disk(
     #[cfg(feature = "rayon")]
     {
         use blvm_protocol::rayon::prelude::*;
-        let rows: Vec<(OutPointKey, Option<Vec<u8>>)> =
-            keys.iter().copied().zip(values).collect();
+        let rows: Vec<(OutPointKey, Option<Vec<u8>>)> = keys.iter().copied().zip(values).collect();
         for (k, utxo) in rows
             .into_par_iter()
             .filter_map(|(key, value)| {

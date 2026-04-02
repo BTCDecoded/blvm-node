@@ -16,9 +16,7 @@ use crate::storage::ibd_utxo_store::IbdUtxoStore;
 use crate::storage::Storage;
 use anyhow::Result;
 use blvm_consensus::bip_validation::Bip30Index;
-use blvm_protocol::{
-    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet,
-};
+use blvm_protocol::{segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -153,8 +151,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let nominal_max_ahead = params.nominal_max_ahead;
     let utxo_nominal_max_entries = params.utxo_nominal_max_entries;
     let nominal_prefetch_lookahead = params.utxo_prefetch_lookahead.clamp(1, 128);
-    let utxo_prefetch_lookahead_live =
-        AtomicUsize::new(nominal_prefetch_lookahead);
+    let utxo_prefetch_lookahead_live = AtomicUsize::new(nominal_prefetch_lookahead);
 
     //
     // Blocks may arrive out of order. We maintain a small reorder buffer
@@ -170,13 +167,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // IBD Profiling (profile feature): BLVM_IBD_DEBUG=profile,blocked,disk or =profile:100,blocked or =full
     // Format: comma-separated. profile[:sample][:slow_ms] (e.g. profile:100 = every 100th block; profile:1:50 = slow threshold 50ms)
     #[cfg(feature = "profile")]
-    let (
-        ibd_profile_sample,
-        ibd_profile_slow_ms,
-        ibd_profile,
-        ibd_disk_profile,
-        ibd_blocked_log,
-    ) = {
+    let (ibd_profile_sample, ibd_profile_slow_ms, ibd_profile, ibd_disk_profile, ibd_blocked_log) = {
         let mut sample: u64 = 0;
         let mut slow: u64 = 0;
         let mut disk = false;
@@ -233,20 +224,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             info!("IBD profiling ENABLED (BLVM_IBD_DEBUG): sample_interval={}, slow_threshold_ms={}, disk_io={}, blocked_log={}", sample, slow, disk, blocked_log);
         }
         if blocked_log {
-            info!(
-                "IBD_BLOCKED_LOG ENABLED: every validation-blocking phase will be logged"
-            );
+            info!("IBD_BLOCKED_LOG ENABLED: every validation-blocking phase will be logged");
         }
         (sample, slow, on, disk, blocked_log)
     };
     #[cfg(not(feature = "profile"))]
-    let (
-        ibd_profile_sample,
-        ibd_profile_slow_ms,
-        ibd_profile,
-        ibd_disk_profile,
-        ibd_blocked_log,
-    ) = (0u64, 0u64, false, false, false);
+    let (ibd_profile_sample, ibd_profile_slow_ms, ibd_profile, ibd_disk_profile, ibd_blocked_log) =
+        (0u64, 0u64, false, false, false);
 
     // Track last 11 block headers for BIP113 median-time-past calculation
     // Vec + drain keeps contiguity; avoids VecDeque::make_contiguous() per-block alloc
@@ -327,9 +311,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let tree = pm
             .as_ref()
             .and_then(|p| p.commitment_store())
-            .and_then(|_| {
-                blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree::new().ok()
-            });
+            .and_then(|_| blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree::new().ok());
         let store = pm.and_then(|p| p.commitment_store());
         if tree.is_some() && store.is_some() {
             info!("IBD: incremental UTXO commitment enabled (applying delta per block)");
@@ -378,7 +360,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         .unwrap_or(0);
                     blvm_consensus::profile_log!(
                         "[IBD_STALL_WAIT] next_height={} duration_ms={} buffer_after={} ts_ms={}",
-                        next_validation_height, wait_ms, buffer_len_after, ts_ms
+                        next_validation_height,
+                        wait_ms,
+                        buffer_len_after,
+                        ts_ms
                     );
                 }
             }
@@ -588,114 +573,111 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 )
             };
 
-            let (sync_ms, evict_ms, utxo_flush_batch, rss_pressure, apply_utxo_ms, validation_result) =
-                match validation_result {
-                    Ok((tx_ids_cow, utxo_delta_opt)) => {
-                        #[cfg(feature = "profile")]
-                        let t_apply_utxo = std::time::Instant::now();
-                        #[cfg(feature = "profile")]
-                        let mut protect_evict_ms: u64 = 0;
-                        #[cfg(not(feature = "profile"))]
-                        let protect_evict_ms: u64 = 0;
-                        let flush = if let Some(delta) = utxo_delta_opt {
-                            let store = &ibd_store_v2_for_validation;
-                            #[cfg(all(
-                                feature = "utxo-commitments",
-                                feature = "production"
-                            ))]
-                            if let (Some(ref mut tree), Some(_)) =
-                                (&mut commitment_tree_opt, &commitment_store_opt)
-                            {
-                                for dk in &delta.deletions {
-                                    let op =
-                                        blvm_consensus::utxo_overlay::utxo_deletion_key_to_outpoint(
-                                            dk,
-                                        );
-                                    let key = outpoint_to_key(&op);
-                                    if let Some(utxo) = store.get(&key) {
-                                        if let Err(e) = tree.remove(&op, &utxo) {
-                                            warn!(
-                                                "IBD commitment: remove failed at height {}: {}",
-                                                next_height, e
-                                            );
-                                        }
-                                    }
-                                }
-                                for (op, arc) in &delta.additions {
-                                    if let Err(e) = tree.insert(*op, arc.as_ref().clone()) {
+            let (
+                sync_ms,
+                evict_ms,
+                utxo_flush_batch,
+                rss_pressure,
+                apply_utxo_ms,
+                validation_result,
+            ) = match validation_result {
+                Ok((tx_ids_cow, utxo_delta_opt)) => {
+                    #[cfg(feature = "profile")]
+                    let t_apply_utxo = std::time::Instant::now();
+                    #[cfg(feature = "profile")]
+                    let mut protect_evict_ms: u64 = 0;
+                    #[cfg(not(feature = "profile"))]
+                    let protect_evict_ms: u64 = 0;
+                    let flush = if let Some(delta) = utxo_delta_opt {
+                        let store = &ibd_store_v2_for_validation;
+                        #[cfg(all(feature = "utxo-commitments", feature = "production"))]
+                        if let (Some(ref mut tree), Some(_)) =
+                            (&mut commitment_tree_opt, &commitment_store_opt)
+                        {
+                            for dk in &delta.deletions {
+                                let op =
+                                    blvm_consensus::utxo_overlay::utxo_deletion_key_to_outpoint(dk);
+                                let key = outpoint_to_key(&op);
+                                if let Some(utxo) = store.get(&key) {
+                                    if let Err(e) = tree.remove(&op, &utxo) {
                                         warn!(
-                                            "IBD commitment: insert failed at height {}: {}",
+                                            "IBD commitment: remove failed at height {}: {}",
                                             next_height, e
                                         );
                                     }
                                 }
                             }
-                            store.apply_utxo_delta(delta, next_height);
-                            if store.is_dynamic_eviction() {
-                                #[cfg(feature = "profile")]
-                                let t_protect_evict = std::time::Instant::now();
-                                block_input_keys_batch_into_arc(
-                                    &blocks_buf,
-                                    &mut keys_buf,
-                                    &mut keys_seen,
-                                );
-                                store.protect_keys_for_next_blocks(&keys_buf);
-                                store.evict_if_needed(next_height);
-                                #[cfg(feature = "profile")]
-                                {
-                                    protect_evict_ms =
-                                        t_protect_evict.elapsed().as_millis() as u64;
+                            for (op, arc) in &delta.additions {
+                                if let Err(e) = tree.insert(*op, arc.as_ref().clone()) {
+                                    warn!(
+                                        "IBD commitment: insert failed at height {}: {}",
+                                        next_height, e
+                                    );
                                 }
                             }
-                            let pressure_level = mem_guard.should_flush(
-                                Some((&max_ahead_live, nominal_max_ahead)),
+                        }
+                        store.apply_utxo_delta(delta, next_height);
+                        if store.is_dynamic_eviction() {
+                            #[cfg(feature = "profile")]
+                            let t_protect_evict = std::time::Instant::now();
+                            block_input_keys_batch_into_arc(
+                                &blocks_buf,
+                                &mut keys_buf,
+                                &mut keys_seen,
                             );
-                            let rss_pressure = pressure_level >= PressureLevel::Elevated;
-                            if rss_pressure {
-                                info!(
+                            store.protect_keys_for_next_blocks(&keys_buf);
+                            store.evict_if_needed(next_height);
+                            #[cfg(feature = "profile")]
+                            {
+                                protect_evict_ms = t_protect_evict.elapsed().as_millis() as u64;
+                            }
+                        }
+                        let pressure_level =
+                            mem_guard.should_flush(Some((&max_ahead_live, nominal_max_ahead)));
+                        let rss_pressure = pressure_level >= PressureLevel::Elevated;
+                        if rss_pressure {
+                            info!(
                                     "[IBD_V2] height={} RSS pressure (cache={}, pending={}), forcing flush",
                                     next_height,
                                     store.len(),
                                     store.pending_len()
                                 );
-                                let batch = store.take_flush_batch_force();
-                                ibd_maybe_heap_trim();
-                                (0u64, protect_evict_ms, batch, true)
-                            } else if ibd_defer_flush {
-                                let at_checkpoint =
-                                    next_height > 0 && next_height % ibd_defer_checkpoint == 0;
-                                let batch = if at_checkpoint {
-                                    store.take_flush_batch_force()
-                                } else {
-                                    None
-                                };
-                                (0u64, protect_evict_ms, batch, false)
+                            let batch = store.take_flush_batch_force();
+                            ibd_maybe_heap_trim();
+                            (0u64, protect_evict_ms, batch, true)
+                        } else if ibd_defer_flush {
+                            let at_checkpoint =
+                                next_height > 0 && next_height % ibd_defer_checkpoint == 0;
+                            let batch = if at_checkpoint {
+                                store.take_flush_batch_force()
                             } else {
-                                let batch = store.maybe_take_flush_batch();
-                                (0u64, protect_evict_ms, batch, false)
-                            }
+                                None
+                            };
+                            (0u64, protect_evict_ms, batch, false)
                         } else {
-                            (0u64, 0u64, None, false)
-                        };
-                        #[cfg(feature = "profile")]
-                        let apply_utxo_ms = (t_apply_utxo.elapsed().as_millis())
-                            .saturating_sub(protect_evict_ms as u128) as u64;
-                        #[cfg(not(feature = "profile"))]
-                        let apply_utxo_ms = 0u64;
-                        (
-                            flush.0,
-                            flush.1,
-                            flush.2,
-                            flush.3,
-                            apply_utxo_ms,
-                            Ok((
-                                tx_ids_cow,
-                                None::<blvm_consensus::block::UtxoDelta>,
-                            )),
-                        )
-                    }
-                    Err(e) => (0u64, 0u64, None, false, 0u64, Err(e)),
-                };
+                            let batch = store.maybe_take_flush_batch();
+                            (0u64, protect_evict_ms, batch, false)
+                        }
+                    } else {
+                        (0u64, 0u64, None, false)
+                    };
+                    #[cfg(feature = "profile")]
+                    let apply_utxo_ms = (t_apply_utxo.elapsed().as_millis())
+                        .saturating_sub(protect_evict_ms as u128)
+                        as u64;
+                    #[cfg(not(feature = "profile"))]
+                    let apply_utxo_ms = 0u64;
+                    (
+                        flush.0,
+                        flush.1,
+                        flush.2,
+                        flush.3,
+                        apply_utxo_ms,
+                        Ok((tx_ids_cow, None::<blvm_consensus::block::UtxoDelta>)),
+                    )
+                }
+                Err(e) => (0u64, 0u64, None, false, 0u64, Err(e)),
+            };
 
             (
                 prefetch_ms,
@@ -786,9 +768,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 {
                     let block_hash = blockstore.get_block_hash(block_arc.as_ref());
                     let commitment = tree.generate_commitment(block_hash, next_height);
-                    if let Err(e) =
-                        cstore.store_commitment(&block_hash, next_height, &commitment)
-                    {
+                    if let Err(e) = cstore.store_commitment(&block_hash, next_height, &commitment) {
                         warn!(
                             "IBD commitment: store failed at height {}: {}",
                             next_height, e
@@ -842,11 +822,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 if !skip_storage {
                     pending_storage_bytes =
                         pending_storage_bytes.saturating_add(feeder_est_bytes as u64);
-                    pending_blocks.push((
-                        block_arc,
-                        Arc::clone(&witnesses_storage),
-                        next_height,
-                    ));
+                    pending_blocks.push((block_arc, Arc::clone(&witnesses_storage), next_height));
                 }
                 recent_headers_buf.push_back(header_rc);
                 if recent_headers_buf.len() > 11 {
@@ -975,23 +951,24 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         + sync_ms
                         + evict_ms
                         + flush_ms;
-                    let should_log = ibd_profile_height_matches_sample(ibd_profile_sample, next_height)
-                        || (ibd_disk_profile
-                            && (prefetch_await_ms > 0
-                                || gap_fill_ms > 0
-                                || prefetch_ms > 0
-                                || sync_ms > 0
-                                || evict_ms > 0))
-                        || (ibd_profile_slow_ms > 0
-                            && (prefetch_await_ms >= ibd_profile_slow_ms
-                                || gap_fill_ms >= ibd_profile_slow_ms
-                                || prefetch_ms >= ibd_profile_slow_ms
-                                || utxo_base_ms >= ibd_profile_slow_ms
-                                || val_ms >= ibd_profile_slow_ms
-                                || apply_utxo_ms >= ibd_profile_slow_ms
-                                || sync_ms >= ibd_profile_slow_ms
-                                || evict_ms >= ibd_profile_slow_ms
-                                || flush_ms >= ibd_profile_slow_ms));
+                    let should_log =
+                        ibd_profile_height_matches_sample(ibd_profile_sample, next_height)
+                            || (ibd_disk_profile
+                                && (prefetch_await_ms > 0
+                                    || gap_fill_ms > 0
+                                    || prefetch_ms > 0
+                                    || sync_ms > 0
+                                    || evict_ms > 0))
+                            || (ibd_profile_slow_ms > 0
+                                && (prefetch_await_ms >= ibd_profile_slow_ms
+                                    || gap_fill_ms >= ibd_profile_slow_ms
+                                    || prefetch_ms >= ibd_profile_slow_ms
+                                    || utxo_base_ms >= ibd_profile_slow_ms
+                                    || val_ms >= ibd_profile_slow_ms
+                                    || apply_utxo_ms >= ibd_profile_slow_ms
+                                    || sync_ms >= ibd_profile_slow_ms
+                                    || evict_ms >= ibd_profile_slow_ms
+                                    || flush_ms >= ibd_profile_slow_ms));
                     if should_log && total_ms > 0 {
                         blvm_consensus::profile_log!(
                             "[IBD_PROFILE] height={} total_ms={} prefetch_await={} gap_fill={} prefetch={} utxo_base={} validation={} apply_utxo={} sync={} evict={} flush_coord={} disk_total={} txs={} inputs={}",
@@ -1011,8 +988,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             n_inputs
                         );
                         let (dl, ch, ev, _ph) = ibd_store_v2_for_validation.stats();
-                        let utxo_stats =
-                            (ibd_store_v2_for_validation.len(), dl, ch, ev);
+                        let utxo_stats = (ibd_store_v2_for_validation.len(), dl, ch, ev);
                         blvm_consensus::profile_log!(
                             "[IBD_PIPELINE] height={} utxo_flush={} block_flush={} pending={} utxo_cache={} disk_loads={} cache_hits={} evictions={}",
                             next_height,
@@ -1041,10 +1017,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         &mut pending_blocks,
                     );
                 }
-                error!(
-                    "Failed to validate block at height {}: {}",
-                    next_height, e
-                );
+                error!("Failed to validate block at height {}: {}", next_height, e);
                 // Diagnostic: identify which UTXOs were missing from utxo_base_buf
                 // keys_v2_buf already filled in the validation path above
                 {
@@ -1066,8 +1039,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         }
                     }
                 }
-                let utxo_for_dump =
-                    ibd_store_v2_for_validation.build_utxo_map(&keys_v2_buf);
+                let utxo_for_dump = ibd_store_v2_for_validation.build_utxo_map(&keys_v2_buf);
                 ParallelIBD::dump_failed_block(
                     next_height,
                     block_arc.as_ref(),
@@ -1083,9 +1055,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         // Allows download workers to progress; fewer yields = less validation interruption
         if yield_interval > 0 && blocks_synced % yield_interval == 0 {
             #[cfg(feature = "profile")]
-            if ibd_profile
-                && ibd_profile_height_matches_sample(ibd_profile_sample, next_height)
-            {
+            if ibd_profile && ibd_profile_height_matches_sample(ibd_profile_sample, next_height) {
                 blvm_consensus::profile_log!(
                     "[IBD_YIELD] blocks_synced={} utxo_flush={} block_flush={} (yielding to runtime)",
                     blocks_synced,
@@ -1295,7 +1265,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     }
     let last_validated = next_validation_height.saturating_sub(1);
     if let Err(e) = ibd_store_v2_for_validation.flush_disk() {
-        warn!("Failed to flush ibd_utxos memtable at final shutdown (height {}): {}", last_validated, e);
+        warn!(
+            "Failed to flush ibd_utxos memtable at final shutdown (height {}): {}",
+            last_validated, e
+        );
     }
 
     for handle in flush_handles.drain(..) {
@@ -1319,7 +1292,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         )?;
     }
 
-    let tip = storage_clone.chain().get_height().ok().flatten().unwrap_or(0);
+    let tip = storage_clone
+        .chain()
+        .get_height()
+        .ok()
+        .flatten()
+        .unwrap_or(0);
     let _ = storage_clone.chain().set_utxo_watermark(tip);
 
     Ok(())

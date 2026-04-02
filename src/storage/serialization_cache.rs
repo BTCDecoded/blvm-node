@@ -56,11 +56,11 @@ impl Drop for IbdHeaderSerializeCacheBypassGuard {
 }
 
 /// Sharded header serialization cache (reduces Mutex contention vs one global LRU under rayon).
-static HEADER_SERIALIZE_CACHE: OnceLock<[Mutex<LruCache<Hash, Arc<Vec<u8>>>>; HEADER_CACHE_SHARDS]> =
-    OnceLock::new();
+static HEADER_SERIALIZE_CACHE: OnceLock<
+    [Mutex<LruCache<Hash, Arc<Vec<u8>>>>; HEADER_CACHE_SHARDS],
+> = OnceLock::new();
 
-fn header_caches(
-) -> &'static [Mutex<LruCache<Hash, Arc<Vec<u8>>>>; HEADER_CACHE_SHARDS] {
+fn header_caches() -> &'static [Mutex<LruCache<Hash, Arc<Vec<u8>>>>; HEADER_CACHE_SHARDS] {
     HEADER_SERIALIZE_CACHE.get_or_init(|| {
         let cap = NonZeroUsize::new(64).expect("nonzero");
         std::array::from_fn(|_| Mutex::new(LruCache::new(cap)))

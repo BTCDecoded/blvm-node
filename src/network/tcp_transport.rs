@@ -95,13 +95,10 @@ impl TcpTransport {
 
         info!("Connecting to peer at {} (timeout {}s)", addr, timeout_secs);
 
-        let stream = timeout(
-            Duration::from_secs(timeout_secs),
-            TcpStream::connect(addr),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Connection timeout ({}s) to {}", timeout_secs, addr))?
-        .map_err(|e| anyhow::anyhow!("Connection failed to {}: {}", addr, e))?;
+        let stream = timeout(Duration::from_secs(timeout_secs), TcpStream::connect(addr))
+            .await
+            .map_err(|_| anyhow::anyhow!("Connection timeout ({}s) to {}", timeout_secs, addr))?
+            .map_err(|e| anyhow::anyhow!("Connection failed to {}: {}", addr, e))?;
 
         Ok(stream)
     }

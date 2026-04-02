@@ -33,8 +33,11 @@ impl NetworkManager {
                 peer.set_start_height(version_msg.start_height);
                 debug!(
                     "Updated peer {} with version={}, services={}, user_agent={}, start_height={}",
-                    peer_addr, version_msg.version, version_msg.services,
-                    version_msg.user_agent, version_msg.start_height
+                    peer_addr,
+                    version_msg.version,
+                    version_msg.services,
+                    version_msg.user_agent,
+                    version_msg.start_height
                 );
             }
         }
@@ -49,10 +52,7 @@ impl NetworkManager {
                     {
                         warn!("Failed to send VerAck to {:?}: {}", transport_addr, e);
                     } else {
-                        debug!(
-                            "Sent VerAck to {:?} (handshake completing)",
-                            transport_addr
-                        );
+                        debug!("Sent VerAck to {:?} (handshake completing)", transport_addr);
                     }
                 }
                 Err(e) => {
@@ -103,33 +103,29 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::Pong(pong_msg) => {
-                {
-                    let mut pm = self.peer_manager_mutex().lock().await;
-                    let transport_addr = pm.find_transport_addr_by_socket(peer_addr).or_else(|| {
-                        pm.peers()
-                            .iter()
-                            .find(|(addr, _)| {
-                                match addr {
-                                    TransportAddr::Tcp(sock) => sock == &peer_addr,
-                                    #[cfg(feature = "quinn")]
-                                    TransportAddr::Quinn(sock) => sock == &peer_addr,
-                                    #[cfg(feature = "iroh")]
-                                    TransportAddr::Iroh(_) => false,
-                                }
-                            })
-                            .map(|(addr, _)| addr.clone())
-                    });
+                let mut pm = self.peer_manager_mutex().lock().await;
+                let transport_addr = pm.find_transport_addr_by_socket(peer_addr).or_else(|| {
+                    pm.peers()
+                        .iter()
+                        .find(|(addr, _)| match addr {
+                            TransportAddr::Tcp(sock) => sock == &peer_addr,
+                            #[cfg(feature = "quinn")]
+                            TransportAddr::Quinn(sock) => sock == &peer_addr,
+                            #[cfg(feature = "iroh")]
+                            TransportAddr::Iroh(_) => false,
+                        })
+                        .map(|(addr, _)| addr.clone())
+                });
 
-                    if let Some(addr) = transport_addr {
-                        if let Some(peer) = pm.get_peer_mut(&addr) {
-                            if !peer.record_pong_received(pong_msg.nonce) {
-                                warn!("Received pong with non-matching nonce from {}", peer_addr);
-                            } else {
-                                debug!(
-                                    "Received valid pong from {} (nonce={})",
-                                    peer_addr, pong_msg.nonce
-                                );
-                            }
+                if let Some(addr) = transport_addr {
+                    if let Some(peer) = pm.get_peer_mut(&addr) {
+                        if !peer.record_pong_received(pong_msg.nonce) {
+                            warn!("Received pong with non-matching nonce from {}", peer_addr);
+                        } else {
+                            debug!(
+                                "Received valid pong from {} (nonce={})",
+                                peer_addr, pong_msg.nonce
+                            );
                         }
                     }
                 }
@@ -233,9 +229,9 @@ impl NetworkManager {
                             let notfound = NotFoundMessage {
                                 inventory: getdata.inventory.clone(),
                             };
-                            if let Ok(wire_msg) =
-                                ProtocolParser::serialize_message(&ProtocolMessage::NotFound(notfound))
-                            {
+                            if let Ok(wire_msg) = ProtocolParser::serialize_message(
+                                &ProtocolMessage::NotFound(notfound),
+                            ) {
                                 if let Err(e) = self.send_to_peer(peer_addr, wire_msg).await {
                                     warn!(
                                         "Failed to send NotFound message to {}: {}",
@@ -417,9 +413,11 @@ impl NetworkManager {
                         cmpct_msg.compact_block.short_ids.len(),
                         peer_addr
                     );
-                    let _ = self.peer_tx().send(NetworkMessage::PeerDisconnected(
-                        TransportAddr::Tcp(peer_addr),
-                    ));
+                    let _ =
+                        self.peer_tx()
+                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                                peer_addr,
+                            )));
                     return Err(anyhow::anyhow!("Invalid compact block: too many short IDs"));
                 }
             }
@@ -430,9 +428,11 @@ impl NetworkManager {
                         getblocktxn_msg.indices.len(),
                         peer_addr
                     );
-                    let _ = self.peer_tx().send(NetworkMessage::PeerDisconnected(
-                        TransportAddr::Tcp(peer_addr),
-                    ));
+                    let _ =
+                        self.peer_tx()
+                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                                peer_addr,
+                            )));
                     return Err(anyhow::anyhow!("GetBlockTxn with too many indices"));
                 }
             }
@@ -443,9 +443,11 @@ impl NetworkManager {
                         blocktxn_msg.transactions.len(),
                         peer_addr
                     );
-                    let _ = self.peer_tx().send(NetworkMessage::PeerDisconnected(
-                        TransportAddr::Tcp(peer_addr),
-                    ));
+                    let _ =
+                        self.peer_tx()
+                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                                peer_addr,
+                            )));
                     return Err(anyhow::anyhow!("BlockTxn with too many transactions"));
                 }
             }

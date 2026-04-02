@@ -173,10 +173,7 @@ impl PendingFlushPackage {
             };
             rows.push((*key, encoded));
         }
-        let chunks: Vec<Vec<_>> = rows
-            .chunks(MAX_BATCH_OPS)
-            .map(|c| c.to_vec())
-            .collect();
+        let chunks: Vec<Vec<_>> = rows.chunks(MAX_BATCH_OPS).map(|c| c.to_vec()).collect();
         Ok(PreparedFlushPackage {
             chunks: Arc::new(chunks),
             max_block_height: self.max_block_height,
@@ -386,10 +383,13 @@ impl IbdUtxoStore {
     #[inline]
     fn cache_put(&self, key: OutPointKey, utxo: Arc<UTXO>) {
         let gen = self.next_cache_generation();
-        self.cache.insert(key, UtxoCacheSlot {
-            generation: gen,
-            utxo,
-        });
+        self.cache.insert(
+            key,
+            UtxoCacheSlot {
+                generation: gen,
+                utxo,
+            },
+        );
     }
 
     /// Called by the dedicated flush worker after a successful `flush_pending_batch`.
@@ -409,10 +409,7 @@ impl IbdUtxoStore {
     pub fn wait_utxo_disk_through(&self, min_height: u64) {
         let mut guard = self.utxo_barrier_mu.lock().expect("utxo barrier mu");
         while self.utxo_disk_commit_height.load(Ordering::Acquire) < min_height {
-            guard = self
-                .utxo_barrier_cv
-                .wait(guard)
-                .expect("utxo barrier cv");
+            guard = self.utxo_barrier_cv.wait(guard).expect("utxo barrier cv");
         }
     }
 
@@ -431,15 +428,13 @@ impl IbdUtxoStore {
     }
 
     pub fn pending_len(&self) -> usize {
-        self.pending_state
-            .lock()
-            .map(|p| p.len_keys())
-            .unwrap_or(0)
+        self.pending_state.lock().map(|p| p.len_keys()).unwrap_or(0)
     }
 
     fn eviction_scan_cap(&self, to_evict: usize) -> usize {
         let hint = to_evict.saturating_mul(8).max(1024);
-        hint.min(EVICT_SCAN_CAP).min(self.cache.len().saturating_add(1))
+        hint.min(EVICT_SCAN_CAP)
+            .min(self.cache.len().saturating_add(1))
     }
 
     pub(crate) fn maybe_evict(&self) {
@@ -623,7 +618,9 @@ impl IbdUtxoStore {
         if evicted > 0 {
             tracing::warn!(
                 "IbdUtxoStore: EMERGENCY evict {} of {} entries (keep {})",
-                evicted, len, keep
+                evicted,
+                len,
+                keep
             );
         }
     }
@@ -747,15 +744,13 @@ impl IbdUtxoStore {
             cache_misses_buf.push(*key);
         }
         if !cache_misses_buf.is_empty() && !self.memory_only {
-            let need_inflight_scan = self.max_entries_effective() != usize::MAX
-                && {
-                    let inflight = self.in_flight_insertions.lock().expect("in_flight lock");
-                    !inflight.is_empty()
-                };
+            let need_inflight_scan = self.max_entries_effective() != usize::MAX && {
+                let inflight = self.in_flight_insertions.lock().expect("in_flight lock");
+                !inflight.is_empty()
+            };
             let to_load = std::mem::take(cache_misses_buf);
             let load_count = to_load.len();
-            if let Ok((loaded, keys_scanned)) =
-                load_keys_from_disk(Arc::clone(&self.disk), to_load)
+            if let Ok((loaded, keys_scanned)) = load_keys_from_disk(Arc::clone(&self.disk), to_load)
             {
                 self.stats_disk_loads
                     .fetch_add(load_count as u64, Ordering::Relaxed);
@@ -766,8 +761,7 @@ impl IbdUtxoStore {
                         map.insert(key_to_outpoint(&key), Arc::clone(&arc));
                     }
                 } else {
-                    let mut pairs: Vec<(OutPointKey, Arc<UTXO>)> =
-                        Vec::with_capacity(loaded.len());
+                    let mut pairs: Vec<(OutPointKey, Arc<UTXO>)> = Vec::with_capacity(loaded.len());
                     for (key, utxo) in loaded {
                         let arc = Arc::new(utxo);
                         map.insert(key_to_outpoint(&key), Arc::clone(&arc));
@@ -816,11 +810,7 @@ impl IbdUtxoStore {
         self.maybe_evict();
     }
 
-    pub fn apply_utxo_delta(
-        &self,
-        mut delta: blvm_consensus::block::UtxoDelta,
-        block_height: u64,
-    ) {
+    pub fn apply_utxo_delta(&self, mut delta: blvm_consensus::block::UtxoDelta, block_height: u64) {
         let total_delta = delta.additions.len() as isize - delta.deletions.len() as isize;
         self.total_utxo_count
             .fetch_add(total_delta, Ordering::Relaxed);
@@ -937,7 +927,9 @@ impl IbdUtxoStore {
             }
         }
 
-        if self.max_entries_effective() != usize::MAX && self.cache.len() > self.max_entries_effective() {
+        if self.max_entries_effective() != usize::MAX
+            && self.cache.len() > self.max_entries_effective()
+        {
             let mut evicted = 0;
             for (key, value_opt) in batch {
                 if value_opt.is_some() {
@@ -994,7 +986,8 @@ impl IbdUtxoStore {
             }
         }
 
-        if self.max_entries_effective() != usize::MAX && self.cache.len() > self.max_entries_effective()
+        if self.max_entries_effective() != usize::MAX
+            && self.cache.len() > self.max_entries_effective()
         {
             let mut evicted = 0;
             'outer: for chunk in pkg.chunks.iter() {

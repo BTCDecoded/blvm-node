@@ -48,9 +48,10 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.blocks().get_header(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to get block header", e)
-                })
+                storage
+                    .blocks()
+                    .get_header(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get block header", e))
             }
         })
         .await
@@ -63,15 +64,17 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             move || {
                 // First get hash by height
-                let hash = storage.blocks().get_hash_by_height(height).map_err(|e| {
-                    ModuleError::op_err("Failed to get hash by height", e)
-                })?;
+                let hash = storage
+                    .blocks()
+                    .get_hash_by_height(height)
+                    .map_err(|e| ModuleError::op_err("Failed to get hash by height", e))?;
 
                 if let Some(hash) = hash {
                     // Then get block by hash
-                    storage.blocks().get_block(&hash).map_err(|e| {
-                        ModuleError::op_err("Failed to get block", e)
-                    })
+                    storage
+                        .blocks()
+                        .get_block(&hash)
+                        .map_err(|e| ModuleError::op_err("Failed to get block", e))
                 } else {
                     Ok(None)
                 }
@@ -86,9 +89,10 @@ impl BlockchainApi {
         tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
             move || {
-                storage.blocks().get_hash_by_height(height).map_err(|e| {
-                    ModuleError::op_err("Failed to get hash by height", e)
-                })
+                storage
+                    .blocks()
+                    .get_hash_by_height(height)
+                    .map_err(|e| ModuleError::op_err("Failed to get hash by height", e))
             }
         })
         .await
@@ -101,9 +105,10 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.blocks().get_height_by_hash(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to get height by hash", e)
-                })
+                storage
+                    .blocks()
+                    .get_height_by_hash(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get height by hash", e))
             }
         })
         .await
@@ -138,9 +143,10 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.blocks().get_block_metadata(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to get block metadata", e)
-                })
+                storage
+                    .blocks()
+                    .get_block_metadata(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get block metadata", e))
             }
         })
         .await
@@ -153,9 +159,10 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.blocks().has_block(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to check block existence", e)
-                })
+                storage
+                    .blocks()
+                    .has_block(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to check block existence", e))
             }
         })
         .await
@@ -167,9 +174,10 @@ impl BlockchainApi {
         tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
             move || {
-                storage.blocks().block_count().map_err(|e| {
-                    ModuleError::op_err("Failed to get block count", e)
-                })
+                storage
+                    .blocks()
+                    .block_count()
+                    .map_err(|e| ModuleError::op_err("Failed to get block count", e))
             }
         })
         .await
@@ -181,9 +189,10 @@ impl BlockchainApi {
         tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
             move || {
-                storage.blocks().get_recent_headers(count).map_err(|e| {
-                    ModuleError::op_err("Failed to get recent headers", e)
-                })
+                storage
+                    .blocks()
+                    .get_recent_headers(count)
+                    .map_err(|e| ModuleError::op_err("Failed to get recent headers", e))
             }
         })
         .await
@@ -196,9 +205,10 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.transactions().get_transaction(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to get transaction", e)
-                })
+                storage
+                    .transactions()
+                    .get_transaction(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get transaction", e))
             }
         })
         .await
@@ -211,9 +221,10 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             let hash = *hash;
             move || {
-                storage.transactions().has_transaction(&hash).map_err(|e| {
-                    ModuleError::op_err("Failed to check transaction existence", e)
-                })
+                storage
+                    .transactions()
+                    .has_transaction(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to check transaction existence", e))
             }
         })
         .await
@@ -242,9 +253,10 @@ impl BlockchainApi {
             let storage = Arc::clone(&self.storage);
             let outpoint = *outpoint;
             move || {
-                storage.utxos().has_utxo(&outpoint).map_err(|e| {
-                    ModuleError::op_err("Failed to check UTXO existence", e)
-                })
+                storage
+                    .utxos()
+                    .has_utxo(&outpoint)
+                    .map_err(|e| ModuleError::op_err("Failed to check UTXO existence", e))
             }
         })
         .await
@@ -256,9 +268,10 @@ impl BlockchainApi {
         tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
             move || {
-                storage.chain().load_chain_info().map_err(|e| {
-                    ModuleError::op_err("Failed to get chain info", e)
-                })
+                storage
+                    .chain()
+                    .load_chain_info()
+                    .map_err(|e| ModuleError::op_err("Failed to get chain info", e))
             }
         })
         .await
@@ -268,17 +281,17 @@ impl BlockchainApi {
     /// Get current chain tip (highest block hash)
     pub async fn get_chain_tip(&self) -> Result<Hash, ModuleError> {
         let chain_info = self.get_chain_info().await?;
-        chain_info
-            .map(|info| info.tip_hash)
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string()))
+        chain_info.map(|info| info.tip_hash).ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string())
+        })
     }
 
     /// Get current block height
     pub async fn get_block_height(&self) -> Result<u64, ModuleError> {
         let chain_info = self.get_chain_info().await?;
-        chain_info
-            .map(|info| info.height)
-            .ok_or_else(|| ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string()))
+        chain_info.map(|info| info.height).ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string())
+        })
     }
 
     /// Get chain parameters

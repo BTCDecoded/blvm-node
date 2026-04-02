@@ -28,9 +28,9 @@ pub use chunk_assigner::BlockChunk;
 use download::download_chunk;
 use feeder::{new_feeder_state, run_feeder_thread};
 use memory::{MemoryGuard, TIDESDB_MAX_TXN_OPS};
-use types::{ChunkWorkItem, FeederBufferValue, ReadyItem};
 #[cfg(feature = "production")]
 use types::PrefetchWorkItemV2;
+use types::{ChunkWorkItem, FeederBufferValue, ReadyItem};
 
 use crate::network::inventory::MSG_BLOCK;
 use crate::network::peer_scoring::is_lan_peer;
@@ -42,8 +42,7 @@ use crate::node::block_processor::validate_block_with_context;
 use crate::storage::blockstore::{block_height_row_key, BlockMetadata, BlockStore};
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::{
-    block_input_keys_and_tx_ids_filtered,
-    block_input_keys_batch_into_arc, key_to_outpoint,
+    block_input_keys_and_tx_ids_filtered, block_input_keys_batch_into_arc, key_to_outpoint,
     outpoint_to_key, OutPointKey, SyncBatch,
 };
 #[cfg(feature = "production")]
@@ -147,7 +146,9 @@ impl ParallelIBDConfig {
                     .collect()
             })
             .or_else(|| {
-                ibd_config.filter(|c| !c.preferred_peers.is_empty()).map(|c| c.preferred_peers.clone())
+                ibd_config
+                    .filter(|c| !c.preferred_peers.is_empty())
+                    .map(|c| c.preferred_peers.clone())
             })
             .unwrap_or_default();
         let mode = std::env::var("BLVM_IBD_MODE")
@@ -256,7 +257,6 @@ pub struct ParallelIBD {
     /// Peer scorer for bandwidth-based peer selection
     peer_scorer: Arc<crate::network::peer_scoring::PeerScorer>,
 }
-
 
 impl ParallelIBD {
     /// Create a new parallel IBD coordinator
@@ -656,7 +656,10 @@ impl ParallelIBD {
         let effective_max_entries = mem_guard.utxo_max_entries;
         let utxo_flush_threshold = mem_guard.utxo_flush_threshold;
         // Max blocks download can race ahead of validation. Limits block_rx channel depth.
-        let max_ahead_blocks: u64 = self.config.max_ahead_blocks.unwrap_or(mem_guard.max_ahead_blocks);
+        let max_ahead_blocks: u64 = self
+            .config
+            .max_ahead_blocks
+            .unwrap_or(mem_guard.max_ahead_blocks);
         let max_ahead_live = Arc::new(AtomicU64::new(max_ahead_blocks));
         // IBD v2 (IbdUtxoStore) is the only path. Storage is guaranteed Some (checked at start).
         let ibd_memory_only: bool = self.config.memory_only && start_height <= 1;
@@ -730,13 +733,17 @@ impl ParallelIBD {
                 let rx_clone = in_rx.clone();
                 let tx_clone = out_tx.clone();
                 let store = Arc::clone(&store);
-                std::thread::spawn(move || prefetch::run_prefetch_worker(rx_clone, tx_clone, store));
+                std::thread::spawn(move || {
+                    prefetch::run_prefetch_worker(rx_clone, tx_clone, store)
+                });
             }
             for _ in 0..gap_fill_workers {
                 let rx_clone = gap_rx_v2.clone();
                 let tx_clone = out_tx.clone();
                 let store = Arc::clone(&store);
-                std::thread::spawn(move || prefetch::run_prefetch_worker(rx_clone, tx_clone, store));
+                std::thread::spawn(move || {
+                    prefetch::run_prefetch_worker(rx_clone, tx_clone, store)
+                });
             }
             info!(
                 "IBD v2 prefetch: {} workers, queue={}; gap-fill overflow: {} workers (direct to feeder)",
@@ -801,9 +808,10 @@ impl ParallelIBD {
 
                     loop {
                         let maybe_work = loop {
-                            if let Some((chunk_start, chunk_end)) =
-                                assigner_clone.get_work(&peer_id, max_ahead_live_clone.load(std::sync::atomic::Ordering::Relaxed))
-                            {
+                            if let Some((chunk_start, chunk_end)) = assigner_clone.get_work(
+                                &peer_id,
+                                max_ahead_live_clone.load(std::sync::atomic::Ordering::Relaxed),
+                            ) {
                                 break Some((chunk_start, chunk_end));
                             }
                             if assigner_clone.is_done() {
@@ -918,7 +926,9 @@ impl ParallelIBD {
                                 _guard.disarm();
                                 assigner_clone.on_chunk_complete(&peer_id);
 
-                                if num_peers_clone > 1 && consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                                if num_peers_clone > 1
+                                    && consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+                                {
                                     warn!(
                                         "Peer {} exceeded max failures, stopping worker",
                                         peer_id
@@ -926,7 +936,9 @@ impl ParallelIBD {
                                     break;
                                 }
 
-                                if num_peers_clone == 1 && consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                                if num_peers_clone == 1
+                                    && consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+                                {
                                     // Single peer: wait for reconnect instead of killing the worker.
                                     // The reconnect logic in peer_connections / background_tasks will
                                     // re-establish the TCP session; we just need to stay alive.
@@ -935,7 +947,8 @@ impl ParallelIBD {
                                         peer_id, consecutive_failures
                                     );
                                     let wait_secs = 10u64;
-                                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs))
+                                        .await;
                                     // After waiting, try to get work again — peer may be back.
                                     // Reset failure count so we get fresh retries.
                                     consecutive_failures = 0;
@@ -1041,7 +1054,14 @@ impl ParallelIBD {
                             let store = &ibd_store_v2_for_coord;
                             let keys_owned = std::mem::take(&mut coord_keys_buf);
                             let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
-                            let item = (Arc::clone(store), keys_owned, tx_ids_owned, h, block, witnesses);
+                            let item = (
+                                Arc::clone(store),
+                                keys_owned,
+                                tx_ids_owned,
+                                h,
+                                block,
+                                witnesses,
+                            );
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
                             let route_to_gap_fill = h <= next_needed;
@@ -1093,7 +1113,9 @@ impl ParallelIBD {
                             }
                             reorder_buffer.insert(h, (block, witnesses));
                             gap_drained += 1;
-                            if found_missing || gap_drained >= 200 { break; }
+                            if found_missing || gap_drained >= 200 {
+                                break;
+                            }
                         }
                         if !found_missing {
                             // Still missing after draining channel. Track how long.
@@ -1160,7 +1182,14 @@ impl ParallelIBD {
                             let store = &ibd_store_v2_for_coord;
                             let keys_owned = std::mem::take(&mut coord_keys_buf);
                             let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
-                            let item = (Arc::clone(store), keys_owned, tx_ids_owned, h, block, witnesses);
+                            let item = (
+                                Arc::clone(store),
+                                keys_owned,
+                                tx_ids_owned,
+                                h,
+                                block,
+                                witnesses,
+                            );
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
                             let route_to_gap_fill = h <= next_needed;
@@ -1272,7 +1301,14 @@ impl ParallelIBD {
                             let store = &ibd_store_v2_for_coord;
                             let keys_owned = std::mem::take(&mut coord_keys_buf);
                             let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
-                            let item = (Arc::clone(store), keys_owned, tx_ids_owned, h, block, witnesses);
+                            let item = (
+                                Arc::clone(store),
+                                keys_owned,
+                                tx_ids_owned,
+                                h,
+                                block,
+                                witnesses,
+                            );
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
                             let route_to_gap_fill = h <= next_needed;
@@ -1356,7 +1392,8 @@ impl ParallelIBD {
             utxo_nominal_max_entries,
             utxo_prefetch_lookahead: utxo_pf,
         };
-        let validation_handle = std::thread::spawn(move || validation_loop::run_validation_loop(params));
+        let validation_handle =
+            std::thread::spawn(move || validation_loop::run_validation_loop(params));
 
         // Spawn BlockSyncProgress publisher — polls validation_height every 2s for module event subscribers
         let progress_handle = if let Some(ref ep) = event_publisher {
@@ -1377,10 +1414,18 @@ impl ParallelIBD {
                         } else {
                             0.0
                         };
-                        let blocks_per_second =
-                            if elapsed > 0.0 { (current - start) as f64 / elapsed } else { 0.0 };
-                        ep.publish_block_sync_progress(current, end, progress_percent, blocks_per_second)
-                            .await;
+                        let blocks_per_second = if elapsed > 0.0 {
+                            (current - start) as f64 / elapsed
+                        } else {
+                            0.0
+                        };
+                        ep.publish_block_sync_progress(
+                            current,
+                            end,
+                            progress_percent,
+                            blocks_per_second,
+                        )
+                        .await;
                         last_height = current;
                     }
                     if current >= end {
@@ -1407,11 +1452,10 @@ impl ParallelIBD {
             Ok(mutex) => mutex
                 .into_inner()
                 .map_err(|e| anyhow::anyhow!("IBD UTXO mutex poisoned: {e:?}"))?,
-            Err(arc) => {
-                arc.lock()
-                    .map_err(|e| anyhow::anyhow!("IBD UTXO mutex poisoned: {e:?}"))?
-                    .clone()
-            }
+            Err(arc) => arc
+                .lock()
+                .map_err(|e| anyhow::anyhow!("IBD UTXO mutex poisoned: {e:?}"))?
+                .clone(),
         };
 
         // Isolated validation: coordinator drained all blocks; no local reorder buffer to check.
@@ -1456,7 +1500,13 @@ impl ParallelIBD {
         peer_ids: &[String],
         scored_peers: Option<&[(String, f64)]>,
     ) -> Vec<BlockChunk> {
-        create_chunks_impl(&self.config, start_height, end_height, peer_ids, scored_peers)
+        create_chunks_impl(
+            &self.config,
+            start_height,
+            end_height,
+            peer_ids,
+            scored_peers,
+        )
     }
 
     /// Returns pre-computed tx_ids so the caller avoids redundant double-SHA256.
@@ -1682,7 +1732,11 @@ impl ParallelIBD {
         let mut success = true;
         if let Ok(f) = std::fs::File::create(&block_path) {
             if let Err(e) = bincode::serialize_into(std::io::BufWriter::new(f), block) {
-                error!("IBD_SNAPSHOT: Failed to serialize block to {}: {}", block_path.display(), e);
+                error!(
+                    "IBD_SNAPSHOT: Failed to serialize block to {}: {}",
+                    block_path.display(),
+                    e
+                );
                 success = false;
             }
         } else {
@@ -1691,18 +1745,29 @@ impl ParallelIBD {
         }
         if let Ok(f) = std::fs::File::create(&witnesses_path) {
             if let Err(e) = bincode::serialize_into(std::io::BufWriter::new(f), witnesses) {
-                error!("IBD_SNAPSHOT: Failed to serialize witnesses to {}: {}", witnesses_path.display(), e);
+                error!(
+                    "IBD_SNAPSHOT: Failed to serialize witnesses to {}: {}",
+                    witnesses_path.display(),
+                    e
+                );
                 success = false;
             }
         } else {
-            error!("IBD_SNAPSHOT: Failed to create {}", witnesses_path.display());
+            error!(
+                "IBD_SNAPSHOT: Failed to create {}",
+                witnesses_path.display()
+            );
             success = false;
         }
         if let Ok(f) = std::fs::File::create(&utxo_path) {
             let serializable: std::collections::HashMap<_, _> =
                 utxo_set.iter().map(|(k, v)| (*k, (**v).clone())).collect();
             if let Err(e) = bincode::serialize_into(std::io::BufWriter::new(f), &serializable) {
-                error!("IBD_SNAPSHOT: Failed to serialize utxo_set to {}: {}", utxo_path.display(), e);
+                error!(
+                    "IBD_SNAPSHOT: Failed to serialize utxo_set to {}: {}",
+                    utxo_path.display(),
+                    e
+                );
                 success = false;
             }
         } else {
@@ -1720,7 +1785,11 @@ impl ParallelIBD {
             base_dir
         );
         if let Err(e) = std::fs::write(&info_path, info) {
-            error!("IBD_SNAPSHOT: Failed to write {}: {}", info_path.display(), e);
+            error!(
+                "IBD_SNAPSHOT: Failed to write {}: {}",
+                info_path.display(),
+                e
+            );
             success = false;
         }
         if success {
@@ -1730,7 +1799,10 @@ impl ParallelIBD {
                 dir.display()
             );
         } else {
-            warn!("IBD_SNAPSHOT: Block {} dump incomplete or failed (see errors above)", height);
+            warn!(
+                "IBD_SNAPSHOT: Block {} dump incomplete or failed (see errors above)",
+                height
+            );
         }
     }
 
@@ -1774,11 +1846,7 @@ impl ParallelIBD {
             })
             .collect();
 
-        let flush_max_height = pending
-            .iter()
-            .map(|(_, _, h)| *h)
-            .max()
-            .unwrap_or(0);
+        let flush_max_height = pending.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
 
         // Pre-compute all block hashes ONCE (avoids 4x redundant double SHA256 per block)
         // Parallelize hash computation and serialization for better CPU utilization
@@ -1873,68 +1941,62 @@ impl ParallelIBD {
         flush_order.sort_by_key(|&i| pending[i].2);
 
         // Pre-serialize witness payloads once (shared by RocksDB unified flush and legacy per-CF batches).
-        let witness_blobs: Vec<Option<Vec<u8>>> =
-            if pending.iter().any(|(_, w, _)| !w.is_empty()) {
-                #[cfg(feature = "rayon")]
-                {
-                    use blvm_protocol::rayon::iter::IntoParallelRefIterator;
-                    use blvm_protocol::rayon::prelude::*;
-                    let witness_data_vec: Vec<(usize, Vec<u8>)> = pending
-                        .par_iter()
-                        .enumerate()
-                        .filter_map(|(i, (_, witnesses, _))| {
-                            if !witnesses.is_empty() {
-                                match bincode::serialize(witnesses.as_ref()) {
-                                    Ok(data) => Some((i, data)),
-                                    Err(_) => None,
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    let mut v = vec![None; pending.len()];
-                    for (i, data) in witness_data_vec {
-                        v[i] = Some(data);
-                    }
-                    v
-                }
-
-                #[cfg(not(feature = "rayon"))]
-                {
-                    let mut v = vec![None; pending.len()];
-                    for i in 0..pending.len() {
-                        let witnesses = &pending[i].1;
+        let witness_blobs: Vec<Option<Vec<u8>>> = if pending.iter().any(|(_, w, _)| !w.is_empty()) {
+            #[cfg(feature = "rayon")]
+            {
+                use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+                use blvm_protocol::rayon::prelude::*;
+                let witness_data_vec: Vec<(usize, Vec<u8>)> = pending
+                    .par_iter()
+                    .enumerate()
+                    .filter_map(|(i, (_, witnesses, _))| {
                         if !witnesses.is_empty() {
-                            v[i] = Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
-                                anyhow::anyhow!("Failed to serialize witnesses: {}", e)
-                            })?);
+                            match bincode::serialize(witnesses.as_ref()) {
+                                Ok(data) => Some((i, data)),
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
                         }
-                    }
-                    v
+                    })
+                    .collect();
+
+                let mut v = vec![None; pending.len()];
+                for (i, data) in witness_data_vec {
+                    v[i] = Some(data);
                 }
-            } else {
-                vec![None; pending.len()]
-            };
+                v
+            }
+
+            #[cfg(not(feature = "rayon"))]
+            {
+                let mut v = vec![None; pending.len()];
+                for i in 0..pending.len() {
+                    let witnesses = &pending[i].1;
+                    if !witnesses.is_empty() {
+                        v[i] = Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
+                            anyhow::anyhow!("Failed to serialize witnesses: {}", e)
+                        })?);
+                    }
+                }
+                v
+            }
+        } else {
+            vec![None; pending.len()]
+        };
 
         let metadata_blobs: Vec<Vec<u8>> = (0..pending.len())
             .map(|i| {
                 let metadata = BlockMetadata {
                     n_tx: pending[i].0.transactions.len() as u32,
                 };
-                bincode::serialize(&metadata).map_err(|e| {
-                    anyhow::anyhow!("Block metadata serialization failed: {}", e)
-                })
+                bincode::serialize(&metadata)
+                    .map_err(|e| anyhow::anyhow!("Block metadata serialization failed: {}", e))
             })
             .collect::<Result<Vec<_>>>()?;
 
         // Reuse `header_data` from the parallel serialize pass (avoid double bincode of last 11).
-        #[cfg(any(
-            feature = "rocksdb",
-            feature = "redb",
-            feature = "tidesdb"
-        ))]
+        #[cfg(any(feature = "rocksdb", feature = "redb", feature = "tidesdb"))]
         let recent_entries: Vec<(u64, Vec<u8>)> = flush_order
             .iter()
             .rev()
@@ -2105,15 +2167,13 @@ impl ParallelIBD {
         // Chain metadata: parallel IBD bypasses `run_loop`, so `update_tip` must run here
         // or `get_height()` / restarts see `chain_info` missing despite full block index.
         if let Some(storage) = _storage {
-            if let Some((idx, _)) = pending
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, (_, _, h))| *h)
-            {
+            if let Some((idx, _)) = pending.iter().enumerate().max_by_key(|(_, (_, _, h))| *h) {
                 let block = &pending[idx].0;
                 let tip_height = pending[idx].2;
                 let tip_hash = block_hashes[idx];
-                storage.chain().update_tip(&tip_hash, &block.header, tip_height)?;
+                storage
+                    .chain()
+                    .update_tip(&tip_hash, &block.header, tip_height)?;
             }
         }
 

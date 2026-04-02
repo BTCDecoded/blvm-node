@@ -10,11 +10,11 @@ pub mod control;
 pub mod errors;
 pub mod mempool;
 pub mod methods;
-pub mod params;
 pub mod mining;
 #[cfg(feature = "miniscript")]
 pub mod miniscript;
 pub mod network;
+pub mod params;
 #[cfg(feature = "bip70-http")]
 pub mod payment;
 pub mod rawtx;
@@ -28,13 +28,13 @@ pub mod validation;
 pub mod quinn_server;
 
 use crate::config::{RequestTimeoutConfig, RpcAuthConfig};
-use crate::network::dos_protection::ConnectionRateLimiter;
-use crate::utils::AUTH_RATE_LIMITER_CLEANUP_INTERVAL;
 use crate::module::manager::ModuleManager;
+use crate::network::dos_protection::ConnectionRateLimiter;
 use crate::node::mempool::MempoolManager;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::PerformanceProfiler;
 use crate::storage::Storage;
+use crate::utils::AUTH_RATE_LIMITER_CLEANUP_INTERVAL;
 use anyhow::Result;
 use blvm_protocol::BitcoinProtocolEngine;
 use std::net::SocketAddr;
@@ -155,10 +155,7 @@ impl RpcManager {
     }
 
     /// Set module manager for load/unload/reload RPC methods
-    pub fn set_module_manager(
-        &mut self,
-        module_manager: Arc<tokio::sync::Mutex<ModuleManager>>,
-    ) {
+    pub fn set_module_manager(&mut self, module_manager: Arc<tokio::sync::Mutex<ModuleManager>>) {
         self.module_manager = Some(module_manager);
     }
 
@@ -406,10 +403,8 @@ impl RpcManager {
         self.shutdown_tx = Some(shutdown_tx.clone());
 
         // Create control RPC with shutdown capability and optional module manager
-        let mut control_rpc = control::ControlRpc::with_shutdown(
-            shutdown_tx.clone(),
-            self.node_shutdown.clone(),
-        );
+        let mut control_rpc =
+            control::ControlRpc::with_shutdown(shutdown_tx.clone(), self.node_shutdown.clone());
         if let Some(ref mgr) = self.module_manager {
             control_rpc = control_rpc.with_module_manager(Arc::clone(mgr));
         }
@@ -438,11 +433,9 @@ impl RpcManager {
                 .with_request_timeouts(self.request_timeouts.clone()),
             );
             let mining = Arc::new({
-                let mut m = mining::MiningRpc::with_dependencies(
-                    Arc::clone(storage),
-                    Arc::clone(mempool),
-                )
-                .with_event_publisher(self.event_publisher.clone());
+                let mut m =
+                    mining::MiningRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool))
+                        .with_event_publisher(self.event_publisher.clone());
                 if let Some(ref pe) = self.protocol_engine {
                     m = m.with_protocol_engine(Arc::clone(pe));
                 }
@@ -466,8 +459,8 @@ impl RpcManager {
                     .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap)
             };
             match (self.auth_manager.as_ref(), self.metrics.as_ref()) {
-                (Some(auth_manager), Some(metrics)) => add_limiter(
-                    server::RpcServer::with_dependencies_auth_and_metrics(
+                (Some(auth_manager), Some(metrics)) => {
+                    add_limiter(server::RpcServer::with_dependencies_auth_and_metrics(
                         self.server_addr,
                         blockchain,
                         network,
@@ -478,30 +471,34 @@ impl RpcManager {
                         Arc::clone(auth_manager),
                         Arc::clone(metrics),
                         max_request_size,
-                    ),
-                ),
-                (Some(auth_manager), None) => add_limiter(server::RpcServer::with_dependencies_and_auth(
-                    self.server_addr,
-                    blockchain,
-                    network,
-                    mempool_rpc,
-                    mining,
-                    rawtx_rpc,
-                    Arc::clone(&control_rpc),
-                    Arc::clone(auth_manager),
-                    max_request_size,
-                )),
-                (None, Some(metrics)) => add_limiter(server::RpcServer::with_dependencies_and_metrics(
-                    self.server_addr,
-                    blockchain,
-                    network,
-                    mempool_rpc,
-                    mining,
-                    rawtx_rpc,
-                    Arc::clone(&control_rpc),
-                    Arc::clone(metrics),
-                    max_request_size,
-                )),
+                    ))
+                }
+                (Some(auth_manager), None) => {
+                    add_limiter(server::RpcServer::with_dependencies_and_auth(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                        Arc::clone(auth_manager),
+                        max_request_size,
+                    ))
+                }
+                (None, Some(metrics)) => {
+                    add_limiter(server::RpcServer::with_dependencies_and_metrics(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                        Arc::clone(metrics),
+                        max_request_size,
+                    ))
+                }
                 (None, None) => add_limiter(server::RpcServer::with_dependencies(
                     self.server_addr,
                     blockchain,

@@ -175,7 +175,10 @@ async fn test_reject_spam_in_mempool_rejects_classified_spam() {
     mempool.set_policy_config(Some(policy));
 
     let added = mempool.add_transaction(dust_spam_tx()).unwrap();
-    assert!(!added, "expected spam tx rejected when reject_spam_in_mempool is true");
+    assert!(
+        !added,
+        "expected spam tx rejected when reject_spam_in_mempool is true"
+    );
     assert_eq!(mempool.size(), 0);
 }
 
@@ -183,6 +186,9 @@ async fn test_reject_spam_in_mempool_rejects_classified_spam() {
 async fn test_reject_spam_in_mempool_disabled_accepts_same_tx() {
     let mempool = MempoolManager::new();
     let added = mempool.add_transaction(dust_spam_tx()).unwrap();
-    assert!(added, "default policy should still accept tx classified as spam by heuristics");
+    assert!(
+        added,
+        "default policy should still accept tx classified as spam by heuristics"
+    );
     assert_eq!(mempool.size(), 1);
 }

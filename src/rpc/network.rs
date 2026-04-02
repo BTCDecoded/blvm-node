@@ -488,8 +488,7 @@ impl NetworkRpc {
     pub async fn getaddednodeinfo(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getaddednodeinfo");
 
-        let node =
-            param_str_required(params, 0, "getaddednodeinfo")?;
+        let node = param_str_required(params, 0, "getaddednodeinfo")?;
 
         let dns = param_bool_default(params, 1, false);
 

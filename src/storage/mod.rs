@@ -4,7 +4,6 @@
 //! Supports multiple database backends via feature flags (tidesdb, redb, sled, rocksdb).
 
 pub mod assumeutxo;
-pub mod ibd_autorepair;
 pub mod bitcoin_core_blocks;
 pub mod bitcoin_core_detection;
 pub mod bitcoin_core_format;
@@ -19,6 +18,7 @@ pub mod commitment_store;
 pub mod database;
 pub mod disk_utxo;
 pub mod hashing;
+pub mod ibd_autorepair;
 #[cfg(feature = "production")]
 pub mod ibd_utxo_store;
 pub mod pruning;
@@ -411,10 +411,7 @@ impl Storage {
         let Some(block) = self.blockstore.get_block(&tip_hash)? else {
             return Ok(());
         };
-        let genesis_hash = self
-            .blockstore
-            .get_hash_by_height(0)?
-            .unwrap_or_default();
+        let genesis_hash = self.blockstore.get_hash_by_height(0)?.unwrap_or_default();
         let mut params = ChainParams::default();
         params.genesis_hash = genesis_hash;
         let info = ChainInfo {
