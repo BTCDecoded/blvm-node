@@ -131,144 +131,169 @@ fn main() -> anyhow::Result<()> {
     println!("   Use: Get total UTXO count, total supply, and database stats");
     println!();
 
-    // Example 9: Verify chain
-    println!("9. verifychain - Verify blockchain database integrity");
+    // Example 9: Load UTXO set snapshot (AssumeUTXO)
+    println!("9. loadtxoutset - Load a UTXO set snapshot for AssumeUTXO fast sync");
+    let request = json!({
+        "jsonrpc": "2.0",
+        "method": "loadtxoutset",
+        "params": ["/path/to/utxo-snapshot.dat"],  // path to the snapshot file
+        "id": 9
+    });
+    println!("   Request: {}", serde_json::to_string_pretty(&request)?);
+    println!("   Use: Bootstrap from a UTXO snapshot instead of replaying the full chain");
+    println!("   Note: Snapshot must match a hardcoded AssumeUTXO checkpoint hash");
+    println!();
+
+    // Example 11: Verify chain
+    println!("11. verifychain - Verify blockchain database integrity");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "verifychain",
         "params": [3, 6],  // checklevel (0-4), numblocks (0=all)
-        "id": 9
+        "id": 11
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Verify block and UTXO set consistency (checklevel 0-4, higher=more thorough)");
+    println!(
+        "   Use: Verify block and UTXO set consistency (checklevel 0-4, higher=more thorough)"
+    );
     println!("   Note: checklevel 3 checks all transactions; numblocks=0 checks entire chain");
     println!();
 
-    // Example 10: Get chain tips
-    println!("10. getchaintips - List all known chain tips including orphaned blocks");
+    // Example 12: Get chain tips
+    println!("12. getchaintips - List all known chain tips including orphaned blocks");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "getchaintips",
         "params": [],
-        "id": 10
+        "id": 12
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Inspect main chain tip and any orphaned forks (status: active/valid/invalid)");
+    println!(
+        "   Use: Inspect main chain tip and any orphaned forks (status: active/valid/invalid)"
+    );
     println!();
 
-    // Example 11: Get chain tx stats
-    println!("11. getchaintxstats - Transaction throughput statistics for a block window");
+    // Example 13: Get chain tx stats
+    println!("13. getchaintxstats - Transaction throughput statistics for a block window");
     let nblocks = 2016u64; // one difficulty period
     let request = json!({
         "jsonrpc": "2.0",
         "method": "getchaintxstats",
         "params": [nblocks],  // optional: [nblocks, blockhash]
-        "id": 11
+        "id": 13
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Get tx rate and total tx count over the last N blocks (default: one difficulty period)");
     println!("   Note: Omit params for default window; pass blockhash as second param to anchor the window");
     println!();
 
-    // Example 12: Get block stats
-    println!("12. getblockstats - Compute statistics for a specific block");
+    // Example 14: Get block stats
+    println!("14. getblockstats - Compute statistics for a specific block");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "getblockstats",
         "params": [800_000u64, ["txs", "total_size", "totalfee"]],
         // params: [hash_or_height, stats (optional array to filter fields)]
-        "id": 12
+        "id": 14
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Per-block stats (fees, sizes, tx count); pass height or hash");
-    println!("   Note: Omit stats array for all fields; specify subset for efficient partial queries");
+    println!(
+        "   Note: Omit stats array for all fields; specify subset for efficient partial queries"
+    );
     println!();
 
-    // Example 13: Prune blockchain
-    println!("13. pruneblockchain - Prune stored block data up to a given height or timestamp");
+    // Example 15: Prune blockchain
+    println!("15. pruneblockchain - Prune stored block data up to a given height or timestamp");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "pruneblockchain",
         "params": [800_000u64],  // height (or Unix timestamp if > 1,000,000,000)
-        "id": 13
+        "id": 15
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Free disk space by pruning old block data (node must be started with prune=N)");
+    println!(
+        "   Use: Free disk space by pruning old block data (node must be started with prune=N)"
+    );
     println!("   Note: Pass a height to prune up to that point; pass a timestamp to prune by time");
     println!();
 
-    // Example 14: Get prune info
-    println!("14. getpruneinfo - Get pruning status and available range");
+    // Example 16: Get prune info
+    println!("16. getpruneinfo - Get pruning status and available range");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "getpruneinfo",
         "params": [],
-        "id": 14
+        "id": 16
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Check if pruning is enabled and the earliest block still available");
     println!();
 
-    // Example 15: Invalidate block
-    println!("15. invalidateblock - Mark a block as permanently invalid");
+    // Example 17: Invalidate block
+    println!("17. invalidateblock - Mark a block as permanently invalid");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "invalidateblock",
         "params": [block_hash],
-        "id": 15
+        "id": 17
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Force the node to ignore a block and its descendants (useful for testing)");
-    println!("   Note: Counterpart to reconsiderblock; requires node restart or reconsiderblock to undo");
+    println!(
+        "   Note: Counterpart to reconsiderblock; requires node restart or reconsiderblock to undo"
+    );
     println!();
 
-    // Example 16: Reconsider block
-    println!("16. reconsiderblock - Undo the effect of a previous invalidateblock call");
+    // Example 18: Reconsider block
+    println!("18. reconsiderblock - Undo the effect of a previous invalidateblock call");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "reconsiderblock",
         "params": [block_hash],
-        "id": 16
+        "id": 18
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Re-enable a block previously marked invalid with invalidateblock");
     println!();
 
-    // Example 17: Wait for new block
-    println!("17. waitfornewblock - Long-poll until a new block arrives");
+    // Example 19: Wait for new block
+    println!("19. waitfornewblock - Long-poll until a new block arrives");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "waitfornewblock",
         "params": [5000],  // timeout in milliseconds (0 = no timeout)
-        "id": 17
+        "id": 19
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Block until the next block is received; returns {hash, height}");
     println!("   Note: Timeout in milliseconds; use 0 for infinite wait");
     println!();
 
-    // Example 18: Wait for block
-    println!("18. waitforblock - Long-poll until a specific block hash is seen");
+    // Example 20: Wait for block
+    println!("20. waitforblock - Long-poll until a specific block hash is seen");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "waitforblock",
         "params": [block_hash, 5000],  // [blockhash, timeout_ms]
-        "id": 18
+        "id": 20
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Block until the node sees the given block hash; returns {hash, height}");
     println!();
 
-    // Example 19: Wait for block height
-    println!("19. waitforblockheight - Long-poll until chain reaches a given height");
+    // Example 21: Wait for block height
+    println!("21. waitforblockheight - Long-poll until chain reaches a given height");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "waitforblockheight",
         "params": [800_001u64, 5000],  // [height, timeout_ms]
-        "id": 19
+        "id": 21
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Block until the chain reaches or exceeds the given height; returns {hash, height}");
+    println!(
+        "   Use: Block until the chain reaches or exceeds the given height; returns {hash, height}"
+    );
     println!("   Note: All wait* methods support long-polling for real-time chain monitoring");
     println!();
 
@@ -281,6 +306,7 @@ fn main() -> anyhow::Result<()> {
     println!("  getblock           - Full block by hash (hex, JSON, or JSON+tx details)");
     println!("  getdifficulty      - Current proof-of-work difficulty");
     println!("  gettxoutsetinfo    - UTXO set size and total supply");
+    println!("  loadtxoutset       - Load a UTXO snapshot for AssumeUTXO fast sync");
     println!("  verifychain        - Verify blockchain database integrity");
     println!("  getchaintips       - All known chain tips (main + orphans)");
     println!("  getchaintxstats    - Transaction throughput over a block window");

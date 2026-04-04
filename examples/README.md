@@ -54,7 +54,7 @@ cargo run --example wallet-integration
 **Purpose**: Demonstrate blockchain RPC methods
 
 **What it does**:
-- Shows `getblockchaininfo`, `getblockcount`, `getbestblockhash`, `getblockhash`, `getblockheader`, `getblock`
+- Shows `getblockchaininfo`, `getblockcount`, `getbestblockhash`, `getblockhash`, `getblockheader`, `getblock`, `loadtxoutset`, and more
 
 **Usage**:
 ```bash
@@ -96,7 +96,7 @@ cargo run --example rpc-network
 **Purpose**: Demonstrate mining RPC methods
 
 **What it does**:
-- Shows `getmininginfo`, `getblocktemplate`, `submitblock`, `estimatesmartfee`, `prioritisetransaction`
+- Shows `getmininginfo`, `getblocktemplate`, `generatetoaddress`, `submitblock`, `estimatesmartfee`, `prioritisetransaction`
 
 **Usage**:
 ```bash
@@ -162,6 +162,23 @@ cargo run --example rpc-payment
 ```
 
 **Note**: Vault and pool methods require `--features ctv`
+
+---
+
+### rpc-modules.rs
+
+**Purpose**: Demonstrate module lifecycle management RPC methods
+
+**What it does**:
+- Shows `listmodules`, `loadmodule`, `unloadmodule`, `reloadmodule`
+- Shows `getmoduleclispecs`, `runmodulecli`
+
+**Usage**:
+```bash
+cargo run --example rpc-modules
+```
+
+**Note**: Modules are sandboxed processes declared in `module.toml` manifests. See `examples/simple-module/` for a minimal implementation.
 
 ---
 

@@ -56,36 +56,53 @@ fn main() -> anyhow::Result<()> {
     println!("   Note: Pass {{\"rules\":[\"segwit\"]}} to signal SegWit support");
     println!();
 
-    // Example 3: Submit a mined block
-    println!("3. submitblock - Submit a solved block to the network");
+    // Example 3: Generate blocks to address (regtest only)
+    println!(
+        "3. generatetoaddress - Mine blocks immediately and send coinbase to address (regtest)"
+    );
+    let nblocks = 1u64;
+    let address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"; // regtest bech32 address
+    let request = json!({
+        "jsonrpc": "2.0",
+        "method": "generatetoaddress",
+        "params": [nblocks, address],  // [nblocks, address, maxtries (optional)]
+        "id": 3
+    });
+    println!("   Request: {}", serde_json::to_string_pretty(&request)?);
+    println!("   Use: Instantly mine N blocks in regtest mode; coinbase pays to address");
+    println!("   Note: Only works with a regtest node; use for local testing and wallet funding");
+    println!();
+
+    // Example 4: Submit a mined block
+    println!("4. submitblock - Submit a solved block to the network");
     let raw_block_hex = "00000020..."; // Replace with actual solved block hex
     let request = json!({
         "jsonrpc": "2.0",
         "method": "submitblock",
         "params": [raw_block_hex],
-        "id": 3
+        "id": 4
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Broadcast a block your miner solved");
     println!("   Note: Replace hex with your complete serialized block");
     println!();
 
-    // Example 4: Estimate smart fee
-    println!("4. estimatesmartfee - Estimate fee rate for confirmation within N blocks");
+    // Example 5: Estimate smart fee
+    println!("5. estimatesmartfee - Estimate fee rate for confirmation within N blocks");
     let target_blocks = 6u64;
     let request = json!({
         "jsonrpc": "2.0",
         "method": "estimatesmartfee",
         "params": [target_blocks, "ECONOMICAL"],  // mode: "ECONOMICAL" | "CONSERVATIVE"
-        "id": 4
+        "id": 5
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Get recommended fee rate (BTC/kB) for N-block confirmation");
     println!("   Note: ECONOMICAL = lower fee; CONSERVATIVE = higher confidence");
     println!();
 
-    // Example 5: Prioritise transaction
-    println!("5. prioritisetransaction - Adjust a tx's priority in the mempool");
+    // Example 6: Prioritise transaction
+    println!("6. prioritisetransaction - Adjust a tx's priority in the mempool");
     let txid = "0000000000000000000000000000000000000000000000000000000000000000";
     let fee_delta_satoshis = 10_000i64; // Add 10,000 satoshis to effective fee
     let request = json!({
@@ -93,7 +110,7 @@ fn main() -> anyhow::Result<()> {
         "method": "prioritisetransaction",
         "params": [txid, null, fee_delta_satoshis],
         // params: [txid, dummy (ignored), fee_delta_in_satoshis]
-        "id": 5
+        "id": 6
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Boost or penalize a tx's effective fee for block inclusion");
@@ -103,6 +120,7 @@ fn main() -> anyhow::Result<()> {
     println!("Method Summary:");
     println!("  getmininginfo         - Block height, difficulty, network hashrate");
     println!("  getblocktemplate      - Block template for GBT-compatible miners (BIP22/23)");
+    println!("  generatetoaddress     - Mine N blocks instantly on regtest, pay coinbase to address");
     println!("  submitblock           - Submit a solved block hex to the network");
     println!("  estimatesmartfee      - Fee rate estimate for N-block target");
     println!("  prioritisetransaction - Modify effective fee of a mempool transaction");
