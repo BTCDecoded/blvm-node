@@ -49,6 +49,156 @@ cargo run --example wallet-integration
 
 ---
 
+### rpc-blockchain.rs
+
+**Purpose**: Demonstrate blockchain RPC methods
+
+**What it does**:
+- Shows `getblockchaininfo`, `getblockcount`, `getbestblockhash`, `getblockhash`, `getblockheader`, `getblock`, `loadtxoutset`, and more
+
+**Usage**:
+```bash
+cargo run --example rpc-blockchain
+```
+
+---
+
+### rpc-mempool.rs
+
+**Purpose**: Demonstrate mempool RPC methods
+
+**What it does**:
+- Shows `getmempoolinfo`, `getrawmempool`, `getmempoolentry`, `testmempoolaccept`, `getmempoolancestors`
+
+**Usage**:
+```bash
+cargo run --example rpc-mempool
+```
+
+---
+
+### rpc-network.rs
+
+**Purpose**: Demonstrate network RPC methods
+
+**What it does**:
+- Shows `getnetworkinfo`, `getconnectioncount`, `getpeerinfo`, `addnode`, `setban`, `listbanned`
+
+**Usage**:
+```bash
+cargo run --example rpc-network
+```
+
+---
+
+### rpc-mining.rs
+
+**Purpose**: Demonstrate mining RPC methods
+
+**What it does**:
+- Shows `getmininginfo`, `getblocktemplate`, `generatetoaddress`, `submitblock`, `estimatesmartfee`, `prioritisetransaction`
+
+**Usage**:
+```bash
+cargo run --example rpc-mining
+```
+
+---
+
+### rpc-rawtransaction.rs
+
+**Purpose**: Demonstrate raw transaction RPC methods
+
+**What it does**:
+- Shows `getrawtransaction`, `decoderawtransaction`, `createrawtransaction`, `sendrawtransaction`, `gettxoutproof`
+
+**Usage**:
+```bash
+cargo run --example rpc-rawtransaction
+```
+
+---
+
+### rpc-control.rs
+
+**Purpose**: Demonstrate node control and utility RPC methods
+
+**What it does**:
+- Shows `stop`, `uptime`, `getmemoryinfo`, `getrpcinfo`, `help`, `logging`, `gethealth`, `getmetrics`
+
+**Usage**:
+```bash
+cargo run --example rpc-control
+```
+
+---
+
+### rpc-address.rs
+
+**Purpose**: Demonstrate address validation and chain index RPC methods
+
+**What it does**:
+- Shows `getblockfilter`, `getindexinfo`, `getblockchainstate`, `validateaddress`, `getaddressinfo`
+
+**Usage**:
+```bash
+cargo run --example rpc-address
+```
+
+---
+
+### rpc-payment.rs
+
+**Purpose**: Demonstrate payment, vault, and pool RPC methods (blvm-node extensions)
+
+**What it does**:
+- Shows `createpaymentrequest`, `createcovenantproof`, `getpaymentstate`, `listpayments`
+- Shows vault methods: `createvault`, `getvaultstate`, `unvault`, `withdrawfromvault`
+- Shows pool methods: `createpool`, `getpoolstate`, `joinpool`, `distributepool`
+
+**Usage**:
+```bash
+cargo run --example rpc-payment
+```
+
+**Note**: Vault and pool methods require `--features ctv`
+
+---
+
+### rpc-modules.rs
+
+**Purpose**: Demonstrate module lifecycle management RPC methods
+
+**What it does**:
+- Shows `listmodules`, `loadmodule`, `unloadmodule`, `reloadmodule`
+- Shows `getmoduleclispecs`, `runmodulecli`
+
+**Usage**:
+```bash
+cargo run --example rpc-modules
+```
+
+**Note**: Modules are sandboxed processes declared in `module.toml` manifests. See `examples/simple-module/` for a minimal implementation.
+
+---
+
+### rpc-batch.rs
+
+**Purpose**: Demonstrate transaction batching, congestion monitoring, and script analysis
+
+**What it does**:
+- Shows `getcongestion`, `getcongestionmetrics`, `createbatch`, `addtobatch`, `broadcastbatch`
+- Shows `getdescriptorinfo`, `analyzepsbt`
+
+**Usage**:
+```bash
+cargo run --example rpc-batch
+```
+
+**Note**: Batch methods require `--features ctv`; descriptor/PSBT methods require `--features miniscript`
+
+---
+
 ## Integration Workflow
 
 ### For Electrum
