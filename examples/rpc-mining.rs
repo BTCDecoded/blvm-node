@@ -1,11 +1,11 @@
 //! Example: Mining RPC methods
 //!
 //! This example demonstrates the mining-related JSON-RPC methods available
-//! in bllvm-node. These methods support block template generation, block
+//! in blvm-node. These methods support block template generation, block
 //! submission, fee estimation, and transaction prioritization.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node: bllvm-node --network testnet
+//!   1. Start blvm-node: blvm-node --network testnet
 //!   2. Run this example: cargo run --example rpc-mining
 //!
 //! Or use curl:
@@ -16,7 +16,7 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Mining RPC Examples");
+    println!("blvm-node Mining RPC Examples");
     println!("================================");
     println!();
     println!("These methods support mining operations and fee estimation.");
@@ -126,7 +126,7 @@ fn main() -> anyhow::Result<()> {
     println!("  prioritisetransaction - Modify effective fee of a mempool transaction");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet");
+    println!("  1. Start node: blvm-node --network testnet");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())

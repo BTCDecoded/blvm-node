@@ -1,11 +1,11 @@
 //! Example: Payment, vault, and pool RPC methods
 //!
 //! This example demonstrates the payment-related JSON-RPC methods available
-//! in bllvm-node. These methods cover BIP70 payment requests, CTV covenant
-//! vaults, and payment pools — all bllvm-node extensions beyond Bitcoin Core.
+//! in blvm-node. These methods cover BIP70 payment requests, CTV covenant
+//! vaults, and payment pools — all blvm-node extensions beyond Bitcoin Core.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node with BIP70: bllvm-node --network testnet --features bip70-http,ctv
+//!   1. Start blvm-node with BIP70: blvm-node --network testnet --features bip70-http,ctv
 //!   2. Run this example: cargo run --example rpc-payment
 //!
 //! Or use curl:
@@ -18,11 +18,11 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Payment RPC Examples");
+    println!("blvm-node Payment RPC Examples");
     println!("==================================");
     println!();
     println!("These methods handle BIP70 payments, CTV vaults, and payment pools.");
-    println!("These are bllvm-node extensions — not part of the Bitcoin Core API.");
+    println!("These are blvm-node extensions — not part of the Bitcoin Core API.");
     println!();
 
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
@@ -249,7 +249,7 @@ fn main() -> anyhow::Result<()> {
     println!("Note: Vault and pool methods require `ctv` feature: cargo build --features ctv");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet --features bip70-http");
+    println!("  1. Start node: blvm-node --network testnet --features bip70-http");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())

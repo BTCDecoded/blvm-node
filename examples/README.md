@@ -149,7 +149,7 @@ cargo run --example rpc-address
 
 ### rpc-payment.rs
 
-**Purpose**: Demonstrate payment, vault, and pool RPC methods (bllvm-node extensions)
+**Purpose**: Demonstrate payment, vault, and pool RPC methods (blvm-node extensions)
 
 **What it does**:
 - Shows `createpaymentrequest`, `createcovenantproof`, `getpaymentstate`, `listpayments`

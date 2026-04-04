@@ -1,11 +1,11 @@
 //! Example: Raw Transaction RPC methods
 //!
 //! This example demonstrates the raw transaction JSON-RPC methods available
-//! in bllvm-node. These methods let you fetch, decode, create, and broadcast
+//! in blvm-node. These methods let you fetch, decode, create, and broadcast
 //! raw Bitcoin transactions, as well as verify inclusion via tx output proofs.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node: bllvm-node --network testnet
+//!   1. Start blvm-node: blvm-node --network testnet
 //!   2. Run this example: cargo run --example rpc-rawtransaction
 //!
 //! Or use curl:
@@ -16,7 +16,7 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Raw Transaction RPC Examples");
+    println!("blvm-node Raw Transaction RPC Examples");
     println!("=========================================");
     println!();
     println!("These methods work with raw Bitcoin transactions.");
@@ -165,7 +165,7 @@ fn main() -> anyhow::Result<()> {
     println!("  3. sendrawtransaction    → txid");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet");
+    println!("  1. Start node: blvm-node --network testnet");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())

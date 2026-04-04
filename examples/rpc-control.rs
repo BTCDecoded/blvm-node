@@ -1,11 +1,11 @@
 //! Example: Node control and utility RPC methods
 //!
 //! This example demonstrates the control/utility JSON-RPC methods available
-//! in bllvm-node. These methods let you manage the node lifecycle, inspect
+//! in blvm-node. These methods let you manage the node lifecycle, inspect
 //! memory and RPC state, and control logging.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node: bllvm-node --network testnet
+//!   1. Start blvm-node: blvm-node --network testnet
 //!   2. Run this example: cargo run --example rpc-control
 //!
 //! Or use curl:
@@ -16,12 +16,12 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Control & Utility RPC Examples");
+    println!("blvm-node Control & Utility RPC Examples");
     println!("============================================");
     println!();
     println!("These methods manage the node lifecycle and expose operational telemetry.");
     println!("All methods are Bitcoin Core-compatible (stop, uptime, getmemoryinfo, getrpcinfo, help, logging).");
-    println!("gethealth and getmetrics are bllvm-node extensions.");
+    println!("gethealth and getmetrics are blvm-node extensions.");
     println!();
 
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
@@ -114,7 +114,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     // Example 7: Get health
-    println!("7. gethealth - Node health status (bllvm-node extension)");
+    println!("7. gethealth - Node health status (blvm-node extension)");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "gethealth",
@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     // Example 8: Get metrics
-    println!("8. getmetrics - Operational metrics (bllvm-node extension)");
+    println!("8. getmetrics - Operational metrics (blvm-node extension)");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "getmetrics",
@@ -146,11 +146,11 @@ fn main() -> anyhow::Result<()> {
     println!("  getrpcinfo    - Active RPC commands and log path");
     println!("  help          - List all commands or get help on a specific command");
     println!("  logging       - Inspect or adjust active log categories");
-    println!("  gethealth     - Node health status (bllvm-node extension)");
-    println!("  getmetrics    - Operational metrics (bllvm-node extension)");
+    println!("  gethealth     - Node health status (blvm-node extension)");
+    println!("  getmetrics    - Operational metrics (blvm-node extension)");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet");
+    println!("  1. Start node: blvm-node --network testnet");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())

@@ -1,11 +1,11 @@
 //! Example: Address and index RPC methods
 //!
 //! This example demonstrates address validation and chain index RPC methods
-//! available in bllvm-node. These methods let you validate addresses, query
+//! available in blvm-node. These methods let you validate addresses, query
 //! compact block filters, and inspect chain index state.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node: bllvm-node --network testnet
+//!   1. Start blvm-node: blvm-node --network testnet
 //!   2. Run this example: cargo run --example rpc-address
 //!
 //! Or use curl:
@@ -16,7 +16,7 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Address & Index RPC Examples");
+    println!("blvm-node Address & Index RPC Examples");
     println!("==========================================");
     println!();
     println!("These methods validate addresses and query chain index state.");
@@ -60,8 +60,8 @@ fn main() -> anyhow::Result<()> {
     println!("   Note: Common indexes: txindex, coinstatsindex, blockfilterindex");
     println!();
 
-    // Example 3: Get blockchain state (bllvm-node extended)
-    println!("3. getblockchainstate - Extended chain state summary (bllvm-node extended)");
+    // Example 3: Get blockchain state (blvm-node extended)
+    println!("3. getblockchainstate - Extended chain state summary (blvm-node extended)");
     let request = json!({
         "jsonrpc": "2.0",
         "method": "getblockchainstate",
@@ -111,7 +111,7 @@ fn main() -> anyhow::Result<()> {
     println!("  3. Match filter locally    → download full block only on match");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet");
+    println!("  1. Start node: blvm-node --network testnet");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())

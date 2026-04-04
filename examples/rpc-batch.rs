@@ -1,10 +1,10 @@
 //! Example: Batch, congestion, and script analysis RPC methods
 //!
 //! This example demonstrates transaction batching, congestion control, and
-//! script analysis RPC methods available in bllvm-node.
+//! script analysis RPC methods available in blvm-node.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node: bllvm-node --network testnet
+//!   1. Start blvm-node: blvm-node --network testnet
 //!   2. Run this example: cargo run --example rpc-batch
 //!
 //! Or use curl:
@@ -18,7 +18,7 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Batch & Script Analysis RPC Examples");
+    println!("blvm-node Batch & Script Analysis RPC Examples");
     println!("==================================================");
     println!();
     println!("These methods handle transaction batching, congestion monitoring,");
@@ -169,7 +169,7 @@ fn main() -> anyhow::Result<()> {
     println!("  4. broadcastbatch          → submit when fee rate is acceptable");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet");
+    println!("  1. Start node: blvm-node --network testnet");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())

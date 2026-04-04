@@ -1,11 +1,11 @@
 //! Example: Network RPC methods
 //!
 //! This example demonstrates the network-related JSON-RPC methods available
-//! in bllvm-node. These methods let you inspect peers, manage connections,
+//! in blvm-node. These methods let you inspect peers, manage connections,
 //! and configure bans.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node: bllvm-node --network testnet
+//!   1. Start blvm-node: blvm-node --network testnet
 //!   2. Run this example: cargo run --example rpc-network
 //!
 //! Or use curl:
@@ -16,7 +16,7 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Network RPC Examples");
+    println!("blvm-node Network RPC Examples");
     println!("=================================");
     println!();
     println!("These methods inspect and manage P2P network connections.");
@@ -211,7 +211,7 @@ fn main() -> anyhow::Result<()> {
     println!("  setnetworkactive   - Enable or disable P2P networking");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet");
+    println!("  1. Start node: blvm-node --network testnet");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())

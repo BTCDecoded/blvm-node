@@ -1,11 +1,11 @@
 //! Example: Mempool RPC methods
 //!
 //! This example demonstrates the mempool-related JSON-RPC methods available
-//! in bllvm-node. These methods let you inspect unconfirmed transactions,
+//! in blvm-node. These methods let you inspect unconfirmed transactions,
 //! check mempool statistics, and test transaction acceptance.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start bllvm-node: bllvm-node --network testnet
+//!   1. Start blvm-node: blvm-node --network testnet
 //!   2. Run this example: cargo run --example rpc-mempool
 //!
 //! Or use curl:
@@ -16,7 +16,7 @@
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
-    println!("bllvm-node Mempool RPC Examples");
+    println!("blvm-node Mempool RPC Examples");
     println!("=================================");
     println!();
     println!("These methods inspect the mempool and test transaction acceptance.");
@@ -134,7 +134,7 @@ fn main() -> anyhow::Result<()> {
     println!("  getmempooldescendants - All unconfirmed descendants of a transaction");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: bllvm-node --network testnet");
+    println!("  1. Start node: blvm-node --network testnet");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())
