@@ -331,6 +331,11 @@ impl SyncCoordinator {
         self.state_machine.is_synced()
     }
 
+    /// Current sync phase (for module APIs, e.g. [`crate::module::traits::NodeAPI::get_sync_status`]).
+    pub fn current_sync_state(&self) -> SyncState {
+        self.state_machine.state().clone()
+    }
+
     /// Process an incoming block from the network
     ///
     /// This function:

@@ -480,6 +480,65 @@ impl ModuleApiHub {
                 let result = self.node_api.submit_block(block.clone()).await?;
                 ResponsePayload::SubmitBlockResult(result)
             }
+            RequestPayload::MergeBlockServeDenylist { block_hashes } => {
+                self.node_api
+                    .merge_block_serve_denylist(block_hashes.as_slice())
+                    .await?;
+                ResponsePayload::BlockServeDenylistMerged
+            }
+            RequestPayload::GetBlockServeDenylistSnapshot => {
+                let s = self.node_api.get_block_serve_denylist_snapshot().await?;
+                ResponsePayload::BlockServeDenylistSnapshot(s)
+            }
+            RequestPayload::ClearBlockServeDenylist => {
+                self.node_api.clear_block_serve_denylist().await?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::ReplaceBlockServeDenylist { block_hashes } => {
+                self.node_api
+                    .replace_block_serve_denylist(block_hashes.as_slice())
+                    .await?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::MergeTxServeDenylist { tx_hashes } => {
+                self.node_api
+                    .merge_tx_serve_denylist(tx_hashes.as_slice())
+                    .await?;
+                ResponsePayload::TxServeDenylistMerged
+            }
+            RequestPayload::GetTxServeDenylistSnapshot => {
+                let s = self.node_api.get_tx_serve_denylist_snapshot().await?;
+                ResponsePayload::TxServeDenylistSnapshot(s)
+            }
+            RequestPayload::ClearTxServeDenylist => {
+                self.node_api.clear_tx_serve_denylist().await?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::ReplaceTxServeDenylist { tx_hashes } => {
+                self.node_api
+                    .replace_tx_serve_denylist(tx_hashes.as_slice())
+                    .await?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::GetSyncStatus => {
+                let s = self.node_api.get_sync_status().await?;
+                ResponsePayload::NodeSyncStatus(s)
+            }
+            RequestPayload::BanPeer {
+                peer_addr,
+                ban_duration_seconds,
+            } => {
+                self.node_api
+                    .ban_peer(peer_addr.as_str(), *ban_duration_seconds)
+                    .await?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::SetBlockServeMaintenanceMode { enabled } => {
+                self.node_api
+                    .set_block_serve_maintenance_mode(*enabled)
+                    .await?;
+                ResponsePayload::Bool(true)
+            }
             // Module RPC Endpoint Registration
             RequestPayload::RegisterRpcEndpoint {
                 method,
@@ -557,6 +616,19 @@ impl ModuleApiHub {
             RequestPayload::GetFeeEstimate { .. } => "get_fee_estimate",
             RequestPayload::GetBlockTemplate { .. } => "get_block_template",
             RequestPayload::SubmitBlock { .. } => "submit_block",
+            RequestPayload::MergeBlockServeDenylist { .. } => "merge_block_serve_denylist",
+            RequestPayload::GetBlockServeDenylistSnapshot => "get_block_serve_denylist_snapshot",
+            RequestPayload::ClearBlockServeDenylist => "clear_block_serve_denylist",
+            RequestPayload::ReplaceBlockServeDenylist { .. } => "replace_block_serve_denylist",
+            RequestPayload::MergeTxServeDenylist { .. } => "merge_tx_serve_denylist",
+            RequestPayload::GetTxServeDenylistSnapshot => "get_tx_serve_denylist_snapshot",
+            RequestPayload::ClearTxServeDenylist => "clear_tx_serve_denylist",
+            RequestPayload::ReplaceTxServeDenylist { .. } => "replace_tx_serve_denylist",
+            RequestPayload::GetSyncStatus => "get_sync_status",
+            RequestPayload::BanPeer { .. } => "ban_peer",
+            RequestPayload::SetBlockServeMaintenanceMode { .. } => {
+                "set_block_serve_maintenance_mode"
+            }
             // Filesystem API
             RequestPayload::ReadFile { .. } => "read_file",
             RequestPayload::WriteFile { .. } => "write_file",

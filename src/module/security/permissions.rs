@@ -289,6 +289,17 @@ impl PermissionChecker {
             RequestPayload::UnregisterModuleApi => Permission::RegisterModuleApi,
             RequestPayload::GetBlockTemplate { .. } => Permission::ReadBlockchain,
             RequestPayload::SubmitBlock { .. } => Permission::SubmitBlock,
+            RequestPayload::MergeBlockServeDenylist { .. } => Permission::NetworkAccess,
+            RequestPayload::GetBlockServeDenylistSnapshot => Permission::ReadNetwork,
+            RequestPayload::ClearBlockServeDenylist => Permission::NetworkAccess,
+            RequestPayload::ReplaceBlockServeDenylist { .. } => Permission::NetworkAccess,
+            RequestPayload::MergeTxServeDenylist { .. } => Permission::NetworkAccess,
+            RequestPayload::GetTxServeDenylistSnapshot => Permission::ReadNetwork,
+            RequestPayload::ClearTxServeDenylist => Permission::NetworkAccess,
+            RequestPayload::ReplaceTxServeDenylist { .. } => Permission::NetworkAccess,
+            RequestPayload::GetSyncStatus => Permission::ReadChainState,
+            RequestPayload::BanPeer { .. } => Permission::NetworkAccess,
+            RequestPayload::SetBlockServeMaintenanceMode { .. } => Permission::NetworkAccess,
             RequestPayload::RegisterCliSpec { .. } => Permission::RegisterRpcEndpoint,
         };
 

@@ -50,6 +50,7 @@ pub mod filter_service;
 mod handlers;
 mod network_message_dispatch;
 mod peer_connections;
+mod getdata_serve;
 mod startup;
 mod wire_dispatch;
 // Payment Protocol (BIP70) - P2P handlers

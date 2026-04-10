@@ -350,6 +350,85 @@ mod tests {
             ))
         }
 
+        async fn merge_block_serve_denylist(
+            &self,
+            _block_hashes: &[Hash],
+        ) -> Result<(), ModuleError> {
+            Ok(())
+        }
+
+        async fn get_block_serve_denylist_snapshot(
+            &self,
+        ) -> Result<
+            blvm_node::module::traits::BlockServeDenylistSnapshot,
+            ModuleError,
+        > {
+            Ok(blvm_node::module::traits::BlockServeDenylistSnapshot {
+                total_count: 0,
+                truncated: false,
+                hashes: vec![],
+            })
+        }
+
+        async fn clear_block_serve_denylist(&self) -> Result<(), ModuleError> {
+            Ok(())
+        }
+
+        async fn replace_block_serve_denylist(
+            &self,
+            _block_hashes: &[Hash],
+        ) -> Result<(), ModuleError> {
+            Ok(())
+        }
+
+        async fn merge_tx_serve_denylist(&self, _tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+            Ok(())
+        }
+
+        async fn get_tx_serve_denylist_snapshot(
+            &self,
+        ) -> Result<blvm_node::module::traits::TxServeDenylistSnapshot, ModuleError> {
+            Ok(blvm_node::module::traits::TxServeDenylistSnapshot {
+                total_count: 0,
+                truncated: false,
+                hashes: vec![],
+            })
+        }
+
+        async fn clear_tx_serve_denylist(&self) -> Result<(), ModuleError> {
+            Ok(())
+        }
+
+        async fn replace_tx_serve_denylist(
+            &self,
+            _tx_hashes: &[Hash],
+        ) -> Result<(), ModuleError> {
+            Ok(())
+        }
+
+        async fn get_sync_status(
+            &self,
+        ) -> Result<blvm_node::module::traits::SyncStatus, ModuleError> {
+            Ok(blvm_node::module::traits::SyncStatus {
+                phase: "Synced".into(),
+                progress: 1.0,
+                is_synced: true,
+                error_message: None,
+            })
+        }
+
+        async fn ban_peer(
+            &self,
+            _peer_addr: &str,
+            _ban_duration_seconds: Option<u64>,
+        ) -> Result<(), ModuleError> {
+            Ok(())
+        }
+
+        async fn set_block_serve_maintenance_mode(&self, _enabled: bool) -> Result<(), ModuleError> {
+            Ok(())
+        }
+
         async fn submit_block(&self, _block: Block) -> Result<SubmitBlockResult, ModuleError> {
             Ok(SubmitBlockResult::Accepted)
         }

@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::SystemTime;
@@ -92,6 +92,18 @@ fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
         ProtocolMessage::ModuleList(_) => cmd::MODULELIST,
         ProtocolMessage::MeshPacket(_) => cmd::MESH,
     }
+}
+
+fn sorted_denylist_snapshot(
+    set: &HashSet<blvm_protocol::Hash>,
+    max: usize,
+) -> (u64, bool, Vec<blvm_protocol::Hash>) {
+    let total_count = set.len() as u64;
+    let mut hashes: Vec<_> = set.iter().copied().collect();
+    hashes.sort();
+    let truncated = hashes.len() > max;
+    hashes.truncate(max);
+    (total_count, truncated, hashes)
 }
 
 /// Network manager that coordinates all network operations
@@ -250,6 +262,12 @@ pub struct NetworkManager {
     #[cfg(feature = "stratum-v2")]
     stratum_connections:
         Arc<tokio::sync::RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// Block hashes modules merged into the full-block serve denylist (see `merge_block_serve_denylist`).
+    block_serve_denylist: Arc<parking_lot::RwLock<HashSet<blvm_protocol::Hash>>>,
+    /// Txids merged into the full-tx serve denylist (see `merge_tx_serve_denylist`).
+    tx_serve_denylist: Arc<parking_lot::RwLock<HashSet<blvm_protocol::Hash>>>,
+    /// When true, refuse all full-block answers on `getdata` (operational maintenance).
+    block_serve_maintenance: Arc<AtomicBool>,
 }
 
 /// Pending request metadata (pub(crate) for utxo_commitments_client)
@@ -467,6 +485,9 @@ impl NetworkManager {
             peer_reconnection_queue: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "stratum-v2")]
             stratum_connections: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            block_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
+            tx_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
+            block_serve_maintenance: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -2280,6 +2301,107 @@ impl NetworkManager {
 
     pub(crate) fn storage(&self) -> &Option<Arc<Storage>> {
         &self.storage
+    }
+
+    /// When set, used for protocol feature gates (e.g. segwit) when serving `getdata` blocks.
+    pub(crate) fn protocol_engine(&self) -> Option<&Arc<BitcoinProtocolEngine>> {
+        self.protocol_engine.as_ref()
+    }
+
+    /// Confirmed + mempool transaction lookup for `getdata` (`MSG_TX`).
+    pub(crate) fn mempool_manager(&self) -> Option<&Arc<MempoolManager>> {
+        self.mempool_manager.as_ref()
+    }
+
+    /// Merge block hashes into the full-block serve denylist (modules via [`crate::module::traits::NodeAPI`]).
+    pub(crate) fn merge_block_serve_denylist(&self, hashes: &[blvm_protocol::Hash]) {
+        if hashes.is_empty() {
+            return;
+        }
+        let mut g = self.block_serve_denylist.write();
+        for h in hashes {
+            g.insert(*h);
+        }
+    }
+
+    pub(crate) fn is_block_serve_denied(&self, hash: &blvm_protocol::Hash) -> bool {
+        self.block_serve_denylist.read().contains(hash)
+    }
+
+    pub(crate) fn block_serve_maintenance_mode(&self) -> bool {
+        self.block_serve_maintenance.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_block_serve_maintenance_mode(&self, enabled: bool) {
+        self.block_serve_maintenance
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    pub(crate) fn block_serve_denylist_snapshot(
+        &self,
+    ) -> crate::module::traits::BlockServeDenylistSnapshot {
+        let (total_count, truncated, hashes) = sorted_denylist_snapshot(
+            &self.block_serve_denylist.read(),
+            crate::module::traits::SERVE_DENYLIST_SNAPSHOT_MAX_HASHES,
+        );
+        crate::module::traits::BlockServeDenylistSnapshot {
+            total_count,
+            truncated,
+            hashes,
+        }
+    }
+
+    pub(crate) fn clear_block_serve_denylist(&self) {
+        self.block_serve_denylist.write().clear();
+    }
+
+    pub(crate) fn replace_block_serve_denylist(&self, hashes: &[blvm_protocol::Hash]) {
+        let mut g = self.block_serve_denylist.write();
+        g.clear();
+        for h in hashes {
+            g.insert(*h);
+        }
+    }
+
+    /// Merge txids that must not be answered with a full `tx` on `getdata`.
+    pub(crate) fn merge_tx_serve_denylist(&self, hashes: &[blvm_protocol::Hash]) {
+        if hashes.is_empty() {
+            return;
+        }
+        let mut g = self.tx_serve_denylist.write();
+        for h in hashes {
+            g.insert(*h);
+        }
+    }
+
+    pub(crate) fn is_tx_serve_denied(&self, hash: &blvm_protocol::Hash) -> bool {
+        self.tx_serve_denylist.read().contains(hash)
+    }
+
+    pub(crate) fn tx_serve_denylist_snapshot(
+        &self,
+    ) -> crate::module::traits::TxServeDenylistSnapshot {
+        let (total_count, truncated, hashes) = sorted_denylist_snapshot(
+            &self.tx_serve_denylist.read(),
+            crate::module::traits::SERVE_DENYLIST_SNAPSHOT_MAX_HASHES,
+        );
+        crate::module::traits::TxServeDenylistSnapshot {
+            total_count,
+            truncated,
+            hashes,
+        }
+    }
+
+    pub(crate) fn clear_tx_serve_denylist(&self) {
+        self.tx_serve_denylist.write().clear();
+    }
+
+    pub(crate) fn replace_tx_serve_denylist(&self, hashes: &[blvm_protocol::Hash]) {
+        let mut g = self.tx_serve_denylist.write();
+        g.clear();
+        for h in hashes {
+            g.insert(*h);
+        }
     }
 
     pub(crate) fn replay_protection(&self) -> &Arc<super::replay_protection::ReplayProtection> {

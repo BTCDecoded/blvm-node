@@ -472,6 +472,56 @@ pub trait NodeAPI: Send + Sync {
     /// # Returns
     /// SubmitBlockResult indicating acceptance, rejection, or duplicate
     async fn submit_block(&self, block: Block) -> Result<SubmitBlockResult, ModuleError>;
+
+    /// Merge block hashes into the node's denylist for serving full `block` messages on the network
+    /// (e.g. `getdata`). Additive; callers may include selective-sync, policy/compliance, or tests.
+    /// Peers receive `notfound` for these hashes instead of a full block.
+    async fn merge_block_serve_denylist(
+        &self,
+        block_hashes: &[Hash],
+    ) -> Result<(), ModuleError>;
+
+    /// Bounded snapshot of the block serve denylist (for status and debugging).
+    async fn get_block_serve_denylist_snapshot(
+        &self,
+    ) -> Result<BlockServeDenylistSnapshot, ModuleError>;
+
+    async fn clear_block_serve_denylist(&self) -> Result<(), ModuleError>;
+
+    async fn replace_block_serve_denylist(
+        &self,
+        block_hashes: &[Hash],
+    ) -> Result<(), ModuleError>;
+
+    /// Merge txids into the denylist for serving full `tx` on `getdata` (additive).
+    async fn merge_tx_serve_denylist(
+        &self,
+        tx_hashes: &[Hash],
+    ) -> Result<(), ModuleError>;
+
+    async fn get_tx_serve_denylist_snapshot(
+        &self,
+    ) -> Result<TxServeDenylistSnapshot, ModuleError>;
+
+    async fn clear_tx_serve_denylist(&self) -> Result<(), ModuleError>;
+
+    async fn replace_tx_serve_denylist(
+        &self,
+        tx_hashes: &[Hash],
+    ) -> Result<(), ModuleError>;
+
+    /// Sync coordinator phase and progress (requires sync coordinator on the node API).
+    async fn get_sync_status(&self) -> Result<SyncStatus, ModuleError>;
+
+    /// Ban a peer by socket address string. `ban_duration_seconds: None` means permanent.
+    async fn ban_peer(
+        &self,
+        peer_addr: &str,
+        ban_duration_seconds: Option<u64>,
+    ) -> Result<(), ModuleError>;
+
+    /// When enabled, refuse all full-block `getdata` answers (operational maintenance).
+    async fn set_block_serve_maintenance_mode(&self, enabled: bool) -> Result<(), ModuleError>;
 }
 
 /// Event types that modules can subscribe to
@@ -986,6 +1036,35 @@ pub struct ChainInfo {
     /// Is synced
     pub is_synced: bool,
 }
+
+/// Bounded snapshot of block hashes on the full-block serve denylist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockServeDenylistSnapshot {
+    pub total_count: u64,
+    /// True when `hashes` is shorter than `total_count` due to the snapshot cap.
+    pub truncated: bool,
+    pub hashes: Vec<Hash>,
+}
+
+/// Bounded snapshot of txids on the full-transaction serve denylist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxServeDenylistSnapshot {
+    pub total_count: u64,
+    pub truncated: bool,
+    pub hashes: Vec<Hash>,
+}
+
+/// Sync coordinator view for modules (mirrors internal [`crate::node::sync::SyncState`] labels).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncStatus {
+    pub phase: String,
+    pub progress: f64,
+    pub is_synced: bool,
+    pub error_message: Option<String>,
+}
+
+/// Maximum hashes returned in one denylist snapshot over IPC (each hash is 32 bytes).
+pub const SERVE_DENYLIST_SNAPSHOT_MAX_HASHES: usize = 4096;
 
 /// Lightning node information
 #[derive(Debug, Clone, Serialize, Deserialize)]

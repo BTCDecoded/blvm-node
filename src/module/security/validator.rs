@@ -170,6 +170,17 @@ impl RequestValidator {
             | RequestPayload::SendStratumV2MessageToPeer { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::GetBlockTemplate { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::SubmitBlock { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::MergeBlockServeDenylist { .. }
+            | RequestPayload::GetBlockServeDenylistSnapshot
+            | RequestPayload::ClearBlockServeDenylist
+            | RequestPayload::ReplaceBlockServeDenylist { .. }
+            | RequestPayload::MergeTxServeDenylist { .. }
+            | RequestPayload::GetTxServeDenylistSnapshot
+            | RequestPayload::ClearTxServeDenylist
+            | RequestPayload::ReplaceTxServeDenylist { .. }
+            | RequestPayload::GetSyncStatus
+            | RequestPayload::BanPeer { .. }
+            | RequestPayload::SetBlockServeMaintenanceMode { .. }
             | RequestPayload::RegisterCliSpec { .. } => Ok(ValidationResult::Allowed),
         }
     }

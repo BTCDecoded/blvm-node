@@ -10,6 +10,7 @@ use crate::network::protocol::{HeadersMessage, ProtocolMessage, ProtocolParser, 
 use crate::network::transport::TransportAddr;
 use crate::network::NetworkMessage;
 use anyhow::Result;
+use blvm_protocol::ProtocolVersion;
 use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 
@@ -246,6 +247,19 @@ impl NetworkManager {
                         }
                     }
                 }
+
+                let protocol_version = self
+                    .protocol_engine()
+                    .map(|e| e.get_protocol_version())
+                    .unwrap_or(ProtocolVersion::BitcoinV1);
+
+                if let Err(e) = self
+                    .serve_getdata_request(peer_addr, getdata, protocol_version)
+                    .await
+                {
+                    warn!("getdata: failed to serve peer {}: {}", peer_addr, e);
+                }
+                return Ok(());
             }
             ProtocolMessage::SendPkgTxn(_) => {
                 let _ = self

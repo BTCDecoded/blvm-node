@@ -10,8 +10,9 @@ use blvm_node::module::metrics::manager::Metric;
 use blvm_node::module::process::monitor::ModuleHealth;
 use blvm_node::module::timers::manager::{TaskCallback, TaskId, TimerCallback, TimerId};
 use blvm_node::module::traits::{
-    ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError, ModuleInfo, NetworkStats,
-    NodeAPI, PaymentState, PeerInfo, SubmitBlockResult,
+    BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError,
+    ModuleInfo, NetworkStats, NodeAPI, PaymentState, PeerInfo, SubmitBlockResult, SyncStatus,
+    TxServeDenylistSnapshot,
 };
 use blvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 
@@ -322,6 +323,77 @@ impl NodeAPI for MockNodeAPI {
         Err(ModuleError::OperationError(
             "stub get_block_template".into(),
         ))
+    }
+
+    async fn merge_block_serve_denylist(
+        &self,
+        _block_hashes: &[Hash],
+    ) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
+    async fn get_block_serve_denylist_snapshot(
+        &self,
+    ) -> Result<BlockServeDenylistSnapshot, ModuleError> {
+        Ok(BlockServeDenylistSnapshot {
+            total_count: 0,
+            truncated: false,
+            hashes: vec![],
+        })
+    }
+
+    async fn clear_block_serve_denylist(&self) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
+    async fn replace_block_serve_denylist(
+        &self,
+        _block_hashes: &[Hash],
+    ) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
+    async fn merge_tx_serve_denylist(&self, _tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
+    async fn get_tx_serve_denylist_snapshot(
+        &self,
+    ) -> Result<TxServeDenylistSnapshot, ModuleError> {
+        Ok(TxServeDenylistSnapshot {
+            total_count: 0,
+            truncated: false,
+            hashes: vec![],
+        })
+    }
+
+    async fn clear_tx_serve_denylist(&self) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
+    async fn replace_tx_serve_denylist(&self, _tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
+    async fn get_sync_status(&self) -> Result<SyncStatus, ModuleError> {
+        Ok(SyncStatus {
+            phase: "Synced".to_string(),
+            progress: 1.0,
+            is_synced: true,
+            error_message: None,
+        })
+    }
+
+    async fn ban_peer(
+        &self,
+        _peer_addr: &str,
+        _ban_duration_seconds: Option<u64>,
+    ) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
+    async fn set_block_serve_maintenance_mode(&self, _enabled: bool) -> Result<(), ModuleError> {
+        Ok(())
     }
 
     async fn submit_block(&self, _block: Block) -> Result<SubmitBlockResult, ModuleError> {

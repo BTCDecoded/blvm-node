@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::module::traits::{
-    ChainInfo, EventType, LightningInfo, MempoolSize, NetworkStats, PaymentState, PeerInfo,
+    BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize, NetworkStats,
+    PaymentState, PeerInfo, SyncStatus, TxServeDenylistSnapshot,
 };
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 
@@ -125,6 +126,19 @@ pub enum MessageType {
     // Mining API
     GetBlockTemplate,
     SubmitBlock,
+    /// Merge block hashes into the outbound full-block serve denylist (additive).
+    /// Used for selective sync, policy, compliance, testing, etc.
+    MergeBlockServeDenylist,
+    GetBlockServeDenylistSnapshot,
+    ClearBlockServeDenylist,
+    ReplaceBlockServeDenylist,
+    MergeTxServeDenylist,
+    GetTxServeDenylistSnapshot,
+    ClearTxServeDenylist,
+    ReplaceTxServeDenylist,
+    GetSyncStatus,
+    BanPeer,
+    SetBlockServeMaintenanceMode,
     /// CLI spec registration (module → node on connect)
     RegisterCliSpec,
     /// Invocation (node → module)
@@ -302,6 +316,31 @@ pub enum RequestPayload {
     SubmitBlock {
         block: Block,
     },
+    /// Block hashes that must not be answered with a full `block` on the wire (e.g. `getdata`).
+    MergeBlockServeDenylist {
+        block_hashes: Vec<Hash>,
+    },
+    GetBlockServeDenylistSnapshot,
+    ClearBlockServeDenylist,
+    ReplaceBlockServeDenylist {
+        block_hashes: Vec<Hash>,
+    },
+    MergeTxServeDenylist {
+        tx_hashes: Vec<Hash>,
+    },
+    GetTxServeDenylistSnapshot,
+    ClearTxServeDenylist,
+    ReplaceTxServeDenylist {
+        tx_hashes: Vec<Hash>,
+    },
+    GetSyncStatus,
+    BanPeer {
+        peer_addr: String,
+        ban_duration_seconds: Option<u64>,
+    },
+    SetBlockServeMaintenanceMode {
+        enabled: bool,
+    },
     /// Register CLI spec (module → node on connect)
     RegisterCliSpec {
         spec: CliSpec,
@@ -462,6 +501,12 @@ pub enum ResponsePayload {
     // Mining API responses
     BlockTemplate(blvm_protocol::mining::BlockTemplate),
     SubmitBlockResult(crate::module::traits::SubmitBlockResult),
+    BlockServeDenylistMerged,
+    TxServeDenylistMerged,
+    BlockServeDenylistSnapshot(BlockServeDenylistSnapshot),
+    TxServeDenylistSnapshot(TxServeDenylistSnapshot),
+    /// Sync coordinator status for modules (`traits::SyncStatus`).
+    NodeSyncStatus(SyncStatus),
 }
 
 /// Event message from node to subscribed modules

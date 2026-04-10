@@ -1245,6 +1245,98 @@ impl ModuleIpcServer {
                     ResponsePayload::SubmitBlockResult(result),
                 ))
             }
+            RequestPayload::MergeBlockServeDenylist { block_hashes } => {
+                node_api
+                    .merge_block_serve_denylist(block_hashes.as_slice())
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::BlockServeDenylistMerged,
+                ))
+            }
+            RequestPayload::GetBlockServeDenylistSnapshot => {
+                let s = node_api.get_block_serve_denylist_snapshot().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::BlockServeDenylistSnapshot(s),
+                ))
+            }
+            RequestPayload::ClearBlockServeDenylist => {
+                node_api.clear_block_serve_denylist().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::ReplaceBlockServeDenylist { block_hashes } => {
+                node_api
+                    .replace_block_serve_denylist(block_hashes.as_slice())
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::MergeTxServeDenylist { tx_hashes } => {
+                node_api
+                    .merge_tx_serve_denylist(tx_hashes.as_slice())
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::TxServeDenylistMerged,
+                ))
+            }
+            RequestPayload::GetTxServeDenylistSnapshot => {
+                let s = node_api.get_tx_serve_denylist_snapshot().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::TxServeDenylistSnapshot(s),
+                ))
+            }
+            RequestPayload::ClearTxServeDenylist => {
+                node_api.clear_tx_serve_denylist().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::ReplaceTxServeDenylist { tx_hashes } => {
+                node_api
+                    .replace_tx_serve_denylist(tx_hashes.as_slice())
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::GetSyncStatus => {
+                let s = node_api.get_sync_status().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::NodeSyncStatus(s),
+                ))
+            }
+            RequestPayload::BanPeer {
+                peer_addr,
+                ban_duration_seconds,
+            } => {
+                node_api
+                    .ban_peer(peer_addr.as_str(), *ban_duration_seconds)
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::SetBlockServeMaintenanceMode { enabled } => {
+                node_api
+                    .set_block_serve_maintenance_mode(*enabled)
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
             _ => Ok(ResponseMessage::error(
                 request.correlation_id,
                 format!("Unimplemented request payload: {:?}", request.payload),

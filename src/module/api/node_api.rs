@@ -18,8 +18,9 @@ use crate::module::ipc::protocol::EventPayload;
 use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::metrics::manager::{Metric, MetricsManager};
 use crate::module::traits::{
-    module_error_msg, ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError, ModuleInfo,
-    ModuleState, NetworkStats, NodeAPI, PaymentState, PeerInfo, SubmitBlockResult,
+    module_error_msg, BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize,
+    ModuleError, ModuleInfo, ModuleState, NetworkStats, NodeAPI, PaymentState, PeerInfo,
+    SubmitBlockResult, SyncStatus, TxServeDenylistSnapshot,
 };
 use crate::network::{transport::TransportAddr, NetworkManager};
 use crate::node::mempool::MempoolManager;
@@ -1869,6 +1870,156 @@ impl NodeAPI for NodeApiImpl {
         .map_err(|e| ModuleError::op_err("Template creation failed", e))?;
 
         Ok(template)
+    }
+
+    async fn merge_block_serve_denylist(
+        &self,
+        block_hashes: &[Hash],
+    ) -> Result<(), ModuleError> {
+        if block_hashes.is_empty() {
+            return Ok(());
+        }
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.merge_block_serve_denylist(block_hashes);
+        Ok(())
+    }
+
+    async fn get_block_serve_denylist_snapshot(
+        &self,
+    ) -> Result<BlockServeDenylistSnapshot, ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        Ok(nm.block_serve_denylist_snapshot())
+    }
+
+    async fn clear_block_serve_denylist(&self) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.clear_block_serve_denylist();
+        Ok(())
+    }
+
+    async fn replace_block_serve_denylist(
+        &self,
+        block_hashes: &[Hash],
+    ) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.replace_block_serve_denylist(block_hashes);
+        Ok(())
+    }
+
+    async fn merge_tx_serve_denylist(&self, tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+        if tx_hashes.is_empty() {
+            return Ok(());
+        }
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.merge_tx_serve_denylist(tx_hashes);
+        Ok(())
+    }
+
+    async fn get_tx_serve_denylist_snapshot(
+        &self,
+    ) -> Result<TxServeDenylistSnapshot, ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        Ok(nm.tx_serve_denylist_snapshot())
+    }
+
+    async fn clear_tx_serve_denylist(&self) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.clear_tx_serve_denylist();
+        Ok(())
+    }
+
+    async fn replace_tx_serve_denylist(&self, tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.replace_tx_serve_denylist(tx_hashes);
+        Ok(())
+    }
+
+    async fn get_sync_status(&self) -> Result<SyncStatus, ModuleError> {
+        let Some(ref sc) = self.sync_coordinator else {
+            return Err(ModuleError::OperationError(
+                "sync coordinator not available".to_string(),
+            ));
+        };
+        let coordinator = sc.lock().await;
+        let state = coordinator.current_sync_state();
+        let phase = state.as_event_str().to_string();
+        let error_message = match &state {
+            crate::node::sync::SyncState::Error(s) => Some(s.clone()),
+            _ => None,
+        };
+        Ok(SyncStatus {
+            phase,
+            progress: coordinator.progress(),
+            is_synced: coordinator.is_synced(),
+            error_message,
+        })
+    }
+
+    async fn ban_peer(
+        &self,
+        peer_addr: &str,
+        ban_duration_seconds: Option<u64>,
+    ) -> Result<(), ModuleError> {
+        let nm = self.network_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+        let addr: std::net::SocketAddr = peer_addr.parse().map_err(|e| {
+            ModuleError::OperationError(format!("invalid peer address: {e}"))
+        })?;
+        let unban_ts = match ban_duration_seconds {
+            None => 0u64,
+            Some(0) => 0u64,
+            Some(secs) => crate::utils::current_timestamp().saturating_add(secs),
+        };
+        let nm = Arc::clone(nm);
+        tokio::task::spawn_blocking(move || {
+            nm.ban_peer(addr, unban_ts);
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
+        Ok(())
+    }
+
+    async fn set_block_serve_maintenance_mode(&self, enabled: bool) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.set_block_serve_maintenance_mode(enabled);
+        Ok(())
     }
 
     async fn submit_block(&self, block: Block) -> Result<SubmitBlockResult, ModuleError> {

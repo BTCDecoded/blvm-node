@@ -250,6 +250,8 @@ blvm-consensus = { path = "../blvm-consensus" }
 blvm-spec-lock = { path = "../blvm-spec-lock" }
 blvm-sdk = { path = "../blvm-sdk" }
 blvm-muhash = { path = "../blvm-muhash" }
+# blvm-sdk (optional / dev) depends on blvm-node from crates.io; use this tree so `cargo build -p blvm-node` works unpublished.
+blvm-node = { path = "." }
 
 [dev-dependencies]
 blvm-consensus = { version = ">=0.1, <1", features = ["test-utils"] }

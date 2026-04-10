@@ -9,8 +9,8 @@ use crate::module::ipc::protocol::{
     EventPayload, MessageType, RequestMessage, RequestPayload, ResponsePayload,
 };
 use crate::module::traits::{
-    ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError, NetworkStats, NodeAPI,
-    PaymentState, PeerInfo,
+    BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError,
+    NetworkStats, NodeAPI, PaymentState, PeerInfo, SyncStatus, TxServeDenylistSnapshot,
 };
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 use async_trait::async_trait;
@@ -137,6 +137,25 @@ impl NodeApiIpc {
             }
             RequestPayload::GetBlockTemplate { .. } => MessageType::GetBlockTemplate,
             RequestPayload::SubmitBlock { .. } => MessageType::SubmitBlock,
+            RequestPayload::MergeBlockServeDenylist { .. } => {
+                MessageType::MergeBlockServeDenylist
+            }
+            RequestPayload::GetBlockServeDenylistSnapshot => {
+                MessageType::GetBlockServeDenylistSnapshot
+            }
+            RequestPayload::ClearBlockServeDenylist => MessageType::ClearBlockServeDenylist,
+            RequestPayload::ReplaceBlockServeDenylist { .. } => {
+                MessageType::ReplaceBlockServeDenylist
+            }
+            RequestPayload::MergeTxServeDenylist { .. } => MessageType::MergeTxServeDenylist,
+            RequestPayload::GetTxServeDenylistSnapshot => MessageType::GetTxServeDenylistSnapshot,
+            RequestPayload::ClearTxServeDenylist => MessageType::ClearTxServeDenylist,
+            RequestPayload::ReplaceTxServeDenylist { .. } => MessageType::ReplaceTxServeDenylist,
+            RequestPayload::GetSyncStatus => MessageType::GetSyncStatus,
+            RequestPayload::BanPeer { .. } => MessageType::BanPeer,
+            RequestPayload::SetBlockServeMaintenanceMode { .. } => {
+                MessageType::SetBlockServeMaintenanceMode
+            }
             _ => MessageType::Response,
         }
     }
@@ -909,6 +928,174 @@ impl NodeAPI for NodeApiIpc {
             RequestPayload::SubmitBlock { block },
             |payload| match payload {
                 ResponsePayload::SubmitBlockResult(result) => Ok(result),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn merge_block_serve_denylist(
+        &self,
+        block_hashes: &[Hash],
+    ) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::MergeBlockServeDenylist {
+                block_hashes: block_hashes.to_vec(),
+            },
+            |payload| match payload {
+                ResponsePayload::BlockServeDenylistMerged => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn get_block_serve_denylist_snapshot(
+        &self,
+    ) -> Result<BlockServeDenylistSnapshot, ModuleError> {
+        self.request(
+            RequestPayload::GetBlockServeDenylistSnapshot,
+            |payload| match payload {
+                ResponsePayload::BlockServeDenylistSnapshot(s) => Ok(s),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn clear_block_serve_denylist(&self) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::ClearBlockServeDenylist,
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn replace_block_serve_denylist(
+        &self,
+        block_hashes: &[Hash],
+    ) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::ReplaceBlockServeDenylist {
+                block_hashes: block_hashes.to_vec(),
+            },
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn merge_tx_serve_denylist(&self, tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::MergeTxServeDenylist {
+                tx_hashes: tx_hashes.to_vec(),
+            },
+            |payload| match payload {
+                ResponsePayload::TxServeDenylistMerged => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn get_tx_serve_denylist_snapshot(
+        &self,
+    ) -> Result<TxServeDenylistSnapshot, ModuleError> {
+        self.request(
+            RequestPayload::GetTxServeDenylistSnapshot,
+            |payload| match payload {
+                ResponsePayload::TxServeDenylistSnapshot(s) => Ok(s),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn clear_tx_serve_denylist(&self) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::ClearTxServeDenylist,
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn replace_tx_serve_denylist(&self, tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::ReplaceTxServeDenylist {
+                tx_hashes: tx_hashes.to_vec(),
+            },
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn get_sync_status(&self) -> Result<SyncStatus, ModuleError> {
+        self.request(
+            RequestPayload::GetSyncStatus,
+            |payload| match payload {
+                ResponsePayload::NodeSyncStatus(s) => Ok(s),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn ban_peer(
+        &self,
+        peer_addr: &str,
+        ban_duration_seconds: Option<u64>,
+    ) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::BanPeer {
+                peer_addr: peer_addr.to_string(),
+                ban_duration_seconds,
+            },
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn set_block_serve_maintenance_mode(&self, enabled: bool) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::SetBlockServeMaintenanceMode { enabled },
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
                 _ => Err(ModuleError::OperationError(
                     "Unexpected response type".to_string(),
                 )),
