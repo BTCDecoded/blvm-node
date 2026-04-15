@@ -35,7 +35,14 @@
                                                                              // Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
                                                                              // Temporarily disabled for IBD memory profiling — mimalloc arenas
                                                                              // retain freed pages and inflate RSS on 16GB boxes.
-#[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
+// Use the default Rust allocator in `cargo test` — mimalloc has caused SIGSEGV in
+// integration tests (UTXO Merkle / handler paths) while the same code passes under the
+// system allocator and in `blvm-protocol` tests.
+#[cfg(all(
+    not(target_os = "windows"),
+    feature = "mimalloc",
+    not(test)
+))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

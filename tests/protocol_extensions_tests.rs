@@ -4,16 +4,33 @@
 
 use blvm_node::network::protocol::{FilterPreferences, GetFilteredBlockMessage, GetUTXOSetMessage};
 use blvm_node::network::protocol_extensions::{handle_get_filtered_block, handle_get_utxo_set};
+use blvm_node::storage::database::DatabaseBackend;
 use blvm_node::storage::Storage;
 use blvm_node::{Block, BlockHeader, Transaction};
 use std::sync::Arc;
 
+/// Prefer **Redb** for tests: `Storage::new()` uses the default backend (often RocksDB), whose
+/// background compaction threads have caused SIGSEGV under `cargo test` when the DB is short‑lived.
 fn create_test_storage() -> Arc<Storage> {
-    // Create a minimal test storage with temp directory
-    let temp_dir = std::env::temp_dir().join(format!("blvm_test_{}", std::process::id()));
+    let temp_dir = std::env::temp_dir().join(format!(
+        "blvm_pe_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&temp_dir).unwrap();
-    let storage = Storage::new(&temp_dir).unwrap();
-    Arc::new(storage)
+    #[cfg(feature = "redb")]
+    {
+        let storage = Storage::with_backend(&temp_dir, DatabaseBackend::Redb).unwrap();
+        return Arc::new(storage);
+    }
+    #[cfg(not(feature = "redb"))]
+    {
+        let storage = Storage::new(&temp_dir).unwrap();
+        Arc::new(storage)
+    }
 }
 
 #[tokio::test]
