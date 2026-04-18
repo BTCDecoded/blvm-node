@@ -80,7 +80,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Initialize a batch to collect multiple payment outputs into one transaction");
-    println!("   Note: target_fee_rate controls when broadcastbatch fires; omit for default policy");
+    println!(
+        "   Note: target_fee_rate controls when broadcastbatch fires; omit for default policy"
+    );
     println!();
 
     // Example 4: Add to batch
@@ -102,7 +104,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Accumulate payment outputs; batching reduces per-payment fee overhead");
-    println!("   Note: priority affects ordering within the batch; deadline triggers early broadcast");
+    println!(
+        "   Note: priority affects ordering within the batch; deadline triggers early broadcast"
+    );
     println!();
 
     // Example 5: Broadcast batch
@@ -159,7 +163,9 @@ fn main() -> anyhow::Result<()> {
     println!("  createbatch         - Initialize a transaction batch (ctv feature)");
     println!("  addtobatch          - Add outputs to a batch (ctv feature)");
     println!("  broadcastbatch      - Broadcast batch when conditions are met (ctv feature)");
-    println!("  getdescriptorinfo   - Parse and validate an output descriptor (miniscript feature)");
+    println!(
+        "  getdescriptorinfo   - Parse and validate an output descriptor (miniscript feature)"
+    );
     println!("  analyzepsbt         - Inspect PSBT signing status and fee (miniscript feature)");
     println!();
     println!("Typical batching workflow:");

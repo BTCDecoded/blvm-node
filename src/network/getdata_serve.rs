@@ -10,8 +10,8 @@
 use crate::network::inventory::{MSG_BLOCK, MSG_TX};
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
-    BlockMessage, GetDataMessage, InventoryVector, NotFoundMessage, ProtocolMessage, ProtocolParser,
-    TxMessage,
+    BlockMessage, GetDataMessage, InventoryVector, NotFoundMessage, ProtocolMessage,
+    ProtocolParser, TxMessage,
 };
 use anyhow::Result;
 use blvm_protocol::features::FeatureRegistry;
@@ -78,7 +78,7 @@ impl NetworkManager {
                             missing.push(item.clone());
                         }
                     }
-                },
+                }
                 MSG_TX => {
                     let res = if self.is_tx_serve_denied(&item.hash) {
                         Ok(None)
@@ -106,7 +106,7 @@ impl NetworkManager {
                             missing.push(item.clone());
                         }
                     }
-                },
+                }
                 _ => missing.push(item.clone()),
             }
         }

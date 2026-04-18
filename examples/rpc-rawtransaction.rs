@@ -119,7 +119,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Check if a UTXO exists and get its value, script, and confirmations");
-    println!("   Note: include_mempool=true also checks unconfirmed outputs; returns null if spent");
+    println!(
+        "   Note: include_mempool=true also checks unconfirmed outputs; returns null if spent"
+    );
     println!();
 
     // Example 7: Verify tx output proof
@@ -133,7 +135,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Verify the proof returned by gettxoutproof; returns array of proven txids");
-    println!("   Note: Pair with gettxoutproof to implement SPV verification for lightweight clients");
+    println!(
+        "   Note: Pair with gettxoutproof to implement SPV verification for lightweight clients"
+    );
     println!();
 
     // Example 8: Get transaction details (enhanced)

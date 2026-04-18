@@ -1872,10 +1872,7 @@ impl NodeAPI for NodeApiImpl {
         Ok(template)
     }
 
-    async fn merge_block_serve_denylist(
-        &self,
-        block_hashes: &[Hash],
-    ) -> Result<(), ModuleError> {
+    async fn merge_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError> {
         if block_hashes.is_empty() {
             return Ok(());
         }
@@ -1909,10 +1906,7 @@ impl NodeAPI for NodeApiImpl {
         Ok(())
     }
 
-    async fn replace_block_serve_denylist(
-        &self,
-        block_hashes: &[Hash],
-    ) -> Result<(), ModuleError> {
+    async fn replace_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError> {
         let Some(nm) = self.network_manager.as_ref() else {
             return Err(ModuleError::OperationError(
                 module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
@@ -1935,9 +1929,7 @@ impl NodeAPI for NodeApiImpl {
         Ok(())
     }
 
-    async fn get_tx_serve_denylist_snapshot(
-        &self,
-    ) -> Result<TxServeDenylistSnapshot, ModuleError> {
+    async fn get_tx_serve_denylist_snapshot(&self) -> Result<TxServeDenylistSnapshot, ModuleError> {
         let Some(nm) = self.network_manager.as_ref() else {
             return Err(ModuleError::OperationError(
                 module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
@@ -1995,9 +1987,9 @@ impl NodeAPI for NodeApiImpl {
         let nm = self.network_manager.as_ref().ok_or_else(|| {
             ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
         })?;
-        let addr: std::net::SocketAddr = peer_addr.parse().map_err(|e| {
-            ModuleError::OperationError(format!("invalid peer address: {e}"))
-        })?;
+        let addr: std::net::SocketAddr = peer_addr
+            .parse()
+            .map_err(|e| ModuleError::OperationError(format!("invalid peer address: {e}")))?;
         let unban_ts = match ban_duration_seconds {
             None => 0u64,
             Some(0) => 0u64,

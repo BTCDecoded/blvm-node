@@ -32,7 +32,8 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
-    let raw_tx = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff...";
+    let raw_tx =
+        "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff...";
 
     // Example 1: Get mempool info
     println!("1. getmempoolinfo - Get overall mempool stats");
@@ -108,7 +109,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Persist unconfirmed transactions so they survive a node restart");
-    println!("   Note: Mempool is saved automatically on clean shutdown; call explicitly for safety");
+    println!(
+        "   Note: Mempool is saved automatically on clean shutdown; call explicitly for safety"
+    );
     println!();
 
     // Example 7: Get mempool descendants
@@ -120,7 +123,9 @@ fn main() -> anyhow::Result<()> {
         "id": 7
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Find all unconfirmed transactions that depend on this one (reverse of ancestors)");
+    println!(
+        "   Use: Find all unconfirmed transactions that depend on this one (reverse of ancestors)"
+    );
     println!("   Note: verbose=false returns txid array; verbose=true returns full entry details");
     println!();
 

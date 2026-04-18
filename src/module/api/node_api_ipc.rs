@@ -137,9 +137,7 @@ impl NodeApiIpc {
             }
             RequestPayload::GetBlockTemplate { .. } => MessageType::GetBlockTemplate,
             RequestPayload::SubmitBlock { .. } => MessageType::SubmitBlock,
-            RequestPayload::MergeBlockServeDenylist { .. } => {
-                MessageType::MergeBlockServeDenylist
-            }
+            RequestPayload::MergeBlockServeDenylist { .. } => MessageType::MergeBlockServeDenylist,
             RequestPayload::GetBlockServeDenylistSnapshot => {
                 MessageType::GetBlockServeDenylistSnapshot
             }
@@ -936,10 +934,7 @@ impl NodeAPI for NodeApiIpc {
         .await
     }
 
-    async fn merge_block_serve_denylist(
-        &self,
-        block_hashes: &[Hash],
-    ) -> Result<(), ModuleError> {
+    async fn merge_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError> {
         self.request(
             RequestPayload::MergeBlockServeDenylist {
                 block_hashes: block_hashes.to_vec(),
@@ -982,10 +977,7 @@ impl NodeAPI for NodeApiIpc {
         .await
     }
 
-    async fn replace_block_serve_denylist(
-        &self,
-        block_hashes: &[Hash],
-    ) -> Result<(), ModuleError> {
+    async fn replace_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError> {
         self.request(
             RequestPayload::ReplaceBlockServeDenylist {
                 block_hashes: block_hashes.to_vec(),
@@ -1015,9 +1007,7 @@ impl NodeAPI for NodeApiIpc {
         .await
     }
 
-    async fn get_tx_serve_denylist_snapshot(
-        &self,
-    ) -> Result<TxServeDenylistSnapshot, ModuleError> {
+    async fn get_tx_serve_denylist_snapshot(&self) -> Result<TxServeDenylistSnapshot, ModuleError> {
         self.request(
             RequestPayload::GetTxServeDenylistSnapshot,
             |payload| match payload {
@@ -1059,15 +1049,12 @@ impl NodeAPI for NodeApiIpc {
     }
 
     async fn get_sync_status(&self) -> Result<SyncStatus, ModuleError> {
-        self.request(
-            RequestPayload::GetSyncStatus,
-            |payload| match payload {
-                ResponsePayload::NodeSyncStatus(s) => Ok(s),
-                _ => Err(ModuleError::OperationError(
-                    "Unexpected response type".to_string(),
-                )),
-            },
-        )
+        self.request(RequestPayload::GetSyncStatus, |payload| match payload {
+            ResponsePayload::NodeSyncStatus(s) => Ok(s),
+            _ => Err(ModuleError::OperationError(
+                "Unexpected response type".to_string(),
+            )),
+        })
         .await
     }
 

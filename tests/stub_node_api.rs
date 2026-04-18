@@ -325,10 +325,7 @@ impl NodeAPI for MockNodeAPI {
         ))
     }
 
-    async fn merge_block_serve_denylist(
-        &self,
-        _block_hashes: &[Hash],
-    ) -> Result<(), ModuleError> {
+    async fn merge_block_serve_denylist(&self, _block_hashes: &[Hash]) -> Result<(), ModuleError> {
         Ok(())
     }
 
@@ -357,9 +354,7 @@ impl NodeAPI for MockNodeAPI {
         Ok(())
     }
 
-    async fn get_tx_serve_denylist_snapshot(
-        &self,
-    ) -> Result<TxServeDenylistSnapshot, ModuleError> {
+    async fn get_tx_serve_denylist_snapshot(&self) -> Result<TxServeDenylistSnapshot, ModuleError> {
         Ok(TxServeDenylistSnapshot {
             total_count: 0,
             truncated: false,

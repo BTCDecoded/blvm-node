@@ -42,7 +42,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Initiate graceful node shutdown; flushes mempool and closes storage");
-    println!("   Note: The connection will drop after the response — handle disconnects in your client");
+    println!(
+        "   Note: The connection will drop after the response — handle disconnects in your client"
+    );
     println!();
 
     // Example 2: Uptime
@@ -55,7 +57,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Check how long the node has been running; useful for monitoring/alerting");
-    println!("   Note: Returns an integer (seconds); compare against expected uptime in dashboards");
+    println!(
+        "   Note: Returns an integer (seconds); compare against expected uptime in dashboards"
+    );
     println!();
 
     // Example 3: Get memory info
@@ -68,7 +72,9 @@ fn main() -> anyhow::Result<()> {
         "id": 3
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Inspect locked memory usage (used, free, total, available) for the node process");
+    println!(
+        "   Use: Inspect locked memory usage (used, free, total, available) for the node process"
+    );
     println!("   Note: mode='stats' returns JSON; mode='mallocinfo' returns XML heap info");
     println!();
 
@@ -123,7 +129,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Get a health summary across all node components; ideal for liveness probes");
-    println!("   Note: Returns {{status: \"healthy\"|\"degraded\"|\"unhealthy\", message, components}}");
+    println!(
+        "   Note: Returns {{status: \"healthy\"|\"degraded\"|\"unhealthy\", message, components}}"
+    );
     println!();
 
     // Example 8: Get metrics

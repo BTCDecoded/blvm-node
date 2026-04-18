@@ -82,7 +82,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Validate address format and network (mainnet/testnet) before sending funds");
-    println!("   Note: Returns {{isvalid, address, scriptPubKey, isscript, iswitness, witness_version}}");
+    println!(
+        "   Note: Returns {{isvalid, address, scriptPubKey, isscript, iswitness, witness_version}}"
+    );
     println!();
 
     // Example 5: Get address info

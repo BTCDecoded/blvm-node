@@ -131,14 +131,23 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
-      - name: Cleanup any leftover dependency directories
+
+      - name: Clean leftover path overrides
         run: |
-          # Remove any leftover dependency directories from previous jobs
           if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
-          # Also remove any .cargo/config.toml that might have been left behind
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
-      
+
+      - name: Install tidesdb native dependencies
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf
+          fi
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -187,6 +196,14 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -227,71 +244,58 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
-      - name: Checkout blvm-protocol dependency
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/blvm-protocol
-          path: _temp-blvm-protocol
-      
-      - name: Checkout consensus
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/blvm-consensus
-          path: _temp-blvm-consensus
-      
-      - name: Checkout blvm-spec-lock (consensus path dep)
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/blvm-spec-lock
-          path: _temp-spec-lock
-      
-      - name: Move dependencies to parent directory
+
+      - name: Clean leftover path overrides
         run: |
           if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
-          mv _temp-blvm-protocol ../blvm-protocol
-          mv _temp-blvm-consensus ../blvm-consensus
-          mv _temp-spec-lock ../blvm-spec-lock
-      
-      - name: Setup local dependencies for build
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml << EOF
-          [patch.crates-io]
-          blvm-protocol = { path = "../blvm-protocol" }
-          blvm-consensus = { path = "../blvm-consensus" }
-          EOF
-          echo "✅ Created .cargo/config.toml for local dependency builds"
-      
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
-      
-      - name: Build blvm-spec-lock (with Z3 for full contract verification)
+
+      - name: Install spec-lock build deps (Z3 / clang / jq)
         run: |
-          cd ../blvm-spec-lock
-          # Build with Z3 for full verification of contracts (e.g. get_block_subsidy)
-          # Requires: libz3-dev libclang-dev (apt) or z3 llvm llvm-libs clang (pacman)
-          cargo build --release --features z3 --bin cargo-spec-lock
-          echo "✅ blvm-spec-lock built"
-      
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libz3-dev libclang-dev clang pkg-config jq curl
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm z3 llvm clang pkgconf jq curl
+          fi
+
+      - name: Install cargo-spec-lock from crates.io
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install blvm-spec-lock --locked --features z3
+
+      - name: Fetch blvm-consensus sources from crates.io
+        id: consensus_src
+        run: |
+          CONS_VER=$(curl -fsSL 'https://crates.io/api/v1/crates/blvm-consensus' | jq -r '.crate.max_stable_version // .crate.max_version')
+          echo "Using blvm-consensus $CONS_VER from crates.io"
+          mkdir -p "$GITHUB_WORKSPACE/_spec_verify"
+          curl -fsSL "https://static.crates.io/crates/blvm-consensus/${CONS_VER}/download" | tar -xz -C "$GITHUB_WORKSPACE/_spec_verify"
+          echo "path=$GITHUB_WORKSPACE/_spec_verify/blvm-consensus-${CONS_VER}" >> "$GITHUB_OUTPUT"
+
       - name: Run blvm-spec-lock verify (blvm-consensus)
         run: |
-          echo "🔒 Running blvm-spec-lock verification on blvm-consensus..."
-          cd ../blvm-consensus
-          ../blvm-spec-lock/target/release/cargo-spec-lock verify --crate-path . 2>&1 | tee ../spec_lock_consensus_output.txt
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "🔒 Running blvm-spec-lock verification on crates.io blvm-consensus..."
+          cargo-spec-lock verify --crate-path "${{ steps.consensus_src.outputs.path }}" 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt"
           EXIT_CODE=${PIPESTATUS[0]}
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ blvm-consensus spec-lock verification failed"
             exit $EXIT_CODE
           fi
           echo "✅ blvm-consensus verification passed"
-      
+
       - name: Run blvm-spec-lock verify (blvm-node)
         run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           echo "🔒 Running blvm-spec-lock verification on blvm-node..."
-          cd ..
-          ./blvm-spec-lock/target/release/cargo-spec-lock verify --crate-path blvm-node 2>&1 | tee spec_lock_node_output.txt
+          cd "$GITHUB_WORKSPACE"
+          cargo-spec-lock verify --crate-path . 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
           EXIT_CODE=${PIPESTATUS[0]}
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ blvm-node spec-lock verification failed"
@@ -365,6 +369,14 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -408,7 +420,7 @@ jobs:
         run: |
           # Ensure cargo bin is in PATH (fixes exit code 127)
           export PATH="$HOME/.cargo/bin:$PATH"
-          cargo install cargo-audit --version 0.21.0 --locked
+          cargo install cargo-audit --version 0.22.1 --locked
       
       - name: Run security audit
         run: |
@@ -451,6 +463,23 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
+      - name: Install tidesdb native dependencies
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf
+          fi
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -669,8 +698,16 @@ jobs:
           # Create a temporary Cargo.toml for release (don't modify source file)
           cp Cargo.toml Cargo.toml.release
           
-          # Update version in the release copy
-          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml.release
+          # Update [package] version only (naive sed corrupts e.g. [dependencies.smallvec] version pins).
+          awk -v ver="$VERSION" '
+            /^\[package\]/ { in_package = 1; print; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^version = / {
+              print "version = \"" ver "\""
+              next
+            }
+            { print }
+          ' Cargo.toml.release > Cargo.toml.release.tmp && mv Cargo.toml.release.tmp Cargo.toml.release
           
           # Update blvm-protocol dependency to use latest crates.io version
           sed -i 's|blvm-protocol = { path = "\.\./blvm-protocol"[^}]*}|blvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml.release

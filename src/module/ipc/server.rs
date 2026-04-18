@@ -1329,9 +1329,7 @@ impl ModuleIpcServer {
                 ))
             }
             RequestPayload::SetBlockServeMaintenanceMode { enabled } => {
-                node_api
-                    .set_block_serve_maintenance_mode(*enabled)
-                    .await?;
+                node_api.set_block_serve_maintenance_mode(*enabled).await?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),

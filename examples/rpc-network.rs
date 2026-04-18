@@ -116,7 +116,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Trigger ping messages; observe pingtime/minping in getpeerinfo results");
-    println!("   Note: Returns null immediately — ping happens asynchronously in the network thread");
+    println!(
+        "   Note: Returns null immediately — ping happens asynchronously in the network thread"
+    );
     println!();
 
     // Example 8: Disconnect a node
@@ -179,7 +181,7 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Bootstrap a new node or discover peers without DNS seeds");
-    println!("   Note: Returns {time, services, address, port, network} per entry");
+    println!("   Note: Returns {{time, services, address, port, network}} per entry");
     println!();
 
     // Example 13: Set network active

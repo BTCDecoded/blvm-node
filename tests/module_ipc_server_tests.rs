@@ -359,10 +359,7 @@ mod tests {
 
         async fn get_block_serve_denylist_snapshot(
             &self,
-        ) -> Result<
-            blvm_node::module::traits::BlockServeDenylistSnapshot,
-            ModuleError,
-        > {
+        ) -> Result<blvm_node::module::traits::BlockServeDenylistSnapshot, ModuleError> {
             Ok(blvm_node::module::traits::BlockServeDenylistSnapshot {
                 total_count: 0,
                 truncated: false,
@@ -399,10 +396,7 @@ mod tests {
             Ok(())
         }
 
-        async fn replace_tx_serve_denylist(
-            &self,
-            _tx_hashes: &[Hash],
-        ) -> Result<(), ModuleError> {
+        async fn replace_tx_serve_denylist(&self, _tx_hashes: &[Hash]) -> Result<(), ModuleError> {
             Ok(())
         }
 
@@ -425,7 +419,10 @@ mod tests {
             Ok(())
         }
 
-        async fn set_block_serve_maintenance_mode(&self, _enabled: bool) -> Result<(), ModuleError> {
+        async fn set_block_serve_maintenance_mode(
+            &self,
+            _enabled: bool,
+        ) -> Result<(), ModuleError> {
             Ok(())
         }
 

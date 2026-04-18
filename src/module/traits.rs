@@ -476,10 +476,7 @@ pub trait NodeAPI: Send + Sync {
     /// Merge block hashes into the node's denylist for serving full `block` messages on the network
     /// (e.g. `getdata`). Additive; callers may include selective-sync, policy/compliance, or tests.
     /// Peers receive `notfound` for these hashes instead of a full block.
-    async fn merge_block_serve_denylist(
-        &self,
-        block_hashes: &[Hash],
-    ) -> Result<(), ModuleError>;
+    async fn merge_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError>;
 
     /// Bounded snapshot of the block serve denylist (for status and debugging).
     async fn get_block_serve_denylist_snapshot(
@@ -488,27 +485,16 @@ pub trait NodeAPI: Send + Sync {
 
     async fn clear_block_serve_denylist(&self) -> Result<(), ModuleError>;
 
-    async fn replace_block_serve_denylist(
-        &self,
-        block_hashes: &[Hash],
-    ) -> Result<(), ModuleError>;
+    async fn replace_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError>;
 
     /// Merge txids into the denylist for serving full `tx` on `getdata` (additive).
-    async fn merge_tx_serve_denylist(
-        &self,
-        tx_hashes: &[Hash],
-    ) -> Result<(), ModuleError>;
+    async fn merge_tx_serve_denylist(&self, tx_hashes: &[Hash]) -> Result<(), ModuleError>;
 
-    async fn get_tx_serve_denylist_snapshot(
-        &self,
-    ) -> Result<TxServeDenylistSnapshot, ModuleError>;
+    async fn get_tx_serve_denylist_snapshot(&self) -> Result<TxServeDenylistSnapshot, ModuleError>;
 
     async fn clear_tx_serve_denylist(&self) -> Result<(), ModuleError>;
 
-    async fn replace_tx_serve_denylist(
-        &self,
-        tx_hashes: &[Hash],
-    ) -> Result<(), ModuleError>;
+    async fn replace_tx_serve_denylist(&self, tx_hashes: &[Hash]) -> Result<(), ModuleError>;
 
     /// Sync coordinator phase and progress (requires sync coordinator on the node API).
     async fn get_sync_status(&self) -> Result<SyncStatus, ModuleError>;

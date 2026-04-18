@@ -153,7 +153,9 @@ fn main() -> anyhow::Result<()> {
         "id": 10
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Verify block and UTXO set consistency (checklevel 0-4, higher=more thorough)");
+    println!(
+        "   Use: Verify block and UTXO set consistency (checklevel 0-4, higher=more thorough)"
+    );
     println!("   Note: checklevel 3 checks all transactions; numblocks=0 checks entire chain");
     println!();
 
@@ -166,7 +168,9 @@ fn main() -> anyhow::Result<()> {
         "id": 11
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Inspect main chain tip and any orphaned forks (status: active/valid/invalid)");
+    println!(
+        "   Use: Inspect main chain tip and any orphaned forks (status: active/valid/invalid)"
+    );
     println!();
 
     // Example 12: Get chain tx stats
@@ -194,7 +198,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Per-block stats (fees, sizes, tx count); pass height or hash");
-    println!("   Note: Omit stats array for all fields; specify subset for efficient partial queries");
+    println!(
+        "   Note: Omit stats array for all fields; specify subset for efficient partial queries"
+    );
     println!();
 
     // Example 14: Prune blockchain
@@ -206,7 +212,9 @@ fn main() -> anyhow::Result<()> {
         "id": 14
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Free disk space by pruning old block data (node must be started with prune=N)");
+    println!(
+        "   Use: Free disk space by pruning old block data (node must be started with prune=N)"
+    );
     println!("   Note: Pass a height to prune up to that point; pass a timestamp to prune by time");
     println!();
 
@@ -232,7 +240,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Force the node to ignore a block and its descendants (useful for testing)");
-    println!("   Note: Counterpart to reconsiderblock; requires node restart or reconsiderblock to undo");
+    println!(
+        "   Note: Counterpart to reconsiderblock; requires node restart or reconsiderblock to undo"
+    );
     println!();
 
     // Example 17: Reconsider block
@@ -256,7 +266,7 @@ fn main() -> anyhow::Result<()> {
         "id": 18
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Block until the next block is received; returns {hash, height}");
+    println!("   Use: Block until the next block is received; returns {{hash, height}}");
     println!("   Note: Timeout in milliseconds; use 0 for infinite wait");
     println!();
 
@@ -269,7 +279,7 @@ fn main() -> anyhow::Result<()> {
         "id": 19
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Block until the node sees the given block hash; returns {hash, height}");
+    println!("   Use: Block until the node sees the given block hash; returns {{hash, height}}");
     println!();
 
     // Example 20: Wait for block height
@@ -281,7 +291,9 @@ fn main() -> anyhow::Result<()> {
         "id": 20
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Block until the chain reaches or exceeds the given height; returns {hash, height}");
+    println!(
+        "   Use: Block until the chain reaches or exceeds the given height; returns {{hash, height}}"
+    );
     println!("   Note: All wait* methods support long-polling for real-time chain monitoring");
     println!();
 

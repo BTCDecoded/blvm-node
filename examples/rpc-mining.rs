@@ -120,7 +120,9 @@ fn main() -> anyhow::Result<()> {
     println!("Method Summary:");
     println!("  getmininginfo         - Block height, difficulty, network hashrate");
     println!("  getblocktemplate      - Block template for GBT-compatible miners (BIP22/23)");
-    println!("  generatetoaddress     - Mine N blocks instantly on regtest, pay coinbase to address");
+    println!(
+        "  generatetoaddress     - Mine N blocks instantly on regtest, pay coinbase to address"
+    );
     println!("  submitblock           - Submit a solved block hex to the network");
     println!("  estimatesmartfee      - Fee rate estimate for N-block target");
     println!("  prioritisetransaction - Modify effective fee of a mempool transaction");
