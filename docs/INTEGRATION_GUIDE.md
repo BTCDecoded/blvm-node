@@ -11,7 +11,7 @@ This guide shows how to integrate blvm-node with existing Bitcoin tools and serv
 3. [Exchange Integration](#exchange-integration)
 4. [Mining Pool Integration](#mining-pool-integration)
 5. [Block Explorer Integration](#block-explorer-integration)
-6. [Bitcoin Core Config Migration](#bitcoin-core-config-migration)
+6. [Migrating from `bitcoin.conf`](#migrating-from-bitcoinconf)
 
 ---
 
@@ -56,7 +56,7 @@ See `examples/electrum-integration.rs` for a complete example.
 
 ### RPC API Compatibility
 
-blvm-node implements Bitcoin Core-compatible JSON-RPC API:
+blvm-node implements JSON-RPC API aligned with common Bitcoin node docs:
 
 ```json
 {
@@ -228,11 +228,11 @@ bind = "127.0.0.1"
 
 ---
 
-## Bitcoin Core Config Migration
+## Migrating from `bitcoin.conf`
 
 ### Automatic Conversion
 
-Use the provided tool to convert Bitcoin Core config:
+Use the provided tool to convert a reference `bitcoin.conf`:
 
 ```bash
 # Shell script
@@ -244,7 +244,7 @@ cargo run --bin convert-bitcoin-core-config -- ~/.bitcoin/bitcoin.conf
 
 ### Manual Conversion
 
-**Bitcoin Core** (`bitcoin.conf`):
+**Reference `bitcoin.conf` layout**:
 ```ini
 testnet=1
 rpcport=18332
@@ -270,7 +270,7 @@ password = "mypassword"
 ### Important Notes
 
 - **Data directories are NOT converted** - configure separately
-- Some Bitcoin Core options may not have direct equivalents
+- Some upstream options may not have direct equivalents
 - Review generated config and adjust as needed
 
 ---
@@ -322,7 +322,7 @@ curl -X POST http://127.0.0.1:18332 \
 **Solution**: Check `docs/RPC_REFERENCE.md` for available methods
 
 **Problem**: Different response format
-**Solution**: blvm-node matches Bitcoin Core format exactly
+**Solution**: blvm-node matches the converted field layout
 
 ---
 

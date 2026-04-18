@@ -242,7 +242,7 @@ If you discover a security vulnerability:
 
 ### Bitcoin Protocol Compliance
 - Implements Bitcoin consensus rules
-- Compatible with Bitcoin Core
+- Interoperates with common chain data and RPC conventions where implemented
 - Follows BIP specifications
 - Maintains protocol compatibility
 

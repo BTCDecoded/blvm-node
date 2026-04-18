@@ -59,7 +59,7 @@ BIP125-compliant RBF with standard fee requirements.
 **Use Cases:**
 - General purpose nodes
 - Default configuration
-- Bitcoin Core compatibility
+- familiar defaults
 
 **Configuration:**
 ```toml
@@ -152,7 +152,7 @@ mode = "standard"
 
 1. **Exchanges**: Use conservative mode to protect users from unexpected replacements
 2. **Miners**: Use aggressive mode to maximize fee revenue
-3. **General Users**: Use standard mode for Bitcoin Core compatibility
+3. **General Users**: Use standard mode for familiar defaults
 4. **Enterprise**: Use disabled mode if RBF is not allowed by policy
 
 ## BIP125 Compliance

@@ -44,7 +44,7 @@ Maximum descendant size in virtual bytes. Default: 101,000 bytes (101 kB)
 #### `eviction_strategy`
 Transaction eviction strategy when mempool limits are reached:
 
-- `lowest_fee_rate`: Evict lowest fee rate transactions first (Bitcoin Core default)
+- `lowest_fee_rate`: Evict lowest fee rate transactions first (common default)
 - `oldest_first`: Evict oldest transactions first (FIFO)
 - `largest_first`: Evict largest transactions first (to free most space)
 - `no_descendants_first`: Evict transactions with no descendants first (safest)
@@ -113,7 +113,7 @@ Evicts transactions with the lowest fee rate first. This maximizes the average f
 **Best for:**
 - Mining pools
 - Nodes prioritizing fee revenue
-- Bitcoin Core compatibility
+- familiar defaults
 
 ### Oldest First (FIFO)
 Evicts the oldest transactions first, regardless of fee rate.
@@ -168,12 +168,12 @@ When a transaction would exceed ancestor or descendant limits, it is rejected fr
 
 1. **Exchanges**: Use conservative limits and higher fee thresholds
 2. **Miners**: Use larger mempool sizes and lower fee thresholds
-3. **General Users**: Use default settings for Bitcoin Core compatibility
+3. **General Users**: Use default settings for familiar defaults
 4. **High-Throughput Nodes**: Increase size limits and use aggressive eviction
 
-## Bitcoin Core Compatibility
+## Default policy alignment
 
-Default values match Bitcoin Core defaults:
+Default values match widely used mainnet parameters:
 - `max_mempool_mb`: 300 MB
 - `min_relay_fee_rate`: 1 sat/vB
 - `max_ancestor_count`: 25

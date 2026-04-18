@@ -103,7 +103,7 @@ let response_str = String::from_utf8(response)?;
 
 ## Limitations
 
-- **Bitcoin Core Compatibility**: Bitcoin Core only supports TCP RPC
+- **Ecosystem tooling**: Most JSON-RPC clients assume TCP RPC
 - **Client Support**: Requires QUIC-capable clients
 - **Certificate Management**: Self-signed certs need proper handling for production
 - **Network Requirements**: Some networks may block UDP/QUIC
@@ -117,7 +117,7 @@ let response_str = String::from_utf8(response)?;
 
 ## When Not to Use
 
-- **Bitcoin Core Compatibility**: Need compatibility with Bitcoin Core tooling
+- **Ecosystem tooling**: Need TCP-only RPC scripts
 - **Legacy Clients**: Clients that only support TCP/HTTP
 - **Simple Use Cases**: TCP RPC is simpler and sufficient for most cases
 

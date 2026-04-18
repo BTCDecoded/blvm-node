@@ -74,7 +74,7 @@ enable_indexing = false
 ```
 
 Database backend options:
-- **rocksdb** (default): High-performance, Bitcoin Core format compatible; strong IBD performance
+- **rocksdb** (default): High-performance, common on-disk layouts; strong IBD performance
 - **redb**: Embedded ACID database
 - **tidesdb**: LSM-tree store; requires TidesDB C library
 - **sled**: Embedded key-value store

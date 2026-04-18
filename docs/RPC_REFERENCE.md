@@ -2,7 +2,7 @@
 
 ## Overview
 
-Implements a JSON-RPC 2.0 API compatible with Bitcoin Core RPC methods. API organized into categories: blockchain, network, mining, mempool, raw transactions, and control.
+Implements a JSON-RPC 2.0 API compatible with common Bitcoin RPC method names. API organized into categories: blockchain, network, mining, mempool, raw transactions, and control.
 
 ## Endpoints
 

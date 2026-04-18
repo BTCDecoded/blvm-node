@@ -19,6 +19,13 @@ blvm-consensus = { path = "../../blvm-consensus" }
 [profile.release]
 opt-level = 3
 
+# Standalone `cargo fuzz` does not inherit blvm-node's [patch.crates-io]; resolve local siblings.
+[patch.crates-io]
+blvm-protocol = { path = "../../blvm-protocol" }
+blvm-consensus = { path = "../../blvm-consensus" }
+blvm-spec-lock = { path = "../../blvm-spec-lock" }
+blvm-muhash = { path = "../../blvm-muhash" }
+
 [[bin]]
 name = "compact_block_reconstruction"
 path = "fuzz_targets/compact_block_reconstruction.rs"

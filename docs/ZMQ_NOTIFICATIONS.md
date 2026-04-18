@@ -252,7 +252,7 @@ If you see "Address already in use" errors:
 
 ## Compatibility
 
-BLLVM node's ZMQ notifications are compatible with standard Bitcoin node ZMQ interfaces. Applications that work with Bitcoin Core's ZMQ notifications should work with BLLVM node without modification.
+BLLVM node's ZMQ notifications are compatible with standard Bitcoin node ZMQ interfaces. Applications that work with standard Bitcoin ZMQ subscribers should work with BLLVM node without modification.
 
 ## Future Enhancements
 

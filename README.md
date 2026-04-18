@@ -40,7 +40,7 @@ Tier 4 of the 6-tier Bitcoin Commons architecture (BLVM technology stack):
 - **Mempool Policies**: Comprehensive mempool configuration with 5 eviction strategies
 - **Payment Processing**: CTV (CheckTemplateVerify) support for advanced payment flows
 - **Advanced Indexing**: Address and value range indexing for efficient queries
-- **RPC Interface**: Full RPC server implementation with Bitcoin Core compatibility
+- **RPC Interface**: JSON-RPC server with methods aligned to common Bitcoin node documentation
 - **Storage**: UTXO set management and chain state with multiple backends (tidesdb, redb, sled, rocksdb)
 - **Module System**: Process-isolated modules for optional features
 - **P2P Governance**: Governance message relay via P2P protocol
@@ -51,15 +51,15 @@ See [Security](#security) for production considerations.
 
 Supports multiple database backends via feature flags:
 
-- **rocksdb** (default): High-performance database with Bitcoin Core compatibility; strong IBD performance
+- **rocksdb** (default): High-performance database; reads common LevelDB/`blk*.dat` layouts; strong IBD performance
 - **redb**: Embedded database with ACID transactions
 - **sled**: Embedded key-value store (fallback)
 - **tidesdb** (optional): LSM-tree key-value store; requires TidesDB C library
 
 **RocksDB** (default backend):
-- Automatic Bitcoin Core data directory detection
-- Direct access to Bitcoin Core block files (`blk*.dat`)
-- Bitcoin Core format parsing and storage integration
+- Automatic detection of common Bitcoin-style data directories
+- Direct access to raw block files (`blk*.dat`) where supported
+- Parsers for common on-disk chain formats
 
 Enable RocksDB with the `rocksdb` feature:
 ```bash
