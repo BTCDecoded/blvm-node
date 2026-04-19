@@ -269,6 +269,26 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo install blvm-spec-lock --locked --features z3
 
+      - name: Setup blvm-spec (PROTOCOL.md + ARCHITECTURE.md for verification)
+        run: |
+          set -euo pipefail
+          REPO_ROOT="${GITHUB_WORKSPACE}"
+          DEST="$(dirname "$REPO_ROOT")/blvm-spec"
+          REPO_URL="https://github.com/BTCDecoded/blvm-spec.git"
+          echo "Ensuring blvm-spec at: $DEST"
+          if [ -d "$DEST" ]; then
+            if [ ! -f "$DEST/THE_ORANGE_PAPER.md" ] && [ ! -f "$DEST/PROTOCOL.md" ]; then
+              echo "Removing incomplete blvm-spec at $DEST"
+              rm -rf "$DEST"
+            fi
+          fi
+          if [ -d "$DEST" ] && [ -n "$(ls -A "$DEST" 2>/dev/null || true)" ]; then
+            echo "blvm-spec already present at $DEST"
+            exit 0
+          fi
+          git clone --depth 1 "$REPO_URL" "$DEST"
+          echo "blvm-spec ready at $DEST"
+
       - name: Fetch blvm-consensus sources from crates.io
         id: consensus_src
         run: |
@@ -281,8 +301,20 @@ jobs:
       - name: Run blvm-spec-lock verify (blvm-consensus)
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
+          export SPEC_LOCK_STRICT=1
           echo "🔒 Running blvm-spec-lock verification on crates.io blvm-consensus..."
-          cargo-spec-lock verify --crate-path "${{ steps.consensus_src.outputs.path }}" 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt"
+          SPEC_ARGS="--crate-path ${{ steps.consensus_src.outputs.path }}"
+          if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
+            echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
+          elif [ -f "../blvm-spec/THE_ORANGE_PAPER.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/THE_ORANGE_PAPER.md"
+            echo "Using THE_ORANGE_PAPER.md for spec-derived contracts (fallback)"
+          else
+            echo "❌ No spec found at ../blvm-spec (PROTOCOL.md, ARCHITECTURE.md, or THE_ORANGE_PAPER.md). Clone step should have fetched blvm-spec."
+            exit 1
+          fi
+          cargo-spec-lock verify $SPEC_ARGS 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt"
           EXIT_CODE=${PIPESTATUS[0]}
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ blvm-consensus spec-lock verification failed"
@@ -293,9 +325,21 @@ jobs:
       - name: Run blvm-spec-lock verify (blvm-node)
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
+          export SPEC_LOCK_STRICT=1
           echo "🔒 Running blvm-spec-lock verification on blvm-node..."
           cd "$GITHUB_WORKSPACE"
-          cargo-spec-lock verify --crate-path . 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
+          SPEC_ARGS="--crate-path ."
+          if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
+            echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
+          elif [ -f "../blvm-spec/THE_ORANGE_PAPER.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/THE_ORANGE_PAPER.md"
+            echo "Using THE_ORANGE_PAPER.md for spec-derived contracts (fallback)"
+          else
+            echo "❌ No spec found at ../blvm-spec (PROTOCOL.md, ARCHITECTURE.md, or THE_ORANGE_PAPER.md). Clone step should have fetched blvm-spec."
+            exit 1
+          fi
+          cargo-spec-lock verify $SPEC_ARGS 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
           EXIT_CODE=${PIPESTATUS[0]}
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ blvm-node spec-lock verification failed"
