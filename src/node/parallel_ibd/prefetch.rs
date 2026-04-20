@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "production")]
-use blvm_consensus::types::UTXO;
+use blvm_protocol::types::UTXO;
 #[cfg(feature = "production")]
 use crossbeam_channel::{Receiver, Sender};
 #[cfg(feature = "production")]

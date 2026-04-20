@@ -131,7 +131,7 @@ async fn test_protocol_parser() {
 
     // The serialized message should have the correct structure
     assert!(serialized.len() >= 24); // Header size
-    assert_eq!(&serialized[0..4], &0xd9b4bef9u32.to_le_bytes()); // Magic number
+    assert_eq!(&serialized[0..4], &BITCOIN_MAGIC_MAINNET); // Magic number
 }
 
 // ===== PEER MANAGEMENT COMPREHENSIVE TESTS =====
@@ -228,7 +228,7 @@ async fn test_message_serialization() {
     let serialized = ProtocolParser::serialize_message(&message).unwrap();
 
     // Verify magic number
-    assert_eq!(&serialized[0..4], &0xd9b4bef9u32.to_le_bytes());
+    assert_eq!(&serialized[0..4], &BITCOIN_MAGIC_MAINNET);
 
     // Verify command
     let command = &serialized[4..16];
@@ -303,7 +303,7 @@ async fn test_checksum_validation() {
 
     // Verify message structure
     assert!(serialized.len() >= 24); // Header size
-    assert_eq!(&serialized[0..4], &0xd9b4bef9u32.to_le_bytes()); // Magic number
+    assert_eq!(&serialized[0..4], &BITCOIN_MAGIC_MAINNET); // Magic number
 }
 
 #[tokio::test]
@@ -322,7 +322,7 @@ async fn test_malformed_message_handling() {
 
     // Test with invalid command
     let mut invalid_cmd_data = vec![0u8; 24];
-    invalid_cmd_data[0..4].copy_from_slice(&0xd9b4bef9u32.to_le_bytes()); // Correct magic
+    invalid_cmd_data[0..4].copy_from_slice(&BITCOIN_MAGIC_MAINNET); // Correct magic (mainnet)
     invalid_cmd_data[4..16].copy_from_slice(b"invalid\0\0\0\0\0"); // Invalid command
 
     let result = ProtocolParser::parse_message(&invalid_cmd_data);

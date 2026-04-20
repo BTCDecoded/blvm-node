@@ -17,7 +17,7 @@ use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::storage::blockstore::BlockStore;
 use crate::storage::hashing::double_sha256;
-use blvm_consensus::GENESIS_BLOCK_HASH_INTERNAL;
+use blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL;
 
 /// Download headers for a range starting from the given locator hash.
 ///
@@ -67,7 +67,7 @@ pub(crate) async fn download_header_range(
                 }
 
                 for header in headers {
-                    match blvm_consensus::pow::check_proof_of_work(&header) {
+                    match blvm_protocol::pow::check_proof_of_work(&header) {
                         Ok(true) => {}
                         Ok(false) => {
                             warn!(
@@ -280,7 +280,7 @@ pub(crate) async fn download_headers_parallel(
         }
 
         for header in headers {
-            match blvm_consensus::pow::check_proof_of_work(&header) {
+            match blvm_protocol::pow::check_proof_of_work(&header) {
                 Ok(true) => {}
                 Ok(false) => {
                     return Err(anyhow::anyhow!(
@@ -532,7 +532,7 @@ pub(crate) async fn download_headers(
                     Vec::with_capacity(headers.len());
 
                 for header in &headers {
-                    match blvm_consensus::pow::check_proof_of_work(header) {
+                    match blvm_protocol::pow::check_proof_of_work(header) {
                         Ok(true) => {}
                         Ok(false) => {
                             return Err(anyhow::anyhow!(

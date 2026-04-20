@@ -682,7 +682,7 @@ impl UtxoCommitmentsClient {
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = Result<(blvm_consensus::types::UTXO, Vec<u8>), anyhow::Error>,
+                    Output = Result<(blvm_protocol::types::UTXO, Vec<u8>), anyhow::Error>,
                 > + Send
                 + '_,
         >,
@@ -778,7 +778,7 @@ impl UtxoCommitmentsClient {
                                 .map_err(|e| anyhow::anyhow!("Failed to parse UTXOProof response: {}", e))?;
 
                             // Reconstruct UTXO; proof bytes passed through for caller to deserialize
-                            let utxo = blvm_consensus::types::UTXO {
+                            let utxo = blvm_protocol::types::UTXO {
                                 value: proof_msg.value,
                                 script_pubkey: proof_msg.script_pubkey.into(),
                                 height: proof_msg.height,

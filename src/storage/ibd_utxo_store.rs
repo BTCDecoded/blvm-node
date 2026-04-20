@@ -15,9 +15,9 @@ use crate::storage::disk_utxo::{
     key_to_outpoint, load_keys_from_disk, outpoint_to_key, SyncBatch, MAX_BATCH_OPS,
 };
 use anyhow::Result;
-use blvm_consensus::block::compute_block_tx_ids;
-use blvm_consensus::transaction::is_coinbase;
-use blvm_consensus::types::{OutPoint, UtxoSet, UTXO};
+use blvm_protocol::block::compute_block_tx_ids;
+use blvm_protocol::transaction::is_coinbase;
+use blvm_protocol::types::{OutPoint, UtxoSet, UTXO};
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering};
@@ -28,7 +28,7 @@ type OutPointKey = [u8; 40];
 
 #[inline]
 fn consensus_deletion_key_to_store_key(
-    k: &blvm_consensus::utxo_overlay::UtxoDeletionKey,
+    k: &blvm_protocol::utxo_overlay::UtxoDeletionKey,
 ) -> OutPointKey {
     let mut key = [0u8; 40];
     key[..32].copy_from_slice(&k[..32]);
@@ -625,7 +625,7 @@ impl IbdUtxoStore {
         }
     }
 
-    pub fn bootstrap_genesis(&self, genesis_block: &blvm_consensus::types::Block) {
+    pub fn bootstrap_genesis(&self, genesis_block: &blvm_protocol::types::Block) {
         if genesis_block.transactions.is_empty() {
             return;
         }
@@ -810,7 +810,7 @@ impl IbdUtxoStore {
         self.maybe_evict();
     }
 
-    pub fn apply_utxo_delta(&self, mut delta: blvm_consensus::block::UtxoDelta, block_height: u64) {
+    pub fn apply_utxo_delta(&self, mut delta: blvm_protocol::block::UtxoDelta, block_height: u64) {
         let total_delta = delta.additions.len() as isize - delta.deletions.len() as isize;
         self.total_utxo_count
             .fetch_add(total_delta, Ordering::Relaxed);

@@ -90,7 +90,10 @@ async fn test_custom_messages_different_ids() {
         assert!(protection.check_message_id(&message_id, now).await.is_ok());
     }
 
-    assert!(protection.check_message_id("custom-msg-5", now).await.is_err());
+    assert!(protection
+        .check_message_id("custom-msg-5", now)
+        .await
+        .is_err());
 }
 
 #[tokio::test]

@@ -1,13 +1,15 @@
 //! Address relay handlers (GetAddr, Addr).
 
 use crate::network::network_manager::NetworkManager;
-use crate::network::protocol::{AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser};
+use crate::network::protocol::{
+    AddrMessage, AddrV2Message, NetworkAddress, ProtocolMessage, ProtocolParser,
+};
 use crate::network::transport::TransportAddr;
 use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
-use tracing::warn;
+use tracing::{debug, warn};
 
 impl NetworkManager {
     /// Handle GetAddr request - return known addresses
@@ -68,6 +70,52 @@ impl NetworkManager {
         self.relay_addresses(peer_addr, &msg.addresses).await?;
 
         Ok(())
+    }
+
+    /// Handle BIP155 `addrv2`: map IPv4/IPv6 entries to legacy [`NetworkAddress`] and reuse [`Addr`] storage/relay.
+    pub(crate) async fn handle_addr_v2(
+        &self,
+        peer_addr: SocketAddr,
+        msg: AddrV2Message,
+    ) -> Result<()> {
+        let max_addr = self.protocol_limits().max_addr_to_send;
+        if msg.addresses.len() > max_addr {
+            warn!(
+                "addrv2 message size = {} exceeds max_addr_to_send ({}), disconnecting peer {}",
+                msg.addresses.len(),
+                max_addr,
+                peer_addr
+            );
+            let _ = self
+                .peer_tx()
+                .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
+                    peer_addr,
+                )));
+            return Err(anyhow::anyhow!("addrv2 message size exceeded"));
+        }
+
+        let legacy: Vec<NetworkAddress> = msg
+            .addresses
+            .iter()
+            .filter_map(|a| a.to_legacy())
+            .map(|a| NetworkAddress {
+                services: a.services,
+                ip: a.ip,
+                port: a.port,
+            })
+            .collect();
+
+        if legacy.is_empty() {
+            debug!(
+                "AddrV2 from {}: {} entr(ies), none map to legacy net_addr (e.g. onion-only)",
+                peer_addr,
+                msg.addresses.len()
+            );
+            return Ok(());
+        }
+
+        self.handle_addr(peer_addr, AddrMessage { addresses: legacy })
+            .await
     }
 
     /// Relay addresses to other peers (excluding sender)

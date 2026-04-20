@@ -115,6 +115,8 @@ async fn test_validate_payment_request_message_no_signature() {
         payment_id: vec![],
         merchant_pubkey: vec![],
         merchant_signature: vec![],
+        #[cfg(feature = "ctv")]
+        covenant_proof: None,
     };
 
     // Should fail validation (no signature)
@@ -154,6 +156,8 @@ fn test_payment_request_message_structure() {
         payment_id: vec![1, 2, 3],
         merchant_pubkey: vec![4, 5, 6],
         merchant_signature: vec![],
+        #[cfg(feature = "ctv")]
+        covenant_proof: None,
     };
 
     assert_eq!(msg.payment_id, vec![1, 2, 3]);

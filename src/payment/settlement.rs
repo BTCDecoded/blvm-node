@@ -307,7 +307,7 @@ impl SettlementMonitor {
         expected_outputs: &[PaymentOutput],
     ) -> bool {
         // Convert expected outputs to transaction outputs for comparison
-        use blvm_consensus::types::{ByteString, Integer, TransactionOutput};
+        use blvm_protocol::types::{ByteString, Integer, TransactionOutput};
         let expected_tx_outputs: Vec<TransactionOutput> = expected_outputs
             .iter()
             .filter_map(|po| {

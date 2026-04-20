@@ -8,7 +8,7 @@ mod tests {
     use blvm_node::network::protocol_extensions::{
         handle_get_utxo_proof, serialize_get_utxo_proof, deserialize_utxo_proof,
     };
-    use blvm_consensus::types::{OutPoint, UTXO};
+    use blvm_protocol::types::{OutPoint, UTXO};
     use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
     use blvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
     use std::sync::Arc;

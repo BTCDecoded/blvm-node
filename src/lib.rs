@@ -176,7 +176,7 @@ mod tests {
             inputs: blvm_protocol::tx_inputs![],
             outputs: blvm_protocol::tx_outputs![TransactionOutput {
                 value: 1000,
-                script_pubkey: vec![blvm_consensus::opcodes::OP_1],
+                script_pubkey: vec![blvm_protocol::opcodes::OP_1],
             }],
             lock_time: 0,
         };

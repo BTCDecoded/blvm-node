@@ -118,9 +118,9 @@ async fn test_monitor_cleanup() {
     // Verify we can use it
     let _monitor_with_interval = monitor.with_interval(Duration::from_secs(2));
 
-    // Drop monitor
+    // Drop monitor (drops the only sender)
     drop(_monitor_with_interval);
 
-    // Channel receiver should still be valid
-    assert!(!crash_rx.is_closed());
+    // No senders remain; the unbounded receiver is closed (still safe to poll).
+    assert!(crash_rx.is_closed());
 }

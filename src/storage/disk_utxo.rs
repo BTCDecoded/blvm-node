@@ -42,8 +42,8 @@ const EVICT_VERY_OLD_BLOCKS: u64 = 10_000;
 /// Dust threshold (satoshis) — eviction sort prefers lowest value first (dust).
 #[allow(dead_code)]
 const EVICT_DUST_THRESHOLD: i64 = 546;
-use blvm_consensus::transaction::is_coinbase;
-use blvm_consensus::types::{Block, Hash, OutPoint, UTXO};
+use blvm_protocol::transaction::is_coinbase;
+use blvm_protocol::types::{Block, Hash, OutPoint, UTXO};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 use tracing::debug;
@@ -295,13 +295,13 @@ pub fn block_input_keys_and_tx_ids_filtered(
     tx_ids_buf: &mut Vec<Hash>,
     keys_out: &mut Vec<OutPointKey>,
 ) -> usize {
-    use blvm_consensus::block::compute_block_tx_ids_into;
+    use blvm_protocol::block::compute_block_tx_ids_into;
     compute_block_tx_ids_into(block, tx_ids_buf);
     block_input_keys_into_filtered_with_tx_ids(block, tx_ids_buf, keys_out)
 }
 
 pub fn block_input_keys_into_filtered(block: &Block, keys_out: &mut Vec<OutPointKey>) -> usize {
-    use blvm_consensus::block::compute_block_tx_ids;
+    use blvm_protocol::block::compute_block_tx_ids;
     let tx_ids = compute_block_tx_ids(block);
     block_input_keys_into_filtered_with_tx_ids(block, &tx_ids, keys_out)
 }

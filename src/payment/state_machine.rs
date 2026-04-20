@@ -13,7 +13,7 @@ use blvm_protocol::payment::PaymentOutput;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Payment state in the state machine
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +77,11 @@ pub struct PaymentStateMachine {
         Option<Arc<tokio::sync::Mutex<crate::payment::congestion::CongestionManager>>>,
     /// Network message sender for broadcasting payment proofs (optional)
     #[cfg(feature = "ctv")]
-    network_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::network::NetworkMessage>>,
+    network_sender: Arc<
+        std::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedSender<crate::network::NetworkMessage>>,
+        >,
+    >,
 }
 
 impl PaymentStateMachine {
@@ -102,18 +106,20 @@ impl PaymentStateMachine {
             #[cfg(feature = "ctv")]
             congestion_manager: None, // Will be initialized with mempool/storage if needed
             #[cfg(feature = "ctv")]
-            network_sender: None, // Will be set by NetworkManager
+            network_sender: Arc::new(std::sync::Mutex::new(None)), // Set by NetworkManager
         }
     }
 
-    /// Set network message sender for broadcasting payment proofs
+    /// Install the network sender used to broadcast payment proofs (called from NetworkManager).
     #[cfg(feature = "ctv")]
-    pub fn with_network_sender(
-        mut self,
+    pub fn set_network_sender(
+        &self,
         sender: tokio::sync::mpsc::UnboundedSender<crate::network::NetworkMessage>,
-    ) -> Self {
-        self.network_sender = Some(sender);
-        self
+    ) {
+        *self
+            .network_sender
+            .lock()
+            .expect("payment state machine network_sender mutex poisoned") = Some(sender);
     }
 
     /// Create payment state machine with storage
@@ -153,7 +159,7 @@ impl PaymentStateMachine {
             vault_engine,
             pool_engine,
             congestion_manager: None, // Will be initialized with mempool/storage if needed
-            network_sender: None,     // Will be set by NetworkManager
+            network_sender: Arc::new(std::sync::Mutex::new(None)), // Set by NetworkManager
         }
     }
 
@@ -384,7 +390,11 @@ impl PaymentStateMachine {
             );
 
             // Actually broadcast via NetworkManager if sender is available
-            if let Some(ref sender) = self.network_sender {
+            let sender_slot = self
+                .network_sender
+                .lock()
+                .expect("payment state machine network_sender mutex poisoned");
+            if let Some(ref sender) = *sender_slot {
                 use crate::network::protocol::{ProtocolMessage, ProtocolParser};
                 use crate::network::NetworkMessage;
 

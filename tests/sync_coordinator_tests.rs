@@ -1,8 +1,8 @@
 //! Tests for sync coordinator and state machine
 
-use blvm_consensus::test_utils::create_test_header;
 use blvm_node::node::sync::{SyncState, SyncStateMachine};
 use blvm_node::{BlockHeader, Hash};
+use blvm_protocol::test_utils::create_test_header;
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 
 #[test]

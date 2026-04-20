@@ -435,7 +435,7 @@ impl AssumeUtxoManager {
         }
 
         let script_pubkey =
-            blvm_consensus::types::SharedByteString::from(&data[pos..pos + script_len]);
+            blvm_protocol::types::SharedByteString::from(&data[pos..pos + script_len]);
         pos += script_len;
 
         let is_coinbase = data[pos] != 0;
@@ -629,12 +629,12 @@ mod tests {
             let utxo = UTXO {
                 value: 50_000_000 * (i as i64 + 1), // 0.5 BTC * (i+1)
                 script_pubkey: vec![
-                    blvm_consensus::opcodes::OP_DUP,
-                    blvm_consensus::opcodes::OP_HASH160,
-                    blvm_consensus::opcodes::PUSH_20_BYTES,
+                    blvm_protocol::opcodes::OP_DUP,
+                    blvm_protocol::opcodes::OP_HASH160,
+                    blvm_protocol::opcodes::PUSH_20_BYTES,
                     0x00, // placeholder hash byte (abbreviated P2PKH)
-                    blvm_consensus::opcodes::OP_EQUALVERIFY,
-                    blvm_consensus::opcodes::OP_CHECKSIG,
+                    blvm_protocol::opcodes::OP_EQUALVERIFY,
+                    blvm_protocol::opcodes::OP_CHECKSIG,
                 ]
                 .into(), // P2PKH placeholder
                 is_coinbase: i == 0,

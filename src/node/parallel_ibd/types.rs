@@ -6,7 +6,7 @@ use blvm_protocol::{segwit::Witness, Block, Hash};
 use std::sync::Arc;
 
 use crate::storage::disk_utxo::OutPointKey;
-use blvm_consensus::types::UTXO;
+use blvm_protocol::types::UTXO;
 
 #[cfg(feature = "production")]
 use crate::storage::ibd_utxo_store::IbdUtxoStore;

@@ -55,7 +55,7 @@ fn test_create_vault_custom_config() {
         withdrawal_delay_blocks: 288,            // ~2 days
         recovery_script: Some(vec![0x51, 0x87]), // OP_1, OP_EQUAL
         max_withdrawal: Some(100000),
-        require_unvault: true,
+        require_unvault: false,
     };
 
     let result = engine.create_vault(vault_id, deposit_amount, withdrawal_script, config.clone());

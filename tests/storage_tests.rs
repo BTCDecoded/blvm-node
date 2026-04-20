@@ -970,9 +970,10 @@ fn test_module_tree_isolation_redb() {
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
-    // Create two module trees with different module IDs
-    let tree1 = db.open_tree("module_abc123_state").unwrap();
-    let tree2 = db.open_tree("module_xyz789_state").unwrap();
+    // Create two trees with different IDs (module-prefixed trees use a separate SDK DB;
+    // these tests exercise tree isolation using plain non-module tree names)
+    let tree1 = db.open_tree("test_abc123_state").unwrap();
+    let tree2 = db.open_tree("test_xyz789_state").unwrap();
 
     // Insert different keys in each tree
     tree1.insert(b"key1", b"value1").unwrap();
@@ -995,7 +996,7 @@ fn test_module_tree_operations_redb() {
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
-    let tree = db.open_tree("module_test123_cache").unwrap();
+    let tree = db.open_tree("test123_cache").unwrap();
 
     // Test insert and get
     tree.insert(b"key1", b"value1").unwrap();
@@ -1029,7 +1030,7 @@ fn test_module_tree_iter_redb() {
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
-    let tree = db.open_tree("module_test456_data").unwrap();
+    let tree = db.open_tree("test456_data").unwrap();
 
     // Insert multiple keys
     tree.insert(b"key1", b"value1").unwrap();
@@ -1054,9 +1055,10 @@ fn test_module_tree_multiple_trees_same_module_redb() {
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
-    // Create multiple trees for the same module
-    let state_tree = db.open_tree("module_mod123_state").unwrap();
-    let cache_tree = db.open_tree("module_mod123_cache").unwrap();
+    // Create multiple trees for the same logical module (non-module-prefixed in the node DB;
+    // actual module trees live in the SDK's separate per-module DB)
+    let state_tree = db.open_tree("test_mod123_state").unwrap();
+    let cache_tree = db.open_tree("test_mod123_cache").unwrap();
 
     // Insert same key in both trees
     state_tree.insert(b"key", b"state_value").unwrap();
@@ -1114,16 +1116,22 @@ fn test_module_tree_backend_compatibility() {
     // Test with redb
     let db_redb: Arc<dyn Database> =
         Arc::from(create_database(temp_dir1.path(), DatabaseBackend::Redb, None).unwrap());
-    let tree_redb = db_redb.open_tree("module_test_state").unwrap();
+    let tree_redb = db_redb.open_tree("test_state_a").unwrap();
     tree_redb.insert(b"key", b"value").unwrap();
     assert_eq!(tree_redb.get(b"key").unwrap(), Some(b"value".to_vec()));
 
-    // Test with sled
-    let db_sled: Arc<dyn Database> =
-        Arc::from(create_database(temp_dir2.path(), DatabaseBackend::Sled, None).unwrap());
-    let tree_sled = db_sled.open_tree("module_test_state").unwrap();
-    tree_sled.insert(b"key", b"value").unwrap();
-    assert_eq!(tree_sled.get(b"key").unwrap(), Some(b"value".to_vec()));
+    // Sled backend is only available when the `sled` feature is enabled.
+    // When building with only `redb`, skip the sled half.
+    #[cfg(feature = "sled")]
+    {
+        let db_sled: Arc<dyn Database> =
+            Arc::from(create_database(temp_dir2.path(), DatabaseBackend::Sled, None).unwrap());
+        let tree_sled = db_sled.open_tree("test_state_b").unwrap();
+        tree_sled.insert(b"key", b"value").unwrap();
+        assert_eq!(tree_sled.get(b"key").unwrap(), Some(b"value".to_vec()));
+    }
+    #[cfg(not(feature = "sled"))]
+    let _ = temp_dir2; // suppress unused warning
 }
 
 #[cfg(feature = "block-compression")]

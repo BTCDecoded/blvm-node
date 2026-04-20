@@ -11,15 +11,15 @@
 //! Run:
 //!   cargo test -p blvm-node --test ibd_snapshot_node_bench --features production --release -- --ignored bench_node_hot_path --nocapture
 
-use blvm_consensus::bip_validation::Bip30Index;
-use blvm_consensus::block::{compute_block_tx_ids, connect_block_ibd};
-use blvm_consensus::segwit::Witness;
-use blvm_consensus::types::{Block, Network, OutPoint, UtxoSet, UTXO};
-use blvm_consensus::ValidationResult;
 use blvm_node::storage::disk_utxo::{
     block_input_keys_into, key_to_outpoint, outpoint_to_key, OutPointKey,
 };
 use blvm_node::storage::ibd_utxo_store::IbdUtxoStore;
+use blvm_protocol::bip_validation::Bip30Index;
+use blvm_protocol::block::{compute_block_tx_ids, connect_block_ibd};
+use blvm_protocol::segwit::Witness;
+use blvm_protocol::types::{Block, Network, OutPoint, UtxoSet, UTXO};
+use blvm_protocol::ValidationResult;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -130,12 +130,10 @@ fn node_hot_path_once(
     // 6. connect_block_ibd (the actual validation)
     let owned_utxo = std::mem::take(utxo_base_buf);
     let t_validate = Instant::now();
-    let ctx = blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
-        None::<&[blvm_consensus::types::BlockHeader]>,
+    let ctx = blvm_protocol::block::block_validation_context_for_connect_ibd(
+        None::<&[blvm_protocol::types::BlockHeader]>,
         0u64,
         Network::Mainnet,
-        None,
-        None,
     );
     let (result, new_utxo, _tx_ids_out, utxo_delta) = connect_block_ibd(
         block,

@@ -15,6 +15,8 @@ use blvm_protocol::wire::{
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
 
+pub use blvm_protocol::network::{AddrV2Message, RejectMessage};
+
 /// Bitcoin protocol constants
 pub const BITCOIN_MAGIC_MAINNET: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 pub const BITCOIN_MAGIC_TESTNET: [u8; 4] = [0x0b, 0x11, 0x09, 0x07];
@@ -105,6 +107,10 @@ pub mod cmd {
     pub const UTXOSET: &str = "utxoset";
     pub const VERACK: &str = "verack";
     pub const VERSION: &str = "version";
+    pub const SENDHEADERS: &str = "sendheaders";
+    pub const REJECT: &str = "reject";
+    pub const MEMPOOL: &str = "mempool";
+    pub const ADDRV2: &str = "addrv2";
 }
 
 /// Allowed Bitcoin protocol commands
@@ -123,8 +129,10 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     cmd::NOTFOUND,
     cmd::GETADDR,
     cmd::ADDR,
-    "mempool",
-    "reject",
+    cmd::ADDRV2,
+    cmd::SENDHEADERS,
+    cmd::MEMPOOL,
+    cmd::REJECT,
     cmd::FEEFILTER,
     cmd::SENDCMPCT,
     cmd::CMPCTBLOCK,
@@ -232,6 +240,10 @@ pub enum ProtocolMessage {
     // Address relay
     GetAddr,
     Addr(AddrMessage),
+    AddrV2(AddrV2Message),
+    SendHeaders,
+    Reject(RejectMessage),
+    MemPool,
     // Module Registry
     GetModule(GetModuleMessage),
     Module(ModuleMessage),
@@ -1133,6 +1145,18 @@ impl ProtocolParser {
             cmd::BANLIST => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
             cmd::GETADDR => Ok(ProtocolMessage::GetAddr),
             cmd::ADDR => Ok(ProtocolMessage::Addr(bincode::deserialize(payload)?)),
+            cmd::ADDRV2 => {
+                let msg = blvm_protocol::wire::deserialize_addrv2(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize addrv2: {e}"))?;
+                Ok(ProtocolMessage::AddrV2(msg))
+            },
+            cmd::SENDHEADERS => Ok(ProtocolMessage::SendHeaders),
+            cmd::MEMPOOL => Ok(ProtocolMessage::MemPool),
+            cmd::REJECT => {
+                let msg = blvm_protocol::wire::deserialize_reject(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize reject: {e}"))?;
+                Ok(ProtocolMessage::Reject(msg))
+            },
             // Module Registry
             cmd::GETMODULE => Ok(ProtocolMessage::GetModule(bincode::deserialize(payload)?)),
             cmd::MODULE => Ok(ProtocolMessage::Module(bincode::deserialize(payload)?)),
@@ -1197,6 +1221,12 @@ impl ProtocolParser {
                 (cmd::VERSION, payload)
             }
             ProtocolMessage::Verack => (cmd::VERACK, vec![]),
+            ProtocolMessage::SendHeaders => (cmd::SENDHEADERS, vec![]),
+            ProtocolMessage::MemPool => (cmd::MEMPOOL, vec![]),
+            ProtocolMessage::Reject(msg) => (
+                cmd::REJECT,
+                blvm_protocol::wire::serialize_reject(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
+            ),
             ProtocolMessage::Ping(msg) => (cmd::PING, bincode::serialize(msg)?),
             ProtocolMessage::Pong(msg) => (cmd::PONG, bincode::serialize(msg)?),
             ProtocolMessage::GetHeaders(msg) => {
@@ -1290,6 +1320,10 @@ impl ProtocolParser {
             // Address relay
             ProtocolMessage::GetAddr => (cmd::GETADDR, vec![]),
             ProtocolMessage::Addr(msg) => (cmd::ADDR, bincode::serialize(msg)?),
+            ProtocolMessage::AddrV2(msg) => (
+                cmd::ADDRV2,
+                blvm_protocol::wire::serialize_addrv2(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
+            ),
             // Module Registry
             ProtocolMessage::GetModule(msg) => (cmd::GETMODULE, bincode::serialize(msg)?),
             ProtocolMessage::Module(msg) => (cmd::MODULE, bincode::serialize(msg)?),

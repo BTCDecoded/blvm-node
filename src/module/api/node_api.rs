@@ -323,7 +323,7 @@ impl NodeApiImpl {
     /// Helper to calculate difficulty from bits (private helper, not part of trait).
     /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty_from_bits_helper(&self, bits: u64) -> f64 {
-        blvm_consensus::pow::difficulty_from_bits(bits).unwrap_or(1.0)
+        blvm_protocol::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 }
 
@@ -576,7 +576,7 @@ impl NodeAPI for NodeApiImpl {
                     // Calculate approximate hash rate from difficulty
                     // Hash rate = difficulty * 2^32 / 600 (seconds per block)
                     let difficulty =
-                        blvm_consensus::pow::difficulty_from_bits(chain_info.tip_header.bits)
+                        blvm_protocol::pow::difficulty_from_bits(chain_info.tip_header.bits)
                             .unwrap_or(1.0);
                     difficulty * 4294967296.0 / 600.0
                 } else {
@@ -653,7 +653,7 @@ impl NodeAPI for NodeApiImpl {
             move || {
                 // Get tip header to calculate difficulty
                 let difficulty = if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
-                    blvm_consensus::pow::difficulty_from_bits(tip_header.bits).unwrap_or(1.0) as u32
+                    blvm_protocol::pow::difficulty_from_bits(tip_header.bits).unwrap_or(1.0) as u32
                 } else {
                     0
                 };
@@ -1858,7 +1858,7 @@ impl NodeAPI for NodeApiImpl {
             .unwrap_or_default();
 
         // Use formally verified consensus function (same as RPC getblocktemplate)
-        let template = blvm_consensus::mining::create_block_template(
+        let template = blvm_protocol::mining::create_block_template(
             &utxo_set,
             &mempool_txs,
             height,

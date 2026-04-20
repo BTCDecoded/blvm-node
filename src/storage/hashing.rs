@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 pub fn double_sha256(data: &[u8]) -> [u8; 32] {
     #[cfg(feature = "production")]
     {
-        use blvm_consensus::crypto::OptimizedSha256;
+        use blvm_protocol::crypto::OptimizedSha256;
         let hasher = OptimizedSha256::new();
         hasher.hash256(data)
     }
@@ -46,7 +46,7 @@ pub fn double_sha256(data: &[u8]) -> [u8; 32] {
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     #[cfg(feature = "production")]
     {
-        use blvm_consensus::crypto::OptimizedSha256;
+        use blvm_protocol::crypto::OptimizedSha256;
         let hasher = OptimizedSha256::new();
         hasher.hash(data)
     }

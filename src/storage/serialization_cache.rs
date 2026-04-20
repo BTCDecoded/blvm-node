@@ -3,8 +3,8 @@
 //! Provides LRU caches for frequently serialized data structures to avoid
 //! redundant serialization operations during IBD.
 
-use blvm_consensus::types::Hash;
 use blvm_protocol::lru::LruCache;
+use blvm_protocol::types::Hash;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;

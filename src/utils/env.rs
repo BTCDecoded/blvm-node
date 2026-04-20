@@ -5,8 +5,8 @@
 /// Get environment variable or return default value
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::env_or_default;
+/// ```rust,ignore
+/// use blvm_node::utils::env_or_default;
 ///
 /// let data_dir = env_or_default("DATA_DIR", "data");
 /// ```
@@ -17,8 +17,8 @@ pub fn env_or_default(key: &str, default: &str) -> String {
 /// Get environment variable or compute default
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::env_or_else;
+/// ```rust,ignore
+/// use blvm_node::utils::env_or_else;
 ///
 /// let data_dir = env_or_else("DATA_DIR", || "data".to_string());
 /// ```

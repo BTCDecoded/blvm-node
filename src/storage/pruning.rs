@@ -756,7 +756,7 @@ impl PruningManager {
 
                     // Apply block to UTXO set using connect_block
                     // This properly handles coinbase transactions and input/output processing
-                    let ctx = blvm_consensus::block::BlockValidationContext::for_network(
+                    let ctx = blvm_protocol::block::BlockValidationContext::for_network(
                         blvm_protocol::types::Network::Mainnet,
                     );
                     let (validation_result, new_utxo_set, _undo_log) =

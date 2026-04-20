@@ -15,9 +15,9 @@ use crate::storage::Storage;
 use crate::utils::option_to_result;
 use anyhow::Result;
 #[cfg(feature = "utxo-commitments")]
-use blvm_consensus::types::{OutPoint, UTXO};
-#[cfg(feature = "utxo-commitments")]
 use blvm_protocol::spam_filter::SpamFilter;
+#[cfg(feature = "utxo-commitments")]
+use blvm_protocol::types::{OutPoint, UTXO};
 #[cfg(feature = "utxo-commitments")]
 use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
 use hex;
@@ -327,7 +327,7 @@ pub async fn handle_get_utxo_proof(
     }
 
     // Create OutPoint from message
-    use blvm_consensus::types::OutPoint;
+    use blvm_protocol::types::OutPoint;
     let outpoint = OutPoint {
         hash: message.tx_hash,
         index: message.output_index,

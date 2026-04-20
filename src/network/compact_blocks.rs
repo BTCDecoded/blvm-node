@@ -26,24 +26,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 
-/// Short transaction ID (6 bytes / 48 bits)
-///
-/// Computed using SipHash-2-4 of the transaction hash with keys derived
-/// from the block header nonce.
-pub type ShortTxId = [u8; 6];
-
-/// Compact block representation
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CompactBlock {
-    /// Block header
-    pub header: BlockHeader,
-    /// Nonce for short ID calculation (64-bit)
-    pub nonce: u64,
-    /// Short transaction IDs (6 bytes each)
-    pub short_ids: Vec<ShortTxId>,
-    /// Prefilled transactions (transactions that likely won't be in peer's mempool)
-    pub prefilled_txs: Vec<(usize, Transaction)>,
-}
+pub use blvm_protocol::bip152::{CompactBlock, ShortTxId};
 
 /// Calculate Bitcoin transaction hash (double SHA256 of serialized transaction)
 ///

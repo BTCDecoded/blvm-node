@@ -50,13 +50,13 @@ use crate::storage::ibd_utxo_store::IbdUtxoStore;
 use crate::storage::Storage;
 use crate::utils::{IBD_YIELD_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP};
 use anyhow::{Context, Result};
-use blvm_consensus::bip_validation::Bip30Index;
+use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::{
     segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult,
 };
 
-use blvm_consensus::serialization::varint::decode_varint;
-use blvm_consensus::types::{OutPoint, UTXO};
+use blvm_protocol::serialization::varint::decode_varint;
+use blvm_protocol::types::{OutPoint, UTXO};
 use crossbeam_channel;
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
@@ -884,7 +884,7 @@ impl ParallelIBD {
                                         || block_count > 400)
                                 {
                                     let remaining = assigner_clone.remaining_count();
-                                    blvm_consensus::profile_log!(
+                                    blvm_protocol::profile_log!(
                                     "[IBD_DOWNLOAD] peer={} chunk={}-{} blocks={} assigner_remaining={}",
                                     peer_id, start, end, block_count, remaining
                                 );
@@ -897,7 +897,7 @@ impl ParallelIBD {
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as u64)
                                         .unwrap_or(0);
-                                    blvm_consensus::profile_log!(
+                                    blvm_protocol::profile_log!(
                                     "[IBD_CHUNK_COMPLETE] chunk_start={} chunk_end={} peer={} blocks={} ts_ms={}",
                                     start, end, peer_id, block_count, ts_ms
                                 );
@@ -1247,7 +1247,7 @@ impl ParallelIBD {
                             assigner_for_coord.mark_bootstrap_complete();
                             info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
                         }
-                        blvm_consensus::block::compute_block_tx_ids_into(
+                        blvm_protocol::block::compute_block_tx_ids_into(
                             &block,
                             &mut coord_tx_ids_buf,
                         );
@@ -1531,18 +1531,18 @@ impl ParallelIBD {
         precomputed_tx_ids: Option<&'a [Hash]>,
     ) -> Result<(
         std::borrow::Cow<'a, [Hash]>,
-        Option<blvm_consensus::block::UtxoDelta>,
+        Option<blvm_protocol::block::UtxoDelta>,
     )> {
         // BIP54 activation from version bits when miners signal (no fixed height required).
         // Merge candidates with `min` so an earlier period’s lock-in is not overwritten by a
         // later window’s larger computed activation height (see `version_bits` module docs).
         let candidate = recent_headers.and_then(|hdr| {
-            if hdr.len() >= blvm_consensus::version_bits::LOCK_IN_PERIOD as usize {
-                blvm_consensus::version_bits::activation_height_from_headers(
+            if hdr.len() >= blvm_protocol::version_bits::LOCK_IN_PERIOD as usize {
+                blvm_protocol::version_bits::activation_height_from_headers(
                     hdr,
                     height,
                     network_time,
-                    &blvm_consensus::version_bits::bip54_deployment_mainnet(),
+                    &blvm_protocol::version_bits::bip54_deployment_mainnet(),
                 )
             } else {
                 None
@@ -1550,13 +1550,13 @@ impl ParallelIBD {
         });
         let bip54_activation_override = {
             let mut g = self.bip54_activation_from_version_bits.lock();
-            *g = blvm_consensus::version_bits::merge_bip54_activation_candidate(*g, candidate);
+            *g = blvm_protocol::version_bits::merge_bip54_activation_candidate(*g, candidate);
             *g
         };
 
-        let bip54_active = blvm_consensus::bip_validation::is_bip54_active_at(
+        let bip54_active = blvm_protocol::bip_validation::is_bip54_active_at(
             height,
-            blvm_consensus::types::Network::Mainnet,
+            blvm_protocol::types::Network::Mainnet,
             bip54_activation_override,
         );
         let bip54_boundary = if bip54_active {
@@ -1579,7 +1579,7 @@ impl ParallelIBD {
                     None
                 };
                 match (ts_n_minus_1, ts_n_minus_2015) {
-                    (Some(a), Some(b)) => Some(blvm_consensus::types::Bip54BoundaryTimestamps {
+                    (Some(a), Some(b)) => Some(blvm_protocol::types::Bip54BoundaryTimestamps {
                         timestamp_n_minus_1: a,
                         timestamp_n_minus_2015: b,
                     }),
@@ -1592,15 +1592,15 @@ impl ParallelIBD {
             None
         };
 
-        let context = blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
+        let context = blvm_protocol::block::BlockValidationContext::from_connect_block_ibd_args(
             recent_headers,
             network_time,
-            blvm_consensus::types::Network::Mainnet,
+            blvm_protocol::types::Network::Mainnet,
             bip54_activation_override,
             bip54_boundary,
         );
         let owned_utxo = std::mem::take(utxo_set);
-        let (result, new_utxo_set, tx_ids, utxo_delta) = blvm_consensus::block::connect_block_ibd(
+        let (result, new_utxo_set, tx_ids, utxo_delta) = blvm_protocol::block::connect_block_ibd(
             block,
             witnesses,
             owned_utxo,
@@ -2151,7 +2151,7 @@ impl ParallelIBD {
         #[cfg(feature = "profile")]
         {
             let disk_ms = t_disk.elapsed().as_millis() as u64;
-            blvm_consensus::profile_log!(
+            blvm_protocol::profile_log!(
                 "[FLUSH_STORAGE_PERF] blocks={} max_height={} serialize_ms={} disk_ms={} total_ms={}",
                 count,
                 flush_max_height,
@@ -2490,7 +2490,7 @@ mod tests {
 
         assert_eq!(
             hash,
-            blvm_consensus::GENESIS_BLOCK_HASH_INTERNAL,
+            blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL,
             "Genesis block hash should match"
         );
     }

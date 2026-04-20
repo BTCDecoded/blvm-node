@@ -12,26 +12,26 @@ use crate::rpc::params::{param_str_required, param_u64_default, param_u64_requir
 use crate::rpc::rawtx::address_string_to_script_pubkey;
 use crate::storage::Storage;
 use crate::utils::{current_timestamp, CACHE_REFRESH_TIP};
-use blvm_consensus::mining::MiningResult;
-use blvm_consensus::opcodes::{
+use blvm_protocol::mining::BlockTemplate;
+use blvm_protocol::mining::MiningResult;
+use blvm_protocol::opcodes::{
     OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY, OP_CHECKSIG, OP_CHECKSIGVERIFY,
 };
-use blvm_consensus::types::Network as ConsensusNetwork;
-use blvm_consensus::{
-    BIP112_CSV_ACTIVATION_MAINNET, BIP112_CSV_ACTIVATION_REGTEST, BIP112_CSV_ACTIVATION_TESTNET,
-    SEGWIT_ACTIVATION_MAINNET, SEGWIT_ACTIVATION_TESTNET, TAPROOT_ACTIVATION_MAINNET,
-    TAPROOT_ACTIVATION_TESTNET,
-};
-use blvm_protocol::mining::BlockTemplate;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::serialization::deserialize_block_with_witnesses;
 use blvm_protocol::serialization::serialize_block_with_witnesses;
 use blvm_protocol::serialization::serialize_transaction;
+use blvm_protocol::types::Network as ConsensusNetwork;
 use blvm_protocol::{
     types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
     ConsensusProof, ValidationResult,
 };
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+use blvm_protocol::{
+    BIP112_CSV_ACTIVATION_MAINNET, BIP112_CSV_ACTIVATION_REGTEST, BIP112_CSV_ACTIVATION_TESTNET,
+    SEGWIT_ACTIVATION_MAINNET, SEGWIT_ACTIVATION_TESTNET, TAPROOT_ACTIVATION_MAINNET,
+    TAPROOT_ACTIVATION_TESTNET,
+};
 use hex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -440,7 +440,7 @@ impl MiningRpc {
     /// Calculate difficulty from bits (compact target format).
     /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty(bits: u64) -> f64 {
-        blvm_consensus::pow::difficulty_from_bits(bits).unwrap_or(1.0)
+        blvm_protocol::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 
     /// Calculate network hashrate from recent block timestamps
@@ -953,11 +953,11 @@ impl MiningRpc {
         let utxo_set = self.get_utxo_set()?;
 
         let network_time = current_timestamp();
-        let time_context = Some(blvm_consensus::types::TimeContext {
+        let time_context = Some(blvm_protocol::types::TimeContext {
             network_time,
             median_time_past: 0,
         });
-        let network = blvm_consensus::types::Network::Mainnet;
+        let network = blvm_protocol::types::Network::Mainnet;
 
         match self.consensus.validate_block_with_time_context(
             &block,

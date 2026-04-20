@@ -3,12 +3,46 @@
 //! Tests the core payment processing logic that works for both HTTP and P2P.
 
 use blvm_node::config::PaymentConfig;
+use blvm_node::module::registry::manifest::ModuleManifest;
+use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
 use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
-use blvm_protocol::payment::{Payment, PaymentOutput, PaymentRequest};
+use blvm_protocol::payment::{Payment, PaymentOutput};
+use secp256k1::{Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 
 fn default_payment_config() -> PaymentConfig {
     PaymentConfig::default()
+}
+
+/// Match [`ModuleSigner::verify_payment_addresses`] (author||commons||price) so module payment tests succeed.
+fn apply_valid_payment_signature(
+    manifest: &mut ModuleManifest,
+    author_address: &str,
+    commons_address: &str,
+    price_sats: u64,
+) {
+    let secp = Secp256k1::new();
+    let test_key = SecretKey::from_slice(&[1; 32]).expect("test key");
+    let message_data = format!("{author_address}||{commons_address}||{price_sats}");
+    let message_hash = Sha256::digest(message_data.as_bytes());
+    let message = secp256k1::Message::from_digest_slice(&message_hash).expect("message");
+    let signature = secp.sign_ecdsa(&message, &test_key);
+    let signature_hex = hex::encode(signature.serialize_compact());
+    let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &test_key);
+    let pubkey_hex = hex::encode(pubkey.serialize());
+    manifest.signatures = Some(SignatureSection {
+        maintainers: vec![MaintainerSignature {
+            name: "test-maintainer".to_string(),
+            public_key: pubkey_hex,
+            signature: "dummy".to_string(),
+        }],
+        threshold: Some("1-of-1".to_string()),
+    });
+    manifest
+        .payment
+        .as_mut()
+        .expect("payment section")
+        .payment_signature = Some(signature_hex);
 }
 
 #[tokio::test]
@@ -96,7 +130,7 @@ async fn test_bip47_derivation_error_paths() {
     let config = default_payment_config();
     let processor = PaymentProcessor::new(config).expect("Failed to create payment processor");
 
-    use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
+    use blvm_node::module::registry::manifest::PaymentSection;
 
     // Create a manifest with BIP47 payment code but no legacy address
     let mut manifest = ModuleManifest {
@@ -146,10 +180,12 @@ async fn test_bip47_derivation_error_paths() {
     }
 
     // Test 2: BIP47 payment code with legacy fallback should succeed
-    manifest.payment.as_mut().unwrap().author_address =
-        Some("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_string());
-    manifest.payment.as_mut().unwrap().commons_address =
-        Some("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_string());
+    let author_leg = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    let commons_leg = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    manifest.payment.as_mut().unwrap().author_address = Some(author_leg.to_string());
+    manifest.payment.as_mut().unwrap().commons_address = Some(commons_leg.to_string());
+    let price_sats = manifest.payment.as_ref().unwrap().price_sats.unwrap_or(0);
+    apply_valid_payment_signature(&mut manifest, author_leg, commons_leg, price_sats);
 
     let result = processor
         .create_module_payment_request(&manifest, &module_hash, node_script.clone(), None)
@@ -167,6 +203,7 @@ async fn test_bip47_derivation_error_paths() {
     // Test 3: Legacy address only (no BIP47) should work
     manifest.payment.as_mut().unwrap().author_payment_code = None;
     manifest.payment.as_mut().unwrap().commons_payment_code = None;
+    apply_valid_payment_signature(&mut manifest, author_leg, commons_leg, price_sats);
 
     let result = processor
         .create_module_payment_request(&manifest, &module_hash, node_script.clone(), None)

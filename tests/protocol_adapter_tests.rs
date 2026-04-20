@@ -3,8 +3,10 @@
 use blvm_node::network::protocol_adapter::ProtocolAdapter;
 use blvm_node::network::transport::TransportType;
 use blvm_protocol::network::{
-    NetworkAddress, NetworkMessage, PingMessage, PongMessage, VersionMessage,
+    AddrV2Message, AddressType, NetworkAddress, NetworkAddressV2, NetworkMessage, PingMessage,
+    PongMessage, VersionMessage,
 };
+use blvm_protocol::GetBanListMessage;
 
 fn create_test_version_message() -> NetworkMessage {
     NetworkMessage::Version(VersionMessage {
@@ -191,13 +193,30 @@ fn test_protocol_adapter_protocol_to_consensus() {
 }
 
 #[test]
+fn test_protocol_adapter_roundtrip_addrv2_tcp() {
+    let msg = NetworkMessage::AddrV2(AddrV2Message {
+        addresses: vec![NetworkAddressV2 {
+            time: 1,
+            services: 1033,
+            address_type: AddressType::IPv4,
+            address: vec![10, 0, 0, 1],
+            port: 8333,
+        }],
+    });
+
+    let bytes = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp).unwrap();
+    let back = ProtocolAdapter::deserialize_message(&bytes, TransportType::Tcp).unwrap();
+    assert_eq!(msg, back);
+}
+
+#[test]
 fn test_protocol_adapter_unsupported_message() {
-    // Test with an unsupported message type
-    // Most message types are not yet supported in serialization
-    // This test verifies error handling
-    let msg = NetworkMessage::GetAddr;
+    // Commons ban-list request is not mapped in the TCP adapter (bincode path only on node)
+    let msg = NetworkMessage::GetBanList(GetBanListMessage {
+        request_id: 0,
+        min_score: None,
+    });
 
     let result = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
-    // Should error for unsupported types
     assert!(result.is_err());
 }

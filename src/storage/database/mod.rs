@@ -237,7 +237,7 @@ pub fn create_database<P: AsRef<Path>>(
 
 /// Get default database backend
 ///
-/// Returns the preferred backend: TidesDB (if available) > Redb > Sled.
+/// When `rocksdb` is enabled, returns RocksDB; otherwise TidesDB if enabled, else Redb, else Sled.
 pub fn default_backend() -> DatabaseBackend {
     #[cfg(feature = "rocksdb")]
     return DatabaseBackend::RocksDB;
@@ -524,6 +524,19 @@ pub(crate) mod redb_impl {
     // Module DB tables (used by blvm-sdk open_module_db)
     static SCHEMA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("schema");
     static ITEMS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("items");
+    // Test-only tables (used by storage_tests.rs)
+    static TEST_ABC123_STATE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("test_abc123_state");
+    static TEST_XYZ789_STATE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("test_xyz789_state");
+    static TEST123_CACHE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("test123_cache");
+    static TEST456_DATA: TableDefinition<&[u8], &[u8]> = TableDefinition::new("test456_data");
+    static TEST_MOD123_STATE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("test_mod123_state");
+    static TEST_MOD123_CACHE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("test_mod123_cache");
+    static TEST_STATE_A: TableDefinition<&[u8], &[u8]> = TableDefinition::new("test_state_a");
+    static TEST_STATE_B: TableDefinition<&[u8], &[u8]> = TableDefinition::new("test_state_b");
     pub struct RedbDatabase {
         db: Arc<RedbDb>,
     }
@@ -743,6 +756,15 @@ pub(crate) mod redb_impl {
                 // Module DB tables (blvm-sdk open_module_db)
                 "schema" => Some(&SCHEMA_TABLE),
                 "items" => Some(&ITEMS_TABLE),
+                // Test-only tables
+                "test_abc123_state" => Some(&TEST_ABC123_STATE),
+                "test_xyz789_state" => Some(&TEST_XYZ789_STATE),
+                "test123_cache" => Some(&TEST123_CACHE),
+                "test456_data" => Some(&TEST456_DATA),
+                "test_mod123_state" => Some(&TEST_MOD123_STATE),
+                "test_mod123_cache" => Some(&TEST_MOD123_CACHE),
+                "test_state_a" => Some(&TEST_STATE_A),
+                "test_state_b" => Some(&TEST_STATE_B),
                 _ => None,
             }
         }

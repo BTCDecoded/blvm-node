@@ -79,7 +79,13 @@ impl RpcRateLimiter {
 
     /// Check if n requests are allowed and consume that many tokens (for batch rate limiting).
     /// Returns true only if at least n tokens were available and consumed.
+    /// If n exceeds the burst limit, always returns false — no refill can ever satisfy it.
     pub fn check_and_consume_n(&mut self, n: u32) -> bool {
+        // A batch larger than the burst limit can never be served; reject immediately.
+        if n > self.burst_limit {
+            return false;
+        }
+
         let now = current_timestamp();
 
         // Refill tokens based on elapsed time
@@ -93,8 +99,6 @@ impl RpcRateLimiter {
             self.last_refill = now;
         }
 
-        // Check if we have enough tokens
-        let n = n.min(self.burst_limit); // Cap at burst to avoid overflow
         if self.tokens >= n {
             self.tokens -= n;
             true

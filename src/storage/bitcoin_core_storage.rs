@@ -82,24 +82,26 @@ impl BitcoinCoreStorage {
         data_dir: &Path,
         network: BitcoinCoreNetwork,
     ) -> Result<Box<dyn crate::storage::database::Database>> {
-        #[cfg(feature = "rocksdb")]
-        {
-            use crate::storage::database::rocksdb_impl::RocksDBDatabase;
+        use crate::storage::database::rocksdb_impl::RocksDBDatabase;
 
-            if let Some(core_dir) = BitcoinCoreDetection::detect_data_dir(network)? {
-                // Verify database integrity
-                BitcoinCoreDetection::verify_database(&core_dir)?;
+        if let Some(core_dir) = BitcoinCoreDetection::detect_data_dir(network)? {
+            // Verify database integrity
+            BitcoinCoreDetection::verify_database(&core_dir)?;
 
-                // Open with RocksDB (can read LevelDB format)
-                let db = RocksDBDatabase::open_bitcoin_core(&core_dir)?;
-                Ok(Box::new(db))
-            } else {
-                Err(anyhow::anyhow!("Bitcoin Core data directory not found"))
-            }
+            // Open with RocksDB (can read LevelDB format)
+            let db = RocksDBDatabase::open_bitcoin_core(&core_dir)?;
+            Ok(Box::new(db))
+        } else {
+            Err(anyhow::anyhow!("Bitcoin Core data directory not found"))
         }
-        #[cfg(not(feature = "rocksdb"))]
-        {
-            Err(anyhow::anyhow!("RocksDB feature not enabled"))
-        }
+    }
+
+    /// When RocksDB is disabled, opening Core chainstate is unsupported (API still exists for tests).
+    #[cfg(not(feature = "rocksdb"))]
+    pub fn open_bitcoin_core_database(
+        _data_dir: &Path,
+        _network: BitcoinCoreNetwork,
+    ) -> Result<Box<dyn crate::storage::database::Database>> {
+        Err(anyhow::anyhow!("RocksDB feature not enabled"))
     }
 }

@@ -12,6 +12,7 @@ use crate::rpc::errors::STORAGE_NOT_AVAILABLE_MSG;
 use crate::utils::current_timestamp;
 use crate::Hash;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::sync::Arc;
 use tracing::info;
 
@@ -222,11 +223,27 @@ impl VaultEngine {
         {
             use blvm_protocol::payment::PaymentOutput;
 
-            // Create deposit covenant that commits to unvaulting transaction
+            // Build the deposit covenant outputs.
+            //
+            // require_unvault = true  → two-step: deposit → unvault → withdraw.
+            //   The deposit covenant commits to an intermediate "vault holder" output.
+            //   The holder script is OP_RETURN <32-byte vault_id digest>, which
+            //   is unspendable on-chain but serves as a unique, verifiable commitment
+            //   inside the covenant-proof system.  When the operator calls unvault(),
+            //   a real unvault covenant over the final destination is created.
+            //
+            // require_unvault = false → single-step: deposit directly to withdrawal_script.
             let deposit_outputs = if config.require_unvault {
-                return Err(PaymentError::FeatureNotEnabled(
-                    "Unvault script not yet implemented. Use require_unvault: false for direct withdrawal.".to_string(),
-                ));
+                // Derive the vault-holder placeholder script: OP_RETURN <sha256(vault_id)>
+                let holder_hash: [u8; 32] = Sha256::digest(vault_id.as_bytes()).into();
+                let mut holder_script = Vec::with_capacity(34);
+                holder_script.push(0x6a); // OP_RETURN
+                holder_script.push(0x20); // PUSH 32 bytes
+                holder_script.extend_from_slice(&holder_hash);
+                vec![PaymentOutput {
+                    script: holder_script,
+                    amount: Some(deposit_amount),
+                }]
             } else {
                 // Direct withdrawal (no unvault step)
                 vec![PaymentOutput {

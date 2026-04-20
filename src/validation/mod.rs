@@ -64,14 +64,11 @@ impl ParallelBlockValidator {
             .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
             .collect();
         let network_time = current_timestamp();
-        let consensus_ctx =
-            blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
-                None::<&[BlockHeader]>,
-                network_time,
-                network,
-                None,
-                None,
-            );
+        let consensus_ctx = blvm_protocol::block::block_validation_context_for_connect_ibd(
+            None::<&[BlockHeader]>,
+            network_time,
+            network,
+        );
         let (result, new_utxo_set, _undo_log) = connect_block(
             &context.block,
             &witnesses,
@@ -121,12 +118,10 @@ impl ParallelBlockValidator {
                         .collect();
                     let network_time = current_timestamp();
                     let consensus_ctx =
-                        blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
+                        blvm_protocol::block::block_validation_context_for_connect_ibd(
                             None::<&[BlockHeader]>,
                             network_time,
                             network,
-                            None,
-                            None,
                         );
                     let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
@@ -154,12 +149,10 @@ impl ParallelBlockValidator {
                         .collect();
                     let network_time = current_timestamp();
                     let consensus_ctx =
-                        blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
+                        blvm_protocol::block::block_validation_context_for_connect_ibd(
                             None::<&[BlockHeader]>,
                             network_time,
                             network,
-                            None,
-                            None,
                         );
                     let (result, new_utxo_set, _undo_log) = connect_block(
                         &context.block,
@@ -199,14 +192,11 @@ impl ParallelBlockValidator {
                 .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
                 .collect();
             let network_time = current_timestamp();
-            let consensus_ctx =
-                blvm_consensus::block::BlockValidationContext::from_connect_block_ibd_args(
-                    None::<&[BlockHeader]>,
-                    network_time,
-                    network,
-                    None,
-                    None,
-                );
+            let consensus_ctx = blvm_protocol::block::block_validation_context_for_connect_ibd(
+                None::<&[BlockHeader]>,
+                network_time,
+                network,
+            );
             let (result, new_utxo_set, _undo_log) = connect_block(
                 &context.block,
                 &witnesses,

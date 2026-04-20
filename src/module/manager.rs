@@ -304,165 +304,165 @@ impl ModuleManager {
         let ipc_server = self.ipc_server.clone();
         if let Some(mut crash_rx) = self.crash_rx.take() {
             tokio::spawn(async move {
-            while let Some((module_name, error)) = crash_rx.recv().await {
-                warn!("Module {} crashed: {}", module_name, error);
+                while let Some((module_name, error)) = crash_rx.recv().await {
+                    warn!("Module {} crashed: {}", module_name, error);
 
-                // Get dependent modules before removing
-                let dependents: Vec<String> = {
-                    let modules = modules.lock().await;
-                    modules
-                        .iter()
-                        .filter_map(|(name, m)| {
-                            if m.metadata.dependencies.contains_key(&module_name) {
-                                Some(name.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-
-                // Remove crashed module
-                {
-                    let mut modules = modules.lock().await;
-                    if let Some(mut managed) = modules.remove(&module_name) {
-                        // Stop monitoring
-                        if let Some(handle) = managed.monitor_handle.take() {
-                            handle.abort();
-                        }
-                        // Update state to Error
-                        managed.state = ModuleState::Error(error.to_string());
-                    }
-                }
-
-                // Clean up: loaded_modules, CLI spec, API hub (same as explicit unload)
-                event_manager.remove_loaded_module(&module_name).await;
-                #[cfg(unix)]
-                if let Some(ref ipc) = ipc_server {
-                    ipc.lock()
-                        .await
-                        .unregister_cli_spec_by_name(&module_name)
-                        .await;
-                }
-                if let Some(ref hub) = api_hub {
-                    let mut h = hub.lock().await;
-                    h.unregister_module(&module_name).await;
-                }
-
-                // Publish ModuleStateChanged and ModuleHealthChanged (Running -> Error)
-                use crate::module::ipc::protocol::EventPayload;
-                use crate::module::traits::{EventType, ModuleError};
-                let payload = EventPayload::ModuleStateChanged {
-                    module_name: module_name.clone(),
-                    old_state: "Running".to_string(),
-                    new_state: "Error".to_string(),
-                };
-                if let Err(e) = event_manager
-                    .publish_event(EventType::ModuleStateChanged, payload)
-                    .await
-                {
-                    warn!(
-                        "Failed to publish ModuleStateChanged for crashed module: {}",
-                        e
-                    );
-                }
-                let payload = EventPayload::ModuleHealthChanged {
-                    module_name: module_name.clone(),
-                    old_health: "healthy".to_string(),
-                    new_health: "unhealthy".to_string(),
-                };
-                if let Err(e) = event_manager
-                    .publish_event(EventType::ModuleHealthChanged, payload)
-                    .await
-                {
-                    warn!(
-                        "Failed to publish ModuleHealthChanged for crashed module: {}",
-                        e
-                    );
-                }
-
-                // Publish ModuleCrashed event (specific to abnormal exit)
-                let error_msg = match &error {
-                    ModuleError::ModuleCrashed(msg) => msg.clone(),
-                    _ => error.to_string(),
-                };
-                let payload = EventPayload::ModuleCrashed {
-                    module_name: module_name.clone(),
-                    error: error_msg,
-                };
-                if let Err(e) = event_manager
-                    .publish_event(EventType::ModuleCrashed, payload)
-                    .await
-                {
-                    warn!(
-                        "Failed to publish ModuleCrashed event for {}: {}",
-                        module_name, e
-                    );
-                }
-
-                // Publish ModuleUnloaded event (crashed modules are effectively unloaded)
-                let payload = EventPayload::ModuleUnloaded {
-                    module_name: module_name.clone(),
-                    version: String::new(), // Version unknown for crashed modules
-                };
-                if let Err(e) = event_manager
-                    .publish_event(EventType::ModuleUnloaded, payload)
-                    .await
-                {
-                    warn!(
-                        "Failed to publish ModuleUnloaded event for crashed module: {}",
-                        e
-                    );
-                }
-
-                // Unload dependent modules with hard dependencies
-                // Note: We can't use self.unload_module() here since we're in a spawned task
-                // Instead, we'll just remove them and let the system handle it
-                if !dependents.is_empty() {
-                    warn!(
-                        "Unloading {} dependent module(s) due to crashed dependency '{}'",
-                        dependents.len(),
-                        module_name
-                    );
-                    let removed: Vec<String> = {
-                        let mut modules = modules.lock().await;
-                        dependents
-                            .into_iter()
-                            .filter_map(|dependent| {
-                                if let Some(mut managed) = modules.remove(&dependent) {
-                                    if let Some(handle) = managed.monitor_handle.take() {
-                                        handle.abort();
-                                    }
-                                    managed.state = ModuleState::Error(format!(
-                                        "Dependency '{module_name}' crashed"
-                                    ));
-                                    warn!(
-                                        "Dependent module '{}' unloaded due to crashed dependency",
-                                        dependent
-                                    );
-                                    Some(dependent)
+                    // Get dependent modules before removing
+                    let dependents: Vec<String> = {
+                        let modules = modules.lock().await;
+                        modules
+                            .iter()
+                            .filter_map(|(name, m)| {
+                                if m.metadata.dependencies.contains_key(&module_name) {
+                                    Some(name.clone())
                                 } else {
                                     None
                                 }
                             })
                             .collect()
                     };
-                    for dependent in removed {
-                        event_manager.remove_loaded_module(&dependent).await;
-                        #[cfg(unix)]
-                        if let Some(ref ipc) = ipc_server {
-                            ipc.lock()
-                                .await
-                                .unregister_cli_spec_by_name(&dependent)
-                                .await;
+
+                    // Remove crashed module
+                    {
+                        let mut modules = modules.lock().await;
+                        if let Some(mut managed) = modules.remove(&module_name) {
+                            // Stop monitoring
+                            if let Some(handle) = managed.monitor_handle.take() {
+                                handle.abort();
+                            }
+                            // Update state to Error
+                            managed.state = ModuleState::Error(error.to_string());
                         }
-                        if let Some(ref hub) = api_hub {
-                            let mut h = hub.lock().await;
-                            h.unregister_module(&dependent).await;
+                    }
+
+                    // Clean up: loaded_modules, CLI spec, API hub (same as explicit unload)
+                    event_manager.remove_loaded_module(&module_name).await;
+                    #[cfg(unix)]
+                    if let Some(ref ipc) = ipc_server {
+                        ipc.lock()
+                            .await
+                            .unregister_cli_spec_by_name(&module_name)
+                            .await;
+                    }
+                    if let Some(ref hub) = api_hub {
+                        let mut h = hub.lock().await;
+                        h.unregister_module(&module_name).await;
+                    }
+
+                    // Publish ModuleStateChanged and ModuleHealthChanged (Running -> Error)
+                    use crate::module::ipc::protocol::EventPayload;
+                    use crate::module::traits::{EventType, ModuleError};
+                    let payload = EventPayload::ModuleStateChanged {
+                        module_name: module_name.clone(),
+                        old_state: "Running".to_string(),
+                        new_state: "Error".to_string(),
+                    };
+                    if let Err(e) = event_manager
+                        .publish_event(EventType::ModuleStateChanged, payload)
+                        .await
+                    {
+                        warn!(
+                            "Failed to publish ModuleStateChanged for crashed module: {}",
+                            e
+                        );
+                    }
+                    let payload = EventPayload::ModuleHealthChanged {
+                        module_name: module_name.clone(),
+                        old_health: "healthy".to_string(),
+                        new_health: "unhealthy".to_string(),
+                    };
+                    if let Err(e) = event_manager
+                        .publish_event(EventType::ModuleHealthChanged, payload)
+                        .await
+                    {
+                        warn!(
+                            "Failed to publish ModuleHealthChanged for crashed module: {}",
+                            e
+                        );
+                    }
+
+                    // Publish ModuleCrashed event (specific to abnormal exit)
+                    let error_msg = match &error {
+                        ModuleError::ModuleCrashed(msg) => msg.clone(),
+                        _ => error.to_string(),
+                    };
+                    let payload = EventPayload::ModuleCrashed {
+                        module_name: module_name.clone(),
+                        error: error_msg,
+                    };
+                    if let Err(e) = event_manager
+                        .publish_event(EventType::ModuleCrashed, payload)
+                        .await
+                    {
+                        warn!(
+                            "Failed to publish ModuleCrashed event for {}: {}",
+                            module_name, e
+                        );
+                    }
+
+                    // Publish ModuleUnloaded event (crashed modules are effectively unloaded)
+                    let payload = EventPayload::ModuleUnloaded {
+                        module_name: module_name.clone(),
+                        version: String::new(), // Version unknown for crashed modules
+                    };
+                    if let Err(e) = event_manager
+                        .publish_event(EventType::ModuleUnloaded, payload)
+                        .await
+                    {
+                        warn!(
+                            "Failed to publish ModuleUnloaded event for crashed module: {}",
+                            e
+                        );
+                    }
+
+                    // Unload dependent modules with hard dependencies
+                    // Note: We can't use self.unload_module() here since we're in a spawned task
+                    // Instead, we'll just remove them and let the system handle it
+                    if !dependents.is_empty() {
+                        warn!(
+                            "Unloading {} dependent module(s) due to crashed dependency '{}'",
+                            dependents.len(),
+                            module_name
+                        );
+                        let removed: Vec<String> = {
+                            let mut modules = modules.lock().await;
+                            dependents
+                                .into_iter()
+                                .filter_map(|dependent| {
+                                    if let Some(mut managed) = modules.remove(&dependent) {
+                                        if let Some(handle) = managed.monitor_handle.take() {
+                                            handle.abort();
+                                        }
+                                        managed.state = ModuleState::Error(format!(
+                                            "Dependency '{module_name}' crashed"
+                                        ));
+                                        warn!(
+                                        "Dependent module '{}' unloaded due to crashed dependency",
+                                        dependent
+                                    );
+                                        Some(dependent)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        };
+                        for dependent in removed {
+                            event_manager.remove_loaded_module(&dependent).await;
+                            #[cfg(unix)]
+                            if let Some(ref ipc) = ipc_server {
+                                ipc.lock()
+                                    .await
+                                    .unregister_cli_spec_by_name(&dependent)
+                                    .await;
+                            }
+                            if let Some(ref hub) = api_hub {
+                                let mut h = hub.lock().await;
+                                h.unregister_module(&dependent).await;
+                            }
                         }
                     }
                 }
-            }
             });
         } else {
             warn!("Module crash receiver already taken; crash events will not be handled");

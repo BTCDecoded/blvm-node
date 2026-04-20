@@ -134,6 +134,18 @@ impl NetworkManager {
             ProtocolMessage::FeeFilter(_) => {
                 return Ok(());
             }
+            ProtocolMessage::GetAddr => {
+                self.handle_get_addr(peer_addr).await?;
+                return Ok(());
+            }
+            ProtocolMessage::Addr(msg) => {
+                self.handle_addr(peer_addr, msg.clone()).await?;
+                return Ok(());
+            }
+            ProtocolMessage::AddrV2(addrv2) => {
+                self.handle_addr_v2(peer_addr, addrv2.clone()).await?;
+                return Ok(());
+            }
             ProtocolMessage::GetHeaders(getheaders) => {
                 let is_full_chain_request = getheaders.block_locator_hashes.is_empty();
 
@@ -419,8 +431,6 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::CmpctBlock(cmpct_msg) => {
-                use crate::network::compact_blocks::CompactBlock;
-
                 if cmpct_msg.compact_block.short_ids.len() > 10000 {
                     warn!(
                         "Invalid compact block: too many short IDs ({}) from {}",

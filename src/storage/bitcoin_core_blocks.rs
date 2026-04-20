@@ -7,7 +7,7 @@
 
 use crate::storage::bitcoin_core_detection::BitcoinCoreNetwork;
 use anyhow::{Context, Result};
-use blvm_consensus::serialization::block::deserialize_block_with_witnesses;
+use blvm_protocol::serialization::block::deserialize_block_with_witnesses;
 use blvm_protocol::{Block, Hash};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

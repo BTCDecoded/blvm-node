@@ -7,7 +7,7 @@
 //! - Sync error handling
 //! - Chain reorganization scenarios
 
-use blvm_consensus::test_utils::create_test_header;
+use blvm_protocol::test_utils::create_test_header;
 use blvm_node::node::Node;
 use blvm_node::node::sync::{SyncCoordinator, SyncState, SyncStateMachine};
 use blvm_node::ProtocolVersion;

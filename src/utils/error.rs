@@ -10,8 +10,8 @@ use tracing::{debug, warn};
 /// Useful for non-critical operations that should not stop execution.
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::log_error;
+/// ```rust,ignore
+/// use blvm_node::utils::log_error;
 ///
 /// let result = log_error(|| storage.flush(), "Failed to flush storage");
 /// // If flush fails, logs warning and returns None, but execution continues
@@ -36,8 +36,8 @@ where
 /// Useful for non-critical async operations that should not stop execution.
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::log_error_async;
+/// ```rust,ignore
+/// use blvm_node::utils::log_error_async;
 ///
 /// let result = log_error_async(|| async { storage.flush() }, "Failed to flush storage").await;
 /// ```
@@ -62,8 +62,8 @@ where
 /// Logs a warning when fallback is used.
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::with_fallback;
+/// ```rust,ignore
+/// use blvm_node::utils::with_fallback;
 ///
 /// let value = with_fallback(
 ///     || primary_operation(),
@@ -117,8 +117,8 @@ where
 /// Useful for operations where failure is expected and a default is acceptable.
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::with_default;
+/// ```rust,ignore
+/// use blvm_node::utils::with_default;
 ///
 /// let count = with_default(|| get_count(), 0, "Failed to get count");
 /// ```
@@ -155,8 +155,8 @@ where
 /// Convert an Option to a Result with a context message
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::err_option_to_result;
+/// ```rust,ignore
+/// use blvm_node::utils::err_option_to_result;
 ///
 /// let value = err_option_to_result(opt, || "Value not found")?;
 /// ```

@@ -7,8 +7,8 @@
 /// Similar to `assert!` but returns a Result instead of panicking.
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::ensure;
+/// ```rust,ignore
+/// use blvm_node::utils::ensure;
 ///
 /// ensure(value > 0, "Value must be positive")?;
 /// ```
@@ -23,8 +23,8 @@ pub fn ensure(condition: bool, message: &str) -> Result<(), String> {
 /// Ensure a condition is true with a formatted error message
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::ensure_fmt;
+/// ```rust,ignore
+/// use blvm_node::utils::ensure_fmt;
 ///
 /// ensure_fmt(value > 0, || format!("Value {} must be positive", value))?;
 /// ```

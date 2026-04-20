@@ -33,7 +33,7 @@ pub fn calculate_wtxid(tx: &Transaction, witnesses: Option<&[Vec<Vec<u8>>]>) -> 
 
 #[cfg(any(feature = "production", feature = "profile"))]
 fn segwit_serialize_for_wtxid(tx: &Transaction, witnesses: &[Vec<Vec<u8>>]) -> Vec<u8> {
-    use blvm_consensus::serialization::varint::encode_varint;
+    use blvm_protocol::serialization::varint::encode_varint;
 
     let mut out = Vec::new();
     out.extend_from_slice(&(tx.version as u32).to_le_bytes());

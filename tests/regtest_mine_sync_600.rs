@@ -1,12 +1,12 @@
 //! Regtest: mine 600 blocks on one in-memory node, then replay the same wire bytes on a
 //! second node (sync). Exercises consensus mining + `SyncCoordinator::process_block` end-to-end.
 
-use blvm_consensus::mining::MiningResult;
-use blvm_consensus::ConsensusProof;
 use blvm_node::node::sync::SyncCoordinator;
 use blvm_node::storage::Storage;
+use blvm_protocol::mining::MiningResult;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::serialization::serialize_block_with_witnesses;
+use blvm_protocol::ConsensusProof;
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, UtxoSet};
 use std::sync::Arc;
 use tempfile::TempDir;

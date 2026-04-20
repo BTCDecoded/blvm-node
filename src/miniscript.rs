@@ -11,7 +11,7 @@
 pub mod miniscript_support {
     use anyhow::{Context, Result};
     use bech32::{ToBase32, Variant};
-    use blvm_consensus::opcodes::{
+    use blvm_protocol::opcodes::{
         OP_0, OP_1, OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, PUSH_20_BYTES,
         PUSH_32_BYTES,
     };

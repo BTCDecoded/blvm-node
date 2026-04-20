@@ -94,9 +94,7 @@ where
         }
     }
 
-    Err(last_error.expect(
-        "internal error: expected last error after exhausted retries",
-    ))
+    Err(last_error.expect("internal error: expected last error after exhausted retries"))
 }
 
 /// Retry an async operation with exponential backoff
@@ -136,9 +134,7 @@ where
         }
     }
 
-    Err(last_error.expect(
-        "internal error: expected last error after exhausted retries",
-    ))
+    Err(last_error.expect("internal error: expected last error after exhausted retries"))
 }
 
 /// Check if an error is retryable (transient failure)
@@ -188,7 +184,5 @@ where
         }
     }
 
-    Err(last_error.expect(
-        "internal error: expected last error after exhausted retries",
-    ))
+    Err(last_error.expect("internal error: expected last error after exhausted retries"))
 }

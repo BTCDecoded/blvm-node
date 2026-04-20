@@ -119,7 +119,7 @@ pub fn validate_block_with_context(
     // Compute median time-past (BIP113) from recent headers, if available
     let median_time_past = recent_headers
         .as_ref()
-        .map(|headers| blvm_consensus::bip113::get_median_time_past(headers))
+        .map(|headers| blvm_protocol::bip113::get_median_time_past(headers))
         .unwrap_or(0);
 
     // Use the node's time utility as the single source of network time.

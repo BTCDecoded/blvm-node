@@ -7,8 +7,8 @@ use std::sync::Arc;
 /// Clone multiple Arcs at once
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::arc_clone_many;
+/// ```rust,ignore
+/// use blvm_node::utils::arc_clone_many;
 ///
 /// let (a, b, c) = arc_clone_many((&arc1, &arc2, &arc3));
 /// ```

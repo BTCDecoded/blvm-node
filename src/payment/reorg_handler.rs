@@ -152,6 +152,7 @@ impl PaymentReorgHandler {
             })
             .collect();
 
+        let affected_count = affected.len();
         for (payment_id, tx_hash, expected_outputs) in affected {
             // 0. Chain re-verification: tx might still be in best chain (different block)
             if let Some(storage) = storage {
@@ -258,11 +259,10 @@ impl PaymentReorgHandler {
                 .await;
         }
 
-        if !affected.is_empty() {
+        if affected_count > 0 {
             debug!(
                 "PaymentReorgHandler: processed {} affected payment(s) for block {:?}",
-                affected.len(),
-                block_hash
+                affected_count, block_hash
             );
         }
     }

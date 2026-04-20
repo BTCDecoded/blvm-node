@@ -144,7 +144,7 @@ impl BlockchainRpc {
     /// Calculate difficulty from bits (compact target format).
     /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty(bits: u64) -> f64 {
-        blvm_consensus::pow::difficulty_from_bits(bits).unwrap_or(1.0)
+        blvm_protocol::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 
     /// Calculate median time from recent headers (BIP113)

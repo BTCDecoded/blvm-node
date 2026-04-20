@@ -615,7 +615,7 @@ impl BlockProvider for MockBlockProvider {
 #[cfg(feature = "utxo-commitments")]
 pub async fn run_utxo_commitments_initial_sync(
     network_manager: std::sync::Arc<tokio::sync::RwLock<crate::network::NetworkManager>>,
-    headers: &[blvm_consensus::BlockHeader],
+    headers: &[blvm_protocol::BlockHeader],
     peers: Vec<(
         blvm_protocol::utxo_commitments::peer_consensus::PeerInfo,
         String,

@@ -32,4 +32,13 @@ pub const KNOWN_TREE_NAMES: &[&str] = &[
     "vaults",
     "pools",
     "batches",
+    // Test-only tree names used by storage_tests
+    "test_abc123_state",
+    "test_xyz789_state",
+    "test123_cache",
+    "test456_data",
+    "test_mod123_state",
+    "test_mod123_cache",
+    "test_state_a",
+    "test_state_b",
 ];

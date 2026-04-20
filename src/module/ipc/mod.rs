@@ -11,7 +11,7 @@ pub(crate) const MODULE_IPC_MAX_FRAME_LENGTH: usize = 40 * 1024 * 1024;
 pub(crate) fn module_ipc_length_codec() -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
         .max_frame_length(MODULE_IPC_MAX_FRAME_LENGTH)
-        .new()
+        .new_codec()
 }
 
 #[cfg(unix)]

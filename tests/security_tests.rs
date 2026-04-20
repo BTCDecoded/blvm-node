@@ -39,7 +39,7 @@ async fn test_rate_limiting() {
     assert_eq!(test_addr.port(), 8333);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_per_ip_connection_limit() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let manager = NetworkManager::new(addr);

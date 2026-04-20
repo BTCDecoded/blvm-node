@@ -38,6 +38,7 @@ fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
     match msg {
         ProtocolMessage::Version(_) => cmd::VERSION,
         ProtocolMessage::Verack => cmd::VERACK,
+        ProtocolMessage::SendHeaders => cmd::SENDHEADERS,
         ProtocolMessage::Ping(_) => cmd::PING,
         ProtocolMessage::Pong(_) => cmd::PONG,
         ProtocolMessage::GetHeaders(_) => cmd::GETHEADERS,
@@ -47,8 +48,10 @@ fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
         ProtocolMessage::GetData(_) => cmd::GETDATA,
         ProtocolMessage::Inv(_) => cmd::INV,
         ProtocolMessage::NotFound(_) => cmd::NOTFOUND,
+        ProtocolMessage::Reject(_) => cmd::REJECT,
         ProtocolMessage::Tx(_) => cmd::TX,
         ProtocolMessage::FeeFilter(_) => cmd::FEEFILTER,
+        ProtocolMessage::MemPool => cmd::MEMPOOL,
         ProtocolMessage::SendCmpct(_) => cmd::SENDCMPCT,
         ProtocolMessage::CmpctBlock(_) => cmd::CMPCTBLOCK,
         ProtocolMessage::GetBlockTxn(_) => cmd::GETBLOCKTXN,
@@ -79,6 +82,7 @@ fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
         ProtocolMessage::BanList(_) => cmd::BANLIST,
         ProtocolMessage::GetAddr => cmd::GETADDR,
         ProtocolMessage::Addr(_) => cmd::ADDR,
+        ProtocolMessage::AddrV2(_) => cmd::ADDRV2,
         ProtocolMessage::GetModule(_) => cmd::GETMODULE,
         ProtocolMessage::Module(_) => cmd::MODULE,
         ProtocolMessage::GetModuleByHash(_) => cmd::GETMODULEBYHASH,
@@ -540,22 +544,8 @@ impl NetworkManager {
         &self,
         state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
     ) {
-        // Set network sender for payment proof broadcasting
         #[cfg(feature = "ctv")]
-        {
-            use std::sync::Arc as StdArc;
-            // Try to get mutable access to set the sender
-            // If we can't (multiple references exist), that's okay - broadcasting will be disabled
-            if let Some(state_machine_mut) = StdArc::get_mut(&mut state_machine.clone()) {
-                *state_machine_mut = state_machine_mut
-                    .clone()
-                    .with_network_sender(self.peer_tx.clone());
-            } else {
-                // Multiple references exist - we can't update it now
-                // The state machine will work but won't broadcast (will just update state)
-                debug!("Payment state machine has multiple references, network sender not set (broadcasting disabled)");
-            }
-        }
+        state_machine.set_network_sender(self.peer_tx.clone());
         *self.payment_state_machine.lock().await = Some(state_machine);
     }
 

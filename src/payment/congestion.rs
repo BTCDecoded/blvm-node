@@ -210,23 +210,23 @@ impl CongestionManager {
         batch_id: &str,
         tx: PendingTransaction,
     ) -> Result<(), PaymentError> {
-        let batch = self.batches.get_mut(batch_id).ok_or_else(|| {
-            PaymentError::ProcessingError(format!("Batch {} not found", batch_id))
-        })?;
+        let (batch_clone, tx_count) = {
+            let batch = self.batches.get_mut(batch_id).ok_or_else(|| {
+                PaymentError::ProcessingError(format!("Batch {} not found", batch_id))
+            })?;
 
-        if batch.transactions.len() >= self.config.max_batch_size {
-            return Err(PaymentError::ProcessingError(format!(
-                "Batch {} is full: {} transactions",
-                batch_id, self.config.max_batch_size
-            )));
-        }
+            if batch.transactions.len() >= self.config.max_batch_size {
+                return Err(PaymentError::ProcessingError(format!(
+                    "Batch {} is full: {} transactions",
+                    batch_id, self.config.max_batch_size
+                )));
+            }
 
-        batch.transactions.push(tx);
-
-        // Clone batch for saving (before dropping mutable borrow)
-        let batch_clone = batch.clone();
-        let tx_count = batch.transactions.len();
-        drop(batch); // Release mutable borrow
+            batch.transactions.push(tx);
+            let batch_clone = batch.clone();
+            let tx_count = batch.transactions.len();
+            (batch_clone, tx_count)
+        };
 
         // Save batch to storage
         if let Err(e) = self.save_batch(&batch_clone) {
@@ -366,19 +366,21 @@ impl CongestionManager {
 
         #[cfg(feature = "ctv")]
         {
-            let batch = self.batches.get_mut(batch_id).ok_or_else(|| {
-                PaymentError::ProcessingError(format!("Batch {} not found", batch_id))
-            })?;
+            let (needs_covenant, tx_count, target_fee) = {
+                let batch = self.batches.get_mut(batch_id).ok_or_else(|| {
+                    PaymentError::ProcessingError(format!("Batch {} not found", batch_id))
+                })?;
 
-            if batch.transactions.is_empty() {
-                return Err(PaymentError::ProcessingError("Batch is empty".to_string()));
-            }
+                if batch.transactions.is_empty() {
+                    return Err(PaymentError::ProcessingError("Batch is empty".to_string()));
+                }
 
-            // Check if covenant needs to be created
-            let needs_covenant = batch.covenant_template.is_none();
-            let tx_count = batch.transactions.len();
-            let target_fee = batch.target_fee_rate;
-            drop(batch); // Release borrow before calling update_batch_covenant
+                (
+                    batch.covenant_template.is_none(),
+                    batch.transactions.len(),
+                    batch.target_fee_rate,
+                )
+            };
 
             // Update covenant template if not already created
             if needs_covenant {

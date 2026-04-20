@@ -15,7 +15,7 @@ use crate::storage::disk_utxo::{
 use crate::storage::ibd_utxo_store::IbdUtxoStore;
 use crate::storage::Storage;
 use anyhow::Result;
-use blvm_consensus::bip_validation::Bip30Index;
+use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::{segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
@@ -319,7 +319,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         (tree, store)
     };
     #[cfg(not(all(feature = "utxo-commitments", feature = "production")))]
-    let (mut commitment_tree_opt, commitment_store_opt) = (None, None);
+    // Placeholder `Option<()>` — real types only exist when `utxo-commitments` is enabled; this
+    // branch is mutually exclusive with that code (avoids `None` type inference failure).
+    #[allow(unused_variables)]
+    let (mut commitment_tree_opt, commitment_store_opt) = (None::<()>, None::<()>);
 
     loop {
         // VALIDATION: Read from feeder buffer. Wait on Condvar when next block not yet arrived.
@@ -358,7 +361,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    blvm_consensus::profile_log!(
+                    blvm_protocol::profile_log!(
                         "[IBD_STALL_WAIT] next_height={} duration_ms={} buffer_after={} ts_ms={}",
                         next_validation_height,
                         wait_ms,
@@ -445,7 +448,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         // Validate + sync/evict (validation runs on dedicated thread — no tokio).
         #[cfg(feature = "profile")]
         if ibd_blocked_log {
-            blvm_consensus::profile_log!(
+            blvm_protocol::profile_log!(
                 "[IBD_VALIDATION] height={} phase=start (validate+suggested sync)",
                 next_height
             );
@@ -596,7 +599,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         {
                             for dk in &delta.deletions {
                                 let op =
-                                    blvm_consensus::utxo_overlay::utxo_deletion_key_to_outpoint(dk);
+                                    blvm_protocol::utxo_overlay::utxo_deletion_key_to_outpoint(dk);
                                 let key = outpoint_to_key(&op);
                                 if let Some(utxo) = store.get(&key) {
                                     if let Err(e) = tree.remove(&op, &utxo) {
@@ -673,7 +676,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         flush.2,
                         flush.3,
                         apply_utxo_ms,
-                        Ok((tx_ids_cow, None::<blvm_consensus::block::UtxoDelta>)),
+                        Ok((tx_ids_cow, None::<blvm_protocol::block::UtxoDelta>)),
                     )
                 }
                 Err(e) => (0u64, 0u64, None, false, 0u64, Err(e)),
@@ -727,7 +730,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
         #[cfg(feature = "profile")]
         if ibd_blocked_log {
-            blvm_consensus::profile_log!(
+            blvm_protocol::profile_log!(
                 "[IBD_VALIDATION] height={} phase=end utxo_base_ms={} validation_ms={} apply_utxo_ms={} apply_pending_ms={} sync_ms={} evict_ms={}",
                 next_height,
                 utxo_base_ms,
@@ -738,13 +741,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 evict_ms
             );
             if apply_pending_ms > 2 {
-                blvm_consensus::profile_log!(
+                blvm_protocol::profile_log!(
                     "[IBD_BLOCKED] phase=apply_pending height={} duration_ms={} (pending_writes/flushing scan for cache hits)",
                     next_height, apply_pending_ms
                 );
             }
             if sync_ms > 5 {
-                blvm_consensus::profile_log!(
+                blvm_protocol::profile_log!(
                     "[IBD_BLOCKED] phase=sync_await height={} duration_ms={} (validation waited for previous block sync+evict)",
                     next_height, sync_ms
                 );
@@ -872,7 +875,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 );
                                 #[cfg(feature = "profile")]
                                 if ibd_blocked_log && waited_ms > 0 {
-                                    blvm_consensus::profile_log!(
+                                    blvm_protocol::profile_log!(
                                         "[IBD_BLOCKED]                                                 phase=block_flush_await height={} duration_ms={} in_flight={} utxo_flush={} (validation waited for block storage write)",
                                         next_height,
                                         waited_ms,
@@ -901,7 +904,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     if ibd_profile
                         && ibd_profile_height_matches_sample(ibd_profile_sample, next_height)
                     {
-                        blvm_consensus::profile_log!(
+                        blvm_protocol::profile_log!(
                             "[IBD_BLOCK_FLUSH_SPAWN] height={} blocks={} in_flight={}",
                             next_height,
                             to_flush_count,
@@ -978,7 +981,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                     || evict_ms >= ibd_profile_slow_ms
                                     || flush_ms >= ibd_profile_slow_ms));
                     if should_log && total_ms > 0 {
-                        blvm_consensus::profile_log!(
+                        blvm_protocol::profile_log!(
                             "[IBD_PROFILE] height={} total_ms={} prefetch_await={} gap_fill={} prefetch={} utxo_base={} validation={} apply_utxo={} sync={} evict={} flush_coord={} disk_total={} txs={} inputs={}",
                             next_height,
                             total_ms,
@@ -997,7 +1000,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         );
                         let (dl, ch, ev, _ph) = ibd_store_v2_for_validation.stats();
                         let utxo_stats = (ibd_store_v2_for_validation.len(), dl, ch, ev);
-                        blvm_consensus::profile_log!(
+                        blvm_protocol::profile_log!(
                             "[IBD_PIPELINE] height={} utxo_flush={} block_flush={} pending={} utxo_cache={} disk_loads={} cache_hits={} evictions={}",
                             next_height,
                             utxo_flush_handles.len(),
@@ -1064,7 +1067,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         if yield_interval > 0 && blocks_synced % yield_interval == 0 {
             #[cfg(feature = "profile")]
             if ibd_profile && ibd_profile_height_matches_sample(ibd_profile_sample, next_height) {
-                blvm_consensus::profile_log!(
+                blvm_protocol::profile_log!(
                     "[IBD_YIELD] blocks_synced={} utxo_flush={} block_flush={} (yielding to runtime)",
                     blocks_synced,
                     utxo_flush_handles.len(),
@@ -1219,7 +1222,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             }
             #[cfg(feature = "profile")]
             if ibd_profile {
-                blvm_consensus::profile_log!(
+                blvm_protocol::profile_log!(
                     "[IBD_PREFETCH_STATS] height={} utxo_flush={} block_flush={}",
                     next_height,
                     utxo_flush_handles.len(),
@@ -1228,7 +1231,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 if blocks_synced > 0 && blocks_synced % 5000 == 0 {
                     // IBD_UTXO_PATH: cumulative UTXO path stats for overlap/eviction analysis
                     let (dl, ch, ev, ph) = ibd_store_v2_for_validation.stats();
-                    blvm_consensus::profile_log!(
+                    blvm_protocol::profile_log!(
                         "[IBD_UTXO_PATH] height={} disk_loads={} cache_hits={} evictions={} pending_hits={} cache_len={} (cumulative since start)",
                         next_height,
                         dl,
@@ -1239,7 +1242,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     );
                 }
                 if let Some((rss_mb, avail_mb)) = mem_guard.memory_diag() {
-                    blvm_consensus::profile_log!(
+                    blvm_protocol::profile_log!(
                         "[IBD_DIAG] height={} rss_mb={} avail_mb={} utxo_flush={} block_flush={}",
                         next_height,
                         rss_mb,

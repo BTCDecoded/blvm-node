@@ -551,9 +551,10 @@ impl RpcManager {
         // transport has no channel for Authorization headers today).
         #[cfg(feature = "quinn")]
         let quinn_handle = if let Some(quinn_addr) = self.quinn_addr {
-            let skip_quic = self.auth_manager.as_ref().is_some_and(|a| {
-                a.is_authentication_required()
-            });
+            let skip_quic = self
+                .auth_manager
+                .as_ref()
+                .is_some_and(|a| a.is_authentication_required());
             if skip_quic {
                 warn!(
                     "QUIC RPC not started on {}: JSON-RPC authentication is required but QUIC has no Bearer/certificate channel. Use TCP (HTTP) RPC or disable rpc_auth.required for QUIC.",

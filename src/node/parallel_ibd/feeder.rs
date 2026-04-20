@@ -123,7 +123,7 @@ pub(crate) fn run_feeder_thread(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                blvm_consensus::profile_log!(
+                blvm_protocol::profile_log!(
                     "[IBD_FEEDER_DELIVER] height={} ts_ms={} (buffer was empty, unblocking validation)",
                     h, ts_ms
                 );

@@ -7,8 +7,8 @@
 /// Similar to `unwrap_or_else`, but with a context message for logging.
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::unwrap_or_default_with;
+/// ```rust,ignore
+/// use blvm_node::utils::unwrap_or_default_with;
 ///
 /// let value = unwrap_or_default_with(opt, || {
 ///     tracing::debug!("Using default value");
@@ -25,8 +25,8 @@ where
 /// Convert Option to Result with a context message
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::option_to_result;
+/// ```rust,ignore
+/// use blvm_node::utils::option_to_result;
 ///
 /// let value = option_to_result(opt, "Value not found")?;
 /// ```
@@ -39,8 +39,8 @@ pub fn option_to_result<T>(opt: Option<T>, context: &str) -> Result<T, String> {
 /// Maps the Some value, or returns a default computed from the context.
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::map_or_default;
+/// ```rust,ignore
+/// use blvm_node::utils::map_or_default;
 ///
 /// let result = map_or_default(opt, |v| v * 2, || 0);
 /// ```
@@ -55,8 +55,8 @@ where
 /// Chain two Option operations, returning first Some or None
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::or_else;
+/// ```rust,ignore
+/// use blvm_node::utils::or_else;
 ///
 /// let result = or_else(opt1, || opt2);
 /// ```

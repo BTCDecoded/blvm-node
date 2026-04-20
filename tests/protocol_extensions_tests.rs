@@ -5,9 +5,22 @@
 use blvm_node::network::protocol::{FilterPreferences, GetFilteredBlockMessage, GetUTXOSetMessage};
 use blvm_node::network::protocol_extensions::{handle_get_filtered_block, handle_get_utxo_set};
 use blvm_node::storage::database::DatabaseBackend;
+use blvm_node::storage::hashing::double_sha256;
 use blvm_node::storage::Storage;
 use blvm_node::{Block, BlockHeader, Transaction};
 use std::sync::Arc;
+
+/// Compute the Bitcoin double-SHA256 block hash the same way as BlockStore::block_hash.
+fn block_hash(block: &Block) -> [u8; 32] {
+    let mut header_data = [0u8; 80];
+    header_data[0..4].copy_from_slice(&(block.header.version as i32).to_le_bytes());
+    header_data[4..36].copy_from_slice(&block.header.prev_block_hash);
+    header_data[36..68].copy_from_slice(&block.header.merkle_root);
+    header_data[68..72].copy_from_slice(&(block.header.timestamp as u32).to_le_bytes());
+    header_data[72..76].copy_from_slice(&(block.header.bits as u32).to_le_bytes());
+    header_data[76..80].copy_from_slice(&(block.header.nonce as u32).to_le_bytes());
+    double_sha256(&header_data)
+}
 
 /// Prefer **Redb** for tests: `Storage::new()` uses the default backend (often RocksDB), whose
 /// background compaction threads have caused SIGSEGV under `cargo test` when the DB is short‑lived.
@@ -153,12 +166,12 @@ async fn test_handle_get_filtered_block_with_preferences() {
         .into_boxed_slice(),
     };
 
-    let block_hash = [0x42; 32];
+    let block_hash_val = block_hash(&block);
     storage.blocks().store_block(&block).unwrap();
 
     let message = GetFilteredBlockMessage {
         request_id: 12345,
-        block_hash,
+        block_hash: block_hash_val,
         filter_preferences: FilterPreferences {
             filter_ordinals: true,
             filter_dust: true,
@@ -199,12 +212,12 @@ async fn test_handle_get_filtered_block_with_bip158() {
         .into_boxed_slice(),
     };
 
-    let block_hash = [0x42; 32];
+    let block_hash_val = block_hash(&block);
     storage.blocks().store_block(&block).unwrap();
 
     let message = GetFilteredBlockMessage {
         request_id: 12345,
-        block_hash,
+        block_hash: block_hash_val,
         filter_preferences: FilterPreferences {
             filter_ordinals: false,
             filter_dust: false,

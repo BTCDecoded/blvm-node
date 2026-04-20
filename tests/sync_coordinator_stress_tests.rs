@@ -1,8 +1,8 @@
 //! Stress tests for sync coordinator (state transitions, peer disconnection)
 
-use blvm_consensus::test_utils::create_test_header;
 use blvm_node::node::sync::{SyncCoordinator, SyncState, SyncStateMachine};
 use blvm_node::{BlockHeader, Hash};
+use blvm_protocol::test_utils::create_test_header;
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::sync::Arc;
 use std::time::Duration;

@@ -6,7 +6,7 @@
 use futures::{SinkExt, StreamExt};
 use std::path::Path;
 use tokio::net::UnixStream;
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::{debug, warn};
 
 use crate::module::ipc::module_ipc_length_codec;

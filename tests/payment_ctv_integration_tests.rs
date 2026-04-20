@@ -19,14 +19,19 @@ use tempfile::TempDir;
 
 /// Helper to create test payment outputs
 fn create_test_outputs() -> Vec<PaymentOutput> {
+    create_test_outputs_unique(0)
+}
+
+/// Payment IDs are derived from the serialized request; vary `salt` so multiple requests stay distinct.
+fn create_test_outputs_unique(salt: u64) -> Vec<PaymentOutput> {
     vec![
         PaymentOutput {
-            script: vec![0x51, 0x87], // OP_1, OP_EQUAL (test script)
-            amount: Some(100000),     // 0.001 BTC
+            script: vec![0x51, 0x87],    // OP_1, OP_EQUAL (test script)
+            amount: Some(100000 + salt), // 0.001 BTC + salt
         },
         PaymentOutput {
-            script: vec![0x52, 0x87], // OP_2, OP_EQUAL
-            amount: Some(50000),      // 0.0005 BTC
+            script: vec![0x52, 0x87],   // OP_2, OP_EQUAL
+            amount: Some(50000 + salt), // 0.0005 BTC + salt
         },
     ]
 }
@@ -240,12 +245,10 @@ async fn test_list_payments() {
         Arc::new(PaymentProcessor::new(config).expect("Failed to create payment processor"));
     let state_machine = Arc::new(PaymentStateMachine::new(processor));
 
-    let outputs = create_test_outputs();
-
     // Create multiple payment requests
     let mut payment_ids = Vec::new();
-    for _ in 0..3 {
-        let outputs = create_test_outputs();
+    for i in 0..3 {
+        let outputs = create_test_outputs_unique(i);
         let (payment_id, _) = state_machine
             .create_payment_request(outputs, None, false)
             .await
@@ -413,7 +416,7 @@ async fn test_concurrent_payment_requests() {
     let handles: Vec<_> = (0..5)
         .map(|i| {
             let state_machine = Arc::clone(&state_machine);
-            let outputs = create_test_outputs();
+            let outputs = create_test_outputs_unique(i);
             tokio::spawn(async move {
                 state_machine
                     .create_payment_request(outputs, None, false)

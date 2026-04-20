@@ -186,7 +186,7 @@ impl Node {
         // from_env() without merge, and assume_valid_height could stay 0 (no skip in connect_block).
         #[cfg(feature = "production")]
         {
-            let mut consensus_config = blvm_consensus::config::ConsensusConfig::from_env();
+            let mut consensus_config = blvm_protocol::consensus_config::ConsensusConfig::from_env();
             let assume_valid_from_env = std::env::var("BLVM_ASSUME_VALID_HEIGHT").is_ok();
             let file_assume_valid_height = config
                 .block_validation
@@ -201,7 +201,7 @@ impl Node {
             }
             let height = consensus_config.block_validation.assume_valid_height;
             let hash = consensus_config.block_validation.assume_valid_hash;
-            blvm_consensus::config::init_consensus_config(consensus_config);
+            blvm_protocol::consensus_config::init_consensus_config(consensus_config);
             let source = if assume_valid_from_env {
                 "env"
             } else if file_assume_valid_height > 0 {
@@ -229,7 +229,7 @@ impl Node {
 
         // Initialize Rayon pool for script verification (uses BLVM_SCRIPT_THREADS from consensus config)
         #[cfg(feature = "production")]
-        blvm_consensus::config::init_rayon_for_script_verification();
+        blvm_protocol::consensus_config::init_rayon_for_script_verification();
 
         // Auto-detect governance server if configured (best-effort, non-blocking)
         #[cfg(feature = "governance")]
@@ -1081,26 +1081,7 @@ impl Node {
                                     Arc::clone(&processor_arc),
                                 );
 
-                            let mut state_machine_arc = Arc::new(state_machine);
-
-                            // Set network sender for payment proof broadcasting
-                            // We need to get mutable access to set the sender
-                            #[cfg(feature = "ctv")]
-                            {
-                                use std::sync::Arc as StdArc;
-                                if let Some(sm) = StdArc::get_mut(&mut state_machine_arc) {
-                                    // Create a clone with the network sender set
-                                    let sm_with_sender = sm.clone().with_network_sender(
-                                        // We need to get peer_tx from network, but it's private
-                                        // For now, we'll set it via NetworkManager's set_payment_state_machine
-                                        // which will handle setting the sender
-                                        // Actually, let's pass it here if we can access it
-                                        // Since we can't easily get peer_tx, we'll set it in set_payment_state_machine
-                                    );
-                                    // This won't work because we can't replace the Arc contents
-                                    // Let's use a different approach - set it in set_payment_state_machine
-                                }
-                            }
+                            let state_machine_arc = Arc::new(state_machine);
 
                             self.payment_subsystem
                                 .get_or_insert_with(Default::default)
@@ -1136,15 +1117,13 @@ impl Node {
                                         match (addr.witness_version, addr.witness_program.len()) {
                                             // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
                                             (0, 20) | (0, 32) => {
-                                                let mut script =
-                                                    vec![blvm_consensus::opcodes::OP_0];
+                                                let mut script = vec![blvm_protocol::opcodes::OP_0];
                                                 script.extend_from_slice(&addr.witness_program);
                                                 Some(script)
                                             }
                                             // Taproot v1: P2TR (32 bytes)
                                             (1, 32) => {
-                                                let mut script =
-                                                    vec![blvm_consensus::opcodes::OP_1];
+                                                let mut script = vec![blvm_protocol::opcodes::OP_1];
                                                 script.extend_from_slice(&addr.witness_program);
                                                 Some(script)
                                             }
@@ -1217,7 +1196,7 @@ impl Node {
                                         Some(Arc::clone(&self.mempool_manager)),
                                         Some(tx_cache),
                                         Some(settlement_monitor),
-                                        Arc::clone(event_manager),
+                                        Arc::clone(&event_manager),
                                     ));
                             }
 

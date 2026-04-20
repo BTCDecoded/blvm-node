@@ -8,8 +8,8 @@ use tracing::warn;
 /// Execute a closure with a Mutex lock, automatically releasing it
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::with_lock;
+/// ```rust,ignore
+/// use blvm_node::utils::with_lock;
 ///
 /// let result = with_lock(&mutex, |guard| {
 ///     // Use guard here
@@ -27,8 +27,8 @@ where
 /// Execute a closure with a read lock, automatically releasing it
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::with_read_lock;
+/// ```rust,ignore
+/// use blvm_node::utils::with_read_lock;
 ///
 /// let value = with_read_lock(&rwlock, |guard| {
 ///     guard.get_value()
@@ -45,8 +45,8 @@ where
 /// Execute a closure with a write lock, automatically releasing it
 ///
 /// # Example
-/// ```rust
-/// use crate::utils::with_write_lock;
+/// ```rust,ignore
+/// use blvm_node::utils::with_write_lock;
 ///
 /// with_write_lock(&rwlock, |guard| {
 ///     guard.set_value(new_value);

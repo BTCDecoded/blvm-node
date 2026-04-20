@@ -7,7 +7,7 @@ use blvm_node::storage::{BlockStore, Storage};
 use blvm_node::config::PruningConfig;
 use blvm_node::network::NetworkManager;
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
-use blvm_consensus::UtxoSet;
+use blvm_protocol::UtxoSet;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::time::{sleep, Duration};

@@ -159,6 +159,11 @@ pub async fn store_encrypted_module(
     file.write_all(encrypted_binary)
         .await
         .map_err(|e| ModuleError::op_err("Failed to write encrypted binary", e))?;
+    file.flush()
+        .await
+        .map_err(|e| ModuleError::op_err("Failed to flush encrypted binary", e))?;
+    // Ensure file handle is closed before returning the path for callers that read it immediately.
+    drop(file);
 
     // Write metadata
     let metadata_path = module_dir.join("metadata.json");
