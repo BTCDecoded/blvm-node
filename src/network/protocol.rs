@@ -1149,14 +1149,14 @@ impl ProtocolParser {
                 let msg = blvm_protocol::wire::deserialize_addrv2(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize addrv2: {e}"))?;
                 Ok(ProtocolMessage::AddrV2(msg))
-            },
+            }
             cmd::SENDHEADERS => Ok(ProtocolMessage::SendHeaders),
             cmd::MEMPOOL => Ok(ProtocolMessage::MemPool),
             cmd::REJECT => {
                 let msg = blvm_protocol::wire::deserialize_reject(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize reject: {e}"))?;
                 Ok(ProtocolMessage::Reject(msg))
-            },
+            }
             // Module Registry
             cmd::GETMODULE => Ok(ProtocolMessage::GetModule(bincode::deserialize(payload)?)),
             cmd::MODULE => Ok(ProtocolMessage::Module(bincode::deserialize(payload)?)),
