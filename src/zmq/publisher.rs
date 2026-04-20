@@ -7,7 +7,7 @@
 //! making real-time blockchain event notifications available out of the box.
 
 use anyhow::{Context, Result};
-use bincode;
+use blvm_protocol::wire::{serialize_block, serialize_tx};
 use blvm_protocol::{Block, Hash, Transaction};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -138,10 +138,8 @@ impl ZmqPublisher {
     /// Message format: [topic: "rawblock", block_data: serialized block in Bitcoin wire format]
     pub async fn publish_rawblock(&self, block: &Block) -> Result<()> {
         if let Some(ref socket) = self.rawblock_socket {
-            // Serialize block to Bitcoin wire format
-            // Note: For full compatibility, this should use Bitcoin P2P wire format
-            // For now, using bincode serialization (can be enhanced later)
-            let block_data = bincode::serialize(block)?;
+            // Bitcoin P2P wire serialization (matches `blvm-protocol` `block` message payload).
+            let block_data = serialize_block(block).map_err(|e| anyhow::anyhow!("{e}"))?;
             socket.send("rawblock", zeromq::SNDMORE)?;
             socket.send(&block_data, 0)?;
             debug!(
@@ -157,10 +155,7 @@ impl ZmqPublisher {
     /// Message format: [topic: "rawtx", tx_data: serialized transaction in Bitcoin wire format]
     pub async fn publish_rawtx(&self, tx: &Transaction) -> Result<()> {
         if let Some(ref socket) = self.rawtx_socket {
-            // Serialize transaction to Bitcoin wire format
-            // Note: For full compatibility, this should use Bitcoin P2P wire format
-            // For now, using bincode serialization (can be enhanced later)
-            let tx_data = bincode::serialize(tx)?;
+            let tx_data = serialize_tx(tx).map_err(|e| anyhow::anyhow!("{e}"))?;
             socket.send("rawtx", zeromq::SNDMORE)?;
             socket.send(&tx_data, 0)?;
             debug!("Published rawtx notification: {} bytes", tx_data.len());

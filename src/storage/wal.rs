@@ -252,7 +252,7 @@ impl WalBufferedDb {
         // Apply operations using batch writes for efficiency
         for (tree_name, ops) in tree_ops {
             let tree = self.inner.open_tree(&tree_name)?;
-            let mut batch = tree.batch();
+            let mut batch = tree.batch()?;
 
             for op in ops {
                 match op {
@@ -388,7 +388,7 @@ impl WalBufferedDb {
             }
 
             let tree = self.inner.open_tree(&tree_name)?;
-            let mut batch = tree.batch();
+            let mut batch = tree.batch()?;
 
             for (key, value_opt) in tree_buffer {
                 match value_opt {
@@ -528,11 +528,11 @@ mod tests {
             Box::new(std::iter::empty())
         }
 
-        fn batch(&self) -> Box<dyn super::super::database::BatchWriter + '_> {
-            Box::new(MockBatch {
+        fn batch(&self) -> Result<Box<dyn super::super::database::BatchWriter + '_>> {
+            Ok(Box::new(MockBatch {
                 ops: Vec::new(),
                 db: self.db.clone(),
-            })
+            }))
         }
     }
 

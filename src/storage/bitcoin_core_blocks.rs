@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 
 /// Magic bytes for block files
 const MAGIC_MAINNET: [u8; 4] = [0xF9, 0xBE, 0xB4, 0xD9];
@@ -258,7 +259,7 @@ impl BitcoinCoreBlockReader {
                     let index = self.build_index()?;
                     // Save to cache for next time
                     if let Err(e) = self.save_index_to_cache(cache_path, &index) {
-                        eprintln!("Warning: Failed to save block index cache: {e}");
+                        warn!("Failed to save block index cache: {e}");
                     }
                     *index_guard = Some(index);
                 }

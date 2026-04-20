@@ -124,7 +124,7 @@ impl BufferedBlockStore {
         // Use batch writes for blocks
         {
             let blocks_tree = self.blockstore.blocks_tree()?;
-            let mut batch = blocks_tree.batch();
+            let mut batch = blocks_tree.batch()?;
 
             for deferred in &blocks {
                 // Serialize block for storage
@@ -139,7 +139,7 @@ impl BufferedBlockStore {
         // Use batch writes for witnesses
         {
             let witnesses_tree = self.blockstore.witnesses_tree()?;
-            let mut batch = witnesses_tree.batch();
+            let mut batch = witnesses_tree.batch()?;
 
             for deferred in &blocks {
                 if !deferred.witnesses.is_empty() {
@@ -155,7 +155,7 @@ impl BufferedBlockStore {
         // Use batch writes for height index
         {
             let height_tree = self.blockstore.height_tree()?;
-            let mut batch = height_tree.batch();
+            let mut batch = height_tree.batch()?;
 
             for deferred in &blocks {
                 let height_key = deferred.height.to_be_bytes();

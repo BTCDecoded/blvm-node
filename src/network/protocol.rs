@@ -42,7 +42,7 @@ pub const NODE_FIBRE: u64 = 1 << 26;
 pub const NODE_UTXO_COMMITMENTS: u64 = 1 << 27;
 /// Ban List Sharing support (GetBanList, BanList)
 pub const NODE_BAN_LIST_SHARING: u64 = 1 << 28;
-/// Governance message relay support (EconomicNodeRegistration, EconomicNodeVeto, EconomicNodeStatus)
+/// Governance-related P2P capability (proposal/webhook integration; advertised via Version.services)
 pub const NODE_GOVERNANCE: u64 = 1 << 29;
 /// Erlay (BIP330) transaction relay support
 #[cfg(feature = "erlay")]
@@ -59,10 +59,6 @@ pub mod cmd {
     pub const CFHEADERS: &str = "cfheaders";
     pub const CFILTER: &str = "cfilter";
     pub const CMPCTBLOCK: &str = "cmpctblock";
-    pub const ECONFORK: &str = "econfork";
-    pub const ECONREG: &str = "econreg";
-    pub const ECONSTATUS: &str = "econstatus";
-    pub const ECONVETO: &str = "econveto";
     pub const FEEFILTER: &str = "feefilter";
     pub const FILTEREDBLOCK: &str = "filteredblock";
     pub const GETADDR: &str = "getaddr";
@@ -158,11 +154,6 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     // Ban List Sharing
     cmd::GETBANLIST,
     cmd::BANLIST,
-    // Governance messages
-    cmd::ECONREG,
-    cmd::ECONVETO,
-    cmd::ECONSTATUS,
-    cmd::ECONFORK,
     // Module Registry
     cmd::GETMODULE,
     cmd::MODULE,
@@ -236,13 +227,8 @@ pub enum ProtocolMessage {
     // Ban List Sharing
     GetBanList(GetBanListMessage),
     BanList(BanListMessage),
-    // Governance/Commons Economic Node messages
-    EconomicNodeRegistration(EconomicNodeRegistrationMessage),
-    EconomicNodeVeto(EconomicNodeVetoMessage),
     // Mesh networking packets (payment-gated routing)
     MeshPacket(Vec<u8>), // Serialized mesh packet (handled by mesh module)
-    EconomicNodeStatus(EconomicNodeStatusMessage),
-    EconomicNodeForkDecision(EconomicNodeForkDecisionMessage),
     // Address relay
     GetAddr,
     Addr(AddrMessage),
@@ -1145,19 +1131,6 @@ impl ProtocolParser {
             // Ban List Sharing
             cmd::GETBANLIST => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
             cmd::BANLIST => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
-            // Governance messages
-            cmd::ECONREG => Ok(ProtocolMessage::EconomicNodeRegistration(
-                bincode::deserialize(payload)?,
-            )),
-            cmd::ECONVETO => Ok(ProtocolMessage::EconomicNodeVeto(bincode::deserialize(
-                payload,
-            )?)),
-            cmd::ECONSTATUS => Ok(ProtocolMessage::EconomicNodeStatus(bincode::deserialize(
-                payload,
-            )?)),
-            cmd::ECONFORK => Ok(ProtocolMessage::EconomicNodeForkDecision(
-                bincode::deserialize(payload)?,
-            )),
             cmd::GETADDR => Ok(ProtocolMessage::GetAddr),
             cmd::ADDR => Ok(ProtocolMessage::Addr(bincode::deserialize(payload)?)),
             // Module Registry
@@ -1314,15 +1287,6 @@ impl ProtocolParser {
             // Ban List Sharing
             ProtocolMessage::GetBanList(msg) => (cmd::GETBANLIST, bincode::serialize(msg)?),
             ProtocolMessage::BanList(msg) => (cmd::BANLIST, bincode::serialize(msg)?),
-            // Governance messages
-            ProtocolMessage::EconomicNodeRegistration(msg) => {
-                (cmd::ECONREG, bincode::serialize(msg)?)
-            }
-            ProtocolMessage::EconomicNodeVeto(msg) => (cmd::ECONVETO, bincode::serialize(msg)?),
-            ProtocolMessage::EconomicNodeStatus(msg) => (cmd::ECONSTATUS, bincode::serialize(msg)?),
-            ProtocolMessage::EconomicNodeForkDecision(msg) => {
-                (cmd::ECONFORK, bincode::serialize(msg)?)
-            }
             // Address relay
             ProtocolMessage::GetAddr => (cmd::GETADDR, vec![]),
             ProtocolMessage::Addr(msg) => (cmd::ADDR, bincode::serialize(msg)?),
@@ -1422,99 +1386,6 @@ pub struct BanEntry {
     pub unban_timestamp: u64,
     /// Reason for ban (optional)
     pub reason: Option<String>,
-}
-
-// Governance/Commons Economic Node messages
-
-/// EconomicNodeRegistration message - Register economic node via P2P
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EconomicNodeRegistrationMessage {
-    /// Node type: "mining_pool", "exchange", "custodian", "commons_contributor"
-    pub node_type: String,
-    /// Entity name
-    pub entity_name: String,
-    /// Public key for veto signals
-    pub public_key: String,
-    /// Qualification data (JSON with cryptographic proofs)
-    pub qualification_data: serde_json::Value,
-    /// Unix timestamp
-    pub timestamp: i64,
-    /// Cryptographic signature of message by entity's private key
-    /// Signs: node_type || entity_name || public_key || qualification_data_hash || timestamp
-    pub signature: String,
-    /// Unique message ID for deduplication (hex-encoded hash)
-    pub message_id: String,
-}
-
-/// EconomicNodeVeto message - Veto signal via P2P
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EconomicNodeVetoMessage {
-    /// Economic node ID (if already registered)
-    pub node_id: Option<i32>,
-    /// Public key (if not registered yet, used to identify node)
-    pub public_key: String,
-    /// Pull request ID being vetoed
-    pub pr_id: i32,
-    /// Signal type: "veto", "support", "abstain"
-    pub signal_type: String,
-    /// Unix timestamp
-    pub timestamp: i64,
-    /// Cryptographic signature by node's private key
-    /// Signs: node_id || public_key || pr_id || signal_type || timestamp
-    pub signature: String,
-    /// Unique message ID for deduplication
-    pub message_id: String,
-}
-
-/// EconomicNodeStatus message - Query/response for node status
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EconomicNodeStatusMessage {
-    /// Request ID (for async request-response matching)
-    pub request_id: u64,
-    /// Node ID or public key to query
-    pub node_identifier: String,
-    /// Query type: "by_id", "by_public_key"
-    pub query_type: String,
-    /// Response data (if this is a response)
-    pub status: Option<NodeStatusResponse>,
-}
-
-/// NodeStatusResponse - Status information for economic node
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeStatusResponse {
-    /// Node ID
-    pub node_id: i32,
-    /// Node type
-    pub node_type: String,
-    /// Entity name
-    pub entity_name: String,
-    /// Current status: "active", "pending", "revoked"
-    pub status: String,
-    /// Current weight
-    pub weight: f64,
-    /// Registered timestamp
-    pub registered_at: i64,
-    /// Last verified timestamp
-    pub last_verified_at: Option<i64>,
-}
-
-/// EconomicNodeForkDecision message - Node's decision to adopt a governance ruleset
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EconomicNodeForkDecisionMessage {
-    /// Node ID (optional, can be looked up by public_key)
-    pub node_id: Option<i32>,
-    /// Public key of the node making the decision
-    pub public_key: String,
-    /// Ruleset ID being adopted
-    pub chosen_ruleset: String,
-    /// Reason for the fork decision
-    pub decision_reason: String,
-    /// Timestamp of the decision
-    pub timestamp: i64,
-    /// Cryptographic signature
-    pub signature: String,
-    /// Message ID for deduplication
-    pub message_id: String,
 }
 
 // Address relay messages

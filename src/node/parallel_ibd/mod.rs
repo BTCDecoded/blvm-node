@@ -2066,7 +2066,7 @@ impl ParallelIBD {
             // Batch write blocks (no WAL — safe for IBD, re-downloads on crash)
             {
                 let blocks_tree = blockstore.blocks_tree()?;
-                let mut batch = blocks_tree.batch();
+                let mut batch = blocks_tree.batch()?;
                 for &i in &flush_order {
                     let height = pending[i].2;
                     let key = block_height_row_key(height, &block_hashes[i]);
@@ -2078,7 +2078,7 @@ impl ParallelIBD {
             // Batch write headers
             {
                 let headers_tree = blockstore.headers_tree()?;
-                let mut batch = headers_tree.batch();
+                let mut batch = headers_tree.batch()?;
                 for &i in &flush_order {
                     let height = pending[i].2;
                     let key = block_height_row_key(height, &block_hashes[i]);
@@ -2092,7 +2092,7 @@ impl ParallelIBD {
                 let has_witnesses = pending.iter().any(|(_, w, _)| !w.is_empty());
                 if has_witnesses {
                     let witnesses_tree = blockstore.witnesses_tree()?;
-                    let mut batch = witnesses_tree.batch();
+                    let mut batch = witnesses_tree.batch()?;
                     for &i in &flush_order {
                         if let Some(ref data) = witness_blobs[i] {
                             let height = pending[i].2;
@@ -2107,7 +2107,7 @@ impl ParallelIBD {
             // Batch write height index
             {
                 let height_tree = blockstore.height_tree()?;
-                let mut batch = height_tree.batch();
+                let mut batch = height_tree.batch()?;
                 for &i in &flush_order {
                     let height = pending[i].2;
                     let height_key = height.to_be_bytes();
@@ -2119,7 +2119,7 @@ impl ParallelIBD {
             // Reverse index (hash → height) — required for RPC lookups and chain recovery
             {
                 let ht_tree = blockstore.hash_to_height_tree()?;
-                let mut batch = ht_tree.batch();
+                let mut batch = ht_tree.batch()?;
                 for &i in &flush_order {
                     let height_bytes = pending[i].2.to_be_bytes();
                     batch.put(&block_hashes[i], &height_bytes);
@@ -2130,7 +2130,7 @@ impl ParallelIBD {
             // Block metadata (same row keys as bodies — keeps RPC n_tx consistent with `store_block_with_witness`)
             {
                 let meta_tree = blockstore.metadata_tree()?;
-                let mut batch = meta_tree.batch();
+                let mut batch = meta_tree.batch()?;
                 for &i in &flush_order {
                     let key = block_height_row_key(pending[i].2, &block_hashes[i]);
                     batch.put(&key, &metadata_blobs[i]);

@@ -30,7 +30,7 @@ Modules subscribe to events they need:
 // Example: blvm-governance subscribes to governance events
 let event_types = vec![
     EventType::GovernanceProposalCreated,
-    EventType::EconomicNodeRegistered,
+    EventType::GovernanceForkDetected,
     EventType::NewBlock,
     EventType::ConfigLoaded, // React to config changes
 ];
@@ -43,7 +43,7 @@ client.subscribe_events(event_types).await?;
 - **Network Events**: PeerConnected, MessageReceived, etc.
 - **Module Lifecycle**: ModuleLoaded, ModuleUnloaded, etc.
 - **Configuration**: ConfigLoaded (NEW - allows modules to react to config changes)
-- **Governance**: EconomicNodeRegistered, EconomicNodeVeto, etc.
+- **Governance**: `GovernanceProposalCreated`, `GovernanceForkDetected`, webhook events, etc. (see `EventType` in `src/module/traits.rs`)
 
 ### 3. Configuration Integration
 
@@ -125,7 +125,7 @@ let response = node_api.call_module(
 ### blvm-governance
 
 **Integration Points:**
-- Subscribes to: `EconomicNodeRegistered`, `EconomicNodeVeto`, `NewBlock`, `ConfigLoaded`
+- Subscribes to: `GovernanceProposalCreated`, `GovernanceForkDetected`, `NewBlock`, `ConfigLoaded` (exact set may evolve; see `EventType`)
 - Publishes: Governance webhook notifications
 - Uses: NodeAPI for block data, network stats
 

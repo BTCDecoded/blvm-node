@@ -86,13 +86,15 @@ pub trait Tree: Send + Sync {
     ///
     /// # Example
     /// ```ignore
-    /// let mut batch = tree.batch();
+    /// let mut batch = tree.batch()?;
     /// for (key, value) in items {
     ///     batch.put(key, value);
     /// }
     /// batch.commit()?;  // Single atomic commit
     /// ```
-    fn batch(&self) -> Box<dyn BatchWriter + '_>;
+    ///
+    /// Returns `Err` if a batch cannot be created (e.g. RocksDB column family missing).
+    fn batch(&self) -> Result<Box<dyn BatchWriter + '_>>;
 }
 
 /// Batch writer for efficient bulk database operations
@@ -427,12 +429,12 @@ mod sled_impl {
             }))
         }
 
-        fn batch(&self) -> Box<dyn BatchWriter + '_> {
-            Box::new(SledBatchWriter {
+        fn batch(&self) -> Result<Box<dyn BatchWriter + '_>> {
+            Ok(Box::new(SledBatchWriter {
                 tree: Arc::clone(&self.tree),
                 batch: sled::Batch::default(),
                 op_count: 0,
-            })
+            }))
         }
     }
 
@@ -1028,12 +1030,12 @@ pub(crate) mod redb_impl {
             Box::new(items.into_iter())
         }
 
-        fn batch(&self) -> Box<dyn BatchWriter + '_> {
-            Box::new(RedbBatchWriter {
+        fn batch(&self) -> Result<Box<dyn BatchWriter + '_>> {
+            Ok(Box::new(RedbBatchWriter {
                 db: Arc::clone(&self.db),
                 table_def: self.table_def,
                 pending: Vec::new(),
-            })
+            }))
         }
     }
 
@@ -1711,19 +1713,20 @@ pub mod rocksdb_impl {
             Box::new(items.into_iter())
         }
 
-        fn batch(&self) -> Box<dyn BatchWriter + '_> {
-            let cf = self.cf().unwrap_or_else(|e| {
-                panic!(
+        fn batch(&self) -> Result<Box<dyn BatchWriter + '_>> {
+            let cf = self.cf().map_err(|e| {
+                anyhow::anyhow!(
                     "Column family '{}' not found; RocksDB schema may be corrupted or mismatched: {}",
-                    self.cf_name, e
+                    self.cf_name,
+                    e
                 )
-            });
-            Box::new(RocksDBBatchWriter {
+            })?;
+            Ok(Box::new(RocksDBBatchWriter {
                 db: Arc::clone(&self.db),
                 cf,
                 batch: rocksdb::WriteBatch::default(),
                 op_count: 0,
-            })
+            }))
         }
     }
 
@@ -2055,12 +2058,12 @@ pub(crate) mod tidesdb_impl {
             Box::new(items.into_iter())
         }
 
-        fn batch(&self) -> Box<dyn BatchWriter + '_> {
-            Box::new(TidesDBBatchWriter {
+        fn batch(&self) -> Result<Box<dyn BatchWriter + '_>> {
+            Ok(Box::new(TidesDBBatchWriter {
                 db: Arc::clone(&self.db),
                 cf: Arc::clone(&self.cf),
                 pending: Vec::new(),
-            })
+            }))
         }
     }
 
@@ -2130,11 +2133,11 @@ pub(crate) mod tidesdb_impl {
                 Err(e) => Some(Err(e)),
             }))
         }
-        fn batch(&self) -> Box<dyn BatchWriter + '_> {
-            Box::new(TidesDBModuleBatchWriter {
-                inner: self.inner.batch(),
+        fn batch(&self) -> Result<Box<dyn BatchWriter + '_>> {
+            Ok(Box::new(TidesDBModuleBatchWriter {
+                inner: self.inner.batch()?,
                 key_prefix: self.key_prefix(),
-            })
+            }))
         }
     }
 

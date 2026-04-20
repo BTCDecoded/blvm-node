@@ -283,7 +283,7 @@ impl IbdUtxoStore {
             fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
                 Box::new(std::iter::empty())
             }
-            fn batch(&self) -> Box<dyn crate::storage::database::BatchWriter + '_> {
+            fn batch(&self) -> Result<Box<dyn crate::storage::database::BatchWriter + '_>> {
                 struct NullBatch;
                 impl crate::storage::database::BatchWriter for NullBatch {
                     fn put(&mut self, _: &[u8], _: &[u8]) {}
@@ -295,7 +295,7 @@ impl IbdUtxoStore {
                         0
                     }
                 }
-                Box::new(NullBatch)
+                Ok(Box::new(NullBatch))
             }
         }
         Self::new_with_options(
@@ -899,7 +899,7 @@ impl IbdUtxoStore {
         let mut total_flushed = 0;
         let mut ser_buf = Vec::with_capacity(192);
         for chunk in batch.chunks(MAX_BATCH_OPS) {
-            let mut b = self.disk.batch();
+            let mut b = self.disk.batch()?;
             for (key, value_opt) in chunk {
                 match value_opt {
                     Some(arc) => {
@@ -957,7 +957,7 @@ impl IbdUtxoStore {
             if chunk.is_empty() {
                 continue;
             }
-            let mut b = self.disk.batch();
+            let mut b = self.disk.batch()?;
             for (key, value_opt) in chunk {
                 match value_opt {
                     Some(bytes) => b.put(key.as_slice(), bytes.as_slice()),

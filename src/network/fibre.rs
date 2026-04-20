@@ -158,15 +158,15 @@ impl FecEncoder {
             .map_err(|e| FibreError::FecError(format!("Decoding failed: {e}")))?;
 
         // Combine data shards (exclude parity shards)
-        let data: Vec<u8> = shard_vec[..self.data_shards]
-            .iter()
-            .flat_map(|s| {
-                s.as_ref()
-                    .expect("FEC decoder should have reconstructed all data shards")
-                    .iter()
-                    .copied()
-            })
-            .collect();
+        let mut data = Vec::new();
+        for s in &shard_vec[..self.data_shards] {
+            let Some(shard) = s.as_ref() else {
+                return Err(FibreError::FecError(
+                    "FEC reconstruct did not yield all data shards".to_string(),
+                ));
+            };
+            data.extend_from_slice(shard);
+        }
 
         Ok(data)
     }
@@ -874,7 +874,14 @@ impl FibreRelay {
                 );
             }
 
-            let assembly = self.receiving_blocks.get_mut(&block_hash).unwrap();
+            let assembly = match self.receiving_blocks.get_mut(&block_hash) {
+                Some(a) => a,
+                None => {
+                    return Err(FibreError::FecError(
+                        "FIBRE block assembly missing after insert".to_string(),
+                    ));
+                }
+            };
             assembly.received_chunks.insert(chunk.index, chunk.clone());
 
             let received_count = assembly.received_chunks.len();
@@ -886,10 +893,11 @@ impl FibreRelay {
         if should_reconstruct {
             // Extract assembly data (clone what we need) before removing
             let (total_chunks, fec_encoder, received_chunks, block_hash_check) = {
-                let assembly = self
-                    .receiving_blocks
-                    .get(&block_hash)
-                    .expect("Assembly should exist");
+                let Some(assembly) = self.receiving_blocks.get(&block_hash) else {
+                    return Err(FibreError::FecError(
+                        "FIBRE block assembly missing before reconstruction".to_string(),
+                    ));
+                };
 
                 (
                     assembly.total_chunks,

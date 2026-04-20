@@ -547,33 +547,45 @@ impl RpcManager {
             });
         }
 
-        // Start QUIC server if enabled
+        // Start QUIC server if enabled (disabled when HTTP Bearer auth is mandatory: QUIC
+        // transport has no channel for Authorization headers today).
         #[cfg(feature = "quinn")]
         let quinn_handle = if let Some(quinn_addr) = self.quinn_addr {
-            info!("Starting QUIC RPC server on {}", quinn_addr);
+            let skip_quic = self.auth_manager.as_ref().is_some_and(|a| {
+                a.is_authentication_required()
+            });
+            if skip_quic {
+                warn!(
+                    "QUIC RPC not started on {}: JSON-RPC authentication is required but QUIC has no Bearer/certificate channel. Use TCP (HTTP) RPC or disable rpc_auth.required for QUIC.",
+                    quinn_addr
+                );
+                None
+            } else {
+                info!("Starting QUIC RPC server on {}", quinn_addr);
 
-            let (quinn_shutdown_tx, mut quinn_shutdown_rx) = mpsc::unbounded_channel();
-            self.quinn_shutdown_tx = Some(quinn_shutdown_tx);
+                let (quinn_shutdown_tx, mut quinn_shutdown_rx) = mpsc::unbounded_channel();
+                self.quinn_shutdown_tx = Some(quinn_shutdown_tx);
 
-            let mut quinn_server = quinn_server::QuinnRpcServer::new(quinn_addr)
-                .with_max_request_size(self.max_request_size_bytes)
-                .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap);
-            if let Some(ref auth_manager) = self.auth_manager {
-                quinn_server = quinn_server.with_auth_manager(Arc::clone(auth_manager));
-            }
+                let mut quinn_server = quinn_server::QuinnRpcServer::new(quinn_addr)
+                    .with_max_request_size(self.max_request_size_bytes)
+                    .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap);
+                if let Some(ref auth_manager) = self.auth_manager {
+                    quinn_server = quinn_server.with_auth_manager(Arc::clone(auth_manager));
+                }
 
-            Some(tokio::spawn(async move {
-                tokio::select! {
-                    result = quinn_server.start() => {
-                        if let Err(e) = result {
-                            error!("QUIC RPC server error: {}", e);
+                Some(tokio::spawn(async move {
+                    tokio::select! {
+                        result = quinn_server.start() => {
+                            if let Err(e) = result {
+                                error!("QUIC RPC server error: {}", e);
+                            }
+                        }
+                        _ = quinn_shutdown_rx.recv() => {
+                            info!("QUIC RPC server shutdown requested");
                         }
                     }
-                    _ = quinn_shutdown_rx.recv() => {
-                        info!("QUIC RPC server shutdown requested");
-                    }
-                }
-            }))
+                }))
+            }
         } else {
             None
         };

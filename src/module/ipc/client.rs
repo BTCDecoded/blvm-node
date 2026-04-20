@@ -6,9 +6,10 @@
 use futures::{SinkExt, StreamExt};
 use std::path::Path;
 use tokio::net::UnixStream;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, warn};
 
+use crate::module::ipc::module_ipc_length_codec;
 use crate::module::ipc::protocol::{
     CorrelationId, InvocationResultMessage, ModuleMessage, RequestMessage, ResponseMessage,
 };
@@ -33,8 +34,8 @@ impl ModuleIpcClient {
 
         let (read_half, write_half) = tokio::io::split(stream);
 
-        let reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
-        let writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+        let reader = FramedRead::new(read_half, module_ipc_length_codec());
+        let writer = FramedWrite::new(write_half, module_ipc_length_codec());
 
         debug!("Connected to node IPC socket");
 

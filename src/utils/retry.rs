@@ -33,7 +33,7 @@ impl RetryConfig {
     /// Create a new retry configuration
     pub fn new(max_attempts: u32, initial_delay: Duration) -> Self {
         Self {
-            max_attempts,
+            max_attempts: max_attempts.max(1),
             initial_delay,
             max_delay: Duration::from_secs(30),
             backoff_multiplier: 2.0,
@@ -67,19 +67,20 @@ where
     F: FnMut() -> Result<T, E>,
     E: std::fmt::Display,
 {
+    let max_attempts = config.max_attempts.max(1);
     let mut delay = config.initial_delay;
     let mut last_error = None;
 
-    for attempt in 0..config.max_attempts {
+    for attempt in 0..max_attempts {
         match operation() {
             Ok(result) => return Ok(result),
             Err(e) => {
                 last_error = Some(e);
-                if attempt < config.max_attempts - 1 {
+                if attempt < max_attempts - 1 {
                     tracing::debug!(
                         "Operation failed (attempt {}/{}): {}. Retrying in {:?}...",
                         attempt + 1,
-                        config.max_attempts,
+                        max_attempts,
                         last_error.as_ref().unwrap(),
                         delay
                     );
@@ -93,7 +94,9 @@ where
         }
     }
 
-    Err(last_error.expect("Should have at least one error"))
+    Err(last_error.expect(
+        "internal error: expected last error after exhausted retries",
+    ))
 }
 
 /// Retry an async operation with exponential backoff
@@ -106,19 +109,20 @@ where
     Fut: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Display,
 {
+    let max_attempts = config.max_attempts.max(1);
     let mut delay = config.initial_delay;
     let mut last_error = None;
 
-    for attempt in 0..config.max_attempts {
+    for attempt in 0..max_attempts {
         match operation().await {
             Ok(result) => return Ok(result),
             Err(e) => {
                 last_error = Some(e);
-                if attempt < config.max_attempts - 1 {
+                if attempt < max_attempts - 1 {
                     tracing::debug!(
                         "Async operation failed (attempt {}/{}): {}. Retrying in {:?}...",
                         attempt + 1,
-                        config.max_attempts,
+                        max_attempts,
                         last_error.as_ref().unwrap(),
                         delay
                     );
@@ -132,7 +136,9 @@ where
         }
     }
 
-    Err(last_error.expect("Should have at least one error"))
+    Err(last_error.expect(
+        "internal error: expected last error after exhausted retries",
+    ))
 }
 
 /// Check if an error is retryable (transient failure)
@@ -150,10 +156,11 @@ where
     Fut: std::future::Future<Output = Result<T, E>>,
     E: IsRetryable + std::fmt::Display,
 {
+    let max_attempts = config.max_attempts.max(1);
     let mut delay = config.initial_delay;
     let mut last_error = None;
 
-    for attempt in 0..config.max_attempts {
+    for attempt in 0..max_attempts {
         match operation().await {
             Ok(result) => return Ok(result),
             Err(e) => {
@@ -163,11 +170,11 @@ where
                 }
 
                 last_error = Some(e);
-                if attempt < config.max_attempts - 1 {
+                if attempt < max_attempts - 1 {
                     tracing::debug!(
                         "Retryable error (attempt {}/{}): {}. Retrying in {:?}...",
                         attempt + 1,
-                        config.max_attempts,
+                        max_attempts,
                         last_error.as_ref().unwrap(),
                         delay
                     );
@@ -181,5 +188,7 @@ where
         }
     }
 
-    Err(last_error.expect("Should have at least one error"))
+    Err(last_error.expect(
+        "internal error: expected last error after exhausted retries",
+    ))
 }

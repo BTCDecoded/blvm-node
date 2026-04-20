@@ -573,20 +573,10 @@ pub enum EventType {
     GovernanceProposalVoted,
     /// Proposal merged
     GovernanceProposalMerged,
-    /// Economic node registered
-    EconomicNodeRegistered,
-    /// Economic node status query/response
-    EconomicNodeStatus,
-    /// Economic node fork decision
-    EconomicNodeForkDecision,
-    /// Economic node veto signal
-    EconomicNodeVeto,
     /// Webhook sent
     WebhookSent,
     /// Webhook delivery failed
     WebhookFailed,
-    /// Veto threshold reached
-    VetoThresholdReached,
     /// Governance fork detected
     GovernanceForkDetected,
 

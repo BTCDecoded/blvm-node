@@ -282,9 +282,7 @@ impl Node {
             .with_dependencies(protocol_arc, storage_arc, mempool_manager_arc),
         );
 
-        // Governance is handled via the blvm-governance module
-        // The module subscribes to governance events (EconomicNodeRegistered, EconomicNodeVeto, etc.)
-        // and handles webhook delivery and economic node tracking
+        // Governance is handled via the blvm-governance module (webhooks, proposal store, etc.)
 
         self.network = network;
         self.config = Some(config.clone());

@@ -302,9 +302,8 @@ impl ModuleManager {
         let api_hub = self.api_hub.clone();
         #[cfg(unix)]
         let ipc_server = self.ipc_server.clone();
-        let mut crash_rx = self.crash_rx.take().expect("Crash receiver already taken");
-        let modules_dir = self.modules_dir.clone();
-        tokio::spawn(async move {
+        if let Some(mut crash_rx) = self.crash_rx.take() {
+            tokio::spawn(async move {
             while let Some((module_name, error)) = crash_rx.recv().await {
                 warn!("Module {} crashed: {}", module_name, error);
 
@@ -464,7 +463,10 @@ impl ModuleManager {
                     }
                 }
             }
-        });
+            });
+        } else {
+            warn!("Module crash receiver already taken; crash events will not be handled");
+        }
 
         info!("Module manager started");
         Ok(())

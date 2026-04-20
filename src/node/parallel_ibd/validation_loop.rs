@@ -791,7 +791,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         MAX_UTXO_FLUSHES_IN_FLIGHT
                     };
                     while utxo_flush_handles.len() >= flush_limit {
-                        let handle = utxo_flush_handles.pop_front().expect("non-empty");
+                        let Some(handle) = utxo_flush_handles.pop_front() else {
+                            return Err(anyhow::anyhow!(
+                                "IBD invariant violated: UTXO flush wait queue empty under backpressure"
+                            ));
+                        };
                         match handle.join() {
                             Ok(Ok(())) => {}
                             Ok(Err(e)) => return Err(e),
@@ -854,7 +858,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             in_flight,
                             pending_blocks.len()
                         );
-                        let handle = flush_handles.pop_front().expect("non-empty");
+                        let Some(handle) = flush_handles.pop_front() else {
+                            return Err(anyhow::anyhow!(
+                                "IBD invariant violated: block storage flush wait queue empty under backpressure"
+                            ));
+                        };
                         match handle.join() {
                             Ok(Ok(())) => {
                                 let waited_ms = wait_start.elapsed().as_millis() as u64;

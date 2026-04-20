@@ -4,9 +4,10 @@ use futures::{SinkExt, StreamExt};
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::windows::named_pipe::ClientOptions;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::debug;
 
+use crate::module::ipc::module_ipc_length_codec;
 use crate::module::ipc::protocol::{
     CorrelationId, InvocationResultMessage, ModuleMessage, RequestMessage, ResponseMessage,
 };
@@ -43,8 +44,8 @@ impl ModuleIpcClient {
             .map_err(|e| ModuleError::IpcError(format!("Failed to connect to pipe: {e}")))?;
 
         let (read_half, write_half) = tokio::io::split(client);
-        let reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
-        let writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+        let reader = FramedRead::new(read_half, module_ipc_length_codec());
+        let writer = FramedWrite::new(write_half, module_ipc_length_codec());
 
         debug!("Connected to node IPC pipe: {}", pipe_name);
 

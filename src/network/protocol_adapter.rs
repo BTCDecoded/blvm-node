@@ -385,9 +385,6 @@ impl ProtocolAdapter {
             ConsensusNetworkMessage::FilteredBlock(_) => "filteredblock",
             ConsensusNetworkMessage::GetBanList(_) => "getbanlist",
             ConsensusNetworkMessage::BanList(_) => "banlist",
-            ConsensusNetworkMessage::EconomicNodeRegistration(_) => "economic_node_registration",
-            ConsensusNetworkMessage::EconomicNodeVeto(_) => "economic_node_veto",
-            ConsensusNetworkMessage::EconomicNodeStatus(_) => "economic_node_status",
         }
     }
 }

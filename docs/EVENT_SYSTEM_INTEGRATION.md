@@ -71,7 +71,7 @@ if stats.unwrap().2 > 100 {  // channel_full_count
 
 **Solution**:
 - **Complete Coverage**: All EventType variants have corresponding EventPayload variants
-- **Governance Events**: All governance events (EconomicNodeRegistered, EconomicNodeStatus, EconomicNodeForkDecision, EconomicNodeVeto) are published
+- **Governance Events**: Governance-related `EventType` variants (for example proposal lifecycle and fork detection) are published when those code paths fire
 - **Network Events**: All network events are published
 - **Lifecycle Events**: All lifecycle events are published
 
@@ -84,15 +84,11 @@ if stats.unwrap().2 > 100 {  // channel_full_count
 - `ChainReorg`: Chain reorganization
 
 ### Governance Events
-- `EconomicNodeRegistered`: Economic node registered
-- `EconomicNodeStatus`: Status query/response
-- `EconomicNodeForkDecision`: Fork decision made
-- `EconomicNodeVeto`: Veto signal sent
 - `GovernanceProposalCreated`: Proposal created
 - `GovernanceProposalVoted`: Vote cast
 - `GovernanceProposalMerged`: Proposal merged
-- `VetoThresholdReached`: Veto threshold reached
-- `GovernanceForkDetected`: Fork detected
+- `WebhookSent` / `WebhookFailed`: Webhook delivery outcome
+- `GovernanceForkDetected`: Governance fork detected
 
 ### Network Events
 - `PeerConnected`: Peer connected
@@ -225,11 +221,11 @@ let subscribers = event_manager.get_subscribers(EventType::NewBlock).await;
 5. Statistics track failed delivery count
 
 ### Scenario 5: Governance Event Flow
-1. Network receives EconomicNodeRegistration
-2. Event published to governance module
-3. Governance module processes event
-4. Governance module may publish additional events
-5. All events delivered via same reliable channel
+1. The node or a module emits a governance-related event (for example `GovernanceProposalCreated`)
+2. Event is published to subscribers (for example the governance module)
+3. Subscribing modules process the event
+4. Modules may publish follow-up events via `EventPublisher`
+5. Delivery uses the same channel semantics as other module events
 
 ## Configuration
 

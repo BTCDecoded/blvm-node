@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, warn};
 
 use async_trait::async_trait;
@@ -22,6 +22,7 @@ use crate::module::ipc::protocol::{
     CliSpec, InvocationMessage, InvocationResultMessage, InvocationResultPayload, InvocationType,
     ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
+use crate::module::ipc::module_ipc_length_codec;
 use crate::module::traits::{module_error_msg, EventType, ModuleError, NodeAPI};
 use tokio::sync::oneshot;
 
@@ -465,8 +466,8 @@ impl ModuleIpcServer {
         A: NodeAPI + Send + Sync,
     {
         let (read_half, write_half) = tokio::io::split(stream);
-        let mut reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
-        let mut writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
+        let mut reader = FramedRead::new(read_half, module_ipc_length_codec());
+        let mut writer = FramedWrite::new(write_half, module_ipc_length_codec());
 
         // Wait for handshake message from module
         let module_id = match reader.next().await {

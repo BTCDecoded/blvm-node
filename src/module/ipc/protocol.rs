@@ -652,29 +652,6 @@ pub enum EventPayload {
         repository: String,
         pr_number: u64,
     },
-    EconomicNodeRegistered {
-        node_id: String,
-        node_type: String, // "miner", "exchange", "service"
-        hashpower_percent: Option<f64>,
-    },
-    EconomicNodeStatus {
-        request_id: String,
-        query_type: String, // "status", "hashpower", "uptime"
-        node_id: Option<String>,
-        response_data: Option<String>, // JSON string with status data
-    },
-    EconomicNodeForkDecision {
-        message_id: String,
-        ruleset_version: String,
-        decision: String, // "adopt", "reject", "abstain"
-        node_id: String,
-        timestamp: u64,
-    },
-    EconomicNodeVeto {
-        proposal_id: String,
-        node_id: String,
-        reason: String,
-    },
     WebhookSent {
         webhook_url: String,
         event_type: String,
@@ -684,10 +661,6 @@ pub enum EventPayload {
         webhook_url: String,
         event_type: String,
         error: String,
-    },
-    VetoThresholdReached {
-        proposal_id: String,
-        veto_percent: f64,
     },
     GovernanceForkDetected {
         fork_id: String,

@@ -326,7 +326,7 @@ pub fn flush_batch_to_disk(
     let mut total_flushed = 0;
     let mut ser_buf = Vec::with_capacity(192);
     for chunk in batch.chunks(MAX_BATCH_OPS) {
-        let mut b = disk.batch();
+        let mut b = disk.batch()?;
         for (key, value_opt) in chunk {
             match value_opt {
                 Some(arc) => {

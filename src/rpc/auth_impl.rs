@@ -167,6 +167,12 @@ impl RpcAuthManager {
         }
     }
 
+    /// Returns true when RPC clients must authenticate (no anonymous access).
+    #[must_use]
+    pub fn is_authentication_required(&self) -> bool {
+        self.auth_required
+    }
+
     /// Add a valid authentication token
     pub async fn add_token(&self, token: String) -> Result<()> {
         let user_id = UserId::Token(AuthToken::new(token.clone()));

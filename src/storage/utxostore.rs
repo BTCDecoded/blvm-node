@@ -543,7 +543,7 @@ impl CachedUtxoStore {
         let count = pending_ops.len();
 
         // Use batch writer for atomic commit
-        let mut batch = self.inner.utxos.batch();
+        let mut batch = self.inner.utxos.batch()?;
 
         for (outpoint, utxo_opt) in pending_ops {
             let key = outpoint_to_key(&outpoint);

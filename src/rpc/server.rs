@@ -1,6 +1,6 @@
 //! JSON-RPC server implementation
 //!
-//! Handles HTTP/WebSocket connections and routes JSON-RPC requests.
+//! HTTP JSON-RPC server: accepts connections and routes JSON-RPC requests.
 //! Uses hyper for secure HTTP handling with proper request size limits.
 
 use anyhow::Result;

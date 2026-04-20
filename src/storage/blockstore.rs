@@ -365,7 +365,7 @@ impl BlockStore {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut batch = self.recent_headers.batch();
+        let mut batch = self.recent_headers.batch()?;
         for &(height, header) in entries {
             let height_bytes = height.to_be_bytes();
             let header_data = bincode::serialize(header)?;
@@ -611,9 +611,9 @@ impl BlockStore {
         }
 
         // Create batch writers for each tree
-        let mut headers_batch = self.headers.batch();
-        let mut heights_batch = self.height_index.batch();
-        let mut hash_to_height_batch = self.hash_to_height.batch();
+        let mut headers_batch = self.headers.batch()?;
+        let mut heights_batch = self.height_index.batch()?;
+        let mut hash_to_height_batch = self.hash_to_height.batch()?;
 
         // Pre-serialize and add to batches
         for (hash, header, height) in entries {

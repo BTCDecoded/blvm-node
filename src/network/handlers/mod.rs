@@ -5,8 +5,6 @@
 pub mod addr;
 pub mod ban_list;
 pub mod bip157;
-#[cfg(feature = "governance")]
-pub mod governance;
 pub mod module;
 pub mod package_relay;
 pub mod payment;
