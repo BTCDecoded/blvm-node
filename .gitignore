@@ -5,6 +5,9 @@
 /target/
 target/
 fuzz/target/
+fuzz/Cargo.lock
+fuzz/artifacts/
+fuzz/corpus/
 examples/**/target/
 modules/**/target/
 

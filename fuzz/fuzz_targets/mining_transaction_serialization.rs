@@ -1,8 +1,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use protocol_engine::serialization::serialize_transaction;
-use protocol_engine::types::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+use blvm_protocol::serialization::transaction::serialize_transaction;
+use blvm_protocol::types::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz transaction serialization
@@ -107,8 +108,11 @@ fuzz_target!(|data: &[u8]| {
         offset += 4;
 
         inputs.push(TransactionInput {
-            prevout: OutPoint { hash, index },
-            script_sig,
+            prevout: OutPoint {
+                hash,
+                index: index.min(u32::MAX as u64) as u32,
+            },
+            script_sig: script_sig.into(),
             sequence: sequence as u64,
         });
     }
@@ -180,7 +184,7 @@ fuzz_target!(|data: &[u8]| {
 
         outputs.push(TransactionOutput {
             value,
-            script_pubkey,
+            script_pubkey: script_pubkey.into(),
         });
     }
 
@@ -199,8 +203,8 @@ fuzz_target!(|data: &[u8]| {
     // Create transaction
     let tx = Transaction {
         version: version as u64,
-        inputs,
-        outputs,
+        inputs: SmallVec::from_vec(inputs),
+        outputs: SmallVec::from_vec(outputs),
         lock_time,
     };
 

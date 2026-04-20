@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use protocol_engine::types::{BlockHeader, Hash, OutPoint, UTXO};
+use blvm_protocol::types::{BlockHeader, OutPoint, UTXO};
 use blvm_node::node::mempool::MempoolManager;
 use blvm_node::rpc::mining::MiningRpc;
 use blvm_node::storage::Storage;
@@ -38,8 +38,8 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    let storage = match Arc::new(Storage::new(temp_dir.path())) {
-        Ok(s) => s,
+    let storage = match Storage::new(temp_dir.path()) {
+        Ok(s) => Arc::new(s),
         Err(_) => return,
     };
 
@@ -137,11 +137,15 @@ fuzz_target!(|data: &[u8]| {
             ]) as u64;
             offset += 4;
 
-            let outpoint = OutPoint { hash, index };
+            let outpoint = OutPoint {
+                hash,
+                index: index.min(u32::MAX as u64) as u32,
+            };
             let utxo = UTXO {
                 value: 100000000, // 1 BTC
-                script_pubkey: vec![0x76, 0xa9, 0x14],
+                script_pubkey: vec![0x76, 0xa9, 0x14].into(),
                 height: 0,
+                is_coinbase: false,
             };
 
             // Ignore errors - just try to add

@@ -1,6 +1,7 @@
 #![no_main]
-use blvm_consensus::{Block, BlockHeader, Hash, Transaction, TransactionOutput};
+use blvm_protocol::{Block, BlockHeader, Transaction, TransactionOutput};
 use libfuzzer_sys::fuzz_target;
+use smallvec::smallvec;
 use blvm_node::network::compact_blocks::{
     calculate_short_tx_id, calculate_tx_hash, create_compact_block, is_quic_transport,
     recommended_compact_block_version, should_prefer_compact_blocks,
@@ -66,13 +67,14 @@ fuzz_target!(|data: &[u8]| {
         header: header.clone(),
         transactions: vec![Transaction {
             version: 1,
-            inputs: vec![],
-            outputs: vec![TransactionOutput {
+            inputs: smallvec![],
+            outputs: smallvec![TransactionOutput {
                 value: 5000000000,
-                script_pubkey: vec![0x51],
+                script_pubkey: vec![0x51].into(),
             }],
             lock_time: 0,
-        }],
+        }]
+        .into_boxed_slice(),
     };
 
     // Test compact block creation - should never panic

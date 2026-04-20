@@ -430,6 +430,111 @@ jobs:
           # See Cargo.toml security note for details
           cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0007 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0009
 
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    needs: [setup, test]
+    runs-on: [self-hosted, Linux, X64, builds]
+    timeout-minutes: 45
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        target:
+          - compact_block_reconstruction
+          - transport_aware_negotiation
+          - protocol_message_parsing
+          - mining_transaction_serialization
+          - mining_block_template
+          - node_mempool_policy
+          - node_rpc_surface
+          - node_miniscript
+          - node_p2p_allowed_frames
+          - node_payment
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Checkout blvm-protocol (sibling for fuzz [patch.crates-io])
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/blvm-protocol
+          path: _temp-blvm-protocol
+      - name: Checkout blvm-consensus (sibling for fuzz [patch.crates-io])
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/blvm-consensus
+          path: _temp-blvm-consensus
+      - name: Checkout blvm-muhash (sibling for fuzz [patch.crates-io])
+        uses: actions/checkout@v4
+        with:
+          repository: BTCDecoded/blvm-muhash
+          path: _temp-blvm-muhash
+      - name: Move sibling crates next to repo root
+        run: |
+          for name in blvm-protocol blvm-consensus blvm-muhash; do
+            if [ -d "../${name}" ]; then rm -rf "../${name}"; fi
+          done
+          mv _temp-blvm-protocol ../blvm-protocol
+          mv _temp-blvm-consensus ../blvm-consensus
+          mv _temp-blvm-muhash ../blvm-muhash
+
+      - name: Install tidesdb native dependencies
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf
+          fi
+
+      - name: Cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: bind-env
+          cache-key: ${{ needs.setup.outputs.cache-key }}
+
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: restore
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install cargo-fuzz
+
+      - name: Initialize corpus dirs
+        working-directory: fuzz
+        run: |
+          chmod +x init_corpus.sh
+          ./init_corpus.sh
+
+      - name: Run cargo-fuzz (${{ matrix.target }})
+        working-directory: fuzz
+        env:
+          RUSTFLAGS: "-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4"
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          timeout 300 cargo +nightly fuzz run "${{ matrix.target }}" -- -max_total_time=120 -timeout=10 -max_len=100000
+
+      - name: Save Cargo cache
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: save
+
   build:
     name: Build
     needs: 
@@ -440,6 +545,7 @@ jobs:
       - docs
       - security
       - verify
+      - fuzz
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       # Use release-fast for PRs, branches — full release only for push to main
@@ -456,7 +562,8 @@ jobs:
        (needs.test.result == 'success' && needs.clippy.result == 'success' && 
         needs.fmt.result == 'success' && needs.docs.result == 'success' && 
         needs.security.result == 'success')) &&
-      (needs.verify.result == 'skipped' || needs.verify.result == 'success')
+      (needs.verify.result == 'skipped' || needs.verify.result == 'success') &&
+      (needs.fuzz.result == 'skipped' || needs.fuzz.result == 'success')
     steps:
       - uses: actions/checkout@v4
       

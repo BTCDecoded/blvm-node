@@ -1,6 +1,8 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use blvm_node::network::protocol::ProtocolParser;
+use blvm_protocol::p2p_framing::BITCOIN_P2P_MAGIC_MAINNET_LE;
+use blvm_protocol::{p2p_frame, TcpFramedParser};
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // Fuzz protocol message parsing with malformed/corrupted data
@@ -10,8 +12,15 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    // Frame-only parse (any command): exercises checksum/header paths beyond node allowlist.
+    let _ = p2p_frame::parse_p2p_frame(data, BITCOIN_P2P_MAGIC_MAINNET_LE, |_| true);
+
     // Test parse_message() - should never panic, should handle errors gracefully
     let result = ProtocolParser::parse_message(data);
+
+    // Protocol-layer parser without going through node shim (same `TcpFramedParser` entry).
+    use blvm_node::network::protocol::ALLOWED_COMMANDS;
+    let _ = TcpFramedParser::parse_message(data, ALLOWED_COMMANDS);
 
     // If parsing succeeds, test round-trip serialization
     if let Ok(message) = result {
