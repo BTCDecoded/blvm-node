@@ -84,8 +84,7 @@ This document defines the security boundaries, threat model, and limitations of 
 
 #### Threats NOT Applicable (Trusted Network)
 - Eclipse attacks
-- Sybil attacks  
-- Eclipse attacks
+- Sybil attacks
 - Network partitioning attacks
 - Malicious peer injection
 
@@ -103,12 +102,11 @@ This document defines the security boundaries, threat model, and limitations of 
 **Threats**: Full Bitcoin network threat model
 
 #### Additional Threats for Mainnet
-- **Eclipse attacks** - malicious peers isolate node
-- **Sybil attacks** - fake peer identities
-- **Network partitioning** - routing attacks
-- **Eclipse attacks** - peer selection manipulation
-- **Resource exhaustion** - memory/CPU DoS
-- **Protocol manipulation** - malformed messages
+- **Eclipse attacks** — malicious peers isolate node
+- **Sybil attacks** — fake peer identities
+- **Network partitioning** — routing attacks
+- **Resource exhaustion** — memory/CPU DoS
+- **Protocol manipulation** — malformed messages
 
 ## Security Limitations
 
@@ -201,7 +199,7 @@ This document defines the security boundaries, threat model, and limitations of 
    - Production mainnet without hardening
 
 2. **Security Warnings**
-   - Do not expose RPC to untrusted networks
+   - **Never expose RPC to untrusted/public networks** without authentication. The node warns at startup when bound to a non-loopback address without auth (`rpc_auth.required = false`); heed the warning.
    - Do not use for financial operations
    - Do not rely on for consensus without audit
    - Do not use sled storage for production
@@ -265,6 +263,6 @@ For production use, additional security hardening, professional audit, and mainn
 
 ---
 
-**Last Updated**: December 2024  
+**Last Updated**: April 2026  
 **Version**: 0.1.0  
 **Status**: Pre-Production Testing
