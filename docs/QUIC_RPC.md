@@ -54,18 +54,23 @@ QUIC RPC requires the `quinn` feature flag:
 blvm-node = { path = "../blvm-node", features = ["quinn"] }
 ```
 
-Or when building:
+Or when checking a build locally (prefer `check` over full `build` on resource-constrained hosts):
 
 ```bash
-cargo build --features quinn
+cargo check --features quinn
 ```
 
 ## Security Notes
 
 - **Self-Signed Certificates**: Currently uses self-signed certificates for development
 - **Production**: Should use proper certificate management for production
-- **Authentication & Rate Limiting**: Quinn RPC uses the same auth and rate-limit model as HTTP RPC. When auth is configured (or rate-limit-only mode is enabled), all QUIC RPC requests are subject to IP-based rate limiting. Auth tokens are not supported over QUIC (no HTTP headers); only IP rate limiting applies.
-- **Same Security Boundaries**: QUIC RPC has same security boundaries as TCP RPC (no wallet access)
+- **Bearer / HTTP auth vs QUIC**: JSON-RPC over QUIC does not carry HTTP `Authorization` headers. **When `rpc_auth.required` is true**, the node **does not start the QUIC JSON-RPC listener** (TCP HTTP JSON-RPC is used for authenticated access). A warning is logged at startup. P2P over QUIC (if enabled elsewhere) is unaffected by this RPC guard.
+- **Optional QUIC RPC without mandatory auth**: If authentication is not required, QUIC RPC is subject to the same **IP-based** rate limiting and optional auth paths as configured; Bearer tokens still cannot be sent like on HTTP—use TCP RPC for header-based credentials.
+- **Same Security Boundaries**: QUIC RPC has the same JSON-RPC surface boundaries as TCP RPC (e.g. no wallet access beyond what RPC exposes)
+
+## P2P QUIC
+
+Transport preferences for peer connections (e.g. `quinn` feature for P2P) are separate from JSON-RPC over QUIC. This document describes **JSON-RPC over QUIC** only.
 
 ## Client Usage
 

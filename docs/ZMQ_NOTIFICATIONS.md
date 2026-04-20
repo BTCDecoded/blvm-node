@@ -71,6 +71,12 @@ Publishes the complete serialized transaction data when a transaction enters or 
 rawtx = "tcp://127.0.0.1:28335"
 ```
 
+#### Wire format for `rawblock` and `rawtx` payloads
+
+Payloads use **Bitcoin P2P wire serialization** from `blvm-protocol` (`serialize_block` / `serialize_tx`): the same encoding as the `block` and `tx` P2P message bodies, **not** `bincode` or other ad hoc encodings.
+
+**Migration:** Older builds published `rawblock`/`rawtx` using **bincode**. Subscribers and tools that assumed bincode bytes must be updated to decode P2P wire format (or re-serialize as needed). Treat this as a **breaking change** when upgrading from those builds.
+
 ### 5. `sequence` - Sequence Notifications
 
 Publishes sequence notifications for mempool events with sequence numbers.
