@@ -103,13 +103,13 @@ impl ApiError {
 
 /// Build "Failed to {context}: {e}" for REST error messages. Use instead of ad hoc format!.
 #[inline]
-pub fn rest_error_failed(context: &str, e: &impl std::fmt::Display) -> String {
+pub fn rest_error_failed(context: &str, e: impl std::fmt::Display) -> String {
     format!("Failed to {}: {}", context, e)
 }
 
 /// Build "Invalid {context}: {e}" for REST error messages. Use instead of ad hoc format!.
 #[inline]
-pub fn rest_error_invalid(context: &str, e: &impl std::fmt::Display) -> String {
+pub fn rest_error_invalid(context: &str, e: impl std::fmt::Display) -> String {
     format!("Invalid {}: {}", context, e)
 }
 

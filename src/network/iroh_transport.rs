@@ -128,6 +128,7 @@ impl Transport for IrohTransport {
             peer_addr: TransportAddr::Iroh(peer_addr_bytes),
             connected: true,
             active_streams: std::collections::HashMap::new(),
+            max_message_length: self.max_message_length,
         })
     }
 }
@@ -196,6 +197,7 @@ pub struct IrohConnection {
     peer_node_id: EndpointId,
     peer_addr: TransportAddr,
     connected: bool,
+    max_message_length: usize,
     /// Active streams per channel (for QUIC stream multiplexing)
     active_streams: std::collections::HashMap<u32, SendStream>,
 }

@@ -1433,7 +1433,7 @@ impl NetworkManager {
                         .lock()
                         .await
                         .iter()
-                        .find_map(|(sock, &ref ta)| if ta == addr { Some(*sock) } else { None })
+                        .find_map(|(sock, &ref ta)| if *ta == addr { Some(*sock) } else { None })
                 }
             };
 

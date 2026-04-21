@@ -613,7 +613,7 @@ impl NodeAPI for NodeApiImpl {
                     #[cfg(feature = "quinn")]
                     TransportAddr::Quinn(addr) => addr.to_string(),
                     #[cfg(feature = "iroh")]
-                    TransportAddr::Iroh(node_id) => format!("iroh:{}", hex::encode(node_id)),
+                    TransportAddr::Iroh(ref node_id) => format!("iroh:{}", hex::encode(node_id)),
                 };
 
                 let transport_type = match transport_addr {
@@ -1599,7 +1599,6 @@ impl NodeAPI for NodeApiImpl {
             } else if peer_addr.starts_with("iroh:") {
                 #[cfg(feature = "iroh")]
                 {
-                    use iroh::net::NodeId;
                     let node_id_str = &peer_addr[5..];
                     let node_id_bytes = hex::decode(node_id_str)
                         .map_err(|e| ModuleError::op_err("Invalid Iroh node ID hex", e))?;
@@ -1610,7 +1609,7 @@ impl NodeAPI for NodeApiImpl {
                     }
                     let mut node_id = [0u8; 32];
                     node_id.copy_from_slice(&node_id_bytes);
-                    TransportAddr::Iroh(node_id)
+                    TransportAddr::Iroh(node_id.to_vec())
                 }
                 #[cfg(not(feature = "iroh"))]
                 return Err(ModuleError::OperationError(
@@ -1678,7 +1677,6 @@ impl NodeAPI for NodeApiImpl {
             } else if peer_addr.starts_with("iroh:") {
                 #[cfg(feature = "iroh")]
                 {
-                    use iroh::net::NodeId;
                     let node_id_str = &peer_addr[5..];
                     let node_id_bytes = hex::decode(node_id_str)
                         .map_err(|e| ModuleError::op_err("Invalid Iroh node ID hex", e))?;
@@ -1689,7 +1687,7 @@ impl NodeAPI for NodeApiImpl {
                     }
                     let mut node_id = [0u8; 32];
                     node_id.copy_from_slice(&node_id_bytes);
-                    TransportAddr::Iroh(node_id)
+                    TransportAddr::Iroh(node_id.to_vec())
                 }
                 #[cfg(not(feature = "iroh"))]
                 return Err(ModuleError::OperationError(

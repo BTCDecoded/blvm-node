@@ -244,8 +244,8 @@ impl Migrator {
             if hash_bytes.len() != 32 {
                 continue;
             }
-            let hash: Hash = TryFrom::try_from(hash_bytes.as_ref())
-                .map_err(|_| anyhow::anyhow!("Invalid hash length in height_index"))?;
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(hash_bytes.as_ref());
 
             if let Ok(Some(block)) = reader.read_block(&hash) {
                 if blockstore.store_block(&block).is_err() {

@@ -144,7 +144,7 @@ impl PaymentRpc {
             PaymentError::ProcessingError("Missing 'payment_request_id' parameter".to_string())
         })?;
 
-        let state = state_machine.get_payment_state(payment_request_id).await?;
+        let state = state_machine.get_payment_state(&payment_request_id).await?;
 
         // Convert state to JSON
         let state_json = match &state {

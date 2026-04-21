@@ -5,7 +5,7 @@
 
 use crate::network::network_manager::NetworkManager;
 use crate::network::peer;
-use crate::network::transport::{Transport, TransportAddr};
+use crate::network::transport::{Transport, TransportAddr, TransportListener};
 use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
@@ -289,15 +289,29 @@ pub(crate) async fn start_iroh_listener(
     nm: &NetworkManager,
     listen_addr: SocketAddr,
 ) -> Result<()> {
-    let iroh_transport = nm.iroh_transport().lock().ok().and_then(|g| g.as_ref());
-
-    let Some(iroh_transport) = iroh_transport else {
-        return Ok(());
+    let listen_result = {
+        let guard = match nm.iroh_transport().lock() {
+            Ok(g) => g,
+            Err(_) => return Ok(()),
+        };
+        let Some(transport) = guard.as_ref() else {
+            return Ok(());
+        };
+        transport.listen(listen_addr).await
     };
 
-    match iroh_transport.listen(listen_addr).await {
-        Ok(mut iroh_listener) => {
-            info!("Iroh listener started on {}", listen_addr);
+    let mut iroh_listener = match listen_result {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(
+                "Failed to start Iroh listener (graceful degradation): {}",
+                e
+            );
+            return Ok(());
+        }
+    };
+
+    info!("Iroh listener started on {}", listen_addr);
             let peer_tx = nm.peer_tx().clone();
             let peer_manager = Arc::clone(nm.peer_manager_mutex());
             let dos_protection = Arc::clone(nm.dos_protection());
@@ -413,14 +427,6 @@ pub(crate) async fn start_iroh_listener(
                     }
                 }
             });
-        }
-        Err(e) => {
-            warn!(
-                "Failed to start Iroh listener (graceful degradation): {}",
-                e
-            );
-        }
-    }
 
     Ok(())
 }
