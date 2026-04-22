@@ -879,5 +879,5 @@ All methods return JSON-RPC 2.0 error responses on failure:
 ## Related Documentation
 
 - [High Availability](HIGH_AVAILABILITY.md) - Health checks and metrics
-- [Configuration reference](../blvm-docs/src/reference/configuration-reference.md) (mdBook source in **blvm-docs** sibling repo)
+- [Configuration reference](https://docs.thebitcoincommons.org/reference/configuration-reference.html) ([BLVM Documentation](https://docs.thebitcoincommons.org/))
 - [Module System](MODULE_SYSTEM.md) - Module system documentation

@@ -7,7 +7,7 @@
 
 Minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for consensus decisions.
 
-> **📚 Comprehensive Documentation**: See [blvm-docs](../blvm-docs/) for complete system documentation.  
+> **📚 Comprehensive Documentation**: See [docs.thebitcoincommons.org](https://docs.thebitcoincommons.org/) (source repo: [blvm-docs](https://github.com/BTCDecoded/blvm-docs)).  
 > **For verified system status**: See [SYSTEM_STATUS.md](https://github.com/BTCDecoded/.github/blob/main/SYSTEM_STATUS.md) in the BTCDecoded organization repository.
 
 Provides a minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for all consensus decisions. Adds only non-consensus infrastructure: storage, networking, RPC, and orchestration.

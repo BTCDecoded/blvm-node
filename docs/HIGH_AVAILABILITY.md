@@ -312,4 +312,4 @@ readinessProbe:
 
 - [RPC Reference](RPC_REFERENCE.md) - Complete RPC API
 - [Configuration Guide](CONFIGURATION_GUIDE.md) - Node configuration (this repo)
-- [Production mainnet node](../blvm-docs/src/getting-started/first-node.md#production-mainnet-node) (mdBook source in **blvm-docs** sibling repo)
+- [Production mainnet node](https://docs.thebitcoincommons.org/getting-started/first-node.html#production-mainnet-node) ([BLVM Documentation](https://docs.thebitcoincommons.org/))
