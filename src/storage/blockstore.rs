@@ -822,7 +822,7 @@ impl BlockStore {
     pub fn remove_block_body(&self, hash: &Hash) -> Result<()> {
         if let Some(h) = self.get_height_by_hash(hash)? {
             let k = block_height_row_key(h, hash);
-            let _ = self.blocks.remove(&k)?;
+            self.blocks.remove(&k)?;
         }
         self.blocks.remove(hash.as_slice())?;
         Ok(())
@@ -832,7 +832,7 @@ impl BlockStore {
     pub fn remove_witness(&self, hash: &Hash) -> Result<()> {
         if let Some(h) = self.get_height_by_hash(hash)? {
             let k = block_height_row_key(h, hash);
-            let _ = self.witnesses.remove(&k)?;
+            self.witnesses.remove(&k)?;
         }
         self.witnesses.remove(hash.as_slice())?;
         Ok(())

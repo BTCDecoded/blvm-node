@@ -1234,7 +1234,7 @@ pub mod rocksdb_impl {
             let max_subcompactions: u32 = std::env::var("BLVM_ROCKSDB_MAX_SUBCOMPACTIONS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| {
+                .unwrap_or({
                     if total_ram_gb >= 32 {
                         4
                     } else if total_ram_gb >= 24 {
@@ -1339,7 +1339,7 @@ pub mod rocksdb_impl {
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&n| n > 0 && n <= 16_384)
-                .unwrap_or_else(|| {
+                .unwrap_or({
                     if total_ram_gb >= 64 {
                         2048
                     } else if total_ram_gb >= 32 {

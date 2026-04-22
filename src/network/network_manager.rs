@@ -1475,7 +1475,7 @@ impl NetworkManager {
 
         // Publish MessageSent event for module subscribers
         if let Some(ref ep) = *self.event_publisher.lock().await {
-            let addr_str = format!("{:?}", addr);
+            let addr_str = format!("{addr:?}");
             let ep_clone = Arc::clone(ep);
             let msg_type_clone = msg_type.clone();
             tokio::spawn(async move {

@@ -299,7 +299,7 @@ impl ControlRpc {
             .map_err(|e| RpcError::internal_error(e.to_string()))?;
         let config = crate::module::loader::ModuleLoader::load_module_config(
             name,
-            &discovered.directory.join("config.toml"),
+            discovered.directory.join("config.toml"),
         )
         .map_err(|e| RpcError::internal_error(e.to_string()))?;
         manager
@@ -351,7 +351,7 @@ impl ControlRpc {
             .map_err(|e| RpcError::internal_error(e.to_string()))?;
         let config = crate::module::loader::ModuleLoader::load_module_config(
             name,
-            &discovered.directory.join("config.toml"),
+            discovered.directory.join("config.toml"),
         )
         .map_err(|e| RpcError::internal_error(e.to_string()))?;
         manager

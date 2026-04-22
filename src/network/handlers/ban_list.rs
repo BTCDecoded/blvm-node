@@ -161,11 +161,11 @@ impl NetworkManager {
                     if entry.unban_timestamp == u64::MAX {
                         ban_list.insert(socket_addr, u64::MAX);
                         merged_count += 1;
-                    } else if existing_timestamp != u64::MAX {
-                        if entry.unban_timestamp > existing_timestamp {
-                            ban_list.insert(socket_addr, entry.unban_timestamp);
-                            merged_count += 1;
-                        }
+                    } else if existing_timestamp != u64::MAX
+                        && entry.unban_timestamp > existing_timestamp
+                    {
+                        ban_list.insert(socket_addr, entry.unban_timestamp);
+                        merged_count += 1;
                     }
                 }
                 None => {

@@ -20,8 +20,7 @@ pub fn param_str_required(
 ) -> Result<String, RpcError> {
     param_str(params, index).map(String::from).ok_or_else(|| {
         RpcError::invalid_params(format!(
-            "Expected string at params[{}] for {}",
-            index, method_name
+            "Expected string at params[{index}] for {method_name}"
         ))
     })
 }

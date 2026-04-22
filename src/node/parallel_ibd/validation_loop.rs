@@ -3,8 +3,6 @@
 //! Reads blocks from the feeder buffer, validates them, applies UTXO deltas,
 //! and flushes to storage in batches. Extracted from parallel_ibd/mod.rs.
 
-#![cfg(feature = "production")]
-
 use super::feeder::FeederState;
 use super::memory::{self, MemoryGuard, PressureLevel};
 use crate::storage::blockstore::BlockStore;
@@ -107,7 +105,7 @@ fn dynamic_prefetch_lookahead(level: PressureLevel, nominal: usize) -> usize {
     let n = nominal.clamp(1, 128);
     match level {
         PressureLevel::Emergency => 8,
-        PressureLevel::Critical => (n / 2).max(12).min(48),
+        PressureLevel::Critical => (n / 2).clamp(12, 48),
         PressureLevel::Elevated => ((n * 2 / 3).max(24)).min(n),
         PressureLevel::None => n,
     }

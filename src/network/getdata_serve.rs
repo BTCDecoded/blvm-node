@@ -50,9 +50,9 @@ impl NetworkManager {
         for item in &getdata.inventory {
             match item.inv_type {
                 MSG_BLOCK => {
-                    let res = if self.block_serve_maintenance_mode() {
-                        Ok(None)
-                    } else if self.is_block_serve_denied(&item.hash) {
+                    let res = if self.block_serve_maintenance_mode()
+                        || self.is_block_serve_denied(&item.hash)
+                    {
                         Ok(None)
                     } else {
                         build_block_wire(&blockstore, &item.hash, protocol_version)
@@ -139,7 +139,7 @@ fn build_block_wire(
     let Some(height) = blockstore.get_height_by_hash(hash)? else {
         return Ok(None);
     };
-    let ts = block.header.timestamp as u64;
+    let ts = block.header.timestamp;
     let registry = FeatureRegistry::for_protocol(protocol_version);
     let segwit_on = registry.is_feature_active("segwit", height, ts);
     let witnesses = match blockstore.get_witness(hash)? {

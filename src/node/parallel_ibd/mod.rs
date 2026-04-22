@@ -595,7 +595,7 @@ impl ParallelIBD {
                 .max_concurrent_per_peer
                 .max(self.config.max_blocks_in_transit_per_peer);
             const PIPELINE_HORIZON_FOR_CAP: usize = 32;
-            let h = pipeline.min(PIPELINE_HORIZON_FOR_CAP).max(1);
+            let h = pipeline.clamp(1, PIPELINE_HORIZON_FOR_CAP);
             let base = bl.saturating_mul(4);
             let parallel = total_download_workers.saturating_mul(h).saturating_mul(2);
             let floor = if mem_guard.system_total_ram_mb() <= 16 * 1024 {
@@ -671,8 +671,11 @@ impl ParallelIBD {
                 "IBD v2: IbdUtxoStore (DashMap, zero lock, max_cache={} entries)",
                 effective_max_entries
             );
-            let eviction =
-                crate::storage::ibd_utxo_store::EvictionStrategy::from_str(&self.config.eviction);
+            let eviction: crate::storage::ibd_utxo_store::EvictionStrategy = self
+                .config
+                .eviction
+                .parse()
+                .unwrap_or(crate::storage::ibd_utxo_store::EvictionStrategy::Fifo);
             let utxo_disk_baseline = storage
                 .chain()
                 .get_utxo_watermark()

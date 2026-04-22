@@ -8,14 +8,11 @@ on:
   release:
     types: [published]
   repository_dispatch:
-    types: [upstream-changed]
+    types: [build-chain, upstream-changed]
+  # Manual runs use the same `skip_tests` input as blvm-consensus / blvm-protocol; commit
+  # [skip_tests], [skip_docs], [skip_verify], [skip_fuzz] on push.
   workflow_dispatch:
     inputs:
-      skip_verification:
-        description: 'Skip blvm-spec-lock verification and attestation steps'
-        required: false
-        type: boolean
-        default: false
       skip_tests:
         description: 'Skip test execution and coverage steps'
         required: false
@@ -47,6 +44,8 @@ jobs:
     steps:
       - name: Disk check
         uses: BTCDecoded/rust-ci/runner-disk-guard@main
+        with:
+          show-df: false
 
       - uses: actions/checkout@v4
       
@@ -124,6 +123,8 @@ jobs:
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
       (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
@@ -189,7 +190,9 @@ jobs:
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
-      ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
       
@@ -237,7 +240,9 @@ jobs:
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
-      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verification != 'true')
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_verify]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
       
@@ -335,7 +340,9 @@ jobs:
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
-      ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
       
@@ -362,7 +369,9 @@ jobs:
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
-      ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_docs]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
       
@@ -403,7 +412,10 @@ jobs:
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
-        !contains(github.event.head_commit.message, '[no ci]')))
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
       
@@ -427,22 +439,21 @@ jobs:
           # See Cargo.toml security note for details
           cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0007 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0009
 
-  fuzz:
-    name: Fuzz (shard ${{ matrix.shard }}/2)
-    needs: [setup, test]
+  # Fuzz is skippable via `[skip_fuzz]` on push (skips fuzz-build + all fuzz shards). Fuzz does not
+  # need `test` so `[skip_tests]` can still run libFuzzer.
+  fuzz-build:
+    name: Fuzz (build once)
+    needs: [setup]
     runs-on: [self-hosted, Linux, X64, builds]
-    timeout-minutes: 45
+    timeout-minutes: 60
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_fuzz]')) &&
       (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        shard: [0, 1]
     steps:
       - uses: actions/checkout@v4
 
@@ -508,21 +519,71 @@ jobs:
           chmod +x init_corpus.sh
           ./init_corpus.sh
 
-      # One `fuzz build` compiles all fuzz bins and shared deps once per shard job (see fuzz/TARGETS.md).
-      - name: Build all fuzz binaries (once per shard job)
+      # Do not set RUSTFLAGS here: cargo-fuzz already injects sancov + ASAN; duplicating
+      # -Cpasses=sancov-module breaks the link step (sancov ctors discarded with --gc-sections).
+      - name: Build all fuzz binaries (once per workflow)
         working-directory: fuzz
-        env:
-          RUSTFLAGS: "-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4"
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo +nightly fuzz build
 
-      - name: Run cargo-fuzz (TARGETS.md shard)
+      - name: Save Cargo cache
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: save
+
+      - name: Stash fuzz target for shard jobs
+        run: |
+          STASH="/tmp/gh-fuzz-blvm-node/${GITHUB_RUN_ID}"
+          rm -rf "$STASH"
+          mkdir -p "$STASH"
+          cp -a fuzz/target "$STASH/"
+
+  fuzz:
+    name: Fuzz (shard ${{ matrix.shard }}/2)
+    needs: [setup, fuzz-build]
+    runs-on: [self-hosted, Linux, X64, builds]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1]
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_fuzz]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    steps:
+      - uses: actions/checkout@v4
+
+      # Shards only run prebuilt libFuzzer binaries from fuzz-build (no Cargo/rustup in the hot path).
+
+      - name: Initialize corpus dirs
+        working-directory: fuzz
+        run: |
+          chmod +x init_corpus.sh
+          ./init_corpus.sh
+
+      - name: Restore fuzz target from shared stash
+        run: |
+          STASH="/tmp/gh-fuzz-blvm-node/${GITHUB_RUN_ID}"
+          if [ ! -d "$STASH/target" ]; then
+            echo "Expected $STASH/target from fuzz-build (same GITHUB_RUN_ID, shared /tmp on runner pool)"
+            exit 1
+          fi
+          rm -rf fuzz/target
+          cp -a "$STASH/target" fuzz/target
+
+      - name: Run libFuzzer binaries (TARGETS.md shard)
         working-directory: fuzz
         env:
-          RUSTFLAGS: "-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4"
+          ASAN_OPTIONS: detect_odr_violation=0
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
           mapfile -t bins < <(grep -v '^#' TARGETS.md | grep -v '^$' || true)
           shard=${{ matrix.shard }}
           shards=2
@@ -533,18 +594,17 @@ jobs:
               continue
             fi
             ((idx++)) || true
-            echo "=== shard $shard: cargo-fuzz run $t ==="
-            timeout 210 cargo +nightly fuzz run "$t" -- \
+            echo "=== shard $shard/$shards: $t ==="
+            bin="$PWD/target/x86_64-unknown-linux-gnu/release/$t"
+            if [ ! -x "$bin" ]; then
+              echo "missing executable $bin"
+              exit 1
+            fi
+            timeout 210 "$bin" "corpus/$t" -- \
               -max_total_time=120 \
               -timeout=10 \
               -max_len=100000
           done
-
-      - name: Save Cargo cache
-        if: always()
-        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
-        with:
-          operation: save
 
   build:
     name: Build
@@ -556,6 +616,7 @@ jobs:
       - docs
       - security
       - verify
+      - fuzz-build
       - fuzz
     runs-on: [self-hosted, Linux, X64, builds]
     env:
@@ -570,11 +631,14 @@ jobs:
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
       ((github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true') ||
-       (needs.test.result == 'success' && needs.clippy.result == 'success' && 
-        needs.fmt.result == 'success' && needs.docs.result == 'success' && 
-        needs.security.result == 'success')) &&
+       ((needs.test.result == 'success' || needs.test.result == 'skipped') &&
+        (needs.clippy.result == 'success' || needs.clippy.result == 'skipped') &&
+        (needs.fmt.result == 'success' || needs.fmt.result == 'skipped') &&
+        (needs.docs.result == 'success' || needs.docs.result == 'skipped') &&
+        (needs.security.result == 'success' || needs.security.result == 'skipped'))) &&
       (needs.verify.result == 'skipped' || needs.verify.result == 'success') &&
-      (needs.fuzz.result == 'skipped' || needs.fuzz.result == 'success')
+      ((needs.fuzz-build.result == 'success' && needs.fuzz.result == 'success') ||
+       (needs.fuzz-build.result == 'skipped' && needs.fuzz.result == 'skipped'))
     steps:
       - uses: actions/checkout@v4
       
@@ -633,7 +697,7 @@ jobs:
 
   release:
     name: Release
-    needs: [build, test, clippy, fmt, docs, security]
+    needs: [build, test, clippy, fmt, docs, security, verify, fuzz-build, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
     if: |
       always() &&
@@ -646,9 +710,14 @@ jobs:
         !contains(github.event.head_commit.message, '[no ci]') &&
         !contains(github.event.head_commit.message, '[skip release]'))) &&
       ((github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true') ||
-       (needs.test.result == 'success' && needs.clippy.result == 'success' && 
-        needs.fmt.result == 'success' && needs.docs.result == 'success' && 
-        needs.security.result == 'success'))
+       ((needs.test.result == 'success' || needs.test.result == 'skipped') &&
+        (needs.clippy.result == 'success' || needs.clippy.result == 'skipped') &&
+        (needs.fmt.result == 'success' || needs.fmt.result == 'skipped') &&
+        (needs.docs.result == 'success' || needs.docs.result == 'skipped') &&
+        (needs.security.result == 'success' || needs.security.result == 'skipped') &&
+        (needs.verify.result == 'success' || needs.verify.result == 'skipped'))) &&
+      ((needs.fuzz-build.result == 'success' && needs.fuzz.result == 'success') ||
+       (needs.fuzz-build.result == 'skipped' && needs.fuzz.result == 'skipped'))
     permissions:
       contents: write
       id-token: write
@@ -774,19 +843,14 @@ jobs:
             exit 1
           fi
           
-          # Add -unverified suffix if verification is skipped
-          # Add -unverified suffix if verification OR tests are skipped
-          # (untested counts as unverified)
-          # Check if we're in workflow_dispatch mode
+          # -unverified when manual run skipped tests (same knob as other BLVM CIs: verify uses skip_tests on dispatch)
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            SKIP_VERIFICATION="${{ github.event.inputs.skip_verification }}"
             SKIP_TESTS="${{ github.event.inputs.skip_tests }}"
           else
-            SKIP_VERIFICATION="false"
             SKIP_TESTS="false"
           fi
           
-          if [ "$SKIP_VERIFICATION" = "true" ] || [ "$SKIP_TESTS" = "true" ]; then
+          if [ "$SKIP_TESTS" = "true" ]; then
             VERSION_TAG="v${VERSION}-unverified"
             echo "⚠️  Releasing UNVERIFIED version: ${VERSION_TAG}"
           else
@@ -852,6 +916,15 @@ jobs:
           echo ""
           echo "Patch section check:"
           grep -A 5 "^\[patch\.crates-io\]" Cargo.toml.release || echo "  ✅ [patch.crates-io] removed - using published crates"
+      
+      # Same post-edit check as other BLVM repos (see CI / release unification): manifest must parse
+      # before package/publish. Full compile is still gated by `cargo package` / `cargo publish --dry-run`.
+      - name: Pre-release manifest smoke (crates.io Cargo.toml)
+        run: |
+          cp Cargo.toml Cargo.toml.__ci_worktree
+          cp Cargo.toml.release Cargo.toml
+          cargo metadata --format-version 1 --no-deps > /dev/null
+          mv Cargo.toml.__ci_worktree Cargo.toml
       
       - name: Check for crates.io token
         run: |
@@ -1005,7 +1078,7 @@ jobs:
           done
       
       - name: Download attestation artifacts
-        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
         uses: actions/download-artifact@v4
         with:
           pattern: '*-attestation-data'
@@ -1013,7 +1086,7 @@ jobs:
           path: attestation-data
       
       - name: Collect build metadata for attestation
-        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
         id: metadata
         run: |
           # Get toolchain versions
@@ -1078,7 +1151,7 @@ jobs:
           echo "  Cargo.lock hash: $CARGO_LOCK_HASH"
       
       - name: Create build attestation
-        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
         id: attestation
         run: |
           # Create predicate JSON file
@@ -1097,7 +1170,7 @@ jobs:
           cat predicate.json
       
       - name: Upload build metadata
-        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: build-metadata
@@ -1105,7 +1178,7 @@ jobs:
           retention-days: 365
       
       - name: Attest build provenance
-        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.skip_verification != 'true' && github.event.inputs.skip_tests != 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: "blvm-node"

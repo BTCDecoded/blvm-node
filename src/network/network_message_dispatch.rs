@@ -45,7 +45,7 @@ pub(crate) async fn handle_network_message(
         NetworkMessage::RawMessageReceived(data, peer_addr) => {
             ignore_error(
                 || nm.handle_incoming_wire_tcp(peer_addr, data),
-                &format!("Error processing raw message from {}", peer_addr),
+                &format!("Error processing raw message from {peer_addr}"),
             )
             .await;
         }
@@ -69,28 +69,28 @@ pub(crate) async fn handle_network_message(
         NetworkMessage::GetCfiltersReceived(data, peer_addr) => {
             ignore_error(
                 || nm.handle_getcfilters_request(data, peer_addr),
-                &format!("Error handling GetCfilters from {}", peer_addr),
+                &format!("Error handling GetCfilters from {peer_addr}"),
             )
             .await;
         }
         NetworkMessage::GetCfheadersReceived(data, peer_addr) => {
             ignore_error(
                 || nm.handle_getcfheaders_request(data, peer_addr),
-                &format!("Error handling GetCfheaders from {}", peer_addr),
+                &format!("Error handling GetCfheaders from {peer_addr}"),
             )
             .await;
         }
         NetworkMessage::GetCfcheckptReceived(data, peer_addr) => {
             ignore_error(
                 || nm.handle_getcfcheckpt_request(data, peer_addr),
-                &format!("Error handling GetCfcheckpt from {}", peer_addr),
+                &format!("Error handling GetCfcheckpt from {peer_addr}"),
             )
             .await;
         }
         NetworkMessage::PkgTxnReceived(data, peer_addr) => {
             ignore_error(
                 || nm.handle_pkgtxn_request(data, peer_addr),
-                &format!("Error handling PkgTxn from {}", peer_addr),
+                &format!("Error handling PkgTxn from {peer_addr}"),
             )
             .await;
         }
@@ -108,7 +108,7 @@ pub(crate) async fn handle_network_message(
             };
             ignore_error(
                 || nm.handle_get_module(peer_addr, protocol_msg),
-                &format!("Error handling GetModule from {}", peer_addr),
+                &format!("Error handling GetModule from {peer_addr}"),
             )
             .await;
         }
@@ -127,7 +127,7 @@ pub(crate) async fn handle_network_message(
             };
             ignore_error(
                 || nm.handle_get_module_by_hash(peer_addr, protocol_msg),
-                &format!("Error handling GetModuleByHash from {}", peer_addr),
+                &format!("Error handling GetModuleByHash from {peer_addr}"),
             )
             .await;
         }
@@ -146,7 +146,7 @@ pub(crate) async fn handle_network_message(
             };
             ignore_error(
                 || nm.handle_get_module_list(peer_addr, protocol_msg),
-                &format!("Error handling GetModuleList from {}", peer_addr),
+                &format!("Error handling GetModuleList from {peer_addr}"),
             )
             .await;
         }
@@ -164,7 +164,7 @@ pub(crate) async fn handle_network_message(
             };
             ignore_error(
                 || nm.handle_get_payment_request(peer_addr, protocol_msg),
-                &format!("Error handling GetPaymentRequest from {}", peer_addr),
+                &format!("Error handling GetPaymentRequest from {peer_addr}"),
             )
             .await;
         }
@@ -178,7 +178,7 @@ pub(crate) async fn handle_network_message(
             };
             ignore_error(
                 || nm.handle_payment(peer_addr, protocol_msg),
-                &format!("Error handling Payment from {}", peer_addr),
+                &format!("Error handling Payment from {peer_addr}"),
             )
             .await;
         }
@@ -240,7 +240,7 @@ pub(crate) async fn handle_network_message(
         NetworkMessage::GetUTXOSetReceived(data, peer_addr) => {
             ignore_error(
                 || nm.handle_get_utxo_set_request(data, peer_addr),
-                &format!("Error handling GetUTXOSet from {}", peer_addr),
+                &format!("Error handling GetUTXOSet from {peer_addr}"),
             )
             .await;
         }
@@ -248,7 +248,7 @@ pub(crate) async fn handle_network_message(
         NetworkMessage::GetFilteredBlockReceived(data, peer_addr) => {
             ignore_error(
                 || nm.handle_get_filtered_block_request(data, peer_addr),
-                &format!("Error handling GetFilteredBlock from {}", peer_addr),
+                &format!("Error handling GetFilteredBlock from {peer_addr}"),
             )
             .await;
         }

@@ -145,8 +145,7 @@ impl ModuleDiscovery {
                 // Security: Ensure resolved path stays within modules_dir (prevents path traversal)
                 let canonical_binary = candidate.canonicalize().map_err(|e| {
                     ModuleError::OperationError(format!(
-                        "Failed to canonicalize binary path {:?}: {e}",
-                        candidate
+                        "Failed to canonicalize binary path {candidate:?}: {e}"
                     ))
                 })?;
 

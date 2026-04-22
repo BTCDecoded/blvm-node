@@ -2,8 +2,6 @@
 //!
 //! Used by `blvm migrate core`.
 
-#![cfg(feature = "rocksdb")]
-
 use anyhow::Result;
 use std::path::PathBuf;
 

@@ -32,7 +32,7 @@ impl BlockNotFoundError {
 impl std::fmt::Display for BlockNotFoundError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.0.is_empty() {
-            write!(f, "{}", BLOCK_NOT_FOUND_MSG)
+            write!(f, "{BLOCK_NOT_FOUND_MSG}")
         } else {
             write!(f, "{}: {}", BLOCK_NOT_FOUND_MSG, self.0)
         }
@@ -189,7 +189,7 @@ impl RpcError {
             if hash.is_empty() {
                 BLOCK_NOT_FOUND_MSG.to_string()
             } else {
-                format!("{}: {}", BLOCK_NOT_FOUND_MSG, hash)
+                format!("{BLOCK_NOT_FOUND_MSG}: {hash}")
             },
         )
     }
@@ -201,7 +201,7 @@ impl RpcError {
             if txid.is_empty() {
                 TX_NOT_FOUND_MSG.to_string()
             } else {
-                format!("{}: {}", TX_NOT_FOUND_MSG, txid)
+                format!("{TX_NOT_FOUND_MSG}: {txid}")
             },
         )
     }

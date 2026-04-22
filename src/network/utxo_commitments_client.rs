@@ -174,7 +174,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             // Get peer_states Arc first, then drop RwLock before Mutex lock
             let peer_states_arc = {
                 let network = network_manager.read().await;
-                Arc::clone(&network.peer_states())
+                Arc::clone(network.peer_states())
             };
 
             // Get peer version to check capabilities - now safe to lock RwLock

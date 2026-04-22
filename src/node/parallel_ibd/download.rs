@@ -36,7 +36,7 @@ fn try_load_local_ibd_block(
         return Ok(None);
     }
     let registry = FeatureRegistry::for_protocol(protocol_version);
-    let ts = block.header.timestamp as u64;
+    let ts = block.header.timestamp;
     let segwit_on = registry.is_feature_active("segwit", height, ts);
     let witnesses = match blockstore.get_witness(&expected_hash)? {
         Some(w) => w,

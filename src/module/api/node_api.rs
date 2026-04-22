@@ -1847,11 +1847,9 @@ impl NodeAPI for NodeApiImpl {
         let coinbase_script_bytes = coinbase_script.unwrap_or_default();
         let coinbase_address_bytes = coinbase_address
             .map(|a| {
-                if a.starts_with("hex:") {
-                    hex::decode(&a[4..]).unwrap_or_default()
-                } else {
-                    a.into_bytes()
-                }
+                a.strip_prefix("hex:")
+                    .map(|h| hex::decode(h).unwrap_or_default())
+                    .unwrap_or_else(|| a.into_bytes())
             })
             .unwrap_or_default();
 

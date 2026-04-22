@@ -67,7 +67,7 @@ fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
                     let p = if prefix.is_empty() {
                         k.clone()
                     } else {
-                        format!("{}.{}", prefix, k)
+                        format!("{prefix}.{k}")
                     };
                     flatten(&p, val, out);
                 }
@@ -77,13 +77,10 @@ fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
             }
         }
     }
-    match value {
-        Value::Table(t) => {
-            for (k, v) in t {
-                flatten(k, v, &mut result);
-            }
+    if let Value::Table(t) = value {
+        for (k, v) in t {
+            flatten(k, v, &mut result);
         }
-        _ => {}
     }
     result
 }
@@ -813,15 +810,11 @@ fn expand_tilde_path(s: &str) -> String {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "~".to_string());
     }
-    if s.starts_with("~/") || s.starts_with("~\\") {
-        if let Some(home) = dirs::home_dir() {
-            let rest = if s.starts_with("~/") {
-                &s[2..]
-            } else {
-                &s[2..]
-            };
-            return home.join(rest).to_string_lossy().into_owned();
-        }
+    if let (Some(home), Some(rest)) = (
+        dirs::home_dir(),
+        s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")),
+    ) {
+        return home.join(rest).to_string_lossy().into_owned();
     }
     s.to_string()
 }

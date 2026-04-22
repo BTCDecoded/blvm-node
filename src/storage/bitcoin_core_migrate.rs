@@ -2,8 +2,6 @@
 //!
 //! Used by `blvm migrate core` and the standalone migrate-bitcoin-core binary.
 
-#![cfg(feature = "rocksdb")]
-
 use super::bitcoin_core_blocks::BitcoinCoreBlockReader;
 use super::bitcoin_core_detection::{BitcoinCoreDetection, BitcoinCoreNetwork};
 use super::bitcoin_core_format::{convert_key, get_key_prefix, parse_block_index, parse_coin};

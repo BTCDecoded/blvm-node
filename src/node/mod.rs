@@ -212,9 +212,7 @@ impl Node {
                 "off"
             };
             if height > 0 {
-                let hash_s = hash
-                    .map(|h| hex::encode(h))
-                    .unwrap_or_else(|| "none".to_string());
+                let hash_s = hash.map(hex::encode).unwrap_or_else(|| "none".to_string());
                 info!(
                     "Consensus assume-valid: height={} hash={} source={} (blocks before this height may skip script checks per network policy)",
                     height, hash_s, source
@@ -430,7 +428,7 @@ impl Node {
 
         // Create early event publisher for RPC (BlockchainRpc needs it for invalidateblock → BlockDisconnected)
         // Must be done before rpc.start() so BlockchainRpc gets event_publisher
-        if let Some(ref module_manager) = self
+        if let Some(module_manager) = self
             .module_subsystem
             .as_ref()
             .and_then(|s| s.module_manager.as_ref())
@@ -972,7 +970,7 @@ impl Node {
         };
 
         // Start module manager if enabled
-        if let Some(ref module_manager) = self
+        if let Some(module_manager) = self
             .module_subsystem
             .as_ref()
             .and_then(|s| s.module_manager.as_ref())
@@ -1042,7 +1040,7 @@ impl Node {
                         Ok(mut processor) => {
                             // Connect module registry to payment processor
                             processor =
-                                processor.with_module_registry(Arc::clone(&module_registry_arc));
+                                processor.with_module_registry(Arc::clone(module_registry_arc));
 
                             // Add module encryption support
                             let module_encryption =
@@ -1332,7 +1330,7 @@ impl Node {
             info!("Event publisher initialized");
 
             // Set EventPublisher on MempoolManager for mempool event publishing
-            if let Some(ref event_publisher) = self
+            if let Some(event_publisher) = self
                 .module_subsystem
                 .as_ref()
                 .and_then(|s| s.event_publisher.as_ref())
@@ -1579,7 +1577,7 @@ impl Node {
             warn!("Storage bounds exceeded - disk space may be low");
 
             // Publish DiskSpaceLow event to modules
-            if let Some(ref event_publisher) = self
+            if let Some(event_publisher) = self
                 .module_subsystem
                 .as_ref()
                 .and_then(|s| s.event_publisher.as_ref())
@@ -1672,7 +1670,7 @@ impl Node {
         info!("Stopping node");
 
         // Publish NodeShutdown event to modules (give them time to clean up)
-        if let Some(ref event_publisher) = self
+        if let Some(event_publisher) = self
             .module_subsystem
             .as_ref()
             .and_then(|s| s.event_publisher.as_ref())
@@ -1685,7 +1683,7 @@ impl Node {
         }
 
         // Publish DataMaintenance event to modules (high urgency flush for shutdown)
-        if let Some(ref event_publisher) = self
+        if let Some(event_publisher) = self
             .module_subsystem
             .as_ref()
             .and_then(|s| s.event_publisher.as_ref())
@@ -1704,7 +1702,7 @@ impl Node {
         }
 
         // Stop module manager
-        if let Some(ref module_manager) = self
+        if let Some(module_manager) = self
             .module_subsystem
             .as_ref()
             .and_then(|s| s.module_manager.as_ref())
@@ -1727,7 +1725,7 @@ impl Node {
         self.storage.flush()?;
 
         // Publish shutdown completed event
-        if let Some(ref event_publisher) = self
+        if let Some(event_publisher) = self
             .module_subsystem
             .as_ref()
             .and_then(|s| s.event_publisher.as_ref())
@@ -1813,7 +1811,7 @@ impl Node {
         );
 
         // Publish HealthCheck event for module subscribers
-        if let Some(ref ep) = self
+        if let Some(ep) = self
             .module_subsystem
             .as_ref()
             .and_then(|s| s.event_publisher.as_ref())
@@ -1822,11 +1820,11 @@ impl Node {
             let node_healthy = report.overall_status == HealthStatus::Healthy;
             let health_report = serde_json::to_string(&report).ok();
             let ep_clone = Arc::clone(ep);
-            let _ = tokio::spawn(async move {
+            std::mem::drop(tokio::spawn(async move {
                 ep_clone
                     .publish_health_check(check_type, node_healthy, health_report)
                     .await;
-            });
+            }));
         }
 
         report

@@ -312,121 +312,117 @@ pub(crate) async fn start_iroh_listener(
     };
 
     info!("Iroh listener started on {}", listen_addr);
-            let peer_tx = nm.peer_tx().clone();
-            let peer_manager = Arc::clone(nm.peer_manager_mutex());
-            let dos_protection = Arc::clone(nm.dos_protection());
-            let address_database = Arc::clone(nm.address_database());
-            let socket_to_transport = Arc::clone(nm.socket_to_transport());
+    let peer_tx = nm.peer_tx().clone();
+    let peer_manager = Arc::clone(nm.peer_manager_mutex());
+    let dos_protection = Arc::clone(nm.dos_protection());
+    let address_database = Arc::clone(nm.address_database());
+    let socket_to_transport = Arc::clone(nm.socket_to_transport());
 
-            tokio::spawn(async move {
-                loop {
-                    match iroh_listener.accept().await {
-                        Ok((conn, addr)) => {
-                            info!("New Iroh connection from {:?}", addr);
-                            let iroh_addr = match &addr {
-                                TransportAddr::Iroh(key) => {
-                                    if key.is_empty() {
-                                        warn!("Invalid Iroh public key: empty");
-                                        continue;
-                                    }
-                                    addr.clone()
-                                }
-                                _ => {
-                                    error!("Invalid transport address for Iroh");
-                                    continue;
-                                }
-                            };
-
-                            let current_connections = {
-                                let pm = peer_manager.lock().await;
-                                pm.peer_count()
-                            };
-                            if !dos_protection
-                                .check_active_connections(current_connections)
-                                .await
-                            {
-                                warn!(
-                                    "Active connection limit exceeded, rejecting Iroh connection"
-                                );
-                                drop(conn);
+    tokio::spawn(async move {
+        loop {
+            match iroh_listener.accept().await {
+                Ok((conn, addr)) => {
+                    info!("New Iroh connection from {:?}", addr);
+                    let iroh_addr = match &addr {
+                        TransportAddr::Iroh(key) => {
+                            if key.is_empty() {
+                                warn!("Invalid Iroh public key: empty");
                                 continue;
                             }
-
-                            let _ = peer_tx.send(NetworkMessage::PeerConnected(iroh_addr.clone()));
-
-                            let peer_tx_clone = peer_tx.clone();
-                            let peer_manager_clone = Arc::clone(&peer_manager);
-                            let iroh_addr_clone = iroh_addr.clone();
-                            let socket_to_transport_clone = Arc::clone(&socket_to_transport);
-                            let address_database_clone = Arc::clone(&address_database);
-                            tokio::spawn(async move {
-                                let placeholder_socket = if let TransportAddr::Iroh(ref key) =
-                                    iroh_addr_clone
-                                {
-                                    let ip_bytes = if key.len() >= 4 {
-                                        [key[0], key[1], key[2], key[3]]
-                                    } else {
-                                        [0, 0, 0, 0]
-                                    };
-                                    let port = if key.len() >= 6 {
-                                        u16::from_be_bytes([key[key.len() - 2], key[key.len() - 1]])
-                                    } else {
-                                        0
-                                    };
-                                    std::net::SocketAddr::from((ip_bytes, port))
-                                } else {
-                                    std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-                                };
-
-                                let peer = peer::Peer::from_transport_connection(
-                                    conn,
-                                    placeholder_socket,
-                                    iroh_addr_clone.clone(),
-                                    peer_tx_clone.clone(),
-                                );
-
-                                let mut pm = peer_manager_clone.lock().await;
-                                if let Err(e) = pm.add_peer(iroh_addr_clone.clone(), peer) {
-                                    warn!("Failed to add Iroh peer: {}", e);
-                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(
-                                        iroh_addr_clone.clone(),
-                                    ));
-                                    return;
-                                }
-                                drop(pm);
-
-                                socket_to_transport_clone
-                                    .lock()
-                                    .await
-                                    .insert(placeholder_socket, iroh_addr_clone.clone());
-
-                                if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
-                                    if node_id_bytes.len() == 32 {
-                                        use iroh::PublicKey;
-                                        let mut key_array = [0u8; 32];
-                                        key_array.copy_from_slice(node_id_bytes);
-                                        if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
-                                            let address_db_clone = address_database_clone.clone();
-                                            tokio::spawn(async move {
-                                                let mut db = address_db_clone.write().await;
-                                                db.add_iroh_address(public_key, 0);
-                                            });
-                                        }
-                                    }
-                                }
-
-                                info!(
-                                    "Successfully added Iroh peer (transport: {:?})",
-                                    iroh_addr_clone
-                                );
-                            });
+                            addr.clone()
                         }
-                        Err(e) => {
-                            warn!("Failed to accept Iroh connection (continuing): {}", e);
+                        _ => {
+                            error!("Invalid transport address for Iroh");
+                            continue;
                         }
+                    };
+
+                    let current_connections = {
+                        let pm = peer_manager.lock().await;
+                        pm.peer_count()
+                    };
+                    if !dos_protection
+                        .check_active_connections(current_connections)
+                        .await
+                    {
+                        warn!("Active connection limit exceeded, rejecting Iroh connection");
+                        drop(conn);
+                        continue;
                     }
+
+                    let _ = peer_tx.send(NetworkMessage::PeerConnected(iroh_addr.clone()));
+
+                    let peer_tx_clone = peer_tx.clone();
+                    let peer_manager_clone = Arc::clone(&peer_manager);
+                    let iroh_addr_clone = iroh_addr.clone();
+                    let socket_to_transport_clone = Arc::clone(&socket_to_transport);
+                    let address_database_clone = Arc::clone(&address_database);
+                    tokio::spawn(async move {
+                        let placeholder_socket =
+                            if let TransportAddr::Iroh(ref key) = iroh_addr_clone {
+                                let ip_bytes = if key.len() >= 4 {
+                                    [key[0], key[1], key[2], key[3]]
+                                } else {
+                                    [0, 0, 0, 0]
+                                };
+                                let port = if key.len() >= 6 {
+                                    u16::from_be_bytes([key[key.len() - 2], key[key.len() - 1]])
+                                } else {
+                                    0
+                                };
+                                std::net::SocketAddr::from((ip_bytes, port))
+                            } else {
+                                std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+                            };
+
+                        let peer = peer::Peer::from_transport_connection(
+                            conn,
+                            placeholder_socket,
+                            iroh_addr_clone.clone(),
+                            peer_tx_clone.clone(),
+                        );
+
+                        let mut pm = peer_manager_clone.lock().await;
+                        if let Err(e) = pm.add_peer(iroh_addr_clone.clone(), peer) {
+                            warn!("Failed to add Iroh peer: {}", e);
+                            let _ = peer_tx_clone
+                                .send(NetworkMessage::PeerDisconnected(iroh_addr_clone.clone()));
+                            return;
+                        }
+                        drop(pm);
+
+                        socket_to_transport_clone
+                            .lock()
+                            .await
+                            .insert(placeholder_socket, iroh_addr_clone.clone());
+
+                        if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
+                            if node_id_bytes.len() == 32 {
+                                use iroh::PublicKey;
+                                let mut key_array = [0u8; 32];
+                                key_array.copy_from_slice(node_id_bytes);
+                                if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
+                                    let address_db_clone = address_database_clone.clone();
+                                    tokio::spawn(async move {
+                                        let mut db = address_db_clone.write().await;
+                                        db.add_iroh_address(public_key, 0);
+                                    });
+                                }
+                            }
+                        }
+
+                        info!(
+                            "Successfully added Iroh peer (transport: {:?})",
+                            iroh_addr_clone
+                        );
+                    });
                 }
-            });
+                Err(e) => {
+                    warn!("Failed to accept Iroh connection (continuing): {}", e);
+                }
+            }
+        }
+    });
 
     Ok(())
 }

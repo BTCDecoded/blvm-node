@@ -240,7 +240,7 @@ impl MemoryGuard {
         // The old formula scaled with available_mb, giving budget=2755 when 6 GB was
         // free at boot, then OOM when cargo check ate the headroom later.
         let mut budget_mb = if total_gb <= 16 {
-            (total_mb * 10 / 100).max(512).min(1600)
+            (total_mb * 10 / 100).clamp(512, 1600)
         } else {
             (total_mb * 28 / 100).min(available_mb * 45 / 100).max(512)
         };
@@ -296,8 +296,7 @@ impl MemoryGuard {
         // hundreds/thousands of blocks into rare huge batches at blockstore barriers — bad overlap
         // with the single committer and higher barrier wait. Opt-in below 64 GiB: `BLVM_IBD_DEFER_FLUSH=1`.
         let defer_flush = total_gb >= 64
-            || (total_gb >= 16
-                && total_gb < 64
+            || ((16..64).contains(&total_gb)
                 && std::env::var("BLVM_IBD_DEFER_FLUSH")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false));

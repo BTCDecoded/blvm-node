@@ -40,7 +40,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                 };
 
             // Publish block validation started event
-            if let Some(ref event_publisher) = node
+            if let Some(event_publisher) = node
                 .module_subsystem
                 .as_ref()
                 .and_then(|s| s.event_publisher.as_ref())
@@ -67,7 +67,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                     let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
 
                     // Publish block validation completed event (success)
-                    if let Some(ref event_publisher) = node
+                    if let Some(event_publisher) = node
                         .module_subsystem
                         .as_ref()
                         .and_then(|s| s.event_publisher.as_ref())
@@ -119,7 +119,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
 
                         // Publish MiningDifficultyChanged when bits (difficulty target) changes
                         if block.header.bits != old_bits {
-                            if let Some(ref ep) = node
+                            if let Some(ep) = node
                                 .module_subsystem
                                 .as_ref()
                                 .and_then(|s| s.event_publisher.as_ref())
@@ -160,7 +160,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                         );
 
                         // Publish NewBlock event to modules
-                        if let Some(ref event_publisher) = node
+                        if let Some(event_publisher) = node
                             .module_subsystem
                             .as_ref()
                             .and_then(|s| s.event_publisher.as_ref())
@@ -325,7 +325,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                     let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
 
                     // Publish block validation completed event (failure)
-                    if let Some(ref event_publisher) = node
+                    if let Some(event_publisher) = node
                         .module_subsystem
                         .as_ref()
                         .and_then(|s| s.event_publisher.as_ref())
@@ -346,7 +346,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                     let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
 
                     // Publish block validation completed event (error)
-                    if let Some(ref event_publisher) = node
+                    if let Some(event_publisher) = node
                         .module_subsystem
                         .as_ref()
                         .and_then(|s| s.event_publisher.as_ref())

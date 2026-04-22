@@ -712,7 +712,7 @@ impl MiningRpc {
             height_bytes.push((n & 0xff) as u8);
             n >>= 8;
         }
-        if height_bytes.last().map_or(false, |&b| b & 0x80 != 0) {
+        if height_bytes.last().is_some_and(|&b| b & 0x80 != 0) {
             height_bytes.push(0x00);
         }
         let mut script_sig = Vec::with_capacity(1 + height_bytes.len());

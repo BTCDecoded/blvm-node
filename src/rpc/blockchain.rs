@@ -178,7 +178,7 @@ impl BlockchainRpc {
     /// Calculate MuHash3072 for UTXO set (Core gettxoutsetinfo muhash).
     fn calculate_utxo_muhash(utxo_set: &blvm_protocol::UtxoSet) -> [u8; 32] {
         crate::storage::assumeutxo::AssumeUtxoManager::calculate_utxo_hash(utxo_set)
-            .unwrap_or_else(|_| [0u8; 32])
+            .unwrap_or([0u8; 32])
     }
 
     /// Calculate confirmations for a block
@@ -503,7 +503,7 @@ impl BlockchainRpc {
 
         // Simplified implementation - return error for non-existent heights
         if height > 1000 {
-            return Err(BlockNotFoundError::new(format!("at height {}", height)).into());
+            return Err(BlockNotFoundError::new(format!("at height {height}")).into());
         }
 
         Ok(json!(
@@ -1102,8 +1102,7 @@ impl BlockchainRpc {
                         .get_hash_by_height(height)?
                         .ok_or_else(|| {
                             anyhow::Error::from(BlockNotFoundError::new(format!(
-                                "at height {}",
-                                height
+                                "at height {height}"
                             )))
                         })?
                 } else {
@@ -1413,7 +1412,7 @@ impl BlockchainRpc {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let initial_tip = storage.chain().get_tip_hash()?;
-        let initial_tip_clone = initial_tip.clone();
+        let initial_tip_clone = initial_tip;
 
         if timeout_secs.is_none() {
             if let Some(ref tip_hash) = initial_tip {
@@ -1539,7 +1538,7 @@ impl BlockchainRpc {
                         "height": height
                     }));
                 }
-                return Err(BlockNotFoundError::new(format!("at height {}", height)).into());
+                return Err(BlockNotFoundError::new(format!("at height {height}")).into());
             }
             return Err(anyhow::anyhow!(
                 "Block at height {} not yet available (tip: {})",

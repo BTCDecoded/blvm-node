@@ -45,6 +45,7 @@ opt-level = 3
 blvm-protocol = { path = "../../blvm-protocol" }
 blvm-consensus = { path = "../../blvm-consensus" }
 blvm-muhash = { path = "../../blvm-muhash" }
+blvm-primitives = { path = "../../blvm-primitives" }
 
 [[bin]]
 name = "compact_block_reconstruction"

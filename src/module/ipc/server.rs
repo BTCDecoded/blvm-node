@@ -270,8 +270,7 @@ impl ModuleIpcServer {
         }
 
         Err(ModuleError::OperationError(format!(
-            "No module with CLI name '{}' is loaded",
-            module_name
+            "No module with CLI name '{module_name}' is loaded"
         )))
     }
 
@@ -360,8 +359,7 @@ impl ModuleIpcServer {
         }
 
         Err(ModuleError::OperationError(format!(
-            "No module with CLI name '{}' is loaded",
-            module_name
+            "No module with CLI name '{module_name}' is loaded"
         )))
     }
 
@@ -836,13 +834,13 @@ impl ModuleIpcServer {
                         let response = if result.success {
                             result
                                 .payload
-                                .and_then(|p| {
+                                .map(|p| {
                                     if let InvocationResultPayload::Rpc(v) = p {
-                                        Some(Ok(v))
+                                        Ok(v)
                                     } else {
-                                        Some(Err(crate::rpc::errors::RpcError::internal_error(
+                                        Err(crate::rpc::errors::RpcError::internal_error(
                                             "Wrong payload type".to_string(),
-                                        )))
+                                        ))
                                     }
                                 })
                                 .unwrap_or_else(|| {

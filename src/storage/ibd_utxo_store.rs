@@ -20,6 +20,8 @@ use blvm_protocol::transaction::is_coinbase;
 use blvm_protocol::types::{OutPoint, UtxoSet, UTXO};
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
+#[cfg(feature = "production")]
+use std::str::FromStr;
 use std::sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use tracing::debug;
@@ -194,18 +196,23 @@ pub enum EvictionStrategy {
 }
 
 #[cfg(feature = "production")]
-impl EvictionStrategy {
-    pub fn from_str(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
+impl FromStr for EvictionStrategy {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.trim().to_lowercase().as_str() {
             "dynamic" => Self::Dynamic,
             "lifo" => Self::Lifo,
             _ => Self::Fifo,
-        }
+        })
     }
+}
 
+#[cfg(feature = "production")]
+impl EvictionStrategy {
     fn from_env() -> Self {
         let s = std::env::var("BLVM_IBD_EVICTION").unwrap_or_default();
-        Self::from_str(&s)
+        s.parse().unwrap_or(Self::Fifo)
     }
 }
 
