@@ -53,9 +53,9 @@ cargo test --test integration_tests
 cargo test --test storage_tests
 ```
 
-### Full matrix and memory
+### CI parity (default features)
 
-`cargo test --all-features` / `cargo test --no-run --all-features` builds **all** feature-gated integration tests at once and can **exhaust RAM** or destabilize modest machines. Prefer **`cargo check -p blvm-node --all-features`** for a broad compile check, or **`cargo test --no-run --test <name> --features <...>`** for what you changed. Use CI for the complete all-features link+test run if local full builds are not viable. To reduce peak memory when you must run a large build locally: **`CARGO_BUILD_JOBS=1 cargo ...`** (slower, lower parallelism).
+This repo’s **CI** runs **`cargo test`** with **default** `[features].default` from `Cargo.toml` — not `--all-features`. For the same compile/link surface locally: **`cargo check -p blvm-node`**, then **`cargo test -p blvm-node --no-run`** (or **`cargo test`** to execute). If you touch optional features (`iroh`, `tidesdb`, etc.), add **`--features ...`** or **`--test <name>`** for those paths. **`cargo test --all-features`** is a separate, heavier matrix and is not what the main CI job runs.
 
 ### Review Criteria
 

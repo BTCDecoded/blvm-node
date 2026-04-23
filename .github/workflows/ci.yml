@@ -167,7 +167,8 @@ jobs:
         run: |
           # Run tests only (no coverage) for fast PR feedback
           # Coverage runs separately in coverage.yml workflow
-          cargo test --all-features
+          # Default crate features only (see Cargo.toml [features].default) — not --all-features
+          cargo test
       
       - name: Save Cargo cache
         if: always()
@@ -699,7 +700,7 @@ jobs:
         run: |
           PROFILE_FLAG="--release"
           [ -n "${BLVM_FAST_BUILD:-}" ] && PROFILE_FLAG="--profile release-fast"
-          cargo test --no-run $PROFILE_FLAG --all-features
+          cargo test --no-run $PROFILE_FLAG
       
       - name: Cache target
         if: always()
