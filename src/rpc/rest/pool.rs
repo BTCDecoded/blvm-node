@@ -211,7 +211,6 @@ async fn join_pool(
     pool_id: &str,
     request_id: String,
 ) -> Response<Full<Bytes>> {
-    use super::types::ApiResponse;
     use serde_json::json;
 
     let pool_engine = match state_machine.pool_engine() {
@@ -248,13 +247,26 @@ async fn join_pool(
     };
 
     // Parse join request from body
+    let body = match body.as_ref() {
+        Some(b) => b,
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Request body required",
+                request_id,
+            );
+        }
+    };
     let participant_id = body
-        .and_then(|v| v.get("participant_id").and_then(|id| id.as_str()))
+        .get("participant_id")
+        .and_then(|id| id.as_str())
         .unwrap_or("unknown")
         .to_string();
 
     let contribution = body
-        .and_then(|v| v.get("contribution").and_then(|c| c.as_u64()))
+        .get("contribution")
+        .and_then(|c| c.as_u64())
         .unwrap_or(0);
 
     // Validate contribution meets minimum
@@ -270,20 +282,15 @@ async fn join_pool(
         );
     }
 
-    // Join pool (implementation would call pool_engine.join_pool)
-    // For now, return pool state
-    let response = ApiResponse {
-        success: true,
-        data: Some(json!({
+    success_response(
+        json!({
             "pool_id": pool_id,
             "participant_id": participant_id,
             "contribution": contribution,
             "message": "Join pool request received (full implementation pending)"
-        })),
-        error: None,
-    };
-
-    success_response(serde_json::to_string(&response).unwrap(), request_id)
+        }),
+        request_id,
+    )
 }
 
 #[cfg(feature = "ctv")]
@@ -293,7 +300,6 @@ async fn distribute_pool(
     pool_id: &str,
     request_id: String,
 ) -> Response<Full<Bytes>> {
-    use super::types::ApiResponse;
     use serde_json::json;
 
     let pool_engine = match state_machine.pool_engine() {
@@ -358,20 +364,15 @@ async fn distribute_pool(
         );
     }
 
-    // Distribute pool (implementation would call pool_engine.distribute)
-    // For now, return pool state
-    let response = ApiResponse {
-        success: true,
-        data: Some(json!({
+    success_response(
+        json!({
             "pool_id": pool_id,
             "distribution": distribution,
             "total_balance": pool_state.total_balance,
             "message": "Distribute pool request received (full implementation pending)"
-        })),
-        error: None,
-    };
-
-    success_response(serde_json::to_string(&response).unwrap(), request_id)
+        }),
+        request_id,
+    )
 }
 
 #[cfg(feature = "ctv")]

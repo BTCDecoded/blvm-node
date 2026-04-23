@@ -137,7 +137,6 @@ async fn add_to_batch(
     batch_id: &str,
     request_id: String,
 ) -> Response<Full<Bytes>> {
-    use super::types::ApiResponse;
     use crate::payment::congestion::{PendingTransaction, TransactionPriority};
     use blvm_protocol::payment::PaymentOutput;
     use serde_json::json;
@@ -154,14 +153,26 @@ async fn add_to_batch(
         }
     };
 
+    let body = match body.as_ref() {
+        Some(b) => b,
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Request body required",
+                request_id,
+            );
+        }
+    };
+
     // Parse transaction from body
     let outputs = body
-        .and_then(|v| {
-            v.get("outputs").and_then(|o| o.as_array()).map(|arr| {
-                arr.iter()
-                    .filter_map(|item| serde_json::from_value::<PaymentOutput>(item.clone()).ok())
-                    .collect::<Vec<_>>()
-            })
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| serde_json::from_value::<PaymentOutput>(item.clone()).ok())
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
 
@@ -175,7 +186,8 @@ async fn add_to_batch(
     }
 
     let priority_str = body
-        .and_then(|v| v.get("priority").and_then(|p| p.as_str()))
+        .get("priority")
+        .and_then(|p| p.as_str())
         .unwrap_or("normal");
 
     let priority = match priority_str.to_lowercase().as_str() {
@@ -185,10 +197,11 @@ async fn add_to_batch(
         _ => TransactionPriority::Normal,
     };
 
-    let deadline = body.and_then(|v| v.get("deadline").and_then(|d| d.as_u64()));
+    let deadline = body.get("deadline").and_then(|d| d.as_u64());
 
     let tx_id = body
-        .and_then(|v| v.get("tx_id").and_then(|id| id.as_str()))
+        .get("tx_id")
+        .and_then(|id| id.as_str())
         .unwrap_or("unknown")
         .to_string();
 
@@ -207,16 +220,14 @@ async fn add_to_batch(
     match manager.add_to_batch(batch_id, pending_tx) {
         Ok(_) => {
             let batch = manager.get_batch(batch_id);
-            let response = ApiResponse {
-                success: true,
-                data: Some(json!({
+            success_response(
+                json!({
                     "batch_id": batch_id,
                     "transaction_count": batch.map(|b| b.transactions.len()).unwrap_or(0),
                     "message": "Transaction added to batch successfully"
-                })),
-                error: None,
-            };
-            success_response(serde_json::to_string(&response).unwrap(), request_id)
+                }),
+                request_id,
+            )
         }
         Err(e) => error_response(
             StatusCode::BAD_REQUEST,

@@ -198,7 +198,7 @@ impl ModuleWatcher {
             let config = crate::module::loader::ModuleLoader::load_module_config(
                 name,
                 &discovered.directory.join("config.toml"),
-            );
+            )?;
             info!("Module watcher: reloading {} after file change", name);
             manager
                 .reload_module(

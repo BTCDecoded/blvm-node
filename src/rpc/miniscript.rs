@@ -9,7 +9,6 @@
 #[cfg(feature = "miniscript")]
 pub mod miniscript_rpc {
     use super::super::errors::RpcError;
-    use super::super::types::RpcResult;
     use crate::miniscript::miniscript_support;
     use serde_json::{json, Value};
     use std::str::FromStr;
@@ -92,9 +91,7 @@ pub mod miniscript_rpc {
             .decode(psbt_str)
             .map_err(|e| RpcError::invalid_params(&format!("Invalid PSBT base64: {}", e)))?;
 
-        // Parse PSBT using bitcoin crate's built-in PSBT support
-        // miniscript depends on bitcoin crate which includes PSBT support
-        use bitcoin::psbt::Psbt;
+        use miniscript::bitcoin::psbt::Psbt;
         let psbt = Psbt::deserialize(&psbt_bytes)
             .map_err(|e| RpcError::internal_error(&format!("Failed to parse PSBT: {}", e)))?;
 

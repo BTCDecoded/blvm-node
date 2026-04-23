@@ -115,6 +115,7 @@ impl QuinnRpcServer {
         connection: quinn::Connection,
         auth_manager: Option<Arc<auth::RpcAuthManager>>,
         max_request_size: usize,
+        batch_rate_multiplier_cap: u32,
     ) {
         let client_addr = connection.remote_address();
         // Accept bidirectional streams from the connection

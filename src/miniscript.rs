@@ -16,7 +16,9 @@ pub mod miniscript_support {
         PUSH_32_BYTES,
     };
     use blvm_protocol::ByteString;
-    use miniscript::{Descriptor, Miniscript, Policy};
+    use miniscript::bitcoin;
+    use miniscript::policy::concrete::Policy;
+    use miniscript::{Descriptor, Miniscript, Segwitv0};
     use std::str::FromStr;
 
     /// Miniscript compilation error
@@ -48,15 +50,13 @@ pub mod miniscript_support {
     ///
     /// # Returns
     /// Compiled script as ByteString compatible with blvm-consensus
-    pub fn compile_policy(policy: &Policy) -> Result<ByteString, MiniscriptError> {
-        // Compile policy to miniscript
+    pub fn compile_policy(
+        policy: &Policy<bitcoin::PublicKey>,
+    ) -> Result<ByteString, MiniscriptError> {
         let ms: Miniscript<_, _> = policy
-            .compile()
+            .compile::<Segwitv0>()
             .map_err(|e| MiniscriptError::CompilationFailed(e.to_string()))?;
-
-        // Encode to script bytes
         let script_bytes = ms.encode();
-
         Ok(ByteString::from(script_bytes.as_bytes()))
     }
 
@@ -67,16 +67,12 @@ pub mod miniscript_support {
     ///
     /// # Returns
     /// Parsed miniscript if script is miniscript-compatible
-    pub fn parse_script(script: &ByteString) -> Result<Miniscript, MiniscriptError> {
-        // Parse script as miniscript
-        // Note: Miniscript::from_str expects hex string representation
-        // Convert bytes to hex for parsing
-        let script_hex = hex::encode(script.as_ref());
-
-        // Try to parse as miniscript
-        // Note: This is a simplified version - full implementation would use
-        // miniscript's script parsing capabilities directly from bytes
-        Miniscript::from_str(&script_hex).map_err(|e| MiniscriptError::ParseFailed(e.to_string()))
+    pub fn parse_script(
+        script: &ByteString,
+    ) -> Result<Miniscript<bitcoin::PublicKey, Segwitv0>, MiniscriptError> {
+        let s = bitcoin::Script::from_bytes(script.as_ref());
+        Miniscript::<bitcoin::PublicKey, Segwitv0>::decode_consensus(s)
+            .map_err(|e| MiniscriptError::ParseFailed(e.to_string()))
     }
 
     /// Analyze script for satisfaction properties
@@ -90,15 +86,14 @@ pub mod miniscript_support {
         // Try to parse as miniscript
         match parse_script(script) {
             Ok(ms) => {
-                // Calculate satisfaction weight
-                let satisfaction_weight = ms.max_satisfaction_weight();
+                let satisfaction_weight = ms.max_satisfaction_size().ok();
 
                 // Determine script type
                 let script_type = determine_script_type(script);
 
                 Ok(ScriptAnalysis {
                     is_miniscript: true,
-                    satisfaction_weight: Some(satisfaction_weight),
+                    satisfaction_weight,
                     script_type,
                 })
             }
@@ -116,7 +111,7 @@ pub mod miniscript_support {
 
     /// Determine script type from script bytes
     fn determine_script_type(script: &ByteString) -> String {
-        let bytes = script.as_ref();
+        let bytes: &[u8] = script.as_ref();
 
         // P2PKH: OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG
         if bytes.len() == 25
@@ -163,7 +158,9 @@ pub mod miniscript_support {
     ///
     /// # Returns
     /// Parsed descriptor
-    pub fn parse_descriptor(descriptor: &str) -> Result<Descriptor, MiniscriptError> {
+    pub fn parse_descriptor(
+        descriptor: &str,
+    ) -> Result<Descriptor<bitcoin::PublicKey>, MiniscriptError> {
         Descriptor::from_str(descriptor)
             .map_err(|e| MiniscriptError::DescriptorParseFailed(e.to_string()))
     }
@@ -179,8 +176,6 @@ pub mod miniscript_support {
     /// # Returns
     /// 8-character checksum string
     pub fn calculate_descriptor_checksum(descriptor: &str) -> String {
-        use bech32::{ToBase32, Variant};
-
         // Remove existing checksum if present
         let descriptor_clean = if let Some(sep_pos) = descriptor.rfind('#') {
             &descriptor[..sep_pos]

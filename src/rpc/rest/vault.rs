@@ -205,7 +205,6 @@ async fn unvault_vault(
 
     #[cfg(feature = "ctv")]
     {
-        use super::types::ApiResponse;
         use serde_json::json;
 
         let vault_engine = match state_machine.vault_engine() {
@@ -255,19 +254,15 @@ async fn unvault_vault(
             );
         }
 
-        // Deposit to vault (implementation would call vault_engine.deposit)
-        let response = ApiResponse {
-            success: true,
-            data: Some(json!({
+        return success_response(
+            json!({
                 "vault_id": vault_id,
                 "amount": amount,
-                "current_balance": vault_state.balance,
+                "current_balance": vault_state.deposit_amount,
                 "message": "Deposit request received (full implementation pending)"
-            })),
-            error: None,
-        };
-
-        return success_response(serde_json::to_string(&response).unwrap(), request_id);
+            }),
+            request_id,
+        );
     }
 }
 
@@ -290,7 +285,6 @@ async fn withdraw_from_vault(
 
     #[cfg(feature = "ctv")]
     {
-        use super::types::ApiResponse;
         use serde_json::json;
 
         let vault_engine = match state_machine.vault_engine() {
@@ -340,28 +334,25 @@ async fn withdraw_from_vault(
             );
         }
 
-        if amount > vault_state.balance {
+        let available = vault_state.deposit_amount;
+        if amount > available {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
-                &format!("Insufficient balance: {} > {}", amount, vault_state.balance),
+                &format!("Insufficient balance: {} > {}", amount, available),
                 request_id,
             );
         }
 
-        // Withdraw from vault (implementation would call vault_engine.withdraw)
-        let response = ApiResponse {
-            success: true,
-            data: Some(json!({
+        return success_response(
+            json!({
                 "vault_id": vault_id,
                 "amount": amount,
-                "remaining_balance": vault_state.balance - amount,
+                "remaining_balance": available.saturating_sub(amount),
                 "message": "Withdrawal request received (full implementation pending)"
-            })),
-            error: None,
-        };
-
-        return success_response(serde_json::to_string(&response).unwrap(), request_id);
+            }),
+            request_id,
+        );
     }
 }
 

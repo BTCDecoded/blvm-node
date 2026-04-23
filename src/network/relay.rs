@@ -365,7 +365,11 @@ pub struct RelayStats {
 mod tests {
 
     #[cfg(feature = "fibre")]
+    use super::RelayManager;
+    #[cfg(feature = "fibre")]
     use crate::network::fibre::FibreRelay;
+    #[cfg(feature = "fibre")]
+    use blvm_protocol::Block;
 
     #[test]
     #[cfg(feature = "fibre")]

@@ -144,7 +144,7 @@ zeromq = { package = "zmq", version = "=0.10" }
 # File watcher for module hot-reload on change (optional feature)
 notify = { version = "=6.1", optional = true }
 # Miniscript support for script policy compilation and descriptor parsing (optional feature)
-miniscript = { version = "=13.0.0", optional = true }
+miniscript = { version = "=13.0.0", optional = true, features = ["compiler"] }
 # Base64 encoding/decoding for PSBT
 base64 = { version = "=0.22", optional = true }
 # Regex for range descriptor detection

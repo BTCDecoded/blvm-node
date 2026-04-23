@@ -21,14 +21,14 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024; // 1 MiB
 /// Start Stratum V2 TCP listener on the given address.
 /// When stratum-v2 feature is enabled and config has listen_addr.
 pub(crate) async fn start_stratum_v2_listener(
-    nm: &NetworkManager,
+    nm: Arc<NetworkManager>,
     listen_addr: SocketAddr,
 ) -> Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
     info!("Stratum V2 listener started on {}", listen_addr);
 
     let peer_tx = nm.peer_tx().clone();
-    let stratum_connections = nm.stratum_connections();
+    let stratum_connections = Arc::clone(nm.stratum_connections());
 
     tokio::spawn(async move {
         loop {

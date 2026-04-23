@@ -496,7 +496,7 @@ impl Node {
             if stratum_config.enabled {
                 if let Some(addr) = stratum_config.listen_addr {
                     if let Err(e) = crate::network::stratum_v2_listener::start_stratum_v2_listener(
-                        &self.network,
+                        std::sync::Arc::clone(&self.network),
                         addr,
                     )
                     .await

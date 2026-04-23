@@ -13,7 +13,8 @@
 mod miniscript_tests {
     use blvm_node::miniscript::miniscript_support::*;
     use blvm_protocol::ByteString;
-    use miniscript::{Descriptor, Miniscript, Policy};
+    use miniscript::bitcoin;
+    use miniscript::policy::concrete::Policy;
     use std::str::FromStr;
 
     /// Test basic policy compilation
@@ -21,7 +22,7 @@ mod miniscript_tests {
     fn test_compile_simple_policy() {
         // Simple policy: pk(key)
         let policy_str = "pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8a8f3af4eb0c8666e7c1914)";
-        let policy: Policy = Policy::from_str(policy_str).expect("Failed to parse policy");
+        let policy: Policy<bitcoin::PublicKey> = Policy::from_str(policy_str).expect("Failed to parse policy");
 
         let result = compile_policy(&policy);
         assert!(result.is_ok(), "Policy compilation should succeed");
@@ -38,7 +39,8 @@ mod miniscript_tests {
     fn test_compile_multisig_policy() {
         // 2-of-3 multisig policy
         let policy_str = "thresh(2,pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8a8f3af4eb0c8666e7c1914),pk(03e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0),pk(02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9))";
-        let policy: Policy = Policy::from_str(policy_str).expect("Failed to parse multisig policy");
+        let policy: Policy<bitcoin::PublicKey> =
+            Policy::from_str(policy_str).expect("Failed to parse multisig policy");
 
         let result = compile_policy(&policy);
         assert!(result.is_ok(), "Multisig policy compilation should succeed");
@@ -49,7 +51,8 @@ mod miniscript_tests {
     fn test_compile_timelock_policy() {
         // Policy with after() timelock
         let policy_str = "and(pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8a8f3af4eb0c8666e7c1914),after(1000000))";
-        let policy: Policy = Policy::from_str(policy_str).expect("Failed to parse timelock policy");
+        let policy: Policy<bitcoin::PublicKey> =
+            Policy::from_str(policy_str).expect("Failed to parse timelock policy");
 
         let result = compile_policy(&policy);
         assert!(result.is_ok(), "Timelock policy compilation should succeed");
@@ -192,7 +195,7 @@ mod miniscript_tests {
     fn test_analyze_script_miniscript() {
         // Create a simple miniscript and analyze it
         let policy_str = "pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8a8f3af4eb0c8666e7c1914)";
-        let policy: Policy = Policy::from_str(policy_str).expect("Failed to parse policy");
+        let policy: Policy<bitcoin::PublicKey> = Policy::from_str(policy_str).expect("Failed to parse policy");
 
         let script = compile_policy(&policy).expect("Policy compilation should succeed");
 
@@ -266,7 +269,7 @@ mod miniscript_tests {
     fn test_satisfaction_weight() {
         // Create a policy and check if satisfaction weight is calculated
         let policy_str = "pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8a8f3af4eb0c8666e7c1914)";
-        let policy: Policy = Policy::from_str(policy_str).expect("Failed to parse policy");
+        let policy: Policy<bitcoin::PublicKey> = Policy::from_str(policy_str).expect("Failed to parse policy");
 
         let script = compile_policy(&policy).expect("Policy compilation should succeed");
 
