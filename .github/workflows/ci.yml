@@ -167,7 +167,7 @@ jobs:
         run: |
           # Run tests only (no coverage) for fast PR feedback
           # Coverage runs separately in coverage.yml workflow
-          cargo test --all-features --verbose
+          cargo test --all-features
       
       - name: Save Cargo cache
         if: always()
