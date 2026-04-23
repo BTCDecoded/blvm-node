@@ -233,7 +233,7 @@ jobs:
   verify:
     name: Verify
     needs: setup
-    runs-on: [self-hosted, Linux, X64, perf]
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 60
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
