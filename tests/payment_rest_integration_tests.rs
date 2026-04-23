@@ -18,6 +18,7 @@ use blvm_node::rpc::rest::pool::handle_pool_request;
 use blvm_node::rpc::rest::vault::handle_vault_request;
 use blvm_node::storage::Storage;
 use bytes::Bytes;
+use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::{Method, Response, StatusCode};
 use serde_json::json;
@@ -55,11 +56,11 @@ fn create_test_state_machine_with_storage() -> (Arc<PaymentStateMachine>, TempDi
 }
 
 /// Helper to extract response body as JSON
-fn extract_response_body(
+async fn extract_response_body(
     response: Response<Full<Bytes>>,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, body) = response.into_parts();
-    let body_bytes = body.to_bytes();
+    let body_bytes = body.collect().await?.to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes)?;
     Ok(json)
 }
@@ -89,7 +90,7 @@ async fn test_rest_create_vault() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_json = extract_response_body(response).unwrap();
+    let body_json = extract_response_body(response).await.unwrap();
     assert_eq!(body_json["data"]["vault_id"], "test_vault_rest_1");
 }
 
@@ -154,7 +155,7 @@ async fn test_rest_unvault_vault() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_json = extract_response_body(response).unwrap();
+    let body_json = extract_response_body(response).await.unwrap();
     assert_eq!(body_json["data"]["vault_id"], "test_vault_rest_3");
 }
 
@@ -190,7 +191,7 @@ async fn test_rest_get_vault_state() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_json = extract_response_body(response).unwrap();
+    let body_json = extract_response_body(response).await.unwrap();
     assert_eq!(body_json["data"]["vault_id"], "test_vault_rest_4");
 }
 
@@ -229,7 +230,7 @@ async fn test_rest_create_pool() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_json = extract_response_body(response).unwrap();
+    let body_json = extract_response_body(response).await.unwrap();
     assert_eq!(body_json["data"]["pool_id"], "test_pool_rest_1");
 }
 
@@ -276,7 +277,7 @@ async fn test_rest_join_pool() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_json = extract_response_body(response).unwrap();
+    let body_json = extract_response_body(response).await.unwrap();
     assert_eq!(body_json["data"]["pool_id"], "test_pool_rest_2");
 }
 
@@ -317,7 +318,7 @@ async fn test_rest_get_pool_state() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_json = extract_response_body(response).unwrap();
+    let body_json = extract_response_body(response).await.unwrap();
     assert_eq!(body_json["data"]["pool_id"], "test_pool_rest_3");
 }
 
@@ -345,7 +346,7 @@ async fn test_rest_create_batch() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_json = extract_response_body(response).unwrap();
+    let body_json = extract_response_body(response).await.unwrap();
     assert_eq!(body_json["data"]["batch_id"], "test_batch_rest_1");
 }
 
@@ -379,7 +380,7 @@ async fn test_rest_get_batch_state() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_json = extract_response_body(response).unwrap();
+    let body_json = extract_response_body(response).await.unwrap();
     assert_eq!(body_json["data"]["batch_id"], "test_batch_rest_2");
 }
 
