@@ -460,36 +460,6 @@ jobs:
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
 
-      - name: Checkout blvm-protocol (sibling for fuzz [patch.crates-io])
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/blvm-protocol
-          path: _temp-blvm-protocol
-      - name: Checkout blvm-consensus (sibling for fuzz [patch.crates-io])
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/blvm-consensus
-          path: _temp-blvm-consensus
-      - name: Checkout blvm-muhash (sibling for fuzz [patch.crates-io])
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/blvm-muhash
-          path: _temp-blvm-muhash
-      - name: Checkout blvm-primitives (sibling for fuzz [patch.crates-io])
-        uses: actions/checkout@v4
-        with:
-          repository: BTCDecoded/blvm-primitives
-          path: _temp-blvm-primitives
-      - name: Move sibling crates next to repo root
-        run: |
-          for name in blvm-protocol blvm-consensus blvm-muhash blvm-primitives; do
-            if [ -d "../${name}" ]; then rm -rf "../${name}"; fi
-          done
-          mv _temp-blvm-protocol ../blvm-protocol
-          mv _temp-blvm-consensus ../blvm-consensus
-          mv _temp-blvm-muhash ../blvm-muhash
-          mv _temp-blvm-primitives ../blvm-primitives
-
       - name: Install tidesdb native dependencies
         run: |
           if command -v apt-get >/dev/null 2>&1; then
