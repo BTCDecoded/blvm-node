@@ -172,7 +172,7 @@ mod tests {
     #[tokio::test]
     async fn test_mempool_get_all() {
         let mempool = create_test_mempool_rpc();
-        let result = rest_mempool::get_mempool(&mempool).await;
+        let result = rest_mempool::get_mempool(&mempool, false).await;
 
         // Should return a result (may be empty array)
         assert!(result.is_ok());

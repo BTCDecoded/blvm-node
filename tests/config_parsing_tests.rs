@@ -315,14 +315,14 @@ fn test_rpc_auth_config_default() {
 
 #[test]
 fn test_ban_list_sharing_config_default() {
-    let config = BanListSharingConfig::default();
+    let _config = BanListSharingConfig::default();
     // Verify defaults are set
     assert!(true);
 }
 
 #[test]
 fn test_dos_protection_config_default() {
-    let config = DosProtectionConfig::default();
+    let _config = DosProtectionConfig::default();
     // Verify defaults are set
     assert!(true);
 }
