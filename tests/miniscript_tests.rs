@@ -29,10 +29,7 @@ mod miniscript_tests {
         assert!(result.is_ok(), "Policy compilation should succeed");
 
         let script = result.unwrap();
-        assert!(
-            !script.as_ref().is_empty(),
-            "Compiled script should not be empty"
-        );
+        assert!(!script.is_empty(), "Compiled script should not be empty");
     }
 
     /// Test multi-signature policy compilation

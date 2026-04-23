@@ -7,14 +7,14 @@ use std::time::Duration;
 
 #[test]
 fn test_health_checker_creation() {
-    let checker = HealthChecker::new();
+    let _checker = HealthChecker::new();
     // Should create successfully
     assert!(true);
 }
 
 #[test]
 fn test_health_checker_default() {
-    let checker = HealthChecker::default();
+    let _checker = HealthChecker::default();
     // Should create successfully
     assert!(true);
 }
@@ -81,7 +81,6 @@ fn test_comprehensive_health_check_all_healthy() {
 
     assert_eq!(report.overall_status, HealthStatus::Healthy);
     assert_eq!(report.components.len(), 3);
-    assert!(report.uptime_seconds >= 0);
     assert!(report.timestamp > 0);
 }
 
