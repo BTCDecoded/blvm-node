@@ -22,7 +22,8 @@ mod miniscript_tests {
     fn test_compile_simple_policy() {
         // Simple policy: pk(key)
         let policy_str = "pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8a8f3af4eb0c8666e7c1914)";
-        let policy: Policy<bitcoin::PublicKey> = Policy::from_str(policy_str).expect("Failed to parse policy");
+        let policy: Policy<bitcoin::PublicKey> =
+            Policy::from_str(policy_str).expect("Failed to parse policy");
 
         let result = compile_policy(&policy);
         assert!(result.is_ok(), "Policy compilation should succeed");
@@ -195,7 +196,8 @@ mod miniscript_tests {
     fn test_analyze_script_miniscript() {
         // Create a simple miniscript and analyze it
         let policy_str = "pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8a8f3af4eb0c8666e7c1914)";
-        let policy: Policy<bitcoin::PublicKey> = Policy::from_str(policy_str).expect("Failed to parse policy");
+        let policy: Policy<bitcoin::PublicKey> =
+            Policy::from_str(policy_str).expect("Failed to parse policy");
 
         let script = compile_policy(&policy).expect("Policy compilation should succeed");
 
@@ -269,7 +271,8 @@ mod miniscript_tests {
     fn test_satisfaction_weight() {
         // Create a policy and check if satisfaction weight is calculated
         let policy_str = "pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8a8f3af4eb0c8666e7c1914)";
-        let policy: Policy<bitcoin::PublicKey> = Policy::from_str(policy_str).expect("Failed to parse policy");
+        let policy: Policy<bitcoin::PublicKey> =
+            Policy::from_str(policy_str).expect("Failed to parse policy");
 
         let script = compile_policy(&policy).expect("Policy compilation should succeed");
 
