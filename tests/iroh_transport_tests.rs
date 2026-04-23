@@ -3,7 +3,7 @@
 #[cfg(feature = "iroh")]
 mod tests {
     use blvm_node::network::iroh_transport::IrohTransport;
-    use blvm_node::network::transport::{Transport, TransportAddr};
+    use blvm_node::network::transport::{Transport, TransportAddr, TransportListener};
     use std::net::SocketAddr;
 
     #[tokio::test]
@@ -21,7 +21,7 @@ mod tests {
     #[tokio::test]
     async fn test_iroh_transport_node_id() {
         let transport = IrohTransport::new().await.unwrap();
-        let node_id = transport.node_id();
+        let _node_id = transport.node_id();
 
         // Node ID should be a valid endpoint ID
         assert!(true);
