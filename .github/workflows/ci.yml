@@ -277,10 +277,20 @@ jobs:
       - name: Fetch blvm-consensus sources from crates.io
         id: consensus_src
         run: |
-          CONS_VER=$(curl -fsSL 'https://crates.io/api/v1/crates/blvm-consensus' | jq -r '.crate.max_stable_version // .crate.max_version')
+          # crates.io returns 403 without a descriptive User-Agent (see https://crates.io/policies)
+          UA='BTCDecoded/blvm-node verify job (https://github.com/BTCDecoded/blvm-node)'
+          CONS_VER=$(curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
+            'https://crates.io/api/v1/crates/blvm-consensus' \
+            | jq -r '.crate.max_stable_version // .crate.max_version')
+          if [ -z "$CONS_VER" ] || [ "$CONS_VER" = "null" ]; then
+            echo "❌ Could not resolve blvm-consensus version from crates.io API"
+            exit 1
+          fi
           echo "Using blvm-consensus $CONS_VER from crates.io"
           mkdir -p "$GITHUB_WORKSPACE/_spec_verify"
-          curl -fsSL "https://static.crates.io/crates/blvm-consensus/${CONS_VER}/download" | tar -xz -C "$GITHUB_WORKSPACE/_spec_verify"
+          curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
+            "https://crates.io/api/v1/crates/blvm-consensus/${CONS_VER}/download" \
+            | tar -xz -C "$GITHUB_WORKSPACE/_spec_verify"
           echo "path=$GITHUB_WORKSPACE/_spec_verify/blvm-consensus-${CONS_VER}" >> "$GITHUB_OUTPUT"
 
       - name: Run blvm-spec-lock verify (blvm-consensus)
