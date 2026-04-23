@@ -257,6 +257,9 @@ jobs:
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
+      - name: Setup blvm-spec (Orange Paper for spec-lock verification)
+        uses: BTCDecoded/rust-ci/setup-blvm-spec@main
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
 
@@ -297,7 +300,19 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           echo "🔒 Running blvm-spec-lock verification on crates.io blvm-consensus..."
-          cargo-spec-lock verify --crate-path "${{ steps.consensus_src.outputs.path }}" 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt"
+          SPEC_ARGS="--crate-path ${{ steps.consensus_src.outputs.path }}"
+          if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
+            echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
+          elif [ -f "../blvm-spec/THE_ORANGE_PAPER.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/THE_ORANGE_PAPER.md"
+            echo "Using THE_ORANGE_PAPER.md for spec-derived contracts"
+          else
+            echo "❌ No spec at ../blvm-spec (run setup-blvm-spec step)"
+            exit 1
+          fi
+          export SPEC_LOCK_STRICT=1
+          cargo-spec-lock verify $SPEC_ARGS 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt"
           EXIT_CODE=${PIPESTATUS[0]}
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ blvm-consensus spec-lock verification failed"
@@ -310,7 +325,19 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           echo "🔒 Running blvm-spec-lock verification on blvm-node..."
           cd "$GITHUB_WORKSPACE"
-          cargo-spec-lock verify --crate-path . 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
+          SPEC_ARGS="--crate-path ."
+          if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
+            echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
+          elif [ -f "../blvm-spec/THE_ORANGE_PAPER.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/THE_ORANGE_PAPER.md"
+            echo "Using THE_ORANGE_PAPER.md for spec-derived contracts"
+          else
+            echo "❌ No spec at ../blvm-spec"
+            exit 1
+          fi
+          export SPEC_LOCK_STRICT=1
+          cargo-spec-lock verify $SPEC_ARGS 2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
           EXIT_CODE=${PIPESTATUS[0]}
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ blvm-node spec-lock verification failed"
