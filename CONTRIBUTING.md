@@ -53,6 +53,10 @@ cargo test --test integration_tests
 cargo test --test storage_tests
 ```
 
+### Full matrix and memory
+
+`cargo test --all-features` / `cargo test --no-run --all-features` builds **all** feature-gated integration tests at once and can **exhaust RAM** or destabilize modest machines. Prefer **`cargo check -p blvm-node --all-features`** for a broad compile check, or **`cargo test --no-run --test <name> --features <...>`** for what you changed. Use CI for the complete all-features link+test run if local full builds are not viable. To reduce peak memory when you must run a large build locally: **`CARGO_BUILD_JOBS=1 cargo ...`** (slower, lower parallelism).
+
 ### Review Criteria
 
 Reviewers will check:
