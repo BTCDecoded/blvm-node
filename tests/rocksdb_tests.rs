@@ -5,7 +5,7 @@
 
 #[cfg(feature = "rocksdb")]
 mod rocksdb_tests {
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend, Tree};
+    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
     use std::sync::Arc;
     use tempfile::TempDir;
 

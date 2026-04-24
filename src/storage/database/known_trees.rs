@@ -41,4 +41,18 @@ pub const KNOWN_TREE_NAMES: &[&str] = &[
     "test_mod123_cache",
     "test_state_a",
     "test_state_b",
+    // rocksdb_tests (tests/rocksdb_tests.rs) — CFs must exist at DB open
+    "test_tree",
+    "tree1",
+    "tree2",
+    "dynamic_tree_0",
+    "dynamic_tree_1",
+    "dynamic_tree_2",
+    "dynamic_tree_3",
+    "dynamic_tree_4",
+    "dynamic_tree_5",
+    "dynamic_tree_6",
+    "dynamic_tree_7",
+    "dynamic_tree_8",
+    "dynamic_tree_9",
 ];
