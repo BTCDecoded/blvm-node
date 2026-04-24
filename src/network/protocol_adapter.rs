@@ -170,6 +170,9 @@ impl ProtocolAdapter {
             }
             crate::network::protocol::ProtocolMessage::Ping(p) => bincode::serialize(p)?,
             crate::network::protocol::ProtocolMessage::Pong(p) => bincode::serialize(p)?,
+            crate::network::protocol::ProtocolMessage::AddrV2(a) => {
+                blvm_protocol::wire::serialize_addrv2(a).map_err(|e| anyhow::anyhow!("{e}"))?
+            }
             // Add other message types as needed
             _ => {
                 return Err(anyhow::anyhow!(
@@ -206,7 +209,8 @@ impl ProtocolAdapter {
         let mut message = Vec::new();
 
         // Magic bytes (mainnet)
-        message.extend_from_slice(&0xf9beb4d9u32.to_le_bytes());
+        // Mainnet: wire order f9 be b4 d9 == u32 LE value 0xd9b4bef9 (must match ProtocolParser)
+        message.extend_from_slice(&0xd9b4bef9u32.to_le_bytes());
 
         // Command
         message.extend_from_slice(&command_bytes);
@@ -298,6 +302,7 @@ impl ProtocolAdapter {
             ConsensusNetworkMessage::Pong(p) => {
                 Ok(ProtocolMessage::Pong(ProtoPongMessage { nonce: p.nonce }))
             }
+            ConsensusNetworkMessage::AddrV2(a) => Ok(ProtocolMessage::AddrV2(a.clone())),
             _ => Err(anyhow::anyhow!(
                 "Unsupported message type for protocol conversion"
             )),
@@ -343,6 +348,7 @@ impl ProtocolAdapter {
             ProtocolMessage::Pong(p) => Ok(ConsensusNetworkMessage::Pong(ConsensusPongMessage {
                 nonce: p.nonce,
             })),
+            ProtocolMessage::AddrV2(a) => Ok(ConsensusNetworkMessage::AddrV2(a.clone())),
             _ => Err(anyhow::anyhow!(
                 "Unsupported message type for consensus conversion"
             )),
