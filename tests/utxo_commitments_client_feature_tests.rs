@@ -5,8 +5,6 @@
 #[cfg(feature = "utxo-commitments")]
 use blvm_node::network::utxo_commitments_client::UtxoCommitmentsClient;
 #[cfg(feature = "utxo-commitments")]
-use blvm_protocol::types::Hash;
-#[cfg(feature = "utxo-commitments")]
 use blvm_protocol::utxo_commitments::UtxoCommitmentsNetworkClient;
 #[cfg(feature = "utxo-commitments")]
 use std::sync::Arc;
@@ -14,9 +12,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[cfg(feature = "utxo-commitments")]
-#[test]
-fn test_utxo_commitments_client_creation() {
-    // Create a mock network manager
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_utxo_commitments_client_creation() {
+    // Create a mock network manager (ReplayProtection spawns a Tokio task on construction.)
     use blvm_node::network::NetworkManager;
     use std::net::SocketAddr;
 
@@ -25,7 +23,7 @@ fn test_utxo_commitments_client_creation() {
     let network_manager_arc = Arc::new(RwLock::new(network_manager));
 
     // Create UTXO commitments client
-    let client = UtxoCommitmentsClient::new(network_manager_arc);
+    let _client = UtxoCommitmentsClient::new(network_manager_arc);
 
     // Should create successfully
     assert!(true);
@@ -56,8 +54,8 @@ fn test_utxo_commitments_client_peer_id_parsing() {
 }
 
 #[cfg(feature = "utxo-commitments")]
-#[test]
-fn test_utxo_commitments_client_get_peer_ids() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_utxo_commitments_client_get_peer_ids() {
     // Create client
     use blvm_node::network::NetworkManager;
     use std::net::SocketAddr;

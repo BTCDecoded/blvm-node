@@ -41,6 +41,22 @@ pub struct UtxoCommitmentsClient {
     network_manager: Arc<RwLock<NetworkManager>>,
 }
 
+/// Async body for [`UtxoCommitmentsClient::get_peer_ids`] (sync trait method).
+#[cfg(feature = "utxo-commitments")]
+async fn collect_utxo_peer_tcp_ids(nm: Arc<RwLock<NetworkManager>>) -> Vec<String> {
+    let network = nm.read().await;
+    let mut peer_addrs: Vec<String> = network
+        .peer_states()
+        .read()
+        .await
+        .keys()
+        .map(|addr| format!("tcp:{addr}"))
+        .collect();
+    use rand::seq::SliceRandom;
+    peer_addrs.shuffle(&mut rand::thread_rng());
+    peer_addrs
+}
+
 #[cfg(feature = "utxo-commitments")]
 impl UtxoCommitmentsClient {
     /// Create a new UTXO commitments client
@@ -631,33 +647,29 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
     ///
     /// Returns peer IDs in format "tcp:addr" or "iroh:pubkey" depending on transport.
     ///
-    /// Implementation uses blocking async via tokio runtime handle to bridge
-    /// sync trait method with async network manager. This is safe when called
-    /// from an async context (which is the typical usage pattern).
+    /// Sync bridge over async state: on a **multi-thread** Tokio runtime this uses
+    /// [`tokio::task::block_in_place`] + [`Handle::block_on`]. On a **current-thread**
+    /// runtime, returns an empty list (callers that need peers should run on a
+    /// multi-thread runtime or add an async API). With no runtime, opens a
+    /// short-lived multi-thread runtime.
     fn get_peer_ids(&self) -> Vec<String> {
-        use tokio::runtime::Handle;
+        use tokio::runtime::{Handle, RuntimeFlavor};
+        use tokio::task::block_in_place;
 
-        // Try to get current async runtime handle
-        if let Ok(handle) = Handle::try_current() {
-            // We're in an async context - block on the async operation
-            handle.block_on(async {
-                let network = self.network_manager.read().await;
-                // Extract connected peer addresses - collect to avoid holding lock across await
-                let mut peer_addrs: Vec<String> = network
-                    .peer_states()
-                    .read()
-                    .await
-                    .keys()
-                    .map(|addr| format!("tcp:{addr}"))
-                    .collect();
-                // Shuffle to prevent predictable peer selection (eclipse resistance)
-                use rand::seq::SliceRandom;
-                peer_addrs.shuffle(&mut rand::thread_rng());
-                peer_addrs
-            })
-        } else {
-            // Not in async context - return empty (caller should use async version)
-            vec![]
+        let nm = Arc::clone(&self.network_manager);
+        match Handle::try_current() {
+            Ok(handle) => match handle.runtime_flavor() {
+                RuntimeFlavor::CurrentThread => vec![],
+                _ => block_in_place(|| handle.block_on(collect_utxo_peer_tcp_ids(nm))),
+            },
+            Err(_) => match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .build()
+            {
+                Ok(rt) => rt.block_on(collect_utxo_peer_tcp_ids(nm)),
+                Err(_) => vec![],
+            },
         }
     }
 }
