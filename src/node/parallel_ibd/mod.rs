@@ -30,7 +30,7 @@ use feeder::{new_feeder_state, run_feeder_thread};
 use memory::{MemoryGuard, TIDESDB_MAX_TXN_OPS};
 #[cfg(feature = "production")]
 use types::PrefetchWorkItemV2;
-use types::{ChunkWorkItem, FeederBufferValue, ReadyItem};
+use types::{estimate_block_bytes, ChunkWorkItem, FeederBufferValue, ReadyItem};
 
 use crate::network::inventory::MSG_BLOCK;
 use crate::network::peer_scoring::is_lan_peer;
@@ -1004,6 +1004,10 @@ impl ParallelIBD {
             info!("Coordinator: sequential mode (single peer) — passthrough, no reorder buffer");
         }
         let ready_tx_coord = ready_tx_for_coord;
+        // Create feeder_state here (before coordinator spawn) so the coordinator can hold a reference.
+        // The feeder thread is spawned later but the Arc is shared; creating it early is safe.
+        let feeder_state = new_feeder_state();
+        let feeder_state_for_coord = Arc::clone(&feeder_state);
         tokio::spawn(async move {
             let mut reorder_buffer: std::collections::BTreeMap<u64, (Block, Vec<Vec<Witness>>)> =
                 std::collections::BTreeMap::new();
@@ -1067,21 +1071,45 @@ impl ParallelIBD {
                             );
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
-                            let route_to_gap_fill = h <= next_needed;
+                            // Direct-insert window: bypass prefetch for blocks close to the
+                            // validation tip. Prefetch workers are parallel and reorder blocks
+                            // (e.g., block 600 arrives in out_rx before block 183). The feeder
+                            // reads out_rx FIFO; if it reads a future block first and blocks on
+                            // a full buffer, the critical close-range block is stuck behind it.
+                            // Direct inserting 64 blocks ahead ensures no ordering stall for the
+                            // range validation actually needs next.
+                            let route_to_gap_fill = h <= next_needed.saturating_add(64);
                             let ptx = &prefetch_input_tx_v2_for_coord;
                             tokio::task::block_in_place(|| {
                                 if route_to_gap_fill {
-                                    if let Err(e) = gap_fill_tx_v2_for_coord.try_send(item) {
-                                        let (_, _, tx_ids, hb, b, w) = e.into_inner();
-                                        let _ = ready_tx_coord.send((
-                                            hb,
-                                            b,
+                                    // Always insert critical blocks (h <= validation_tip+1) directly
+                                    // into the feeder buffer — never route through gap_fill workers.
+                                    // Even if gap_fill try_send would succeed, the worker can block
+                                    // on out_tx.send() downstream (ready channel full because feeder
+                                    // is on its Condvar, because validation needs THIS block).
+                                    // Direct insertion is the only path that cannot deadlock.
+                                    let (_, _, tx_ids, hb, b, w) = item;
+                                    let est_bytes = estimate_block_bytes(&b, &w);
+                                    let mut guard = feeder_state_for_coord.0.lock();
+                                    guard.0.insert(
+                                        hb,
+                                        (
+                                            Arc::new(b),
                                             w,
                                             Vec::new(),
                                             rustc_hash::FxHashMap::default(),
                                             tx_ids,
-                                        ));
-                                    }
+                                            est_bytes,
+                                        ),
+                                    );
+                                    guard.2 += est_bytes;
+                                    // notify_all: both the feeder thread and the validation thread
+                                    // wait on this condvar. notify_one would risk waking the feeder
+                                    // (which checks buffer-full, finds it still full, goes back to
+                                    // sleep) instead of validation (which needs this block). With
+                                    // notify_all both wake up; validation finds and consumes the
+                                    // block, then notifies the feeder when buffer space is freed.
+                                    feeder_state_for_coord.1.notify_all();
                                 } else if let Err(e) = ptx.try_send(item) {
                                     let back = e.into_inner();
                                     if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
@@ -1195,21 +1223,45 @@ impl ParallelIBD {
                             );
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
-                            let route_to_gap_fill = h <= next_needed;
+                            // Direct-insert window: bypass prefetch for blocks close to the
+                            // validation tip. Prefetch workers are parallel and reorder blocks
+                            // (e.g., block 600 arrives in out_rx before block 183). The feeder
+                            // reads out_rx FIFO; if it reads a future block first and blocks on
+                            // a full buffer, the critical close-range block is stuck behind it.
+                            // Direct inserting 64 blocks ahead ensures no ordering stall for the
+                            // range validation actually needs next.
+                            let route_to_gap_fill = h <= next_needed.saturating_add(64);
                             let ptx = &prefetch_input_tx_v2_for_coord;
                             tokio::task::block_in_place(|| {
                                 if route_to_gap_fill {
-                                    if let Err(e) = gap_fill_tx_v2_for_coord.try_send(item) {
-                                        let (_, _, tx_ids, hb, b, w) = e.into_inner();
-                                        let _ = ready_tx_coord.send((
-                                            hb,
-                                            b,
+                                    // Always insert critical blocks (h <= validation_tip+1) directly
+                                    // into the feeder buffer — never route through gap_fill workers.
+                                    // Even if gap_fill try_send would succeed, the worker can block
+                                    // on out_tx.send() downstream (ready channel full because feeder
+                                    // is on its Condvar, because validation needs THIS block).
+                                    // Direct insertion is the only path that cannot deadlock.
+                                    let (_, _, tx_ids, hb, b, w) = item;
+                                    let est_bytes = estimate_block_bytes(&b, &w);
+                                    let mut guard = feeder_state_for_coord.0.lock();
+                                    guard.0.insert(
+                                        hb,
+                                        (
+                                            Arc::new(b),
                                             w,
                                             Vec::new(),
                                             rustc_hash::FxHashMap::default(),
                                             tx_ids,
-                                        ));
-                                    }
+                                            est_bytes,
+                                        ),
+                                    );
+                                    guard.2 += est_bytes;
+                                    // notify_all: both the feeder thread and the validation thread
+                                    // wait on this condvar. notify_one would risk waking the feeder
+                                    // (which checks buffer-full, finds it still full, goes back to
+                                    // sleep) instead of validation (which needs this block). With
+                                    // notify_all both wake up; validation finds and consumes the
+                                    // block, then notifies the feeder when buffer space is freed.
+                                    feeder_state_for_coord.1.notify_all();
                                 } else if let Err(e) = ptx.try_send(item) {
                                     let back = e.into_inner();
                                     if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
@@ -1314,21 +1366,45 @@ impl ParallelIBD {
                             );
                             let next_needed =
                                 validation_height_for_coord.load(Ordering::Relaxed) + 1;
-                            let route_to_gap_fill = h <= next_needed;
+                            // Direct-insert window: bypass prefetch for blocks close to the
+                            // validation tip. Prefetch workers are parallel and reorder blocks
+                            // (e.g., block 600 arrives in out_rx before block 183). The feeder
+                            // reads out_rx FIFO; if it reads a future block first and blocks on
+                            // a full buffer, the critical close-range block is stuck behind it.
+                            // Direct inserting 64 blocks ahead ensures no ordering stall for the
+                            // range validation actually needs next.
+                            let route_to_gap_fill = h <= next_needed.saturating_add(64);
                             let ptx = &prefetch_input_tx_v2_for_coord;
                             tokio::task::block_in_place(|| {
                                 if route_to_gap_fill {
-                                    if let Err(e) = gap_fill_tx_v2_for_coord.try_send(item) {
-                                        let (_, _, tx_ids, hb, b, w) = e.into_inner();
-                                        let _ = ready_tx_coord.send((
-                                            hb,
-                                            b,
+                                    // Always insert critical blocks (h <= validation_tip+1) directly
+                                    // into the feeder buffer — never route through gap_fill workers.
+                                    // Even if gap_fill try_send would succeed, the worker can block
+                                    // on out_tx.send() downstream (ready channel full because feeder
+                                    // is on its Condvar, because validation needs THIS block).
+                                    // Direct insertion is the only path that cannot deadlock.
+                                    let (_, _, tx_ids, hb, b, w) = item;
+                                    let est_bytes = estimate_block_bytes(&b, &w);
+                                    let mut guard = feeder_state_for_coord.0.lock();
+                                    guard.0.insert(
+                                        hb,
+                                        (
+                                            Arc::new(b),
                                             w,
                                             Vec::new(),
                                             rustc_hash::FxHashMap::default(),
                                             tx_ids,
-                                        ));
-                                    }
+                                            est_bytes,
+                                        ),
+                                    );
+                                    guard.2 += est_bytes;
+                                    // notify_all: both the feeder thread and the validation thread
+                                    // wait on this condvar. notify_one would risk waking the feeder
+                                    // (which checks buffer-full, finds it still full, goes back to
+                                    // sleep) instead of validation (which needs this block). With
+                                    // notify_all both wake up; validation finds and consumes the
+                                    // block, then notifies the feeder when buffer space is freed.
+                                    feeder_state_for_coord.1.notify_all();
                                 } else if let Err(e) = ptx.try_send(item) {
                                     let back = e.into_inner();
                                     if let Err(e2) = gap_fill_tx_v2_for_coord.try_send(back) {
@@ -1355,7 +1431,7 @@ impl ParallelIBD {
 
         // Step 4: BLOCK FEEDER — drains ready_rx into shared buffer so validation can run while buffer fills.
         // Feeder runs on std::thread (crossbeam recv is blocking). Buffer fills while validation works.
-        let feeder_state = new_feeder_state();
+        // feeder_state was created earlier (before coordinator spawn) so the coordinator could reference it.
         let feeder_buffer_limit = mem_guard.buffer_limit(start_height);
         let feeder_buffer_bytes_limit = mem_guard.feeder_buffer_bytes_limit;
         let feeder_handle = run_feeder_thread(

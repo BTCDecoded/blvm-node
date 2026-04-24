@@ -166,6 +166,22 @@ pub(crate) async fn download_chunk(
     let mut streamed_block_count: usize = 0;
     let mut progress = BlockDownloadProgress::new();
 
+    // Drain stale stall broadcasts accumulated while this worker was finishing its previous chunk.
+    // Workers hold stall_rx across the entire worker-task lifetime (one subscription, many chunks).
+    // A broadcast sent during the previous chunk's work sits unread in the channel. Without
+    // draining, the very first select! poll in the "no first block yet" branch fires the stale
+    // signal immediately — "no first block yet" → abort → re-queue → same broadcast fires again.
+    // Draining here gives this chunk a clean slate; only broadcasts sent AFTER we start are relevant.
+    if let Some(ref mut rx) = stall_rx {
+        loop {
+            match rx.try_recv() {
+                Ok(_) => continue,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break, // Empty or Closed
+            }
+        }
+    }
+
     info!(
         "Downloading chunk from peer {}: heights {} to {}",
         peer_id, start_height, end_height
@@ -305,11 +321,22 @@ pub(crate) async fn download_chunk(
     loop {
         let next_result = if progress.last_block_hash.is_none() {
             if let Some(ref mut rx) = stall_rx {
+                // biased: poll in_flight first so a locally-cached block (resolved immediately)
+                // is never preempted by a stall signal that arrived in the broadcast channel
+                // before this select runs. Without biased, tokio may pick stall_rx non-deterministically
+                // and abort a chunk we're already holding the first block for.
                 tokio::select! {
+                    biased;
                     r = in_flight.next() => r,
                     stall_res = rx.recv() => {
                         if let Ok(stall_h) = stall_res {
                             if stall_h >= start_height && stall_h <= end_height {
+                                // Only abort if we genuinely have not started — i.e., the first
+                                // height of the chunk is also missing (we cannot make forward
+                                // progress at all). If stall_h > start_height some earlier block
+                                // in the chunk is still pending; biased select above guarantees
+                                // we process any ready in_flight entry before reaching here, so
+                                // landing here means we truly have nothing ready yet.
                                 warn!("Coordinator stall at {}: aborting chunk {}-{} (no first block yet)", stall_h, start_height, end_height);
                                 return Err(anyhow::anyhow!(
                                     "Coordinator stall: aborting chunk {}-{} for retry",
@@ -334,17 +361,21 @@ pub(crate) async fn download_chunk(
                 }
             }
         } else if let Some(ref mut rx) = stall_rx {
+            // We have already received at least one block — we are actively delivering this chunk.
+            // Do NOT abort on a stall signal here: the coordinator needs the block in our range and
+            // we are the worker trying to fetch it. Aborting triggers an infinite retry loop where
+            // every new worker gets killed by the next 30-second broadcast before it can complete.
+            // Drain stall signals (so the channel doesn't accumulate lag) but keep downloading.
+            // The download timeout (download_timeout_secs) handles genuinely stuck peers.
             tokio::select! {
                 r = in_flight.next() => r,
                 stall_res = rx.recv() => {
                     match stall_res {
                         Ok(stall_h) => {
                             if stall_h >= start_height && stall_h <= end_height {
-                                warn!("Coordinator stall at {}: aborting chunk {}-{} for retry", stall_h, start_height, end_height);
-                                return Err(anyhow::anyhow!(
-                                    "Coordinator stall: aborting chunk {}-{} for retry",
-                                    start_height, end_height
-                                ));
+                                // Drain the stall signal but do not abort — we are already
+                                // delivering this chunk. Let the download timeout decide.
+                                info!("Coordinator stall at {}: chunk {}-{} is active (progress started), continuing download", stall_h, start_height, end_height);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {

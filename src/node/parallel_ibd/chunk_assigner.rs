@@ -196,12 +196,14 @@ impl ChunkAssigner {
             }
         }
 
-        // Main queue
+        // Main queue — any peer can take the next sequential chunk.
+        // Per-peer serial (in_flight_per_peer, enforced above) already prevents duplicate
+        // assignment without needing peer matching. Peer matching caused liveness failures:
+        // when a peer's workers exit after consecutive failures, its main-queue chunks became
+        // permanently stuck (only that peer's workers could pick them), requiring the 30-second
+        // coordinator stall broadcast to trickle them into the retry queue one at a time.
         let idx = self.next_index.load(Ordering::Relaxed);
         if idx >= self.chunks.len() {
-            return None;
-        }
-        if self.chunk_peers[idx] != peer_id {
             return None;
         }
         let (start, end) = self.chunks[idx];

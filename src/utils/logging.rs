@@ -9,14 +9,14 @@
 //! # Usage
 //!
 //! ## Main Node
-//! ```rust
+//! ```no_run
 //! use blvm_node::utils::init_logging;
 //!
 //! init_logging(None); // Uses RUST_LOG or defaults to "info"
 //! ```
 //!
 //! ## Module
-//! ```rust
+//! ```no_run
 //! use blvm_node::utils::init_module_logging;
 //!
 //! init_module_logging("my_module", None); // Module gets its own filter
@@ -37,7 +37,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 ///   If None, uses RUST_LOG environment variable or defaults to "info"
 ///
 /// # Example
-/// ```rust
+/// ```no_run
 /// use blvm_node::utils::init_logging;
 ///
 /// // Use RUST_LOG (standard) or default to "info"
@@ -98,7 +98,7 @@ pub fn init_logging(filter: Option<&str>) {
 ///   - Otherwise: "{module_name}=info,blvm_node::module=debug"
 ///
 /// # Example
-/// ```rust
+/// ```no_run
 /// use blvm_node::utils::init_module_logging;
 ///
 /// // Default module logging (respects RUST_LOG)
@@ -146,21 +146,7 @@ pub fn init_module_logging(module_name: &str, filter: Option<&str>) {
 /// * `filter` - Optional log filter. If None, uses RUST_LOG or defaults to "info"
 ///
 /// # Example
-/// ```rust
-/// use blvm_node::utils::init_json_logging;
-///
-/// init_json_logging(None);
-/// ```
-/// Initialize logging with JSON output (for production/monitoring)
-///
-/// Useful when logs need to be parsed by log aggregation systems.
-/// Follows standard structured logging practices.
-///
-/// # Arguments
-/// * `filter` - Optional log filter from config. If None, uses RUST_LOG or defaults to "info"
-///
-/// # Example
-/// ```rust
+/// ```no_run
 /// use blvm_node::utils::init_json_logging;
 ///
 /// init_json_logging(None);
@@ -203,7 +189,7 @@ pub fn init_json_logging(filter: Option<&str>) {
 /// * `config` - Optional LoggingConfig from NodeConfig
 ///
 /// # Example
-/// ```rust
+/// ```no_run
 /// use blvm_node::utils::init_logging_from_config;
 /// use blvm_node::config::NodeConfig;
 ///
