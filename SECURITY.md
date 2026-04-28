@@ -225,7 +225,7 @@ If you discover a security vulnerability:
 
 1. **DO NOT** create public issues
 2. **DO NOT** discuss publicly
-3. **DO** report privately to: security@btcdecoded.org
+3. **DO** report privately to: security@thebitcoincommons.org
 4. **DO** provide detailed reproduction steps
 5. **DO** allow reasonable time for fixes
 
