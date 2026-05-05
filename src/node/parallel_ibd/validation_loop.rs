@@ -475,6 +475,12 @@ struct InFlightEntry {
 /// Each worker owns its own scratch buffers (`utxo_base`, key buffers) so allocations amortise
 /// across the worker's lifetime. With N workers and N concurrent jobs, view-build runs N-way
 /// parallel; the orchestrator stays a thin dispatcher.
+///
+/// `max_retire_lag` is a backpressure limit: if this worker's height exceeds the retire thread's
+/// last-committed height by more than this value, the worker sleeps until retire catches up.
+/// This bounds the size of `pending_shards` (pending UTXO ops awaiting disk flush), which would
+/// otherwise grow to thousands of blocks × hundreds of ops/block = hundreds of millions of bytes,
+/// causing OOM on 16 GiB hosts. Set to 0 to disable (unlimited, for high-RAM machines).
 #[allow(clippy::too_many_arguments)]
 fn run_validation_worker_shared(
     rx: crossbeam_channel::Receiver<ValidateJob>,
@@ -484,6 +490,7 @@ fn run_validation_worker_shared(
     protocol: Arc<blvm_protocol::BitcoinProtocolEngine>,
     store: Arc<IbdUtxoStore>,
     last_retired: Arc<AtomicU64>,
+    max_retire_lag: u64,
 ) {
     // Per-worker scratch buffers. UtxoSet capacity carries over (~peak inputs of recent block).
     let mut utxo_base: UtxoSet = UtxoSet::default();
@@ -614,6 +621,22 @@ fn run_validation_worker_shared(
         // `in_flight_insertions` (until disk flush completes). `maybe_evict` checks all three.
         if let Ok(Some(ref delta)) = &result {
             store.worker_cache_put_protected(&delta.additions, height);
+            // Retire-lag backpressure: if this worker is too far ahead of the retire thread,
+            // pause before pushing more ops to `pending_shards`. Without this, validation can
+            // race tens of thousands of blocks ahead of retire (which drains pending one height
+            // at a time), filling pending_shards with N×ops_per_block entries — each ~200 B.
+            // At h=200k on a 16 GiB host: 61k-block lag × 380 ops/block × 200 B = ~4.6 GB in
+            // pending alone, which pushed RSS to 10.4 GB and triggered Emergency/OOM.
+            if max_retire_lag > 0 {
+                let backoff = std::time::Duration::from_millis(2);
+                loop {
+                    let retired = last_retired.load(std::sync::atomic::Ordering::Relaxed);
+                    if height.saturating_sub(retired) <= max_retire_lag {
+                        break;
+                    }
+                    std::thread::sleep(backoff);
+                }
+            }
             store.apply_utxo_delta(delta, height, &mut del_scratch, &mut add_scratch, true);
         }
         let _ = tx.send(ValidateResult {
@@ -1016,6 +1039,30 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| 32_usize.clamp(n_validate_workers, 64))
         .max(n_validate_workers);
+    // Retire-lag limit: cap how far (in block heights) any worker can race ahead of the retire
+    // thread. The retire thread drains `pending_shards` one height at a time; without a limit,
+    // validation can outpace retire by tens of thousands of blocks, accumulating hundreds of
+    // millions of pending UTXO ops in RAM (→ OOM). The limit is RAM-tier aware: on 16 GiB a
+    // 2 000-block lag × ~400 ops × ~200 B/op = ~160 MB. Override via BLVM_IBD_MAX_RETIRE_LAG.
+    let max_retire_lag: u64 = std::env::var("BLVM_IBD_MAX_RETIRE_LAG")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            let total_gb = (system_total_ram_mb + 512) / 1024;
+            if total_gb >= 32 {
+                0 // no limit: retire-lag RSS is small compared to available RAM
+            } else if total_gb >= 24 {
+                8_000
+            } else if total_gb >= 16 {
+                4_000
+            } else {
+                2_000
+            }
+        });
+    if max_retire_lag > 0 {
+        info!("IBD: retire-lag backpressure active (max_retire_lag={})", max_retire_lag);
+    }
+
     info!(
         "IBD: n_validate_workers={} pipeline_depth={}",
         n_validate_workers, n_pipeline_depth
@@ -1034,10 +1081,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let pr = Arc::clone(&protocol);
         let st = Arc::clone(&ibd_store_v2_for_validation);
         let lr = Arc::clone(&last_retired);
+        let mrl = max_retire_lag;
         _validate_workers.push(
             std::thread::Builder::new()
                 .name(format!("ibd-validate-{}", i))
-                .spawn(move || run_validation_worker_shared(rx, tx, pi, bs, pr, st, lr))
+                .spawn(move || run_validation_worker_shared(rx, tx, pi, bs, pr, st, lr, mrl))
                 .expect("spawn IBD validate worker"),
         );
     }
