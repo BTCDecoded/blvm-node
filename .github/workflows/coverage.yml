@@ -65,6 +65,15 @@ jobs:
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
       
       - name: Run tests with coverage
         id: coverage
@@ -86,7 +95,7 @@ jobs:
           
           # Run tests with coverage
           # --jobs 2 limits parallelism to prevent OOM when compiling 63+ test executables
-          cargo tarpaulin --lib --bins --tests --out xml --output-dir coverage --skip-clean --timeout 120 --jobs 2
+          cargo tarpaulin --locked --lib --bins --tests --out xml --output-dir coverage --skip-clean --timeout 120 --jobs 2
           
           # Extract coverage percentage from XML
           if [ -f "coverage/cobertura.xml" ]; then

@@ -170,8 +170,9 @@ windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32
 # - ring 0.16.20 (RUSTSEC-2025-0009) - FIXED in iroh 0.95
 # - rsa 0.9.8 (RUSTSEC-2023-0071) - FIXED in iroh 0.95
 # - paste 1.0.15 (unmaintained) - FIXED in iroh 0.95
-#
-# iroh 0.95 uses actively maintained dependencies and fixes all known security issues.
+# iroh 0.95 transitive stack: `cargo audit` may still flag optional-path crates (e.g. hickory-proto
+# RUSTSEC-2026-0118 / RUSTSEC-2026-0119 via DNS resolver) until upstream iroh bumps hickory — see
+# `.github/workflows/ci.yml` Run security audit ignores for IDs we accept until then.
 
 [features]
 # Storage: `database_backend = "auto"` (default in config) resolves to RocksDB when the `rocksdb`

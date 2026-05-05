@@ -144,9 +144,9 @@ jobs:
         run: |
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config
+            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf
+            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
 
       - name: Cache
@@ -168,7 +168,8 @@ jobs:
           # Run tests only (no coverage) for fast PR feedback
           # Coverage runs separately in coverage.yml workflow
           # Default crate features only (see Cargo.toml [features].default) — not --all-features
-          cargo test
+          # --locked: CI strips [patch.crates-io]; pin transitive versions (e.g. blvm-muhash >=0.1.6).
+          cargo test --locked
       
       - name: Save Cargo cache
         if: always()
@@ -208,6 +209,15 @@ jobs:
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -229,7 +239,7 @@ jobs:
             echo "Skipping Clippy (cargo-clippy not installed for the active toolchain)"
             exit 0
           fi
-          cargo clippy --lib --bins -- -D warnings
+          cargo clippy --locked --lib --bins -- -D warnings
 
   verify:
     name: Verify
@@ -268,9 +278,9 @@ jobs:
         run: |
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq libz3-dev libclang-dev clang pkg-config jq curl
+            sudo apt-get install -y -qq libz3-dev libclang-dev clang pkg-config jq curl libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm z3 llvm clang pkgconf jq curl
+            sudo pacman -Sy --noconfirm z3 llvm clang pkgconf jq curl openssl
           fi
 
       - name: Install cargo-spec-lock from crates.io
@@ -424,6 +434,15 @@ jobs:
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -440,7 +459,7 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Docs
-        run: cargo doc --no-deps --document-private-items
+        run: cargo doc --locked --no-deps --document-private-items
 
   security:
     name: Security
@@ -460,6 +479,16 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
@@ -475,7 +504,8 @@ jobs:
           # These are transitive dependencies that can't be easily fixed without
           # updating iroh-net to 0.28+ (deprecated, requires API changes)
           # See Cargo.toml security note for details
-          cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0007 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0009
+          # hickory-proto/resolver via iroh (DNS): fixed upstream needs newer iroh / hickory stack
+          cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0007 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2026-0118 --ignore RUSTSEC-2026-0119
 
   # Fuzz is skippable via `[skip_fuzz]` on push (skips fuzz-build + all fuzz shards). Fuzz does not
   # need `test` so `[skip_tests]` can still run libFuzzer.
@@ -502,9 +532,9 @@ jobs:
         run: |
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config
+            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf
+            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
 
       - name: Cache
@@ -671,9 +701,9 @@ jobs:
         run: |
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config
+            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf
+            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
 
       - name: Cache
@@ -694,13 +724,13 @@ jobs:
         run: |
           PROFILE_FLAG="--release"
           [ -n "${BLVM_FAST_BUILD:-}" ] && PROFILE_FLAG="--profile release-fast"
-          cargo build $PROFILE_FLAG
+          cargo build --locked $PROFILE_FLAG
       
       - name: Build tests
         run: |
           PROFILE_FLAG="--release"
           [ -n "${BLVM_FAST_BUILD:-}" ] && PROFILE_FLAG="--profile release-fast"
-          cargo test --no-run $PROFILE_FLAG
+          cargo test --locked --no-run $PROFILE_FLAG
       
       - name: Cache target
         if: always()
@@ -743,6 +773,16 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
