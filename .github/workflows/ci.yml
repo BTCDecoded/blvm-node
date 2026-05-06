@@ -143,8 +143,8 @@ jobs:
       - name: Install tidesdb native dependencies
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
@@ -212,8 +212,8 @@ jobs:
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq pkg-config libssl-dev
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
@@ -277,8 +277,8 @@ jobs:
       - name: Install spec-lock build deps (Z3 / clang / jq)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq libz3-dev libclang-dev clang pkg-config jq curl libssl-dev
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq libz3-dev libclang-dev clang pkg-config jq curl libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm z3 llvm clang pkgconf jq curl openssl
           fi
@@ -437,8 +437,8 @@ jobs:
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq pkg-config libssl-dev
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
@@ -483,8 +483,8 @@ jobs:
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq pkg-config libssl-dev
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
@@ -531,8 +531,8 @@ jobs:
       - name: Install tidesdb native dependencies
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
@@ -700,8 +700,8 @@ jobs:
       - name: Install tidesdb native dependencies
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
@@ -777,8 +777,8 @@ jobs:
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq pkg-config libssl-dev
+            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
