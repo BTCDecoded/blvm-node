@@ -1229,11 +1229,12 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
           
-          # Skip if version already exists
+          # Fail if version already exists — the Determine version step should have picked a free one.
+          # A "skip" here means our API check was wrong (stale cache, pagination, etc.).
           if [ "${{ steps.check-version.outputs.exists }}" = "true" ]; then
-            echo "⚠️  Version ${VERSION} already exists on crates.io, skipping publish"
+            echo "❌ Version ${VERSION} already exists on crates.io — version determination picked a taken version"
             echo "published=false" >> $GITHUB_OUTPUT
-            exit 0
+            exit 1
           fi
           
           echo "Publishing ${CRATE_NAME} v${VERSION} to crates.io..."
@@ -1246,18 +1247,13 @@ jobs:
             echo "Waiting 30 seconds for crates.io to index..."
             sleep 30
           else
-            # Check if error is due to version already existing
-            if echo "$PUBLISH_OUTPUT" | grep -q "already exists"; then
-              echo "⚠️  Version ${VERSION} already exists on crates.io (detected during publish)"
-              echo "published=false" >> $GITHUB_OUTPUT
-              exit 0
-            else
-              echo "❌ Failed to publish ${CRATE_NAME} v${VERSION}"
-              echo "Error output:"
-              echo "$PUBLISH_OUTPUT"
-              echo "published=false" >> $GITHUB_OUTPUT
-              exit $PUBLISH_EXIT_CODE
-            fi
+            echo "❌ Failed to publish ${CRATE_NAME} v${VERSION}"
+            echo "Error output:"
+            echo "$PUBLISH_OUTPUT"
+            echo "published=false" >> $GITHUB_OUTPUT
+            # "already exists" here means our version check was wrong (stale API cache or
+            # a parallel run beat us) — treat it as a hard failure so the run is visible.
+            exit $PUBLISH_EXIT_CODE
           fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
