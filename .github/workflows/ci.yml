@@ -1108,10 +1108,8 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           PROTOCOL_VER="${{ steps.protocol-version.outputs.version }}"
           
-          # Create a temporary Cargo.toml for release (don't modify source file)
-          cp Cargo.toml Cargo.toml.release
-          
-          # Update [package] version only (naive sed corrupts e.g. [dependencies.smallvec] version pins).
+          # Bump [package] version in place. The awk approach is safer than sed for version lines
+          # because Cargo.toml has many dependency version pins that naive regexes would corrupt.
           awk -v ver="$VERSION" '
             /^\[package\]/ { in_package = 1; print; next }
             /^\[/ { in_package = 0 }
@@ -1120,42 +1118,39 @@ jobs:
               next
             }
             { print }
-          ' Cargo.toml.release > Cargo.toml.release.tmp && mv Cargo.toml.release.tmp Cargo.toml.release
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+          
+          # Verify the bump actually happened
+          ACTUAL_VER=$(grep -A 5 '^\[package\]' Cargo.toml | grep '^version = ' | head -1 | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ "$ACTUAL_VER" != "$VERSION" ]; then
+            echo "❌ Version bump failed: Cargo.toml has '$ACTUAL_VER', expected '$VERSION'"
+            grep -A 5 '^\[package\]' Cargo.toml
+            exit 1
+          fi
+          echo "✅ Cargo.toml version bumped to ${ACTUAL_VER}"
           
           # Update blvm-protocol dependency to use latest crates.io version
-          sed -i 's|blvm-protocol = { path = "\.\./blvm-protocol"[^}]*}|blvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml.release
-          sed -i 's|^blvm-protocol = "[^"]*"|blvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml.release
+          sed -i 's|blvm-protocol = { path = "\.\./blvm-protocol"[^}]*}|blvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
+          sed -i 's|^blvm-protocol = "[^"]*"|blvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
           
-          # Remove [patch.crates-io] section from release copy (use published crates)
-          if grep -q "^\[patch\.crates-io\]" Cargo.toml.release; then
-            PATCH_START=$(grep -n "^\[patch\.crates-io\]" Cargo.toml.release | cut -d: -f1)
-            NEXT_SECTION=$(awk -v start="$PATCH_START" 'NR > start && /^\[/ {print NR; exit}' Cargo.toml.release)
-            if [ -z "$NEXT_SECTION" ]; then
-              sed -i "${PATCH_START},\$d" Cargo.toml.release
-            else
-              sed -i "${PATCH_START},$((NEXT_SECTION-1))d" Cargo.toml.release
-            fi
-            echo "✅ Removed [patch.crates-io] section from release Cargo.toml"
-          fi
+          # Also keep Cargo.toml.release as a copy for the smoke-test step
+          cp Cargo.toml Cargo.toml.release
           
           echo "Release Cargo.toml prepared:"
-          echo "  version: ${VERSION}"
+          echo "  version: ${ACTUAL_VER}"
           echo "  blvm-protocol: ${PROTOCOL_VER}"
           echo ""
           echo "Dependencies section:"
-          grep -A 2 "^\[dependencies\]" Cargo.toml.release | head -5
+          grep -A 2 "^\[dependencies\]" Cargo.toml | head -5
           echo ""
           echo "Patch section check:"
-          grep -A 5 "^\[patch\.crates-io\]" Cargo.toml.release || echo "  ✅ [patch.crates-io] removed - using published crates"
+          grep -A 5 "^\[patch\.crates-io\]" Cargo.toml || echo "  ✅ [patch.crates-io] removed - using published crates"
       
-      # Same post-edit check as other BLVM repos (see CI / release unification): manifest must parse
-      # before package/publish. Full compile is still gated by `cargo package` / `cargo publish --dry-run`.
+      # Manifest must parse before package/publish.
       - name: Pre-release manifest smoke (crates.io Cargo.toml)
         run: |
-          cp Cargo.toml Cargo.toml.__ci_worktree
-          cp Cargo.toml.release Cargo.toml
           cargo metadata --format-version 1 --no-deps > /dev/null
-          mv Cargo.toml.__ci_worktree Cargo.toml
+          echo "✅ Cargo.toml parses cleanly"
       
       - name: Check for crates.io token
         run: |
@@ -1171,13 +1166,6 @@ jobs:
           cargo login "${CARGO_REGISTRY_TOKEN}"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      
-      - name: Use release Cargo.toml
-        if: env.CARGO_REGISTRY_TOKEN != ''
-        run: |
-          # Replace Cargo.toml with the release version (temporary, just for this job)
-          mv Cargo.toml.release Cargo.toml
-          echo "✅ Using release Cargo.toml (patch section removed, using published crates)"
       
       - name: Verify package
         if: env.CARGO_REGISTRY_TOKEN != ''
@@ -1238,6 +1226,13 @@ jobs:
           fi
           
           echo "Publishing ${CRATE_NAME} v${VERSION} to crates.io..."
+          # Final sanity: confirm Cargo.toml on disk actually has the bumped version
+          ACTUAL_VER=$(grep -A 5 '^\[package\]' Cargo.toml | grep '^version = ' | head -1 | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ "$ACTUAL_VER" != "$VERSION" ]; then
+            echo "❌ Cargo.toml version mismatch at publish time: got '$ACTUAL_VER', expected '$VERSION'"
+            echo "published=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
           PUBLISH_OUTPUT=$(cargo publish --no-verify --allow-dirty --token "${CARGO_REGISTRY_TOKEN}" 2>&1)
           PUBLISH_EXIT_CODE=$?
           
