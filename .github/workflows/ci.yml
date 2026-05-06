@@ -172,7 +172,10 @@ jobs:
       (github.event_name != 'push' || github.event.head_commit == null ||
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
-        !contains(github.event.head_commit.message, '[no ci]')))
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null ||
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - name: Show disk usage (top 10 largest dirs)
         run: |
@@ -894,7 +897,7 @@ jobs:
     if: |
       always() &&
       needs.setup.result == 'success' &&
-      needs.build-dev.result == 'success' &&
+      (needs.build-dev.result == 'success' || needs.build-dev.result == 'skipped') &&
       (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
