@@ -39,7 +39,7 @@ rocksdb = { version = "=0.24.0", optional = true }
 # relevant feature (e.g. `--no-default-features` for tidesdb).
 #
 # Pinned rev; build.rs builds libtidesdb from source and links lz4/zstd/snappy (CI installs -dev packages).
-tidesdb = { git = "https://github.com/tidesdb/tidesdb-rs.git", rev = "2c128540b02400a538475d992a122d940eb93da3", optional = true }
+tidesdb = { git = "https://github.com/tidesdb/tidesdb-rs.git", rev = "2c128540b02400a538475d992a122d940eb93da3", version = "0.6.7", optional = true }
 
 # Networking layer - EXACT VERSIONS for security
 # Explicit features avoid `full` (smaller graphs, clearer deps). Mirrors actual `tokio::` usage
