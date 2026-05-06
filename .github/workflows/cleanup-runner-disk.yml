@@ -1,0 +1,78 @@
+name: Cleanup Runner Disk
+
+on:
+  schedule:
+    # Every Sunday at 03:00 UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (print what would be deleted, do not delete)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Cleanup self-hosted runner disk
+    runs-on: [self-hosted, Linux, X64, builds]
+    steps:
+      - name: Report disk before
+        run: df -h /
+
+      - name: Remove stale CI build target dirs (older than 7 days)
+        run: |
+          DRY="${{ github.event.inputs.dry_run }}"
+          BASE="/tmp/gh-blvm-node-build"
+          if [ ! -d "$BASE" ]; then
+            echo "No stale build dirs found at $BASE"
+            exit 0
+          fi
+          echo "=== Stale run dirs under $BASE ==="
+          find "$BASE" -mindepth 1 -maxdepth 1 -type d -mtime +7 | while read -r dir; do
+            SIZE=$(du -sh "$dir" 2>/dev/null | cut -f1)
+            echo "  $dir ($SIZE)"
+            if [ "$DRY" != "true" ]; then
+              rm -rf "$dir"
+            fi
+          done
+
+      - name: Remove stale test binaries from workspace target (older than 7 days)
+        run: |
+          DRY="${{ github.event.inputs.dry_run }}"
+          TARGET="$GITHUB_WORKSPACE/target/debug"
+          if [ ! -d "$TARGET" ]; then
+            echo "No local target/debug found"
+            exit 0
+          fi
+          echo "=== Large stale test executables in $TARGET ==="
+          find "$TARGET" -maxdepth 1 -type f -executable \
+            ! -name "*.so" ! -name "*.rlib" ! -name "*.d" \
+            -mtime +7 -size +50M | while read -r f; do
+            SIZE=$(du -sh "$f" 2>/dev/null | cut -f1)
+            echo "  $f ($SIZE)"
+            if [ "$DRY" != "true" ]; then
+              rm -f "$f"
+            fi
+          done
+
+      - name: Remove old incremental fingerprints and rlibs (older than 14 days)
+        run: |
+          DRY="${{ github.event.inputs.dry_run }}"
+          TARGET="$GITHUB_WORKSPACE/target"
+          if [ ! -d "$TARGET" ]; then exit 0; fi
+          BYTES=0
+          COUNT=0
+          while IFS= read -r f; do
+            BYTES=$((BYTES + $(stat -c%s "$f" 2>/dev/null || echo 0)))
+            COUNT=$((COUNT + 1))
+            if [ "$DRY" != "true" ]; then rm -f "$f"; fi
+          done < <(find "$TARGET/debug/.fingerprint" "$TARGET/debug/incremental" \
+            -type f -mtime +14 2>/dev/null)
+          echo "Would remove / removed: $COUNT fingerprint/incremental files (~$((BYTES / 1048576)) MB)"
+
+      - name: Report disk after
+        run: df -h /

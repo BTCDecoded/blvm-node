@@ -26,7 +26,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
-  CARGO_INCREMENTAL: '1'
+  CARGO_INCREMENTAL: '0'
   # Shared target dir for build-dev → test/clippy/docs within the same run.
   # All four jobs run on [self-hosted, Linux, X64, builds] runners that share /tmp.
   BLVM_BUILD_TARGET: /tmp/gh-blvm-node-build/${{ github.run_id }}/target
@@ -251,6 +251,21 @@ jobs:
           CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: cargo test
       
+      - name: Clean test binaries and stale run dirs
+        if: always()
+        run: |
+          # Remove test binary executables from this run (largest artifacts, not needed after test).
+          # Rlibs stay — they speed up future compilations via the cache.
+          TARGET="${{ env.BLVM_BUILD_TARGET }}"
+          if [ -d "$TARGET/debug" ]; then
+            find "$TARGET/debug" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" ! -name "*.d" \
+              -delete 2>/dev/null || true
+          fi
+          # Remove run dirs from previous workflow runs (older than 48h).
+          find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+            -not -name "${{ github.run_id }}" \
+            -mtime +2 -exec rm -rf {} + 2>/dev/null || true
+
       - name: Save Cargo cache
         if: always()
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main

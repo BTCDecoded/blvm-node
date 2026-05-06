@@ -20,7 +20,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
-  CARGO_INCREMENTAL: '1'
+  CARGO_INCREMENTAL: '0'
 
 jobs:
   coverage:
@@ -130,6 +130,17 @@ jobs:
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: save
+
+      - name: Clean test binaries after coverage
+        if: always()
+        run: |
+          # Tarpaulin produces instrumented test binaries alongside coverage data.
+          # Remove them to avoid disk accumulation on self-hosted runners.
+          find . -path "./target/debug" -prune -o \
+            -path "./target" -maxdepth 2 -type f -executable \
+            ! -name "*.so" ! -name "*.rlib" ! -name "*.d" -delete 2>/dev/null || true
+          # Tarpaulin coverage workspace under target
+          rm -rf ./target/tarpaulin 2>/dev/null || true
 
       - name: Coverage Summary
         if: always()
