@@ -10,9 +10,7 @@ on:
   repository_dispatch:
     types: [build-chain, upstream-changed]
   # Manual runs use the same `skip_tests` input as blvm-consensus / blvm-protocol; commit
-  # markers on push:
-  # [skip_tests], [skip_docs], [skip_verify], [skip_fuzz]
-  # [skip_docs_fuzz] — skip Docs + fuzz-build + fuzz (handy for `chore:` noise-only pushes)
+  # [skip_tests], [skip_docs], [skip_verify], [skip_fuzz] on push.
   workflow_dispatch:
     inputs:
       skip_tests:
@@ -144,8 +142,8 @@ jobs:
       - name: Install tidesdb native dependencies
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
@@ -218,8 +216,8 @@ jobs:
       - name: Install tidesdb native dependencies
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
@@ -294,8 +292,8 @@ jobs:
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq pkg-config libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
@@ -369,8 +367,8 @@ jobs:
       - name: Install spec-lock build deps (Z3 / clang / jq)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq libz3-dev libclang-dev clang pkg-config jq curl libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq libz3-dev libclang-dev clang pkg-config jq curl libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm z3 llvm clang pkgconf jq curl openssl
           fi
@@ -510,8 +508,7 @@ jobs:
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
       (github.event_name != 'push' || github.event.head_commit == null || 
-       (!contains(github.event.head_commit.message, '[skip_docs]') &&
-        !contains(github.event.head_commit.message, '[skip_docs_fuzz]'))) &&
+       !contains(github.event.head_commit.message, '[skip_docs]')) &&
       (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
@@ -530,8 +527,8 @@ jobs:
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq pkg-config libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
@@ -586,8 +583,8 @@ jobs:
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq pkg-config libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
@@ -610,7 +607,8 @@ jobs:
           # hickory-proto/resolver via iroh (DNS): fixed upstream needs newer iroh / hickory stack
           cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0007 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2026-0118 --ignore RUSTSEC-2026-0119
 
-  # Fuzz skippable via `[skip_fuzz]` or `[skip_docs_fuzz]` on push (skips fuzz-build + shards).
+  # Fuzz is skippable via `[skip_fuzz]` on push (skips fuzz-build + all fuzz shards). Fuzz does not
+  # need `test` so `[skip_tests]` can still run libFuzzer.
   fuzz-build:
     name: Fuzz (build once)
     needs: [setup]
@@ -622,8 +620,7 @@ jobs:
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
       (github.event_name != 'push' || github.event.head_commit == null || 
-       (!contains(github.event.head_commit.message, '[skip_fuzz]') &&
-        !contains(github.event.head_commit.message, '[skip_docs_fuzz]'))) &&
+       !contains(github.event.head_commit.message, '[skip_fuzz]')) &&
       (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
@@ -634,8 +631,8 @@ jobs:
       - name: Install tidesdb native dependencies
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
@@ -716,8 +713,7 @@ jobs:
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]'))) &&
       (github.event_name != 'push' || github.event.head_commit == null || 
-       (!contains(github.event.head_commit.message, '[skip_fuzz]') &&
-        !contains(github.event.head_commit.message, '[skip_docs_fuzz]'))) &&
+       !contains(github.event.head_commit.message, '[skip_fuzz]')) &&
       (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
     steps:
       - uses: actions/checkout@v4
@@ -819,8 +815,8 @@ jobs:
       - name: Install tidesdb native dependencies
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
@@ -904,8 +900,8 @@ jobs:
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
           if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get -o DPkg::Lock::Timeout=120 update -qq
-            sudo apt-get -o DPkg::Lock::Timeout=120 install -y -qq pkg-config libssl-dev
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
