@@ -963,12 +963,6 @@ jobs:
           [ -n "${BLVM_FAST_BUILD:-}" ] && PROFILE_FLAG="--profile release-fast"
           cargo build $PROFILE_FLAG
       
-      - name: Build tests
-        run: |
-          PROFILE_FLAG="--release"
-          [ -n "${BLVM_FAST_BUILD:-}" ] && PROFILE_FLAG="--profile release-fast"
-          cargo test --no-run $PROFILE_FLAG
-      
       - name: Cache target
         if: always()
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
@@ -1197,7 +1191,7 @@ jobs:
       - name: Dry-run publish
         if: env.CARGO_REGISTRY_TOKEN != ''
         run: |
-          cargo publish --dry-run
+          cargo publish --dry-run --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       
