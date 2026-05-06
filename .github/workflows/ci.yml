@@ -27,6 +27,10 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '1'
+  # Isolate CARGO_HOME per runner so parallel runner processes (org2, org2-03, …)
+  # that share the same OS user never race on registry/src extractions.
+  # RUNNER_NAME is set by the GitHub Actions runner to a value unique per runner process.
+  CARGO_HOME: /opt/runner-cargo/${{ github.run_id }}-${{ runner.name }}
 
 jobs:
   setup:
@@ -160,14 +164,6 @@ jobs:
         with:
           operation: restore
 
-      - name: Clear extracted registry sources
-        # Parallel jobs on shared runners race when extracting .crate archives
-        # into registry/src, leaving partial source trees. Wiping src forces
-        # re-extraction from the already-cached .crate files in registry/cache
-        # (local disk only, no network). Takes ~5s and avoids "file not found
-        # for module" compile errors from corrupted extractions.
-        run: rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/src"
-
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
@@ -237,14 +233,6 @@ jobs:
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
-
-      - name: Clear extracted registry sources
-        # Parallel jobs on shared runners race when extracting .crate archives
-        # into registry/src, leaving partial source trees. Wiping src forces
-        # re-extraction from the already-cached .crate files in registry/cache
-        # (local disk only, no network). Takes ~5s and avoids "file not found
-        # for module" compile errors from corrupted extractions.
-        run: rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/src"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -471,14 +459,6 @@ jobs:
         with:
           operation: restore
 
-      - name: Clear extracted registry sources
-        # Parallel jobs on shared runners race when extracting .crate archives
-        # into registry/src, leaving partial source trees. Wiping src forces
-        # re-extraction from the already-cached .crate files in registry/cache
-        # (local disk only, no network). Takes ~5s and avoids "file not found
-        # for module" compile errors from corrupted extractions.
-        run: rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/src"
-
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
@@ -571,14 +551,6 @@ jobs:
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
-
-      - name: Clear extracted registry sources
-        # Parallel jobs on shared runners race when extracting .crate archives
-        # into registry/src, leaving partial source trees. Wiping src forces
-        # re-extraction from the already-cached .crate files in registry/cache
-        # (local disk only, no network). Takes ~5s and avoids "file not found
-        # for module" compile errors from corrupted extractions.
-        run: rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/src"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -748,14 +720,6 @@ jobs:
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
-
-      - name: Clear extracted registry sources
-        # Parallel jobs on shared runners race when extracting .crate archives
-        # into registry/src, leaving partial source trees. Wiping src forces
-        # re-extraction from the already-cached .crate files in registry/cache
-        # (local disk only, no network). Takes ~5s and avoids "file not found
-        # for module" compile errors from corrupted extractions.
-        run: rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/src"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
