@@ -50,6 +50,26 @@ jobs:
         with:
           show-df: false
 
+      - name: Show disk usage (top 10 largest dirs)
+        if: always()
+        run: |
+          echo "=== df -h ==="
+          df -h /
+          echo ""
+          echo "=== Top 10 largest directories under / (excluding proc/sys/dev) ==="
+          du -x --max-depth=4 / 2>/dev/null \
+            | sort -rh \
+            | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
+            | head -10 \
+            | awk '{printf "%-10s %s\n", $1, $2}'
+          echo ""
+          echo "=== /tmp usage ==="
+          du -sh /tmp/* 2>/dev/null | sort -rh | head -10
+          echo ""
+          echo "=== Runner cache ==="
+          du -sh /tmp/runner-cache 2>/dev/null || echo "(no runner-cache)"
+          du -sh /tmp/gh-blvm-node-build 2>/dev/null || echo "(no gh-blvm-node-build)"
+
       - uses: actions/checkout@v4
       
 
@@ -127,6 +147,23 @@ jobs:
         !contains(github.event.head_commit.message, '[ci skip]') &&
         !contains(github.event.head_commit.message, '[no ci]')))
     steps:
+      - name: Show disk usage (top 10 largest dirs)
+        run: |
+          echo "=== df -h ==="
+          df -h /
+          echo ""
+          echo "=== Top 10 largest directories ==="
+          du -x --max-depth=4 / 2>/dev/null \
+            | sort -rh \
+            | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
+            | head -10 \
+            | awk '{printf "%-10s %s\n", $1, $2}'
+          echo ""
+          echo "=== /tmp ==="
+          du -sh /tmp/* 2>/dev/null | sort -rh | head -10
+          du -sh /tmp/runner-cache 2>/dev/null || true
+          du -sh /tmp/gh-blvm-node-build 2>/dev/null || true
+
       - uses: actions/checkout@v4
 
       - name: Strip [patch.crates-io] for crates.io-only CI
@@ -174,6 +211,22 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: cargo test --no-run
+
+      - name: Dump disk usage on failure
+        if: failure()
+        run: |
+          echo "=== df -h ==="
+          df -h /
+          echo ""
+          echo "=== Top 10 largest directories ==="
+          du -x --max-depth=4 / 2>/dev/null \
+            | sort -rh \
+            | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
+            | head -10 \
+            | awk '{printf "%-10s %s\n", $1, $2}'
+          echo ""
+          echo "=== /tmp ==="
+          du -sh /tmp/* 2>/dev/null | sort -rh | head -10
 
       - name: Save Cargo cache
         if: always()
@@ -250,6 +303,22 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: cargo test
+
+      - name: Dump disk usage on failure
+        if: failure()
+        run: |
+          echo "=== df -h ==="
+          df -h /
+          echo ""
+          echo "=== Top 10 largest directories ==="
+          du -x --max-depth=4 / 2>/dev/null \
+            | sort -rh \
+            | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
+            | head -10 \
+            | awk '{printf "%-10s %s\n", $1, $2}'
+          echo ""
+          echo "=== /tmp ==="
+          du -sh /tmp/* 2>/dev/null | sort -rh | head -10
       
       - name: Clean test binaries and stale run dirs
         if: always()
