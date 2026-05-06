@@ -992,9 +992,6 @@ jobs:
         (needs.verify.result == 'success' || needs.verify.result == 'skipped'))) &&
       ((needs.fuzz-build.result == 'success' && needs.fuzz.result == 'success') ||
        (needs.fuzz-build.result == 'skipped' && needs.fuzz.result == 'skipped'))
-    permissions:
-      contents: write
-      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
