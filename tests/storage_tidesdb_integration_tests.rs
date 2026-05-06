@@ -111,6 +111,7 @@ mod tidesdb_integration_tests {
     }
 
     #[test]
+    #[cfg(feature = "redb")] // compare TidesDB vs redb when pure-Rust backend is built in
     fn test_storage_backend_tidesdb_redb_interchangeability() {
         // Test that storage works the same with TidesDB and redb
         let temp_dir1 = TempDir::new().unwrap();

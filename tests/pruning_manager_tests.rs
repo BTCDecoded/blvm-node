@@ -9,10 +9,11 @@ use tempfile::TempDir;
 
 fn create_test_blockstore() -> (TempDir, Arc<BlockStore>) {
     let temp_dir = TempDir::new().unwrap();
+    // Use default-stack backend (`rocksdb` in default features; use `Redb` if testing with `--features redb`).
     let db = Arc::from(
         create_database(
             temp_dir.path(),
-            blvm_node::storage::database::DatabaseBackend::Redb,
+            blvm_node::storage::database::default_backend(),
             None,
         )
         .unwrap(),

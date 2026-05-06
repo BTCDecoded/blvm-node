@@ -140,6 +140,7 @@ mod rocksdb_integration_tests {
     }
 
     #[test]
+    #[cfg(feature = "redb")]
     fn test_storage_backend_interchangeability() {
         // Test that storage works the same with different backends
         let temp_dir1 = TempDir::new().unwrap();
