@@ -595,6 +595,11 @@ jobs:
           chmod +x init_corpus.sh
           ./init_corpus.sh
 
+      - name: Clean stale fuzz build artifacts
+        # Restored target cache may contain stale .d dep-info files that reference
+        # artifacts no longer on disk, causing "could not parse/generate dep info" errors.
+        run: rm -rf fuzz/target
+
       # Do not set RUSTFLAGS here: cargo-fuzz already injects sancov + ASAN; duplicating
       # -Cpasses=sancov-module breaks the link step (sancov ctors discarded with --gc-sections).
       - name: Build all fuzz binaries (once per workflow)
