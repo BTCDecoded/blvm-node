@@ -27,10 +27,6 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '1'
-  # Isolate CARGO_HOME per runner so parallel runner processes (org2, org2-03, …)
-  # that share the same OS user never race on registry/src extractions.
-  # RUNNER_NAME is set by the GitHub Actions runner to a value unique per runner process.
-  CARGO_HOME: /opt/runner-cargo/${{ github.run_id }}-${{ runner.name }}
 
 jobs:
   setup:
@@ -153,6 +149,14 @@ jobs:
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
 
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -221,6 +225,14 @@ jobs:
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
+
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
@@ -447,6 +459,14 @@ jobs:
             sudo pacman -Sy --noconfirm openssl pkgconf
           fi
 
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -540,6 +560,14 @@ jobs:
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
+
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
@@ -709,6 +737,14 @@ jobs:
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
+
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main

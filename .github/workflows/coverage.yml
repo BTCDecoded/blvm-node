@@ -21,7 +21,6 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '1'
-  CARGO_HOME: /opt/runner-cargo/${{ github.run_id }}-${{ runner.name }}
 
 jobs:
   coverage:
@@ -59,6 +58,11 @@ jobs:
           echo "CARGO_CACHE_DIR=$CARGO_CACHE_DIR" >> $GITHUB_ENV
           echo "TARGET_CACHE_DIR=$TARGET_CACHE_DIR" >> $GITHUB_ENV
       
+      - name: Isolate CARGO_HOME for this runner
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
       - name: Restore Cargo cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
