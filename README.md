@@ -61,14 +61,16 @@ Supports multiple database backends via feature flags:
 - Direct access to raw block files (`blk*.dat`) where supported
 - Parsers for common on-disk chain formats
 
-Enable RocksDB with the `rocksdb` feature:
+Default binary builds enable **RocksDB** (`rocksdb` feature). RocksDB requires a working C++ toolchain; CI installs `libclang` where bindgen is needed.
+
+To build with **redb** only (pure Rust, no `librocksdb-sys`):
+
 ```bash
-cargo build --features rocksdb
+cargo build --no-default-features --features "redb,production,sysinfo,nix,libc,governance,zmq,utxo-commitments,protocol-verification"
 ```
+Omit `governance` if you do not need the HTTP client (Commons auto-detect uses `reqwest` via that feature). Omit `zmq` to disable notification integration at compile time (`zmq` may still be resolved as a dependency until the crate is made fully optional).
 
-**Note**: RocksDB requires `libclang` system dependency. RocksDB and erlay features are mutually exclusive due to dependency conflicts. To use redb instead: `cargo build --no-default-features --features redb,...`
-
-## Configuration
+**Note**: RocksDB and erlay features are mutually exclusive due to dependency conflicts.
 
 ### RBF and Mempool Policies
 

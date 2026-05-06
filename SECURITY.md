@@ -113,9 +113,10 @@ This document defines the security boundaries, threat model, and limitations of 
 ### Current Implementation Limitations
 
 1. **Storage Layer**
-   - ✅ `redb` is now default database (pure Rust, ACID, production-ready)
-   - ⚠️ `sled` available as fallback (beta quality, not recommended for production)
-   - ✅ Database abstraction allows switching backends
+   - ✅ **RocksDB** is included in default features (performance path for mainnet-scale IBD)
+   - ✅ **redb** available as `--features redb` (pure Rust; no default C++ `rocksdb`)
+   - ⚠️ `sled` available behind `--features sled` (not recommended for production mainnet)
+   - ✅ Database abstraction allows switching backends (`database_backend` config)
    - ⚠️ No advanced indexing (sufficient for current use case)
 
 2. **Network Layer**
@@ -152,7 +153,7 @@ This document defines the security boundaries, threat model, and limitations of 
 - [ ] Add comprehensive test vectors
 
 #### Phase 2: Production Readiness
-- [x] Replace sled with redb (redb is now default, sled available as fallback)
+- [x] Add redb as optional pure-Rust storage backend; RocksDB remains default feature set for performance
 - [x] Add DoS protection mechanisms (connection rate limiting, auto-ban, resource monitoring)
 - [x] Add RPC authentication (token-based and certificate-based)
 - [x] Implement rate limiting (per-user RPC rate limiting, network message rate limiting)
