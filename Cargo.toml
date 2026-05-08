@@ -141,7 +141,7 @@ nix = { version = "=0.28", features = ["process", "resource"], optional = true }
 libc = { version = "=0.2", optional = true }
 
 # System information for memory stats (non-Windows only)
-sysinfo = "=0.30"
+sysinfo = { version = "=0.30", optional = true }
 
 # HTTP client for governance auto-detect / webhooks (feature `governance` only)
 reqwest = { version = "=0.12", optional = true, features = ["json"] }
@@ -207,7 +207,7 @@ sigop = []
 # FIBRE relay (FEC shards + UDP-style chunks); keeps reed-solomon / test crc32 out of default builds
 fibre = ["dep:reed-solomon-erasure", "dep:crc32fast"]
 # System information for memory stats (sysinfo is always included)
-sysinfo = []
+sysinfo = ["dep:sysinfo"]
 # Storage backends
 sled = ["dep:sled"]
 redb = ["dep:redb"]
