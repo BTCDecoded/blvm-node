@@ -137,7 +137,7 @@ impl ProcessSandbox {
         // Job handle is intentionally not closed: limits persist while the job exists.
         // Closing would destroy the job and remove limits. Handles are freed when our process exits.
 
-        let mut limit_info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        let mut limit_info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
 
         if let Some(max_memory) = limits.max_memory_bytes {
             limit_info.ProcessMemoryLimit = max_memory as usize;

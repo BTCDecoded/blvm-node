@@ -413,6 +413,7 @@ impl ControlRpc {
     ///
     /// Params: ["module_name", "subcommand", ...args]
     /// Returns: { "stdout": "...", "stderr": "...", "exit_code": 0 }
+    #[cfg(unix)]
     pub async fn runmodulecli(&self, params: &Value) -> RpcResult<Value> {
         let mgr = self
             .module_manager
@@ -457,6 +458,11 @@ impl ControlRpc {
                 "Expected CLI result from module".to_string(),
             )),
         }
+    }
+
+    #[cfg(not(unix))]
+    pub async fn runmodulecli(&self, _params: &Value) -> RpcResult<Value> {
+        Ok(json!({}))
     }
 
     /// List available RPC methods

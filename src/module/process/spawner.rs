@@ -180,6 +180,8 @@ impl ModuleProcessSpawner {
             .map_err(|e| ModuleError::IpcError(format!("Failed to connect to node IPC: {e}")))?;
 
         // Send handshake so node registers this connection (for heartbeat)
+        #[cfg(unix)]
+        {
         let version = context
             .config
             .get("version")
@@ -205,6 +207,7 @@ impl ModuleProcessSpawner {
                     .unwrap_or_else(|| "Handshake failed".to_string()),
             ));
         }
+        } // end #[cfg(unix)] handshake block
 
         let client = Some(ipc_client);
 

@@ -277,7 +277,9 @@ impl ModuleManager {
         ))));
         self.api_hub = Some(Arc::clone(&api_hub));
 
-        // Start IPC server in background task (Unix: domain sockets, Windows: named pipes)
+        // Start IPC server in background task (Unix only: domain sockets)
+        #[cfg(unix)]
+        {
         let mut ipc_server = ModuleIpcServer::new(&socket_path)
             .with_event_manager(Arc::clone(&self.event_manager))
             .with_api_hub(Arc::clone(&api_hub));
@@ -295,6 +297,7 @@ impl ModuleManager {
         let server_handle =
             tokio::spawn(async move { ipc_server.lock().await.start(node_api_clone).await });
         self.ipc_server_handle = Some(server_handle);
+        } // end #[cfg(unix)]
 
         // Start crash handler
         let modules = Arc::clone(&self.modules);
