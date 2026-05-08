@@ -19,6 +19,12 @@ pub const MSG_CMPCT_BLOCK: u32 = 4;
 /// peer's response. Peers that don't support SegWit respond with MSG_BLOCK format (harmless).
 pub const MSG_WITNESS_BLOCK: u32 = 0x40000002;
 
+/// Maximum entries in the global `known_inventory` set.
+/// Matches Bitcoin Core's `INVENTORY_BROADCAST_MAX` order-of-magnitude (5x headroom).
+const MAX_KNOWN_INVENTORY: usize = 250_000;
+/// Maximum inventory entries stored per peer.
+const MAX_PER_PEER_INVENTORY: usize = 50_000;
+
 /// Inventory manager
 pub struct InventoryManager {
     /// Known inventory items
@@ -59,8 +65,20 @@ impl InventoryManager {
         let peer_inv = self.peer_inventories.entry(peer.to_string()).or_default();
 
         for item in inventory {
+            // Per-peer cap: silently stop accepting once the peer's set is full.
+            if peer_inv.len() >= MAX_PER_PEER_INVENTORY {
+                warn!(
+                    "Peer {} inventory cap ({}) reached, ignoring remaining items",
+                    peer, MAX_PER_PEER_INVENTORY
+                );
+                break;
+            }
             peer_inv.insert(item.hash);
-            self.known_inventory.insert(item.hash);
+
+            // Global cap: if we're full, don't grow the shared set further.
+            if self.known_inventory.len() < MAX_KNOWN_INVENTORY {
+                self.known_inventory.insert(item.hash);
+            }
 
             debug!("Added inventory item {:?} from peer {}", item, peer);
         }
@@ -113,7 +131,7 @@ impl InventoryManager {
             .pending_requests
             .iter()
             .filter(|(_, request)| {
-                let age = now - request.timestamp;
+                let age = now.saturating_sub(request.timestamp);
                 age >= max_age_seconds
             })
             .map(|(hash, _)| *hash)

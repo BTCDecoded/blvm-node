@@ -77,14 +77,20 @@ impl ReplayProtection {
         protection
     }
 
-    /// Check if a message ID has been seen before
+    /// Check if a message ID has been seen before.
     ///
-    /// Returns Ok(()) if the message ID is new, or Err(ReplayError) if it's a duplicate.
+    /// Returns `Ok(())` if the message ID is new and `timestamp` is within the acceptable
+    /// window (not too old, not too far in the future). Returns `Err` on duplicates or
+    /// out-of-window timestamps.
     pub async fn check_message_id(&self, message_id: &str, timestamp: i64) -> Result<()> {
+        // Validate timestamp before touching the dedup map.
+        Self::validate_timestamp(timestamp, self.message_id_expiration.as_secs())
+            .context("message timestamp out of window")?;
+
         let mut message_ids = self.message_ids.lock().await;
 
         // Check if we've seen this message ID before
-        if let Some(first_seen) = message_ids.get(message_id) {
+        if message_ids.contains_key(message_id) {
             return Err(ReplayError::DuplicateMessageId(message_id.to_string()).into());
         }
 

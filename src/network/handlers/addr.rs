@@ -14,6 +14,29 @@ use tracing::{debug, warn};
 impl NetworkManager {
     /// Handle GetAddr request - return known addresses
     pub(crate) async fn handle_get_addr(&self, peer_addr: SocketAddr) -> Result<()> {
+        // Answer GetAddr at most once per connection (Core behaviour).
+        // A second GetAddr on the same connection gets an empty response.
+        let already_responded = {
+            let mut responded = self.getaddr_responded.lock().unwrap();
+            if responded.contains(&peer_addr) {
+                true
+            } else {
+                responded.insert(peer_addr);
+                false
+            }
+        }; // guard dropped here
+
+        if already_responded {
+            debug!("GetAddr from {}: already answered once this connection, returning empty", peer_addr);
+            let empty = crate::network::protocol::ProtocolMessage::Addr(
+                crate::network::protocol::AddrMessage { addresses: vec![] },
+            );
+            if let Ok(wire) = crate::network::protocol::ProtocolParser::serialize_message(&empty) {
+                let _ = self.send_to_peer(peer_addr, wire).await;
+            }
+            return Ok(());
+        }
+
         let ban_list = self.ban_list().read().await.clone();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager_ref().lock().await;

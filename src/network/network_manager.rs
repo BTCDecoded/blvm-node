@@ -263,6 +263,13 @@ pub struct NetworkManager {
     tx_serve_denylist: Arc<parking_lot::RwLock<HashSet<blvm_protocol::Hash>>>,
     /// When true, refuse all full-block answers on `getdata` (operational maintenance).
     block_serve_maintenance: Arc<AtomicBool>,
+
+    /// Nonces we placed in our own outbound Version messages.
+    /// Any incoming Version that echoes one of these nonces is a self-connection.
+    pub(crate) local_version_nonces: Arc<std::sync::Mutex<HashSet<u64>>>,
+    /// Peers that have already received a GetAddr response this connection.
+    /// We answer GetAddr at most once per connection (Core behaviour).
+    pub(crate) getaddr_responded: Arc<std::sync::Mutex<HashSet<SocketAddr>>>,
 }
 
 /// Pending request metadata (pub(crate) for utxo_commitments_client)
@@ -483,6 +490,8 @@ impl NetworkManager {
             block_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             tx_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             block_serve_maintenance: Arc::new(AtomicBool::new(false)),
+            local_version_nonces: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            getaddr_responded: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -1649,13 +1658,17 @@ impl NetworkManager {
                         port: 0,
                     };
 
+                    let nonce: u64 = rand::random();
+                    // Track this nonce so we can detect self-connections.
+                    self.local_version_nonces.lock().unwrap().insert(nonce);
+
                     let version_msg = self.create_version_message(
                         70015,
                         0,
                         crate::utils::current_timestamp() as i64,
                         addr_recv,
                         addr_from,
-                        rand::random::<u64>(),
+                        nonce,
                         format!("/Bitcoin Commons:{}/", env!("CARGO_PKG_VERSION")),
                         start_height,
                         true,
@@ -1922,22 +1935,17 @@ impl NetworkManager {
         &self,
         txs: &[blvm_protocol::Transaction],
     ) -> Result<()> {
-        if let Some(ref _mempool_manager) = self.mempool_manager {
-            // Use MempoolManager's add_transaction method
-            // Note: add_transaction requires &mut, so we need to handle this carefully
-            // For now, we'll use a channel or async approach
-            // This is a limitation of the current design - MempoolManager should use interior mutability
+        if let Some(ref mempool_manager) = self.mempool_manager {
+            // Route through MempoolManager so policy (min-fee, spam filter,
+            // ancestor limits, RBF) is enforced. add_transaction uses interior
+            // mutability (&self) so this is safe from Arc context.
             for tx in txs {
-                // In a real implementation, we'd send this to a mempool processing channel
-                // For now, we validate and accept using consensus layer
-                let utxo_lock = self.utxo_set.lock().await;
-                let mempool_lock = self.mempool.lock().await;
-                let _ =
-                    self.consensus
-                        .accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0, None);
+                if let Err(e) = mempool_manager.add_transaction(tx.clone()) {
+                    tracing::debug!("Transaction rejected by mempool: {}", e);
+                }
             }
         } else {
-            // Fallback to legacy mempool
+            // Fallback: no MempoolManager configured, accept via consensus layer.
             let utxo_lock = self.utxo_set.lock().await;
             let mempool_lock = self.mempool.lock().await;
             for tx in txs {
@@ -2616,6 +2624,11 @@ impl NetworkManager {
     /// - Dandelion: NODE_DANDELION (if feature enabled)
     /// - Package Relay: NODE_PACKAGE_RELAY (always enabled)
     /// - FIBRE: NODE_FIBRE (always enabled)
+    /// Returns the shared UTXO set Arc so other components (e.g. MempoolManager) can be wired in.
+    pub fn utxo_set_arc(&self) -> Arc<Mutex<UtxoSet>> {
+        Arc::clone(&self.utxo_set)
+    }
+
     pub fn create_version_message(
         &self,
         version: i32,

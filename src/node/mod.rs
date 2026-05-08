@@ -136,6 +136,9 @@ impl Node {
             Arc::clone(&mempool_manager_arc),
         );
         let network_arc = Arc::new(network);
+
+        // Wire the live UTXO set into MempoolManager so RBF fee checks use real values.
+        mempool_manager_arc.set_utxo_set_arc(network_arc.utxo_set_arc());
         let metrics_arc = Arc::new(MetricsCollector::new());
         let profiler_arc = Arc::new(PerformanceProfiler::new(1000));
         let rpc = RpcManager::new(rpc_addr)

@@ -39,8 +39,10 @@ pub struct MempoolManager {
     /// Legacy mempool (HashSet of hashes) for compatibility
     #[allow(dead_code)]
     mempool: RwLock<Mempool>,
-    #[allow(dead_code)]
-    utxo_set: UtxoSet,
+    /// Shared UTXO set for fee calculation (set via set_utxo_set_arc after construction).
+    /// When None, RBF fee checks fall back to zero-fee comparisons and replacement is
+    /// rejected. Callers should wire this to the node's live UTXO set.
+    utxo_set_arc: RwLock<Option<Arc<tokio::sync::Mutex<UtxoSet>>>>,
     /// Event callback for mempool events (optional)
     /// Called when transactions are added/removed from mempool
     #[allow(dead_code)]
@@ -89,7 +91,7 @@ impl MempoolManager {
                 spent_outputs: HashSet::new(),
             }),
             mempool: RwLock::new(Mempool::new()),
-            utxo_set: UtxoSet::default(),
+            utxo_set_arc: RwLock::new(None),
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
@@ -112,7 +114,7 @@ impl MempoolManager {
                 spent_outputs: HashSet::new(),
             }),
             mempool: RwLock::new(Mempool::new()),
-            utxo_set: UtxoSet::default(),
+            utxo_set_arc: RwLock::new(None),
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
@@ -125,6 +127,12 @@ impl MempoolManager {
             utxo_set_hash: RwLock::new(None),
             event_publisher: RwLock::new(None),
         }
+    }
+
+    /// Wire the live UTXO set into the mempool so RBF fee checks use real values.
+    /// Call this once after constructing MempoolManager and before the first transaction.
+    pub fn set_utxo_set_arc(&self, utxo_set: Arc<tokio::sync::Mutex<UtxoSet>>) {
+        *self.utxo_set_arc.write().unwrap() = Some(utxo_set);
     }
 
     /// Set event publisher for mempool events
@@ -220,16 +228,14 @@ impl MempoolManager {
 
     /// Clean up old transactions
     async fn cleanup_old_transactions(&mut self) -> Result<()> {
-        // Remove transactions that are too old
-        let expiry_time = {
-            if let Some(ref policy) = *self.policy_config.read().unwrap() {
-                policy.mempool_expiry_hours * 3600
-            } else {
-                // No policy config, skip expiry check
-                return Ok(());
-            }
-        };
+        let policy = self
+            .policy_config
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
 
+        let expiry_time = policy.mempool_expiry_hours * 3600;
         let current_time = Self::current_timestamp();
         // Optimization: Pre-allocate with estimated capacity
         let estimated_removals = self.pool_lock().transactions.len() / 100; // Estimate ~1% will expire
@@ -257,10 +263,12 @@ impl MempoolManager {
 
     /// Enforce mempool size limits by evicting transactions if necessary
     async fn enforce_mempool_limits(&mut self) -> Result<()> {
-        let policy = match self.policy_config.read().unwrap().as_ref() {
-            Some(p) => p.clone(),
-            None => return Ok(()), // No policy config, no limits
-        };
+        let policy = self
+            .policy_config
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
 
         // Calculate current mempool size
         let current_size_mb = self.calculate_mempool_size_mb();
@@ -1141,91 +1149,162 @@ impl MempoolManager {
         use blvm_protocol::block::calculate_tx_id;
         let tx_hash = calculate_tx_id(&tx);
 
-        if let Some(ref policy) = *self.policy_config.read().unwrap() {
-            if policy.reject_spam_in_mempool {
-                use blvm_protocol::spam_filter::SpamFilter;
-                let filter = policy
-                    .spam_filter
-                    .as_ref()
-                    .map(|cfg| SpamFilter::with_config(cfg.clone().into()))
-                    .unwrap_or_else(SpamFilter::new);
-                if filter.is_spam(&tx).is_spam {
-                    warn!(
-                        "Transaction {} rejected: classified as spam (reject_spam_in_mempool)",
-                        hex::encode(tx_hash)
-                    );
-                    return Ok(false);
-                }
+        // Reject duplicate — already in pool.
+        if self.pool_lock().transactions.contains_key(&tx_hash) {
+            debug!("Transaction {} already in mempool", hex::encode(tx_hash));
+            return Ok(false);
+        }
+
+        // Policy checks (min fee, spam filter).
+        let effective_policy = self
+            .policy_config
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+
+        if effective_policy.reject_spam_in_mempool {
+            use blvm_protocol::spam_filter::SpamFilter;
+            let filter = effective_policy
+                .spam_filter
+                .as_ref()
+                .map(|cfg| SpamFilter::with_config(cfg.clone().into()))
+                .unwrap_or_else(SpamFilter::new);
+            if filter.is_spam(&tx).is_spam {
+                warn!(
+                    "Transaction {} rejected: classified as spam",
+                    hex::encode(tx_hash)
+                );
+                return Ok(false);
+            }
+        }
+
+        // Min-relay-fee gate: reject transactions whose fee rate is below the
+        // configured floor.  We need the UTXO set to compute fees; if it hasn't
+        // been wired in yet we skip this check (startup path) rather than
+        // accepting zero-fee junk unconditionally.
+        // try_lock is non-blocking so add_transaction stays synchronous; if the
+        // tokio mutex is momentarily held we fall back to skipping the check.
+        let utxo_snapshot: UtxoSet = self
+            .utxo_set_arc
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|arc| arc.try_lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
+
+        if !utxo_snapshot.is_empty() {
+            let fee = self.calculate_transaction_fee(&tx, &utxo_snapshot);
+            let tx_size = self.estimate_transaction_size(&tx) as u64;
+            // fee_rate in sat/vB (consistent with min_relay_fee_rate units)
+            let fee_rate_sat_vb = if tx_size > 0 { fee / tx_size } else { 0 };
+            if fee_rate_sat_vb < effective_policy.min_relay_fee_rate {
+                warn!(
+                    "Transaction {} rejected: fee rate {} sat/vB below min relay fee rate {} sat/vB",
+                    hex::encode(tx_hash),
+                    fee_rate_sat_vb,
+                    effective_policy.min_relay_fee_rate
+                );
+                return Ok(false);
+            }
+            if fee < effective_policy.min_tx_fee {
+                warn!(
+                    "Transaction {} rejected: absolute fee {} sat below min_tx_fee {} sat",
+                    hex::encode(tx_hash),
+                    fee,
+                    effective_policy.min_tx_fee
+                );
+                return Ok(false);
             }
         }
 
         // Check for conflicts with existing mempool transactions
         // If conflict exists, check if RBF replacement is allowed
-        let mut conflicting_tx_hash: Option<Hash> = None;
+        let mut conflicting_tx_hashes: Vec<Hash> = Vec::new();
         for input in &tx.inputs {
             if let Some(existing_tx) = self
                 .pool_lock()
                 .transactions
                 .values()
                 .find(|t| t.inputs.iter().any(|i| i.prevout == input.prevout))
+                .cloned()
             {
-                let existing_hash = calculate_tx_id(existing_tx);
-                conflicting_tx_hash = Some(existing_hash);
-                break;
+                let existing_hash = calculate_tx_id(&existing_tx);
+                if !conflicting_tx_hashes.contains(&existing_hash) {
+                    conflicting_tx_hashes.push(existing_hash);
+                }
             }
         }
 
-        // If there's a conflict, try RBF replacement
-        if let Some(existing_hash) = conflicting_tx_hash {
-            let existing_clone = {
-                let pool = self.pool_lock();
-                pool.transactions.get(&existing_hash).cloned()
-            };
-            if let Some(ref existing_tx) = existing_clone {
-                // Check if RBF replacement is allowed
-                // Note: Storage is not available in MempoolManager context
-                // Conservative mode confirmation checks will be skipped if storage is None
-                if self.check_rbf_replacement(&tx, existing_tx, &self.utxo_set, None)? {
+        // If there are conflicts, attempt RBF replacement.
+        // BIP125 Rule 2: at most 100 displaced transactions.
+        if !conflicting_tx_hashes.is_empty() {
+            if conflicting_tx_hashes.len() > 100 {
+                debug!(
+                    "Transaction conflicts with {} existing transactions (> 100 limit)",
+                    conflicting_tx_hashes.len()
+                );
+                return Ok(false);
+            }
+
+            // All conflicting transactions must be checked for RBF eligibility.
+            // We use the first one as the primary anchor for replacement_checks
+            // (BIP125 Rule 1: the existing tx must signal opt-in RBF).
+            // We also verify that the new tx pays enough to cover all displaced txs.
+            for &existing_hash in &conflicting_tx_hashes {
+                let existing_clone = {
+                    let pool = self.pool_lock();
+                    pool.transactions.get(&existing_hash).cloned()
+                };
+                let Some(ref existing_tx) = existing_clone else {
+                    continue;
+                };
+                if !self.check_rbf_replacement(&tx, existing_tx, &utxo_snapshot, None)? {
                     debug!(
-                        "RBF replacement allowed, replacing transaction {}",
+                        "RBF replacement rejected for conflicting tx {}",
                         hex::encode(existing_hash)
                     );
-
-                    // Remove existing transaction (must not hold pool lock — remove_transaction locks pool)
-                    self.remove_transaction(&existing_hash);
-
-                    // Update RBF tracking
-                    let original_hash = {
-                        let tracking = self.rbf_tracking.read().unwrap();
-                        tracking
-                            .get(&existing_hash)
-                            .map(|t| t.original_tx_hash)
-                            .unwrap_or(existing_hash)
-                    };
-
-                    let replacement_count = {
-                        let tracking = self.rbf_tracking.read().unwrap();
-                        tracking
-                            .get(&existing_hash)
-                            .map(|t| t.replacement_count + 1)
-                            .unwrap_or(1)
-                    };
-
-                    {
-                        let mut tracking = self.rbf_tracking.write().unwrap();
-                        tracking.insert(
-                            tx_hash,
-                            RbfTracking {
-                                replacement_count,
-                                last_replacement_time: Self::current_timestamp(),
-                                original_tx_hash: original_hash,
-                            },
-                        );
-                        tracking.remove(&existing_hash);
-                    }
-                } else {
-                    debug!("Transaction conflicts with existing mempool transaction and RBF replacement not allowed");
                     return Ok(false);
+                }
+            }
+
+            // All checks passed — remove every displaced transaction.
+            for existing_hash in &conflicting_tx_hashes {
+                debug!(
+                    "RBF replacement: removing displaced transaction {}",
+                    hex::encode(existing_hash)
+                );
+                self.remove_transaction(existing_hash);
+            }
+
+            // Update RBF tracking (anchor to the primary conflict).
+            let primary_hash = conflicting_tx_hashes[0];
+            let original_hash = {
+                let tracking = self.rbf_tracking.read().unwrap();
+                tracking
+                    .get(&primary_hash)
+                    .map(|t| t.original_tx_hash)
+                    .unwrap_or(primary_hash)
+            };
+            let replacement_count = {
+                let tracking = self.rbf_tracking.read().unwrap();
+                tracking
+                    .get(&primary_hash)
+                    .map(|t| t.replacement_count + 1)
+                    .unwrap_or(1)
+            };
+            {
+                let mut tracking = self.rbf_tracking.write().unwrap();
+                tracking.insert(
+                    tx_hash,
+                    RbfTracking {
+                        replacement_count,
+                        last_replacement_time: Self::current_timestamp(),
+                        original_tx_hash: original_hash,
+                    },
+                );
+                for h in &conflicting_tx_hashes {
+                    tracking.remove(h);
                 }
             }
         } else {
@@ -1238,15 +1317,13 @@ impl MempoolManager {
             }
         }
 
-        // Check ancestor/descendant limits before adding
-        if let Some(ref policy) = *self.policy_config.read().unwrap() {
-            if !self.check_ancestor_descendant_limits(&tx, &tx_hash, policy)? {
-                warn!(
-                    "Transaction {} rejected: exceeds ancestor/descendant limits",
-                    hex::encode(tx_hash)
-                );
-                return Ok(false);
-            }
+        // Check ancestor/descendant limits before adding (uses effective_policy from above).
+        if !self.check_ancestor_descendant_limits(&tx, &tx_hash, &effective_policy)? {
+            warn!(
+                "Transaction {} rejected: exceeds ancestor/descendant limits",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
         }
 
         // Add transaction to mempool (store full transaction)
@@ -1465,11 +1542,8 @@ impl MempoolManager {
             let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
             let fee = input_total.saturating_sub(output_total);
             let size = self.estimate_transaction_size(tx);
-            let fee_rate = if size > 0 {
-                fee * 1000 / size as u64
-            } else {
-                0
-            };
+            // Store fee rate in sat/vB (consistent with min_relay_fee_rate config units).
+            let fee_rate = if size > 0 { fee / size as u64 } else { 0 };
 
             {
                 let mut fee_cache = self.fee_cache.write().unwrap();
@@ -1658,10 +1732,9 @@ impl Default for MempoolManager {
     }
 }
 
-// Implement MempoolProvider trait for integration with MiningCoordinator
-// Safety: MempoolManager is thread-safe (uses Arc internally)
-unsafe impl Sync for MempoolManager {}
-unsafe impl Send for MempoolManager {}
+// MempoolManager is safe to share across threads: all interior state is
+// protected by Mutex or RwLock, which derive Send+Sync automatically.
+// The explicit impls below are not needed and have been removed.
 
 impl crate::node::miner::MempoolProvider for MempoolManager {
     fn get_transactions(&self) -> Vec<blvm_protocol::Transaction> {

@@ -359,6 +359,18 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
     pm.remove_peer(&addr);
     drop(pm);
 
+    // Clean up per-connection state for this peer.
+    let sock_opt: Option<std::net::SocketAddr> = match &addr {
+        TransportAddr::Tcp(s) => Some(*s),
+        #[cfg(feature = "quinn")]
+        TransportAddr::Quinn(s) => Some(*s),
+        #[cfg(feature = "iroh")]
+        TransportAddr::Iroh(_) => None,
+    };
+    if let Some(sock) = sock_opt {
+        nm.getaddr_responded.lock().unwrap().remove(&sock);
+    }
+
     // Enqueue TCP persistent peers for automatic reconnect (see `start_peer_reconnection_task`).
     // The periodic task used to bail out when `current_peers >= min_peers`, so a LAN node could
     // stay gone while many WAN peers kept the count high.

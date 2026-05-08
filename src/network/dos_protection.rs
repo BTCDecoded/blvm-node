@@ -228,11 +228,10 @@ impl DosProtectionManager {
                 // Return false to reject, caller should ban
                 return false;
             }
-        } else {
-            // Reset violation count on successful connection
-            let mut violations = self.connection_violations.lock().await;
-            violations.remove(&ip);
         }
+        // Do NOT reset the violation counter on success.  Resetting on success allows
+        // an attacker to trickle connections at just under the rate limit, forever
+        // resetting their count while avoiding the auto-ban threshold.
 
         allowed
     }

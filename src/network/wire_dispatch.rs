@@ -23,6 +23,62 @@ impl NetworkManager {
         peer_addr: SocketAddr,
         version_msg: &VersionMessage,
     ) -> Result<()> {
+        /// Minimum accepted protocol version (matches Bitcoin Core's MIN_PEER_PROTO_VERSION).
+        const MIN_PEER_VERSION: i32 = 31800;
+
+        // P-1: Reject peers running ancient versions.
+        if version_msg.version < MIN_PEER_VERSION {
+            warn!(
+                "Peer {} sent Version {} which is below minimum {} — disconnecting",
+                peer_addr, version_msg.version, MIN_PEER_VERSION
+            );
+            return self
+                .disconnect_for_protocol_violation(
+                    peer_addr,
+                    "version below minimum",
+                    false,
+                )
+                .await;
+        }
+
+        // P-2: Self-connection detection.  If the peer's nonce matches one we sent,
+        //       we are connected to ourselves.
+        if self
+            .local_version_nonces
+            .lock()
+            .unwrap()
+            .contains(&(version_msg.nonce as u64))
+        {
+            warn!(
+                "Peer {} echoed our own version nonce — self-connection, disconnecting",
+                peer_addr
+            );
+            return self
+                .disconnect_for_protocol_violation(peer_addr, "self-connection detected", false)
+                .await;
+        }
+
+        // P-3: Reject duplicate Version (peer already completed version exchange).
+        {
+            let peer_states = self.peer_states().read().await;
+            if let Some(state) = peer_states.get(&peer_addr) {
+                if state.version > 0 {
+                    warn!(
+                        "Peer {} sent Version twice — disconnecting",
+                        peer_addr
+                    );
+                    drop(peer_states);
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "duplicate version message",
+                            false,
+                        )
+                        .await;
+                }
+            }
+        }
+
         let mut pm = self.peer_manager_mutex().lock().await;
         let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
         let transport_addr_for_verack = transport_addr.clone();
@@ -130,6 +186,12 @@ impl NetworkManager {
                         }
                     }
                 }
+            }
+            ProtocolMessage::Tx(_) => {
+                let _ = self
+                    .peer_tx()
+                    .send(NetworkMessage::TransactionReceived(data));
+                return Ok(());
             }
             ProtocolMessage::FeeFilter(_) => {
                 return Ok(());
