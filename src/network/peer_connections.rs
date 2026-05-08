@@ -357,6 +357,8 @@ impl NetworkManager {
                         let mut pm = self.peer_manager_mutex().lock().await;
                         pm.add_peer(transport_addr.clone(), peer)?;
                     }
+                    // Record this IP in the eclipse-prevention diversity map.
+                    self.add_peer_diversity(ip).await;
                     let _ = self
                         .peer_tx()
                         .send(NetworkMessage::PeerConnected(transport_addr.clone()));

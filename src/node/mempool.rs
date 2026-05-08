@@ -1155,6 +1155,32 @@ impl MempoolManager {
             return Ok(false);
         }
 
+        // Reject transactions with duplicate inputs (invalid by consensus).
+        {
+            let mut seen = HashSet::with_capacity(tx.inputs.len());
+            for input in &tx.inputs {
+                if !seen.insert(input.prevout) {
+                    warn!(
+                        "Transaction {} rejected: duplicate input {:?}",
+                        hex::encode(tx_hash),
+                        input.prevout
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Reject empty transactions.
+        if tx.inputs.is_empty() || tx.outputs.is_empty() {
+            warn!(
+                "Transaction {} rejected: empty inputs ({}) or outputs ({})",
+                hex::encode(tx_hash),
+                tx.inputs.len(),
+                tx.outputs.len()
+            );
+            return Ok(false);
+        }
+
         // Policy checks (min fee, spam filter).
         let effective_policy = self
             .policy_config

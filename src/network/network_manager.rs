@@ -2002,7 +2002,6 @@ impl NetworkManager {
     /// Remove peer diversity tracking for an IP address
     pub fn remove_peer_diversity(&self, ip: std::net::IpAddr) {
         let prefix = self.get_ip_prefix(ip);
-        // Use block_in_place to avoid blocking async runtime
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut diversity = self.peer_diversity.lock().await;
@@ -2016,6 +2015,13 @@ impl NetworkManager {
                 }
             })
         })
+    }
+
+    /// Increment the eclipse-prevention diversity count for an IP.
+    /// Must be called when a connection to `ip` is successfully established.
+    pub(crate) async fn add_peer_diversity(&self, ip: std::net::IpAddr) {
+        let prefix = self.get_ip_prefix(ip);
+        *self.peer_diversity.lock().await.entry(prefix).or_insert(0) += 1;
     }
 
     /// Get filter service reference

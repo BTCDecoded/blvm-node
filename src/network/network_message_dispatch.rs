@@ -369,6 +369,16 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
     };
     if let Some(sock) = sock_opt {
         nm.getaddr_responded.lock().unwrap().remove(&sock);
+
+        // Remove per-peer rate limiter entries to prevent unbounded map growth
+        // on nodes with many transient peers.
+        nm.peer_tx_rate_limiters().lock().await.remove(&sock);
+        nm.peer_tx_byte_rate_limiters().lock().await.remove(&sock);
+        nm.peer_message_rates().lock().await.remove(&sock);
+        nm.peer_states().write().await.remove(&sock);
+
+        // Decrement eclipse-prevention diversity counter for this peer's IP.
+        nm.remove_peer_diversity(sock.ip());
     }
 
     // Enqueue TCP persistent peers for automatic reconnect (see `start_peer_reconnection_task`).
