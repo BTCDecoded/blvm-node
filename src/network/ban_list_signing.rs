@@ -9,8 +9,8 @@
 use crate::module::traits::ModuleError;
 use crate::network::protocol::BanListMessage;
 use blvm_secp256k1::ecdsa::{
-    ecdsa_sig_parse_compact, ecdsa_sig_verify, ecdsa_sign_compact_rfc6979, ge_to_compressed,
-    pubkey_from_secret,
+    ecdsa_sig_parse_compact, ecdsa_sig_verify, ecdsa_sign_compact_rfc6979, ge_from_pubkey_bytes,
+    ge_to_compressed, pubkey_from_secret,
 };
 use blvm_secp256k1::scalar::Scalar;
 use sha2::{Digest, Sha256};
@@ -48,7 +48,6 @@ pub fn verify_ban_list_signature(
         Some(p) => p,
         None => return Ok(false),
     };
-    use blvm_secp256k1::ecdsa::ge_from_pubkey_bytes;
     let pk = match ge_from_pubkey_bytes(public_key) {
         Some(p) => p,
         None => return Ok(false),
