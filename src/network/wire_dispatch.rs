@@ -93,6 +93,18 @@ impl NetworkManager {
         }
         drop(pm);
 
+        // Mirror version into peer_states so dispatch_protocol_message's pre-handshake guard
+        // allows subsequent messages (Verack, etc.) from this peer. The guard checks
+        // peer_states[peer_addr].version > 0; without this the Verack the remote sends
+        // immediately after their Version would always be dropped as "before Version".
+        {
+            let mut peer_states = self.peer_states().write().await;
+            let state = peer_states
+                .entry(peer_addr)
+                .or_insert_with(blvm_protocol::network::PeerState::new);
+            state.version = version_msg.version as u32;
+        }
+
         if let Some(transport_addr) = transport_addr_for_verack {
             match ProtocolParser::serialize_message(&ProtocolMessage::Verack) {
                 Ok(verack_msg) => {

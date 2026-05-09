@@ -1176,6 +1176,15 @@ impl ParallelIBD {
                         let mut gap_drained = 0usize;
                         while let Ok((h, block, witnesses)) = block_rx.try_recv() {
                             total_received += 1;
+                            if h < next_prefetch_height {
+                                // Stale duplicate from a re-queued chunk that was already
+                                // processed by the coordinator. Inserting it would bloat the
+                                // reorder_buffer with an entry that can never be drained
+                                // (next_prefetch_height only advances forward), eventually
+                                // causing buffer-full stalls and a download livelock.
+                                gap_drained += 1;
+                                continue;
+                            }
                             if h == next_prefetch_height {
                                 found_missing = true;
                             }
@@ -1216,12 +1225,19 @@ impl ParallelIBD {
                     Ok(n) => n,
                     Err(_) => {
                         let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                        // next_needed is the height validation is waiting for, but the coordinator
+                        // may have already advanced next_prefetch_height well past it (blocks are
+                        // in the prefetch pipeline, just not yet validated). Requeuing the old
+                        // height floods block_rx with duplicate blocks that can never advance
+                        // next_prefetch_height, filling reorder_buffer and causing a livelock.
+                        // Always requeue what the coordinator actually needs from download workers.
+                        let stall_height = next_prefetch_height.max(next_needed);
                         warn!(
-                            "Coordinator stall: no blocks for {}s, waiting for height {} (total_received={}, next_prefetch={})",
-                            COORD_STALL_LOG_SECS, next_needed, total_received, next_prefetch_height
+                            "Coordinator stall: no blocks for {}s, waiting for height {} (total_received={}, next_prefetch={}, stall_requeue={})",
+                            COORD_STALL_LOG_SECS, next_needed, total_received, next_prefetch_height, stall_height
                         );
-                        let _ = stall_tx_for_coord.send(next_needed);
-                        assigner_for_coord.requeue_chunk_containing_height(next_needed);
+                        let _ = stall_tx_for_coord.send(stall_height);
+                        assigner_for_coord.requeue_chunk_containing_height(stall_height);
                         continue;
                     }
                 };
@@ -1327,6 +1343,14 @@ impl ParallelIBD {
                                 total_received,
                                 reorder_buffer.len() + 1
                             );
+                        }
+                        if height < next_prefetch_height {
+                            // Stale duplicate from a re-queued chunk whose heights have already
+                            // been dispatched to prefetch. Drop it — inserting into reorder_buffer
+                            // would create an entry that can never be drained (next_prefetch_height
+                            // only moves forward), growing the buffer without bound and blocking
+                            // workers from sending newer blocks (livelock).
+                            continue;
                         }
                         reorder_buffer.insert(height, (block, witnesses));
                     }
