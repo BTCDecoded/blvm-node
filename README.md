@@ -114,7 +114,7 @@ cd blvm-node
 cargo build --release
 ```
 
-The build automatically fetches blvm-consensus from GitHub.
+Cargo resolves **`blvm-consensus`** and other **`blvm-*`** dependencies from **crates.io** according to `Cargo.toml`. The **`[patch]`** flow below is only for **local sibling** development.
 
 ### Local Development
 
@@ -196,7 +196,7 @@ Additional hardening required for production mainnet use.
 
 ```toml
 [dependencies]
-blvm-node = "0.1.0"
+blvm-node = ">=0.1, <1"
 ```
 
 - **blvm-consensus**: All consensus logic (via `blvm-protocol` or direct optional dep)

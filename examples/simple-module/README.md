@@ -54,7 +54,7 @@ The `module.toml` file defines module metadata:
 
 ```toml
 name = "simple-module"
-version = "0.1.0"
+version = "0.1"
 description = "A simple example module"
 author = "BTCDecoded Team"
 capabilities = ["read_blockchain", "subscribe_events"]
