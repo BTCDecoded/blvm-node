@@ -64,6 +64,9 @@ pub struct ModuleManager {
     /// If non-empty, only these module names are auto-loaded (from config `enabled_modules`).
     /// An empty vec means "load everything discovered".
     enabled_modules: Vec<String>,
+    /// HTTP URL for the first-party module registry JSON (e.g. blvm/registry/modules.json on GitHub).
+    /// When set, `auto_load_modules` will bootstrap-download any `enabled_modules` not found locally.
+    registry_url: Option<String>,
     /// Node IPC socket path (where node listens; modules connect here)
     node_socket_path: Option<PathBuf>,
 }
@@ -189,6 +192,7 @@ impl ModuleManager {
             node_socket_path: None,
             rpc_server: None,
             enabled_modules: Vec::new(),
+            registry_url: None,
         }
     }
 
@@ -277,6 +281,12 @@ impl ModuleManager {
     /// An empty list (the default) means load every discovered module.
     pub fn set_enabled_modules(&mut self, enabled: Vec<String>) {
         self.enabled_modules = enabled;
+    }
+
+    /// Set the HTTP URL for the first-party module registry JSON.
+    /// When set, `auto_load_modules` will bootstrap-download any `enabled_modules` not found locally.
+    pub fn set_registry_url(&mut self, url: String) {
+        self.registry_url = Some(url);
     }
 
     /// Return a clone of the `api_hub` arc so callers can release the `ModuleManager` lock
@@ -1326,6 +1336,52 @@ impl ModuleManager {
             }
         }
 
+        // Bootstrap: for any enabled_modules not yet installed locally, attempt a direct
+        // HTTP download from the registry before giving up.
+        #[cfg(feature = "governance")]
+        if !self.enabled_modules.is_empty() {
+            let already_found: std::collections::HashSet<&str> =
+                discovered_modules.iter().map(|m| m.manifest.name.as_str()).collect();
+            let missing: Vec<String> = self
+                .enabled_modules
+                .iter()
+                .filter(|n| !already_found.contains(n.as_str()))
+                .cloned()
+                .collect();
+
+            if !missing.is_empty() {
+                if let Some(ref url) = self.registry_url.clone() {
+                    info!(
+                        "Bootstrap: {} enabled module(s) not installed locally, fetching from registry: {:?}",
+                        missing.len(), missing
+                    );
+                    for name in &missing {
+                        match self.bootstrap_download_module(name, url).await {
+                            Ok(()) => {
+                                let discovery = ModuleDiscovery::new(&self.spawner.modules_dir);
+                                match discovery.discover_module(name) {
+                                    Ok(dm) => {
+                                        info!("Bootstrap: installed and discovered '{}'", name);
+                                        discovered_modules.push(dm);
+                                    }
+                                    Err(e) => warn!(
+                                        "Bootstrap: installed '{}' but re-discovery failed: {}",
+                                        name, e
+                                    ),
+                                }
+                            }
+                            Err(e) => warn!("Bootstrap: could not install '{}': {}", name, e),
+                        }
+                    }
+                } else {
+                    info!(
+                        "Bootstrap: {} enabled module(s) not installed and no registry_url configured: {:?}",
+                        missing.len(), missing
+                    );
+                }
+            }
+        }
+
         if discovered_modules.is_empty() {
             info!("No modules to load (0 discovered or all filtered by enabled_modules)");
             return Ok(());
@@ -1493,6 +1549,173 @@ impl ModuleManager {
         // Create DiscoveredModule
         let discovery = ModuleDiscovery::new(&self.modules_dir);
         discovery.discover_module(&entry.name)
+    }
+
+    /// Download and install a module binary directly from the HTTP registry.
+    ///
+    /// Used during first-boot bootstrap when `enabled_modules` lists modules that
+    /// aren't present in the local `modules_dir`.  Parses the same `modules.json`
+    /// format that `blvm-marketplace` uses so the two stay in sync.
+    #[cfg(feature = "governance")]
+    async fn bootstrap_download_module(
+        &self,
+        name: &str,
+        registry_url: &str,
+    ) -> Result<(), ModuleError> {
+        use serde::Deserialize;
+        use std::collections::HashMap as JsonMap;
+
+        #[derive(Deserialize)]
+        struct RegistryBinary {
+            url: String,
+            #[serde(default)]
+            sha256: String,
+        }
+        #[derive(Deserialize)]
+        struct RegistryEntry {
+            name: String,
+            #[serde(default)]
+            module_toml_url: String,
+            #[serde(default)]
+            binaries: JsonMap<String, RegistryBinary>,
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .user_agent(concat!("blvm-node/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| ModuleError::op_err("Failed to build HTTP client", e))?;
+
+        // Fetch registry index
+        let entries: Vec<RegistryEntry> = client
+            .get(registry_url)
+            .send()
+            .await
+            .map_err(|e| ModuleError::op_err("Registry fetch failed", e))?
+            .json()
+            .await
+            .map_err(|e| ModuleError::op_err("Registry JSON parse failed", e))?;
+
+        let entry = entries
+            .into_iter()
+            .find(|e| e.name == name)
+            .ok_or_else(|| {
+                ModuleError::OperationError(format!(
+                    "Module '{}' not found in registry at {}",
+                    name, registry_url
+                ))
+            })?;
+
+        // Detect platform key
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        let platform = "x86_64-linux";
+        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+        let platform = "aarch64-linux";
+        #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+        let platform = "x86_64-apple";
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        let platform = "aarch64-apple";
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_os = "linux"),
+            all(target_arch = "aarch64", target_os = "linux"),
+            all(target_arch = "x86_64", target_os = "macos"),
+            all(target_arch = "aarch64", target_os = "macos"),
+        )))]
+        let platform = "unknown";
+
+        let binary_info = entry.binaries.get(platform).ok_or_else(|| {
+            ModuleError::OperationError(format!(
+                "No binary for platform '{}' in registry entry for '{}'",
+                platform, name
+            ))
+        })?;
+
+        info!(
+            "Bootstrap: downloading '{}' for {} from {}",
+            name, platform, binary_info.url
+        );
+
+        let download_bytes = |url: String| {
+            let c = client.clone();
+            async move {
+                let resp = c
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| ModuleError::op_err("Download failed", e))?;
+                if !resp.status().is_success() {
+                    return Err(ModuleError::OperationError(format!(
+                        "Download {} returned HTTP {}",
+                        url,
+                        resp.status()
+                    )));
+                }
+                resp.bytes()
+                    .await
+                    .map(|b| b.to_vec())
+                    .map_err(|e| ModuleError::op_err("Reading download body", e))
+            }
+        };
+
+        let binary_bytes = download_bytes(binary_info.url.clone()).await?;
+
+        // Verify sha256 when present
+        if !binary_info.sha256.is_empty() {
+            use sha2::Digest;
+            let actual = hex::encode(sha2::Sha256::digest(&binary_bytes));
+            if actual != binary_info.sha256.to_lowercase() {
+                return Err(ModuleError::OperationError(format!(
+                    "SHA256 mismatch for '{}': expected {} got {}",
+                    name, binary_info.sha256, actual
+                )));
+            }
+        } else {
+            warn!(
+                "Bootstrap: no sha256 in registry for '{}' — skipping integrity check",
+                name
+            );
+        }
+
+        let module_dir = self.modules_dir.join(name);
+        tokio::fs::create_dir_all(&module_dir)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to create module dir", e))?;
+
+        // Write binary
+        let binary_path = module_dir.join(name);
+        tokio::fs::write(&binary_path, &binary_bytes)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to write binary", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = tokio::fs::metadata(&binary_path)
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to read binary metadata", e))?
+                .permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            tokio::fs::set_permissions(&binary_path, perms)
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to set executable bit", e))?;
+        }
+
+        // Download and write module.toml if URL is provided
+        if !entry.module_toml_url.is_empty() {
+            match download_bytes(entry.module_toml_url).await {
+                Ok(toml_bytes) => {
+                    tokio::fs::write(module_dir.join("module.toml"), toml_bytes)
+                        .await
+                        .map_err(|e| ModuleError::op_err("Failed to write module.toml", e))?;
+                }
+                Err(e) => {
+                    warn!("Bootstrap: could not fetch module.toml for '{}': {}", name, e);
+                }
+            }
+        }
+
+        info!("Bootstrap: installed '{}' to {:?}", name, module_dir);
+        Ok(())
     }
 
     /// Get event manager for publishing events

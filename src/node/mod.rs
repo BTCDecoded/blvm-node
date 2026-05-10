@@ -1308,6 +1308,18 @@ impl Node {
                         .await
                         .set_enabled_modules(module_config.enabled_modules.clone());
                 }
+                // Pass the marketplace registry URL to the module manager so it can
+                // bootstrap-download any enabled_modules not yet installed locally.
+                if let Some(registry_url) = module_config
+                    .module_configs
+                    .get("blvm-marketplace")
+                    .and_then(|c| c.get("registry_url"))
+                {
+                    module_manager
+                        .lock()
+                        .await
+                        .set_registry_url(registry_url.clone());
+                }
             }
 
             // Auto-discover and load modules
