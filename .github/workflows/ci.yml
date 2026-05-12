@@ -210,7 +210,9 @@ jobs:
 
       - name: Install tidesdb native dependencies
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
+          if pkg-config --exists liblz4 libzstd 2>/dev/null && command -v cmake >/dev/null 2>&1 && pkg-config --exists openssl 2>/dev/null; then
+            echo "✅ tidesdb native deps already present."
+          elif command -v apt-get >/dev/null 2>&1; then
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
@@ -300,7 +302,9 @@ jobs:
 
       - name: Install tidesdb native dependencies
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
+          if pkg-config --exists liblz4 libzstd 2>/dev/null && command -v cmake >/dev/null 2>&1 && pkg-config --exists openssl 2>/dev/null; then
+            echo "✅ tidesdb native deps already present."
+          elif command -v apt-get >/dev/null 2>&1; then
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
@@ -407,7 +411,9 @@ jobs:
 
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
+          if pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1; then
+            echo "✅ openssl already present."
+          elif command -v apt-get >/dev/null 2>&1; then
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
@@ -641,7 +647,9 @@ jobs:
 
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
+          if pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1; then
+            echo "✅ openssl already present."
+          elif command -v apt-get >/dev/null 2>&1; then
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
@@ -697,7 +705,9 @@ jobs:
 
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
+          if pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1; then
+            echo "✅ openssl already present."
+          elif command -v apt-get >/dev/null 2>&1; then
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
@@ -745,7 +755,9 @@ jobs:
 
       - name: Install tidesdb native dependencies
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
+          if pkg-config --exists liblz4 libzstd 2>/dev/null && command -v cmake >/dev/null 2>&1 && pkg-config --exists openssl 2>/dev/null; then
+            echo "✅ tidesdb native deps already present."
+          elif command -v apt-get >/dev/null 2>&1; then
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
@@ -867,7 +879,9 @@ jobs:
 
       - name: Install tidesdb native dependencies
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
+          if pkg-config --exists liblz4 libzstd 2>/dev/null && command -v cmake >/dev/null 2>&1 && pkg-config --exists openssl 2>/dev/null; then
+            echo "✅ tidesdb native deps already present."
+          elif command -v apt-get >/dev/null 2>&1; then
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
@@ -939,7 +953,9 @@ jobs:
 
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
+          if pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1; then
+            echo "✅ openssl already present."
+          elif command -v apt-get >/dev/null 2>&1; then
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
