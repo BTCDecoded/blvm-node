@@ -31,9 +31,12 @@ env:
   CARGO_INCREMENTAL: '0'
   # lld uses far less memory than GNU ld; prevents OOM kills when linking blvm-node in parallel.
   RUSTFLAGS: '-C link-arg=-fuse-ld=lld'
+  # Redirect ALL temp files (rustc scratch, linker temp objects, mktemp) to /mnt/data so
+  # that the /tmp tmpfs (RAM-backed, limited) is never exhausted during large link steps.
+  TMPDIR: /mnt/data/tmp
   # Shared target dir for build-dev → test/clippy/docs within the same run.
-  # All four jobs run on [self-hosted, Linux, X64, builds] runners that share /tmp.
-  BLVM_BUILD_TARGET: /tmp/gh-blvm-node-build/${{ github.run_id }}/target
+  # All four jobs run on [self-hosted, Linux, X64, builds] runners that share /mnt/data.
+  BLVM_BUILD_TARGET: /mnt/data/gh-blvm-node-build/${{ github.run_id }}/target
 
 jobs:
   setup:
@@ -57,22 +60,25 @@ jobs:
           # We can't know other runners' run_ids, so we delete everything older than 1 hour.
           # The teardown job deletes the current run dir at the end, so at steady-state
           # nothing should survive here — but we clean defensively on every setup.
-          if [ -d /tmp/gh-blvm-node-build ]; then
-            find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+          if [ -d /mnt/data/gh-blvm-node-build ]; then
+            find /mnt/data/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
               -not -name "${{ github.run_id }}" \
               -mmin +60 \
               -exec rm -rf {} + 2>/dev/null || true
             # If still >50 GB used by gh-blvm-node-build, evict everything except current run.
-            USED=$(du -sb /tmp/gh-blvm-node-build 2>/dev/null | cut -f1 || echo 0)
+            USED=$(du -sb /mnt/data/gh-blvm-node-build 2>/dev/null | cut -f1 || echo 0)
             if [ "$USED" -gt 53687091200 ]; then
               echo "⚠️  gh-blvm-node-build still >50 GB after 1h prune — force-evicting all stale dirs"
-              find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+              find /mnt/data/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
                 -not -name "${{ github.run_id }}" \
                 -exec rm -rf {} + 2>/dev/null || true
             fi
           fi
           # Fuzz artifacts from previous runs
-          rm -rf /tmp/gh-fuzz-blvm-node 2>/dev/null || true
+          rm -rf /mnt/data/gh-fuzz-blvm-node 2>/dev/null || true
+          # Ensure TMPDIR exists and prune stale rustc/linker temp dirs (older than 2h)
+          mkdir -p /mnt/data/tmp
+          find /mnt/data/tmp -mindepth 1 -maxdepth 1 -mmin +120 -exec rm -rf {} + 2>/dev/null || true
           echo "=== disk AFTER cleanup ==="
           df -h /
 
@@ -98,8 +104,8 @@ jobs:
           du -sh /tmp/* 2>/dev/null | sort -rh | head -10
           echo ""
           echo "=== Runner cache ==="
-          du -sh /tmp/runner-cache 2>/dev/null || echo "(no runner-cache)"
-          du -sh /tmp/gh-blvm-node-build 2>/dev/null || echo "(no gh-blvm-node-build)"
+          du -sh /mnt/data/runner-cache 2>/dev/null || echo "(no runner-cache)"
+          du -sh /mnt/data/gh-blvm-node-build 2>/dev/null || echo "(no gh-blvm-node-build)"
 
       - uses: actions/checkout@v4
       
@@ -121,7 +127,7 @@ jobs:
       - name: Cache
         id: setup-cache
         run: |
-          CACHE_ROOT="/tmp/runner-cache"
+          CACHE_ROOT="/mnt/data/runner-cache"
           
           # Generate cache keys from Cargo.toml (sibling libraries do not commit Cargo.lock)
           DEPS_KEY=$(sha256sum Cargo.toml | cut -d' ' -f1)
@@ -195,8 +201,8 @@ jobs:
           echo ""
           echo "=== /tmp ==="
           du -sh /tmp/* 2>/dev/null | sort -rh | head -10
-          du -sh /tmp/runner-cache 2>/dev/null || true
-          du -sh /tmp/gh-blvm-node-build 2>/dev/null || true
+          du -sh /mnt/data/runner-cache 2>/dev/null || true
+          du -sh /mnt/data/gh-blvm-node-build 2>/dev/null || true
 
       - uses: actions/checkout@v4
 
@@ -369,7 +375,7 @@ jobs:
               -delete 2>/dev/null || true
           fi
           # Remove ALL run dirs except the current one — no mtime guard, stale dirs eat 10s of GB.
-          find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+          find /mnt/data/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
             -not -name "${{ github.run_id }}" \
             -exec rm -rf {} + 2>/dev/null || true
 
@@ -822,7 +828,7 @@ jobs:
           fi
           JOBS=$(nproc)
           echo "Running ${#bins[@]} fuzz targets across $JOBS cores in parallel"
-          RUNSCRIPT=$(mktemp /tmp/fuzz-run-XXXXXX.sh)
+          RUNSCRIPT=$(mktemp /mnt/data/tmp/fuzz-run-XXXXXX.sh)
           cat > "$RUNSCRIPT" << 'SCRIPT'
           #!/usr/bin/env bash
           t=$1
@@ -1397,16 +1403,16 @@ jobs:
     steps:
       - name: Delete current run target dir
         run: |
-          RUN_DIR="/tmp/gh-blvm-node-build/${{ github.run_id }}"
+          RUN_DIR="/mnt/data/gh-blvm-node-build/${{ github.run_id }}"
           if [ -d "$RUN_DIR" ]; then
             echo "Removing $RUN_DIR ($(du -sh "$RUN_DIR" 2>/dev/null | cut -f1))"
             rm -rf "$RUN_DIR"
           fi
           # Belt-and-suspenders: also remove any other leftover run dirs
-          find /tmp/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+          find /mnt/data/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
             -exec rm -rf {} + 2>/dev/null || true
           # Clean fuzz temp dir
-          rm -rf /tmp/gh-fuzz-blvm-node 2>/dev/null || true
+          rm -rf /mnt/data/gh-fuzz-blvm-node 2>/dev/null || true
           echo "=== disk after teardown ==="
           df -h /
 
