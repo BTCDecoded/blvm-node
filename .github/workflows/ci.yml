@@ -220,7 +220,7 @@ jobs:
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
+            pacman -Qq lz4 zstd snappy cmake pkgconf openssl >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
 
       - name: Isolate CARGO_HOME for this runner
@@ -312,7 +312,7 @@ jobs:
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
+            pacman -Qq lz4 zstd snappy cmake pkgconf openssl >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
 
       - name: Isolate CARGO_HOME for this runner
@@ -421,7 +421,7 @@ jobs:
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm openssl pkgconf
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
           fi
 
       - name: Isolate CARGO_HOME for this runner
@@ -657,7 +657,7 @@ jobs:
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm openssl pkgconf
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
           fi
 
       - name: Isolate CARGO_HOME for this runner
@@ -715,7 +715,7 @@ jobs:
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm openssl pkgconf
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
           fi
 
       - name: Install Rust
@@ -765,7 +765,7 @@ jobs:
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
+            pacman -Qq lz4 zstd snappy cmake pkgconf openssl >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
 
       - name: Cache
@@ -900,7 +900,7 @@ jobs:
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
+            pacman -Qq lz4 zstd snappy cmake pkgconf openssl >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
 
       - name: Isolate CARGO_HOME for this runner
@@ -974,7 +974,7 @@ jobs:
             bash scripts/apt-get-retry.sh update -qq
             bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
           elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm openssl pkgconf
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
           fi
 
       - name: Install Rust
