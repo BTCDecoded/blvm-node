@@ -107,4 +107,4 @@ pnpm-lock.yaml
 
 # Misc
 .cache/
-*.pid
+*.pid.build/
