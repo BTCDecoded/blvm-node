@@ -29,6 +29,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '0'
+  # lld uses far less memory than GNU ld; prevents OOM kills when linking blvm-node in parallel.
+  RUSTFLAGS: '-C link-arg=-fuse-ld=lld'
   # Shared target dir for build-dev → test/clippy/docs within the same run.
   # All four jobs run on [self-hosted, Linux, X64, builds] runners that share /tmp.
   BLVM_BUILD_TARGET: /tmp/gh-blvm-node-build/${{ github.run_id }}/target
@@ -793,9 +795,11 @@ jobs:
       - name: Clean stale fuzz build artifacts
         run: rm -rf fuzz/target
 
-      # cargo-fuzz injects sancov + ASAN; do not set RUSTFLAGS here.
+      # cargo-fuzz injects its own sancov + ASAN flags; clear the global RUSTFLAGS.
       - name: Build fuzz binaries
         working-directory: fuzz
+        env:
+          RUSTFLAGS: ''
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo +nightly fuzz build
