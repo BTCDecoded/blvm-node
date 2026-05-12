@@ -722,13 +722,13 @@ jobs:
           # hickory-proto/resolver via iroh (DNS): fixed upstream needs newer iroh / hickory stack
           cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0007 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2026-0118 --ignore RUSTSEC-2026-0119
 
-  # Fuzz is skippable via `[skip_fuzz]` on push (skips fuzz-build + all fuzz shards). Fuzz does not
+  # Fuzz is skippable via `[skip_fuzz]` on push. Fuzz does not
   # need `test` so `[skip_tests]` can still run libFuzzer.
-  fuzz-build:
-    name: Fuzz (build once)
+  fuzz:
+    name: Fuzz
     needs: [setup]
     runs-on: [self-hosted, Linux, X64, builds]
-    timeout-minutes: 60
+    timeout-minutes: 30
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -751,14 +751,6 @@ jobs:
           elif command -v pacman >/dev/null 2>&1; then
             sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
           fi
-
-      - name: Isolate CARGO_HOME for this runner
-        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
-        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
-        # that share the same OS user from racing on registry/src extractions.
-        run: |
-          mkdir -p "${RUNNER_TEMP}/cargo"
-          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
@@ -787,66 +779,14 @@ jobs:
           ./init_corpus.sh
 
       - name: Clean stale fuzz build artifacts
-        # Restored target cache may contain stale .d dep-info files that reference
-        # artifacts no longer on disk, causing "could not parse/generate dep info" errors.
         run: rm -rf fuzz/target
 
-      # Do not set RUSTFLAGS here: cargo-fuzz already injects sancov + ASAN; duplicating
-      # -Cpasses=sancov-module breaks the link step (sancov ctors discarded with --gc-sections).
-      - name: Build all fuzz binaries (once per workflow)
+      # cargo-fuzz injects sancov + ASAN; do not set RUSTFLAGS here.
+      - name: Build fuzz binaries
         working-directory: fuzz
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo +nightly fuzz build
-
-      - name: Save Cargo cache
-        if: always()
-        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
-        with:
-          operation: save
-
-      - name: Stash fuzz target for shard jobs
-        run: |
-          STASH="/tmp/gh-fuzz-blvm-node/${GITHUB_RUN_ID}"
-          rm -rf "$STASH"
-          mkdir -p "$STASH"
-          cp -a fuzz/target "$STASH/"
-
-  fuzz:
-    name: Fuzz (all targets, parallel)
-    needs: [setup, fuzz-build]
-    runs-on: [self-hosted, Linux, X64, builds]
-    timeout-minutes: 30
-    if: |
-      (github.event_name != 'push' || github.event.head_commit == null || 
-       (!contains(github.event.head_commit.message, '[skip ci]') &&
-        !contains(github.event.head_commit.message, '[ci skip]') &&
-        !contains(github.event.head_commit.message, '[no ci]'))) &&
-      (github.event_name != 'push' || github.event.head_commit == null || 
-       !contains(github.event.head_commit.message, '[skip_fuzz]')) &&
-      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Initialize corpus dirs
-        working-directory: fuzz
-        run: |
-          chmod +x init_corpus.sh
-          ./init_corpus.sh
-
-      - name: Restore fuzz target from stash or workspace
-        run: |
-          if [ -d "fuzz/target" ]; then
-            echo "✅ fuzz/target present in workspace (single-runner path)."
-          else
-            STASH="/tmp/gh-fuzz-blvm-node/${GITHUB_RUN_ID}"
-            if [ ! -d "$STASH/target" ]; then
-              echo "❌ fuzz/target missing from workspace and stash ($STASH/target not found)."
-              exit 1
-            fi
-            cp -a "$STASH/target" fuzz/target
-            echo "✅ fuzz/target restored from stash."
-          fi
 
       - name: Run all libFuzzer binaries in parallel
         working-directory: fuzz
@@ -872,6 +812,12 @@ jobs:
           rm -f "$RUNSCRIPT"
           exit $EXIT
 
+      - name: Save Cargo cache
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: save
+
   build:
     name: Build
     needs:
@@ -883,7 +829,6 @@ jobs:
       - docs
       - security
       - verify
-      - fuzz-build
       - fuzz
     runs-on: [self-hosted, Linux, X64, builds]
     env:
@@ -905,8 +850,7 @@ jobs:
         (needs.docs.result == 'success' || needs.docs.result == 'skipped') &&
         (needs.security.result == 'success' || needs.security.result == 'skipped'))) &&
       (needs.verify.result == 'skipped' || needs.verify.result == 'success') &&
-      ((needs.fuzz-build.result == 'success' && needs.fuzz.result == 'success') ||
-       (needs.fuzz-build.result == 'skipped' && needs.fuzz.result == 'skipped'))
+      (needs.fuzz.result == 'success' || needs.fuzz.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
       
@@ -960,7 +904,7 @@ jobs:
 
   release:
     name: Release
-    needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz-build, fuzz]
+    needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
     permissions:
       contents: write
@@ -983,8 +927,7 @@ jobs:
         (needs.docs.result == 'success' || needs.docs.result == 'skipped') &&
         (needs.security.result == 'success' || needs.security.result == 'skipped') &&
         (needs.verify.result == 'success' || needs.verify.result == 'skipped'))) &&
-      ((needs.fuzz-build.result == 'success' && needs.fuzz.result == 'success') ||
-       (needs.fuzz-build.result == 'skipped' && needs.fuzz.result == 'skipped'))
+      (needs.fuzz.result == 'success' || needs.fuzz.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1421,7 +1364,7 @@ jobs:
     name: Teardown (cleanup runner disk)
     runs-on: [self-hosted, Linux, X64, builds]
     if: always()
-    needs: [build-dev, test, clippy, verify, fmt, docs, security, fuzz-build, fuzz, build]
+    needs: [build-dev, test, clippy, verify, fmt, docs, security, fuzz, build]
     steps:
       - name: Delete current run target dir
         run: |
