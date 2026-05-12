@@ -1,6 +1,6 @@
 [package]
 name = "blvm-node"
-version = "0.1.0"
+version = "0.1.6"
 edition = "2021"
 authors = ["Bitcoin Commons Team"]
 description = "Bitcoin Commons BLVM: Minimal Bitcoin node implementation using blvm-protocol and blvm-consensus"

@@ -371,6 +371,7 @@ impl RpcManager {
             request_timeouts: None,
             module_manager: None,
             protocol_engine: None,
+            server_arc: None,
         }
     }
 
