@@ -1,13 +1,15 @@
 //! Tests for IPC server (node-side communication handling)
 
 #[cfg(unix)]
+#[path = "common/ipc_harness.rs"]
+mod ipc_harness;
+
+#[cfg(unix)]
 mod tests {
     use blvm_node::module::api::events::EventManager;
     use blvm_node::module::inter_module::api::ModuleAPI;
-    use blvm_node::module::ipc::client::ModuleIpcClient;
     use blvm_node::module::ipc::protocol::{EventPayload, FileMetadata};
     use blvm_node::module::ipc::protocol::{RequestMessage, ResponsePayload};
-    use blvm_node::module::ipc::server::ModuleIpcServer;
     use blvm_node::module::metrics::manager::Metric;
     use blvm_node::module::process::monitor::ModuleHealth;
     use blvm_node::module::timers::manager::{TaskCallback, TaskId, TimerCallback, TimerId};
@@ -18,9 +20,8 @@ mod tests {
     use blvm_node::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tempfile::TempDir;
-    use tokio::time::{sleep, Duration};
 
+    use super::ipc_harness;
     // Mock NodeAPI that returns test data
     struct MockNodeAPI {
         test_block: Option<Block>,
@@ -443,26 +444,15 @@ mod tests {
         }
     }
 
-    fn setup_test_socket() -> (TempDir, std::path::PathBuf) {
-        let temp_dir = TempDir::new().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-        (temp_dir, socket_path)
-    }
-
     #[tokio::test]
     async fn test_server_handshake_required() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Send handshake
         let correlation_id = client.next_correlation_id();
@@ -492,18 +482,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_get_block_request() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake first
         let handshake_id = client.next_correlation_id();
@@ -536,18 +521,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_get_block_header_request() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -579,18 +559,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_get_transaction_request() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -622,18 +597,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_has_transaction_request() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -665,18 +635,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_get_chain_tip_request() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -709,18 +674,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_get_block_height_request() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -753,18 +713,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_get_utxo_request() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -799,20 +754,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_subscribe_events_request() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
         let event_manager = Arc::new(EventManager::new());
 
-        let server_path = socket_path.clone();
         let event_mgr_clone = Arc::clone(&event_manager);
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path).with_event_manager(event_mgr_clone);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle =
+            ipc_harness::spawn_ipc_server_with(socket_path.clone(), node_api, move |s| {
+                s.with_event_manager(event_mgr_clone)
+            });
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -846,18 +799,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_multiple_requests() {
-        let (_temp_dir, socket_path) = setup_test_socket();
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = ipc_harness::spawn_ipc_server(socket_path.clone(), node_api);
 
-        sleep(Duration::from_millis(100)).await;
-
-        let mut client = ModuleIpcClient::connect(&socket_path).await.unwrap();
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
