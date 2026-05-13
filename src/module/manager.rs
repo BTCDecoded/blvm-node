@@ -1637,6 +1637,8 @@ impl ModuleManager {
         let platform = "x86_64-linux";
         #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
         let platform = "aarch64-linux";
+        #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+        let platform = "x86_64-windows";
         #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
         let platform = "x86_64-apple";
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1644,10 +1646,18 @@ impl ModuleManager {
         #[cfg(not(any(
             all(target_arch = "x86_64", target_os = "linux"),
             all(target_arch = "aarch64", target_os = "linux"),
+            all(target_arch = "x86_64", target_os = "windows"),
             all(target_arch = "x86_64", target_os = "macos"),
             all(target_arch = "aarch64", target_os = "macos"),
         )))]
         let platform = "unknown";
+
+        // On Windows the installed binary must carry the .exe extension so the
+        // OS can execute it via Command::new.
+        #[cfg(target_os = "windows")]
+        let binary_filename = format!("{name}.exe");
+        #[cfg(not(target_os = "windows"))]
+        let binary_filename = name.to_string();
 
         let download = manifest.downloads.get(platform).ok_or_else(|| {
             ModuleError::OperationError(format!(
@@ -1688,7 +1698,7 @@ impl ModuleManager {
             .await
             .map_err(|e| ModuleError::op_err("Failed to create module dir", e))?;
 
-        let binary_path = module_dir.join(name);
+        let binary_path = module_dir.join(&binary_filename);
         tokio::fs::write(&binary_path, &binary_bytes)
             .await
             .map_err(|e| ModuleError::op_err("Failed to write binary", e))?;
