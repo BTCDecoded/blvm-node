@@ -14,27 +14,58 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::task::JoinHandle;
     use tokio::time::{sleep, Duration, Instant};
 
     use super::stub_node_api::MockNodeAPI;
 
     fn setup_test_socket() -> (TempDir, std::path::PathBuf) {
-        let temp_dir = TempDir::new().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
+        // Linux `sockaddr_un` paths are short (~108 bytes). CI sets a long TMPDIR/CARGO_TARGET_DIR;
+        // `TempDir::new()` there can make Unix socket bind fail with no obvious client error.
+        let tmp = std::path::Path::new("/tmp");
+        let temp_dir = TempDir::new_in(tmp).expect("temp dir under /tmp");
+        let socket_path = temp_dir.path().join("s.sock");
         (temp_dir, socket_path)
     }
 
-    /// Bind can lag behind `tokio::spawn` on loaded CI; fixed sleeps flake.
-    async fn connect_when_ready(socket_path: &Path) -> ModuleIpcClient {
+    fn spawn_server(
+        server_path: std::path::PathBuf,
+        node_api: Arc<MockNodeAPI>,
+    ) -> JoinHandle<Result<(), ModuleError>> {
+        tokio::spawn(async move {
+            let mut server = ModuleIpcServer::new(&server_path);
+            server.start(node_api).await
+        })
+    }
+
+    /// Wait until `bind` created the socket file, then connect. If the server task exits first,
+    /// surface `ModuleIpcServer::start` errors instead of retrying connect until timeout.
+    async fn wait_bound_then_connect(
+        socket_path: &Path,
+        server: &mut JoinHandle<Result<(), ModuleError>>,
+    ) -> ModuleIpcClient {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            match ModuleIpcClient::connect(socket_path).await {
-                Ok(client) => return client,
-                Err(_) if Instant::now() < deadline => {
-                    sleep(Duration::from_millis(50)).await;
-                }
-                Err(e) => panic!("failed to connect to {socket_path:?}: {e:?}"),
+            if socket_path.exists() {
+                return ModuleIpcClient::connect(socket_path).await.unwrap_or_else(|e| {
+                    panic!("connect to {socket_path:?} after bind failed: {e:?}");
+                });
             }
+            if server.is_finished() {
+                match server.await {
+                    Ok(Ok(())) => panic!("server returned before binding (unexpected)"),
+                    Ok(Err(e)) => panic!("IPC server failed to start: {e:?}"),
+                    Err(j) => panic!("IPC server task panicked: {j}"),
+                }
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "timeout waiting for socket file {socket_path:?} (path.len={}, dir={:?})",
+                    socket_path.as_os_str().len(),
+                    socket_path.parent()
+                );
+            }
+            sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -57,14 +88,9 @@ mod tests {
         let (_temp_dir, socket_path) = setup_test_socket();
         let node_api = Arc::new(MockNodeAPI);
 
-        // Start server in background
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = spawn_server(socket_path.clone(), node_api);
 
-        let mut client = connect_when_ready(&socket_path).await;
+        let mut client = wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Send handshake
         let correlation_id = client.next_correlation_id();
@@ -91,14 +117,9 @@ mod tests {
         let (_temp_dir, socket_path) = setup_test_socket();
         let node_api = Arc::new(MockNodeAPI);
 
-        // Start server
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = spawn_server(socket_path.clone(), node_api);
 
-        let mut client = connect_when_ready(&socket_path).await;
+        let mut client = wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Send handshake first
         let handshake_id = client.next_correlation_id();
@@ -126,13 +147,9 @@ mod tests {
         let (_temp_dir, socket_path) = setup_test_socket();
         let node_api = Arc::new(MockNodeAPI);
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = spawn_server(socket_path.clone(), node_api);
 
-        let mut client = connect_when_ready(&socket_path).await;
+        let mut client = wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -164,13 +181,9 @@ mod tests {
         let (_temp_dir, socket_path) = setup_test_socket();
         let node_api = Arc::new(MockNodeAPI);
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = spawn_server(socket_path.clone(), node_api);
 
-        let mut client = connect_when_ready(&socket_path).await;
+        let mut client = wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
@@ -197,13 +210,9 @@ mod tests {
         let (_temp_dir, socket_path) = setup_test_socket();
         let node_api = Arc::new(MockNodeAPI);
 
-        let server_path = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            let mut server = ModuleIpcServer::new(&server_path);
-            let _ = server.start(node_api).await;
-        });
+        let mut server_handle = spawn_server(socket_path.clone(), node_api);
 
-        let mut client = connect_when_ready(&socket_path).await;
+        let mut client = wait_bound_then_connect(&socket_path, &mut server_handle).await;
 
         // Handshake
         let handshake_id = client.next_correlation_id();
