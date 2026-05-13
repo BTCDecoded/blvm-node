@@ -20,27 +20,45 @@ jobs:
     name: Cleanup self-hosted runner disk
     runs-on: [self-hosted, Linux, X64, builds]
     steps:
+      - uses: actions/checkout@v4
+
       - name: Report disk before
         run: df -h /
 
-      - name: Remove stale CI build target dirs (older than 7 days)
+      - name: Remove CI per-run build dirs (same path as ci.yml BLVM_BUILD_TARGET)
         run: |
           DRY="${{ github.event.inputs.dry_run }}"
-          BASE="/tmp/gh-blvm-node-build"
+          BASE="${{ github.workspace }}/.build/gh-blvm-node-build"
           if [ ! -d "$BASE" ]; then
-            echo "No stale build dirs found at $BASE"
-            exit 0
+            echo "No build dir at $BASE"
+          else
+            echo "=== ALL run dirs under $BASE ==="
+            find "$BASE" -mindepth 1 -maxdepth 1 -type d | while read -r dir; do
+              SIZE=$(du -sh "$dir" 2>/dev/null | cut -f1)
+              echo "  $dir ($SIZE)"
+              if [ "$DRY" != "true" ]; then
+                rm -rf "$dir"
+              fi
+            done
           fi
-          echo "=== ALL run dirs under $BASE ==="
-          find "$BASE" -mindepth 1 -maxdepth 1 -type d | while read -r dir; do
-            SIZE=$(du -sh "$dir" 2>/dev/null | cut -f1)
-            AGE=$(find "$dir" -maxdepth 0 -printf '%Td days %TH:%TM\n' 2>/dev/null || echo "?")
-            echo "  $dir ($SIZE, modified $AGE ago)"
+          # Legacy path (older CI) — still remove if present
+          LEGACY="/tmp/gh-blvm-node-build"
+          if [ -d "$LEGACY" ]; then
+            SIZE=$(du -sh "$LEGACY" 2>/dev/null | cut -f1)
+            echo "=== Legacy $LEGACY ($SIZE) ==="
             if [ "$DRY" != "true" ]; then
-              rm -rf "$dir"
+              rm -rf "$LEGACY"
             fi
-          done
-          # Also clean fuzz dir
+          fi
+          # Fuzz dir next to .build (ci.yml rm -rf path)
+          FUZZ="${{ github.workspace }}/.build/gh-fuzz-blvm-node"
+          if [ -d "$FUZZ" ]; then
+            SIZE=$(du -sh "$FUZZ" 2>/dev/null | cut -f1)
+            echo "=== $FUZZ ($SIZE) ==="
+            if [ "$DRY" != "true" ]; then
+              rm -rf "$FUZZ"
+            fi
+          fi
           if [ -d /tmp/gh-fuzz-blvm-node ]; then
             SIZE=$(du -sh /tmp/gh-fuzz-blvm-node 2>/dev/null | cut -f1)
             echo "  /tmp/gh-fuzz-blvm-node ($SIZE)"
@@ -52,7 +70,7 @@ jobs:
       - name: Remove stale test binaries from workspace target (older than 7 days)
         run: |
           DRY="${{ github.event.inputs.dry_run }}"
-          TARGET="$GITHUB_WORKSPACE/target/debug"
+          TARGET="${{ github.workspace }}/target/debug"
           if [ ! -d "$TARGET" ]; then
             echo "No local target/debug found"
             exit 0
@@ -71,7 +89,7 @@ jobs:
       - name: Remove old incremental fingerprints and rlibs (older than 14 days)
         run: |
           DRY="${{ github.event.inputs.dry_run }}"
-          TARGET="$GITHUB_WORKSPACE/target"
+          TARGET="${{ github.workspace }}/target"
           if [ ! -d "$TARGET" ]; then exit 0; fi
           BYTES=0
           COUNT=0

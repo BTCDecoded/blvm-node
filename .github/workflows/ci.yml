@@ -53,28 +53,42 @@ jobs:
         run: |
           echo "=== disk BEFORE cleanup ==="
           df -h /
+          WORK="${{ github.workspace }}"
+          BUILD_ROOT="$WORK/.build/gh-blvm-node-build"
+          # Free space on the filesystem that holds the workspace (avoids full root with /var/lib full)
+          AVAIL=$(df -B1 "$WORK" 2>/dev/null | tail -1 | awk '{print $4}')
+          # If < 12 GiB free, evict ALL other per-run target dirs immediately (ignore 60‑min grace).
+          MIN_FREE=$((12 * 1024 * 1024 * 1024))
+          if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$MIN_FREE" ]; then
+            echo "⚠️  Low disk: $AVAIL bytes free under $WORK — aggressive prune of sibling run dirs"
+            if [ -d "$BUILD_ROOT" ]; then
+              find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+                -not -name "${{ github.run_id }}" \
+                -exec rm -rf {} + 2>/dev/null || true
+            fi
+          fi
           # Nuke ALL stale run dirs (every dir except a currently-active run on THIS runner).
           # We can't know other runners' run_ids, so we delete everything older than 1 hour.
           # The teardown job deletes the current run dir at the end, so at steady-state
           # nothing should survive here — but we clean defensively on every setup.
-          if [ -d ${{ github.workspace }}/.build/gh-blvm-node-build ]; then
-            find ${{ github.workspace }}/.build/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+          if [ -d "$BUILD_ROOT" ]; then
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
               -not -name "${{ github.run_id }}" \
               -mmin +60 \
               -exec rm -rf {} + 2>/dev/null || true
             # If still >50 GB used by gh-blvm-node-build, evict everything except current run.
-            USED=$(du -sb ${{ github.workspace }}/.build/gh-blvm-node-build 2>/dev/null | cut -f1 || echo 0)
+            USED=$(du -sb "$BUILD_ROOT" 2>/dev/null | cut -f1 || echo 0)
             if [ "$USED" -gt 53687091200 ]; then
               echo "⚠️  gh-blvm-node-build still >50 GB after 1h prune — force-evicting all stale dirs"
-              find ${{ github.workspace }}/.build/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+              find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
                 -not -name "${{ github.run_id }}" \
                 -exec rm -rf {} + 2>/dev/null || true
             fi
           fi
           # Fuzz artifacts from previous runs
-          rm -rf ${{ github.workspace }}/.build/gh-fuzz-blvm-node 2>/dev/null || true
+          rm -rf "$WORK/.build/gh-fuzz-blvm-node" 2>/dev/null || true
           # Ensure TMPDIR exists (nested inside the per-run build dir — always writable)
-          mkdir -p "${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/target"
+          mkdir -p "$BUILD_ROOT/${{ github.run_id }}/target"
           echo "=== disk AFTER cleanup ==="
           df -h /
 
