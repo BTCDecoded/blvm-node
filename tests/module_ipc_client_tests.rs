@@ -47,9 +47,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if socket_path.exists() {
-                return ModuleIpcClient::connect(socket_path).await.unwrap_or_else(|e| {
-                    panic!("connect to {socket_path:?} after bind failed: {e:?}");
-                });
+                return ModuleIpcClient::connect(socket_path)
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("connect to {socket_path:?} after bind failed: {e:?}");
+                    });
             }
             if server.is_finished() {
                 match server.await {
