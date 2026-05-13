@@ -31,13 +31,17 @@ env:
   CARGO_INCREMENTAL: '0'
   # lld uses far less memory than GNU ld; prevents OOM kills when linking blvm-node in parallel.
   RUSTFLAGS: '-C link-arg=-fuse-ld=lld'
-  # Shared target dir for build-dev → test/clippy/docs within the same run.
-  # All four jobs run on [self-hosted, Linux, X64, builds] runners that share /mnt/data.
-  BLVM_BUILD_TARGET: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/target
+  # Parent of per-run dirs: .../<run_id>/target and .../<run_id>/tmp.
+  # Prefer pointing the runner's workFolder at a large disk (e.g. /mnt/data/github-runner/<name>/_work)
+  # so github.workspace and this default path stay off root — then BLVM_RUNNER_BUILD_ROOT is optional.
+  # If workspace is still on a small volume, set repository (or org) variable BLVM_RUNNER_BUILD_ROOT
+  # to an absolute path on a large disk — CI, teardown, and cleanup-runner-disk.yml use it.
+  BLVM_RUNNER_DATA_ROOT: ${{ vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace) }}
+  BLVM_BUILD_TARGET: ${{ format('{0}/{1}/target', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
   # Keep rustc/link temps on the same volume as target (system /tmp may be small or full).
-  TMPDIR: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp
-  TMP: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp
-  TEMP: ${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}/tmp
+  TMPDIR: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
+  TMP: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
+  TEMP: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
 
 jobs:
   setup:
@@ -58,10 +62,22 @@ jobs:
           echo "=== disk BEFORE cleanup ==="
           df -h /
           WORK="${{ github.workspace }}"
-          BUILD_ROOT="$WORK/.build/gh-blvm-node-build"
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
           RUN_ID="${{ github.run_id }}"
-          # Free space on the filesystem that holds the workspace
-          AVAIL=$(df -B1 "$WORK" 2>/dev/null | tail -1 | awk '{print $4}')
+          mkdir -p "$BUILD_ROOT/$RUN_ID/target" "$BUILD_ROOT/$RUN_ID/tmp"
+
+          avail_min_two() {
+            local w b
+            w=$(df -B1 "$1" 2>/dev/null | tail -1 | awk '{print $4}')
+            b=$(df -B1 "$2" 2>/dev/null | tail -1 | awk '{print $4}')
+            if [ -z "$w" ] && [ -z "$b" ]; then echo ""; return; fi
+            if [ -z "$w" ]; then echo "$b"; return; fi
+            if [ -z "$b" ]; then echo "$w"; return; fi
+            if [ "$w" -lt "$b" ]; then echo "$w"; else echo "$b"; fi
+          }
+
+          # Headroom vs the tighter of workspace (checkout) and build-root (target, temps).
+          AVAIL=$(avail_min_two "$WORK" "$BUILD_ROOT")
           # blvm-node test builds need a lot of headroom for rustc temps + deps
           MIN_FREE=$((28 * 1024 * 1024 * 1024))
           CRIT_FREE=$((4 * 1024 * 1024 * 1024))
@@ -83,7 +99,7 @@ jobs:
           fi
 
           if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$MIN_FREE" ]; then
-            echo "⚠️  Low disk: $AVAIL bytes free under $WORK — aggressive prune of sibling run dirs"
+            echo "⚠️  Low disk: $AVAIL bytes free (min of $WORK vs $BUILD_ROOT FS) — aggressive prune of sibling run dirs"
             purge_siblings
           fi
 
@@ -102,9 +118,8 @@ jobs:
           fi
 
           rm -rf "$WORK/.build/gh-fuzz-blvm-node" 2>/dev/null || true
-          mkdir -p "$BUILD_ROOT/$RUN_ID/target" "$BUILD_ROOT/$RUN_ID/tmp"
 
-          AVAIL2=$(df -B1 "$WORK" 2>/dev/null | tail -1 | awk '{print $4}')
+          AVAIL2=$(avail_min_two "$WORK" "$BUILD_ROOT")
           if [ -n "$AVAIL2" ] && [ "$AVAIL2" -lt "$MIN_FREE" ]; then
             echo "⚠️  Still low after prune ($AVAIL2 bytes) — second sibling purge"
             purge_siblings
@@ -136,7 +151,9 @@ jobs:
           echo ""
           echo "=== Runner cache ==="
           du -sh ${{ github.workspace }}/.build/runner-cache 2>/dev/null || echo "(no runner-cache)"
-          du -sh ${{ github.workspace }}/.build/gh-blvm-node-build 2>/dev/null || echo "(no gh-blvm-node-build)"
+          echo "=== BLVM_RUNNER_DATA_ROOT (CARGO_TARGET_DIR parent) ==="
+          du -sh "${BLVM_RUNNER_DATA_ROOT}" 2>/dev/null || echo "(no BLVM_RUNNER_DATA_ROOT)"
+          du -sh ${{ github.workspace }}/.build/gh-blvm-node-build 2>/dev/null || echo "(no workspace .build/gh-blvm-node-build)"
 
       - uses: actions/checkout@v4
       
@@ -233,6 +250,7 @@ jobs:
           echo "=== /tmp ==="
           du -sh /tmp/* 2>/dev/null | sort -rh | head -10
           du -sh ${{ github.workspace }}/.build/runner-cache 2>/dev/null || true
+          du -sh "${BLVM_RUNNER_DATA_ROOT}" 2>/dev/null || true
           du -sh ${{ github.workspace }}/.build/gh-blvm-node-build 2>/dev/null || true
 
       - uses: actions/checkout@v4
@@ -273,6 +291,10 @@ jobs:
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -369,6 +391,10 @@ jobs:
         with:
           operation: restore
 
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
@@ -406,7 +432,7 @@ jobs:
               -delete 2>/dev/null || true
           fi
           # Remove ALL run dirs except the current one — no mtime guard, stale dirs eat 10s of GB.
-          find ${{ github.workspace }}/.build/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+          find "${BLVM_RUNNER_DATA_ROOT}" -mindepth 1 -maxdepth 1 -type d \
             -not -name "${{ github.run_id }}" \
             -exec rm -rf {} + 2>/dev/null || true
 
@@ -479,6 +505,10 @@ jobs:
         with:
           operation: restore
 
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
@@ -521,6 +551,9 @@ jobs:
 
       - name: Setup blvm-spec (Orange Paper for spec-lock verification)
         uses: BTCDecoded/rust-ci/setup-blvm-spec@main
+
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -647,6 +680,10 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
@@ -715,6 +752,10 @@ jobs:
         with:
           operation: restore
 
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
@@ -752,6 +793,9 @@ jobs:
           elif command -v pacman >/dev/null 2>&1; then
             pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
           fi
+
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -813,6 +857,10 @@ jobs:
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -957,6 +1005,10 @@ jobs:
         with:
           operation: restore
 
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
@@ -1011,6 +1063,9 @@ jobs:
           elif command -v pacman >/dev/null 2>&1; then
             pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
           fi
+
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -1434,13 +1489,13 @@ jobs:
     steps:
       - name: Delete current run target dir
         run: |
-          RUN_DIR="${{ github.workspace }}/.build/gh-blvm-node-build/${{ github.run_id }}"
+          RUN_DIR="${BLVM_RUNNER_DATA_ROOT}/${{ github.run_id }}"
           if [ -d "$RUN_DIR" ]; then
             echo "Removing $RUN_DIR ($(du -sh "$RUN_DIR" 2>/dev/null | cut -f1))"
             rm -rf "$RUN_DIR"
           fi
           # Belt-and-suspenders: also remove any other leftover run dirs
-          find ${{ github.workspace }}/.build/gh-blvm-node-build -mindepth 1 -maxdepth 1 -type d \
+          find "${BLVM_RUNNER_DATA_ROOT}" -mindepth 1 -maxdepth 1 -type d \
             -exec rm -rf {} + 2>/dev/null || true
           # Clean fuzz temp dir
           rm -rf ${{ github.workspace }}/.build/gh-fuzz-blvm-node 2>/dev/null || true
