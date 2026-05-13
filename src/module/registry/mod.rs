@@ -17,4 +17,4 @@ pub use client::{ModuleEntry, ModuleRegistry, RegistryMirror};
 pub use dependencies::{DependencyResolution, ModuleDependencies};
 pub use discovery::{DiscoveredModule, ModuleDiscovery};
 pub use error::RegistryError;
-pub use manifest::ModuleManifest;
+pub use manifest::{ModuleManifest, PlatformDownload};

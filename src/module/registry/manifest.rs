@@ -29,7 +29,7 @@ pub struct SignatureSection {
     pub threshold: Option<String>,
 }
 
-/// Binary information section
+/// Binary information section (local integrity, populated at install time)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinarySection {
     /// SHA256 hash of the binary in hex format
@@ -38,6 +38,20 @@ pub struct BinarySection {
     /// Binary size in bytes
     #[serde(default)]
     pub size: Option<u64>,
+}
+
+/// Per-platform download entry written by each module's release CI.
+///
+/// Keyed by platform string (e.g. `"x86_64-linux"`, `"aarch64-linux"`,
+/// `"x86_64-apple"`, `"aarch64-apple"`).  The node reads these during
+/// bootstrap install instead of fetching coordinates from a central registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformDownload {
+    /// Direct download URL for this platform's binary
+    pub url: String,
+    /// Hex-encoded SHA-256 of the binary — verified before execution
+    #[serde(default)]
+    pub sha256: String,
 }
 
 /// Payment configuration section (cryptographically signed)
@@ -170,10 +184,20 @@ pub struct ModuleManifest {
     #[serde(default)]
     pub signatures: Option<SignatureSection>,
 
-    /// Binary information (for integrity verification)
-    /// Contains hash and size for binary verification
+    /// Binary information (local integrity — populated at install time)
+    /// Contains hash and size for the already-installed binary
     #[serde(default)]
     pub binary: Option<BinarySection>,
+
+    /// Remote download coordinates per platform (written by release CI).
+    ///
+    /// The node reads this section during bootstrap install to obtain the
+    /// correct URL and SHA-256 for the running platform, eliminating the need
+    /// for a central registry to track per-version binary locations.
+    ///
+    /// Keys: `"x86_64-linux"` | `"aarch64-linux"` | `"x86_64-apple"` | `"aarch64-apple"`
+    #[serde(default)]
+    pub downloads: HashMap<String, PlatformDownload>,
 
     /// Payment configuration (for paid modules)
     /// Contains cryptographically signed payment addresses

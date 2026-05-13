@@ -1553,33 +1553,33 @@ impl ModuleManager {
         discovery.discover_module(&entry.name)
     }
 
-    /// Download and install a module binary directly from the HTTP registry.
+    /// Download and install a module binary during first-boot bootstrap.
     ///
-    /// Used during first-boot bootstrap when `enabled_modules` lists modules that
-    /// aren't present in the local `modules_dir`.  Parses the same `modules.json`
-    /// format that `blvm-marketplace` uses so the two stay in sync.
+    /// # Flow (Option B — self-describing modules)
+    ///
+    /// 1. Fetch `registry_url` (modules.json) → discovery index, get `module_toml_url`.
+    /// 2. Fetch `module_toml_url` → parse as `ModuleManifest` (the module owns this file).
+    /// 3. Read `manifest.downloads[platform]` for the binary URL and SHA-256.
+    /// 4. Download binary, verify SHA-256, write to `modules_dir/<name>/`.
+    /// 5. Write the already-fetched `module.toml` to the same directory.
+    ///
+    /// Binary coordinates and hashes live in each module's own repository and are
+    /// updated by that module's release CI — the central `modules.json` is a static
+    /// address book that never needs to be updated on release.
     #[cfg(feature = "governance")]
     async fn bootstrap_download_module(
         &self,
         name: &str,
         registry_url: &str,
     ) -> Result<(), ModuleError> {
+        use crate::module::registry::manifest::ModuleManifest;
         use serde::Deserialize;
-        use std::collections::HashMap as JsonMap;
 
-        #[derive(Deserialize)]
-        struct RegistryBinary {
-            url: String,
-            #[serde(default)]
-            sha256: String,
-        }
+        // Minimal discovery-index shape: only name + module_toml_url are required.
         #[derive(Deserialize)]
         struct RegistryEntry {
             name: String,
-            #[serde(default)]
             module_toml_url: String,
-            #[serde(default)]
-            binaries: JsonMap<String, RegistryBinary>,
         }
 
         let client = reqwest::Client::builder()
@@ -1588,26 +1588,51 @@ impl ModuleManager {
             .build()
             .map_err(|e| ModuleError::op_err("Failed to build HTTP client", e))?;
 
-        // Fetch registry index
-        let entries: Vec<RegistryEntry> = client
-            .get(registry_url)
-            .send()
-            .await
-            .map_err(|e| ModuleError::op_err("Registry fetch failed", e))?
-            .json()
-            .await
+        let fetch = |url: String| {
+            let c = client.clone();
+            async move {
+                let resp = c
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| ModuleError::op_err("HTTP request failed", e))?;
+                if !resp.status().is_success() {
+                    return Err(ModuleError::OperationError(format!(
+                        "GET {url} returned HTTP {}",
+                        resp.status()
+                    )));
+                }
+                resp.bytes()
+                    .await
+                    .map(|b| b.to_vec())
+                    .map_err(|e| ModuleError::op_err("Reading response body", e))
+            }
+        };
+
+        // ── Step 1: fetch the discovery index ────────────────────────────────
+        let index_bytes = fetch(registry_url.to_string()).await?;
+        let entries: Vec<RegistryEntry> = serde_json::from_slice(&index_bytes)
             .map_err(|e| ModuleError::op_err("Registry JSON parse failed", e))?;
 
-        let entry = entries
+        let module_toml_url = entries
             .into_iter()
             .find(|e| e.name == name)
+            .map(|e| e.module_toml_url)
             .ok_or_else(|| {
                 ModuleError::OperationError(format!(
                     "Module '{name}' not found in registry at {registry_url}"
                 ))
             })?;
 
-        // Detect platform key
+        // ── Step 2: fetch module.toml from the module's own repo ─────────────
+        info!("Bootstrap: fetching manifest for '{}' from {}", name, module_toml_url);
+        let toml_bytes = fetch(module_toml_url.clone()).await?;
+        let toml_str = std::str::from_utf8(&toml_bytes)
+            .map_err(|e| ModuleError::op_err("module.toml is not valid UTF-8", e))?;
+        let manifest: ModuleManifest = toml::from_str(toml_str)
+            .map_err(|e| ModuleError::op_err("Failed to parse module.toml", e))?;
+
+        // ── Step 3: resolve platform binary coordinates ───────────────────────
         #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
         let platform = "x86_64-linux";
         #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
@@ -1624,64 +1649,45 @@ impl ModuleManager {
         )))]
         let platform = "unknown";
 
-        let binary_info = entry.binaries.get(platform).ok_or_else(|| {
+        let download = manifest.downloads.get(platform).ok_or_else(|| {
             ModuleError::OperationError(format!(
-                "No binary for platform '{platform}' in registry entry for '{name}'"
+                "module.toml for '{name}' has no [downloads.{platform}] entry \
+                 (version {})",
+                manifest.version
             ))
         })?;
 
+        // ── Step 4: download and verify binary ───────────────────────────────
         info!(
-            "Bootstrap: downloading '{}' for {} from {}",
-            name, platform, binary_info.url
+            "Bootstrap: downloading '{}' {} for {} from {}",
+            name, manifest.version, platform, download.url
         );
+        let binary_bytes = fetch(download.url.clone()).await?;
 
-        let download_bytes = |url: String| {
-            let c = client.clone();
-            async move {
-                let resp = c
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|e| ModuleError::op_err("Download failed", e))?;
-                if !resp.status().is_success() {
-                    return Err(ModuleError::OperationError(format!(
-                        "Download {} returned HTTP {}",
-                        url,
-                        resp.status()
-                    )));
-                }
-                resp.bytes()
-                    .await
-                    .map(|b| b.to_vec())
-                    .map_err(|e| ModuleError::op_err("Reading download body", e))
-            }
-        };
-
-        let binary_bytes = download_bytes(binary_info.url.clone()).await?;
-
-        // Verify sha256 when present
-        if !binary_info.sha256.is_empty() {
+        if !download.sha256.is_empty() {
             use sha2::Digest;
             let actual = hex::encode(sha2::Sha256::digest(&binary_bytes));
-            if actual != binary_info.sha256.to_lowercase() {
+            if actual != download.sha256.to_lowercase() {
                 return Err(ModuleError::OperationError(format!(
-                    "SHA256 mismatch for '{}': expected {} got {}",
-                    name, binary_info.sha256, actual
+                    "SHA256 mismatch for '{name}' ({platform}): \
+                     expected {} got {actual}",
+                    download.sha256
                 )));
             }
+            debug!("Bootstrap: SHA256 verified for '{}'", name);
         } else {
             warn!(
-                "Bootstrap: no sha256 in registry for '{}' — skipping integrity check",
-                name
+                "Bootstrap: no sha256 in module.toml for '{}' ({}) — skipping integrity check",
+                name, platform
             );
         }
 
+        // ── Step 5: write binary + module.toml to modules_dir ────────────────
         let module_dir = self.modules_dir.join(name);
         tokio::fs::create_dir_all(&module_dir)
             .await
             .map_err(|e| ModuleError::op_err("Failed to create module dir", e))?;
 
-        // Write binary
         let binary_path = module_dir.join(name);
         tokio::fs::write(&binary_path, &binary_bytes)
             .await
@@ -1700,24 +1706,12 @@ impl ModuleManager {
                 .map_err(|e| ModuleError::op_err("Failed to set executable bit", e))?;
         }
 
-        // Download and write module.toml if URL is provided
-        if !entry.module_toml_url.is_empty() {
-            match download_bytes(entry.module_toml_url).await {
-                Ok(toml_bytes) => {
-                    tokio::fs::write(module_dir.join("module.toml"), toml_bytes)
-                        .await
-                        .map_err(|e| ModuleError::op_err("Failed to write module.toml", e))?;
-                }
-                Err(e) => {
-                    warn!(
-                        "Bootstrap: could not fetch module.toml for '{}': {}",
-                        name, e
-                    );
-                }
-            }
-        }
+        // Write the manifest we already fetched (no second download needed)
+        tokio::fs::write(module_dir.join("module.toml"), toml_bytes)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to write module.toml", e))?;
 
-        info!("Bootstrap: installed '{}' to {:?}", name, module_dir);
+        info!("Bootstrap: installed '{}' {} to {:?}", name, manifest.version, module_dir);
         Ok(())
     }
 
