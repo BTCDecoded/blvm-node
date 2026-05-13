@@ -67,6 +67,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
         entry_point: format!("{}.so", name),
         config_schema: HashMap::new(),
         binary: None,
+        downloads: HashMap::new(),
         signatures: Some(signature_section),
         payment: Some(payment_section),
     }

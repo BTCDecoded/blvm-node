@@ -1625,7 +1625,10 @@ impl ModuleManager {
             })?;
 
         // ── Step 2: fetch module.toml from the module's own repo ─────────────
-        info!("Bootstrap: fetching manifest for '{}' from {}", name, module_toml_url);
+        info!(
+            "Bootstrap: fetching manifest for '{}' from {}",
+            name, module_toml_url
+        );
         let toml_bytes = fetch(module_toml_url.clone()).await?;
         let toml_str = std::str::from_utf8(&toml_bytes)
             .map_err(|e| ModuleError::op_err("module.toml is not valid UTF-8", e))?;
@@ -1721,7 +1724,10 @@ impl ModuleManager {
             .await
             .map_err(|e| ModuleError::op_err("Failed to write module.toml", e))?;
 
-        info!("Bootstrap: installed '{}' {} to {:?}", name, manifest.version, module_dir);
+        info!(
+            "Bootstrap: installed '{}' {} to {:?}",
+            name, manifest.version, module_dir
+        );
         Ok(())
     }
 

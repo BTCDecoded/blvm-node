@@ -143,6 +143,7 @@ async fn test_bip47_derivation_error_paths() {
         config_schema: std::collections::HashMap::new(),
         signatures: None,
         binary: None,
+        downloads: std::collections::HashMap::new(),
         payment: Some(PaymentSection {
             required: true,
             price_sats: Some(10000),

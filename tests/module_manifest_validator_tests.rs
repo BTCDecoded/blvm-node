@@ -17,6 +17,7 @@ fn create_valid_manifest() -> ModuleManifest {
         entry_point: "test-module.so".to_string(),
         config_schema: HashMap::new(),
         binary: None,
+        downloads: HashMap::new(),
         signatures: None,
         payment: None,
     }
