@@ -1087,9 +1087,9 @@ fn test_module_tree_isolation_sled() {
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled, None).unwrap());
 
-    // Create two module trees with different module IDs
-    let tree1 = db.open_tree("module_abc123_state").unwrap();
-    let tree2 = db.open_tree("module_xyz789_state").unwrap();
+    // Isolated trees (names must not start with `module_` — Sled open_tree reserves that prefix).
+    let tree1 = db.open_tree("app_abc123_state").unwrap();
+    let tree2 = db.open_tree("app_xyz789_state").unwrap();
 
     // Insert different keys in each tree
     tree1.insert(b"key1", b"value1").unwrap();

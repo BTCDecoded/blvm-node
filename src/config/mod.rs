@@ -85,6 +85,19 @@ fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
     result
 }
 
+/// GitHub raw URL for the monorepo’s `registry/modules.json` (module name → `module_toml_url`).
+pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json";
+
+/// Official modules pulled in on first boot when `enabled_modules` / `registry_url` use defaults.
+fn default_bootstrap_enabled_modules() -> Vec<String> {
+    vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string()]
+}
+
+fn default_module_registry_url() -> Option<String> {
+    Some(DEFAULT_MODULE_REGISTRY_INDEX_URL.to_string())
+}
+
 fn deserialize_module_config<'de, D>(deserializer: D) -> Result<ModuleConfig, D::Error>
 where
     D: Deserializer<'de>,
@@ -105,12 +118,14 @@ where
             let mut modules_dir = "modules".to_string();
             let mut data_dir = "data/modules".to_string();
             let mut socket_dir = "data/modules/sockets".to_string();
-            let mut enabled_modules = Vec::new();
-            let mut registry_url: Option<String> = None;
+            let mut enabled_modules = default_bootstrap_enabled_modules();
+            let mut disabled_modules = Vec::new();
+            let mut registry_url = default_module_registry_url();
             let mut module_configs = HashMap::new();
             let mut watch_enabled = true;
             let mut watch_auto_load = false;
             let mut watch_auto_unload = false;
+            let mut module_database_backend: Option<String> = None;
 
             while let Some(key) = map.next_key::<String>()? {
                 if MODULE_CONFIG_KNOWN_KEYS.contains(&key.as_str()) {
@@ -120,12 +135,18 @@ where
                         "data_dir" => data_dir = map.next_value().unwrap_or(data_dir),
                         "socket_dir" => socket_dir = map.next_value().unwrap_or(socket_dir),
                         "enabled_modules" => enabled_modules = map.next_value().unwrap_or_default(),
+                        "disabled_modules" => {
+                            disabled_modules = map.next_value().unwrap_or_default()
+                        }
                         "registry_url" => registry_url = map.next_value().unwrap_or_default(),
                         "module_configs" => module_configs = map.next_value().unwrap_or_default(),
                         "watch_enabled" => watch_enabled = map.next_value().unwrap_or(true),
                         "watch_auto_load" => watch_auto_load = map.next_value().unwrap_or(false),
                         "watch_auto_unload" => {
                             watch_auto_unload = map.next_value().unwrap_or(false)
+                        }
+                        "module_database_backend" => {
+                            module_database_backend = map.next_value().unwrap_or_default()
                         }
                         _ => {
                             let _: toml::Value = map.next_value()?;
@@ -143,13 +164,17 @@ where
                 }
             }
 
+            let registry_url = registry_url.filter(|s| !s.trim().is_empty());
+
             Ok(ModuleConfig {
                 enabled,
                 modules_dir,
                 data_dir,
                 socket_dir,
                 enabled_modules,
+                disabled_modules,
                 registry_url,
+                module_database_backend,
                 module_configs,
                 watch_enabled,
                 watch_auto_load,
@@ -167,11 +192,13 @@ const MODULE_CONFIG_KNOWN_KEYS: &[&str] = &[
     "data_dir",
     "socket_dir",
     "enabled_modules",
+    "disabled_modules",
     "registry_url",
     "module_configs",
     "watch_enabled",
     "watch_auto_load",
     "watch_auto_unload",
+    "module_database_backend",
 ];
 
 /// Module system configuration
@@ -197,10 +224,23 @@ pub struct ModuleConfig {
     #[serde(default)]
     pub enabled_modules: Vec<String>,
 
+    /// Module names to never auto-load or bootstrap-download (opt-out). Matching is by manifest `name`.
+    #[serde(default)]
+    pub disabled_modules: Vec<String>,
+
     /// Discovery index URL (`modules.json`) for bootstrap-download of missing `enabled_modules`.
     /// If unset, falls back to `[modules.blvm-marketplace] registry_url` when present.
     #[serde(default)]
     pub registry_url: Option<String>,
+
+    /// Default storage engine for **module subprocess** databases (`{module_data}/db/`), as a string
+    /// matching `[storage] database_backend` (`sled`, `tidesdb`, `redb`, `rocksdb`, `auto`).
+    ///
+    /// When unset, matches the node's resolved `[storage] database_backend`. Module `ModuleDb` may
+    /// still use a different engine at runtime when the chain backend does not support dynamic
+    /// `open_tree()` (see `module_subprocess_database_backend_preference` + SDK `open_module_db`).
+    #[serde(default)]
+    pub module_database_backend: Option<String>,
 
     /// Module-specific configuration overrides
     #[serde(default)]
@@ -256,8 +296,10 @@ impl Default for ModuleConfig {
             modules_dir: "modules".to_string(),
             data_dir: "data/modules".to_string(),
             socket_dir: "data/modules/sockets".to_string(),
-            enabled_modules: Vec::new(),
-            registry_url: None,
+            enabled_modules: default_bootstrap_enabled_modules(),
+            disabled_modules: Vec::new(),
+            registry_url: default_module_registry_url(),
+            module_database_backend: None,
             module_configs: std::collections::HashMap::new(),
             watch_enabled: true,
             watch_auto_load: false,
@@ -595,6 +637,11 @@ pub struct BlockValidationNodeConfig {
     pub assume_valid_hash: Option<[u8; 32]>,
 }
 
+/// When `[modules]` is omitted from a config file, behave like `NodeConfig::default()` (subsystem on, auto-discover).
+fn default_modules_option() -> Option<ModuleConfig> {
+    Some(ModuleConfig::default())
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -618,7 +665,8 @@ pub struct NodeConfig {
     /// Protocol version
     pub protocol_version: Option<String>,
 
-    /// Module system configuration
+    /// Module system configuration. Omitted in a config file ⇒ same as `ModuleConfig::default()` (enabled, auto-discover).
+    #[serde(default = "default_modules_option")]
     pub modules: Option<ModuleConfig>,
 
     /// Stratum V2 mining configuration

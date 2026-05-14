@@ -64,6 +64,8 @@ pub struct ModuleManager {
     /// If non-empty, only these module names are auto-loaded (from config `enabled_modules`).
     /// An empty vec means "load everything discovered".
     enabled_modules: Vec<String>,
+    /// Never auto-load or bootstrap these manifest names (from config `disabled_modules`).
+    disabled_modules: Vec<String>,
     /// HTTP URL for the first-party module registry JSON (e.g. blvm/registry/modules.json on GitHub).
     /// When set, `auto_load_modules` will bootstrap-download any `enabled_modules` not found locally.
     registry_url: Option<String>,
@@ -192,6 +194,7 @@ impl ModuleManager {
             node_socket_path: None,
             rpc_server: None,
             enabled_modules: Vec::new(),
+            disabled_modules: Vec::new(),
             registry_url: None,
         }
     }
@@ -210,8 +213,11 @@ impl ModuleManager {
         }
     }
 
-    /// Set default database backend for modules (inherited from node when not set per-module).
-    /// Values: "redb", "rocksdb", "sled", "tidesdb". Modules use same format as node by default.
+    /// Set default `database_backend` merged into module spawn env (`MODULE_CONFIG_DATABASE_BACKEND`).
+    ///
+    /// Set from node startup using
+    /// [`module_subprocess_database_backend_preference`](crate::storage::database::module_subprocess_database_backend_preference)
+    /// so it reflects `[storage]` + optional `[modules] module_database_backend`.
     pub fn set_default_database_backend(&self, backend: String) {
         if let Ok(mut guard) = self.default_database_backend.write() {
             *guard = Some(backend);
@@ -232,7 +238,7 @@ impl ModuleManager {
                 }
             }
         }
-        // Inherit node's database backend when module doesn't specify one
+        // Inherit node's effective module DB backend when module doesn't specify one
         if !merged.contains_key("database_backend") {
             if let Ok(guard) = self.default_database_backend.read() {
                 if let Some(ref backend) = *guard {
@@ -281,6 +287,11 @@ impl ModuleManager {
     /// An empty list (the default) means load every discovered module.
     pub fn set_enabled_modules(&mut self, enabled: Vec<String>) {
         self.enabled_modules = enabled;
+    }
+
+    /// Set module names to exclude from auto-load and registry bootstrap (opt-out).
+    pub fn set_disabled_modules(&mut self, disabled: Vec<String>) {
+        self.disabled_modules = disabled;
     }
 
     /// Set the HTTP URL for the first-party module registry JSON.
@@ -1314,11 +1325,39 @@ impl ModuleManager {
         let discovery = ModuleDiscovery::new(&self.spawner.modules_dir);
         let mut discovered_modules = discovery.discover_modules()?;
 
+        if !self.enabled_modules.is_empty() && !self.disabled_modules.is_empty() {
+            let disabled_set: std::collections::HashSet<&str> =
+                self.disabled_modules.iter().map(|s| s.as_str()).collect();
+            for name in &self.enabled_modules {
+                if disabled_set.contains(name.as_str()) {
+                    warn!(
+                        "Module '{}' is both enabled_modules and disabled_modules; disabled wins (will not load or bootstrap)",
+                        name
+                    );
+                }
+            }
+        }
+
         // If registry is available and we have missing dependencies, try fetching from registry
         if let Some(ref registry) = self.module_registry {
             // Check for missing dependencies (this would be determined by dependency resolution)
             // For now, we'll just try to fetch any modules that are requested but not found
             // In a full implementation, we'd check dependencies first
+        }
+
+        // Opt-out: drop explicitly disabled modules before allowlist and bootstrap.
+        if !self.disabled_modules.is_empty() {
+            let before = discovered_modules.len();
+            discovered_modules.retain(|m| !self.disabled_modules.contains(&m.manifest.name));
+            let after = discovered_modules.len();
+            if before != after {
+                info!(
+                    "disabled_modules filter: kept {}/{} discovered modules ({} skipped)",
+                    after,
+                    before,
+                    before - after
+                );
+            }
         }
 
         // Apply enabled_modules allowlist: if non-empty, skip modules not in the list.
@@ -1347,7 +1386,9 @@ impl ModuleManager {
             let missing: Vec<String> = self
                 .enabled_modules
                 .iter()
-                .filter(|n| !already_found.contains(n.as_str()))
+                .filter(|n| {
+                    !already_found.contains(n.as_str()) && !self.disabled_modules.contains(n)
+                })
                 .cloned()
                 .collect();
 
@@ -1385,7 +1426,7 @@ impl ModuleManager {
         }
 
         if discovered_modules.is_empty() {
-            info!("No modules to load (0 discovered or all filtered by enabled_modules)");
+            info!("No modules to load (0 discovered or all filtered by disabled_modules / enabled_modules)");
             return Ok(());
         }
 

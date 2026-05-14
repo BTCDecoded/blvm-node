@@ -11,6 +11,10 @@ fuzz/corpus/
 examples/**/target/
 modules/**/target/
 
+# Local bootstraps of default official modules (binaries + module.toml; see smoke-bootstrap-official-modules.sh)
+modules/blvm-miniscript/
+modules/blvm-zmq/
+
 # Local IBD benchmark dumps next to the repo
 ibd-bps-*.csv
 **/*.rs.bk

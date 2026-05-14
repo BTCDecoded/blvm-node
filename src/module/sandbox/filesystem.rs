@@ -7,6 +7,20 @@ use tracing::{debug, warn};
 
 use crate::module::traits::ModuleError;
 
+/// Make a path absolute using the current working directory when relative.
+fn absolutize_path(path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        return PathBuf::from(".");
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
 /// File system sandbox that restricts module file access
 pub struct FileSystemSandbox {
     /// Allowed data directory (modules can only access files under this)
@@ -16,9 +30,9 @@ pub struct FileSystemSandbox {
 impl FileSystemSandbox {
     /// Create a new file system sandbox
     pub fn new<P: AsRef<Path>>(data_dir: P) -> Self {
-        Self {
-            allowed_path: data_dir.as_ref().to_path_buf(),
-        }
+        let abs = absolutize_path(data_dir.as_ref());
+        let allowed_path = std::fs::canonicalize(&abs).unwrap_or(abs);
+        Self { allowed_path }
     }
 
     /// Validate that a file path is within the allowed directory

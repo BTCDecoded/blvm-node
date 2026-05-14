@@ -15,8 +15,113 @@ fn test_module_config_default() {
     assert_eq!(config.modules_dir, "modules");
     assert_eq!(config.data_dir, "data/modules");
     assert_eq!(config.socket_dir, "data/modules/sockets");
-    assert!(config.enabled_modules.is_empty());
-    assert!(config.module_configs.is_empty());
+    assert_eq!(config.enabled_modules.len(), 2);
+    assert_eq!(
+        config.enabled_modules,
+        vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string()]
+    );
+    assert!(config.registry_url.is_some());
+    assert!(config.disabled_modules.is_empty());
+    assert!(config.module_database_backend.is_none());
+}
+
+#[test]
+fn test_module_config_module_database_backend_from_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+
+[modules]
+module_database_backend = "tidesdb"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.module_database_backend.as_deref(), Some("tidesdb"));
+}
+
+#[test]
+fn test_module_subprocess_database_backend_preference() {
+    use blvm_node::storage::database::{
+        module_subprocess_database_backend_preference, DatabaseBackend,
+    };
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, None),
+        "rocksdb"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Redb, None),
+        "redb"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Sled, None),
+        "sled"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::TidesDB, None),
+        "tidesdb"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("tidesdb")),
+        "tidesdb"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("auto")),
+        "rocksdb"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::TidesDB, Some("auto")),
+        "tidesdb"
+    );
+}
+
+#[test]
+fn test_module_config_disabled_modules_from_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+
+[modules]
+disabled_modules = ["skip-me", "other"]
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(
+        modules.disabled_modules,
+        vec!["skip-me".to_string(), "other".to_string()]
+    );
+}
+
+/// Omitted `[modules]` in TOML still yields default module subsystem (enabled, auto-discover paths).
+#[test]
+fn test_node_config_omitted_modules_section_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("default modules");
+    assert!(modules.enabled);
+    assert_eq!(modules.modules_dir, "modules");
+    assert_eq!(
+        modules.enabled_modules,
+        vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string()]
+    );
+    assert!(modules.registry_url.is_some());
 }
 
 #[test]

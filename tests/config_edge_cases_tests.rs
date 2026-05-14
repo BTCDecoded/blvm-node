@@ -364,8 +364,10 @@ fn test_config_defaults_after_partial_deserialization() {
     let pref: blvm_node::network::transport::TransportPreference =
         config.transport_preference.into();
     assert!(pref.allows_tcp());
-    // Other fields should have defaults (modules may be None, which is fine)
+    // Other fields should use defaults; modules defaults to Some(ModuleConfig::default()) when omitted from JSON
     if let Some(ref modules) = config.modules {
-        assert_eq!(modules.enabled, true); // Default
+        assert_eq!(modules.enabled, true);
+    } else {
+        panic!("expected default modules section when omitted from partial JSON");
     }
 }

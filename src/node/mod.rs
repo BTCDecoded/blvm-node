@@ -1291,26 +1291,34 @@ impl Node {
                     .set_module_config_overrides(module_config.module_configs.clone());
             }
 
-            // Set default database backend for modules (same format as node)
-            let backend = self
+            // Default database backend for module *subprocess* KV stores: follows node storage +
+            // optional `[modules] module_database_backend` (see
+            // `storage::database::module_subprocess_database_backend_preference`).
+            let chain_backend = self
                 .config_sub(|c| c.storage.as_ref())
                 .and_then(|sc| {
                     crate::storage::database::backend_from_config(sc.database_backend).ok()
                 })
                 .unwrap_or_else(crate::storage::database::default_backend);
-            let backend_str = match backend {
-                crate::storage::database::DatabaseBackend::Redb => "redb",
-                crate::storage::database::DatabaseBackend::RocksDB => "rocksdb",
-                crate::storage::database::DatabaseBackend::Sled => "sled",
-                crate::storage::database::DatabaseBackend::TidesDB => "tidesdb",
-            };
+            let modules_db_override = self
+                .config_sub(|c| c.modules.as_ref())
+                .and_then(|m| m.module_database_backend.as_deref());
+            let backend_str =
+                crate::storage::database::module_subprocess_database_backend_preference(
+                    chain_backend,
+                    modules_db_override,
+                );
             module_manager
                 .lock()
                 .await
-                .set_default_database_backend(backend_str.to_string());
+                .set_default_database_backend(backend_str);
 
-            // Apply enabled_modules allowlist from config before auto-loading.
+            // Apply module allowlists from config before auto-loading.
             if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
+                module_manager
+                    .lock()
+                    .await
+                    .set_disabled_modules(module_config.disabled_modules.clone());
                 if !module_config.enabled_modules.is_empty() {
                     module_manager
                         .lock()
@@ -1326,11 +1334,14 @@ impl Node {
                         .and_then(|c| c.get("registry_url"))
                         .cloned()
                 });
-                if let Some(registry_url) = registry_url {
-                    module_manager
-                        .lock()
-                        .await
-                        .set_registry_url(registry_url);
+                if let Some(ref url) = registry_url {
+                    let url = url.trim();
+                    if !url.is_empty() {
+                        module_manager
+                            .lock()
+                            .await
+                            .set_registry_url(url.to_string());
+                    }
                 }
             }
 

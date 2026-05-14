@@ -89,8 +89,18 @@ impl ModuleDiscovery {
                         }
                     }
 
-                    // Find module binary
-                    let binary_path = self.find_module_binary(&path, &manifest.entry_point)?;
+                    // Find module binary (skip this directory on error so one bad install
+                    // does not abort discovery for all modules).
+                    let binary_path = match self.find_module_binary(&path, &manifest.entry_point) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(
+                                "Skipping module directory {:?} (manifest name: {}): {}",
+                                path, manifest.name, e
+                            );
+                            continue;
+                        }
+                    };
 
                     modules.push(DiscoveredModule {
                         directory: path,

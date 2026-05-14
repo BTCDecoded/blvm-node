@@ -67,11 +67,21 @@ config_key = "Description of this configuration option"
 
 Official modules (`blvm-miniscript`, `blvm-zmq`, …) publish `module.toml` on GitHub with a `[downloads]` table (URLs + SHA-256 per platform). The node can download and install those binaries on first boot when they are listed in **`enabled_modules`** but not yet present under **`modules_dir`**.
 
-Requirements:
+### Discovery vs allowlist vs opt-out
 
-- **`[modules].enabled_modules`** must name the modules to pull in (non-empty allowlist).
-- **`[modules].registry_url`** must point at a **`modules.json`** discovery index (array of `{ "name", "module_toml_url" }`).  
-  Example (Bitcoin Commons monorepo):
+- **Shipped defaults (`ModuleConfig::default()`, `[modules]` omitted):** `enabled_modules` lists **`blvm-miniscript`** and **`blvm-zmq`**, and **`registry_url`** points at the monorepo **`registry/modules.json`**. Missing modules are **bootstrap-downloaded** on startup (requires the **`blvm` binary built with the `governance` feature**, which is **on by default** for Bitcoin Commons `blvm`). Use **`[modules] enabled_modules = []`** to skip bootstrap and only load modules already on disk under `modules_dir`.
+- **`enabled_modules` empty (explicit):** every module **discovered** under `modules_dir` is a candidate to auto-load; **no** HTTP bootstrap runs (no allowlist of names to pull).
+- **`enabled_modules` non-empty:** those manifest names load from disk, and any still missing may be **bootstrap-downloaded** when `registry_url` is set (non-empty) and the node was built with **`governance`**.
+- **`disabled_modules` (opt-out):** listed manifest names are **never** auto-loaded and are **skipped** for bootstrap. If a name is in both `enabled_modules` and `disabled_modules`, **disabled wins** (with a log warning).
+
+Explicit **`loadmodule`** RPC still loads a module by name when invoked; `disabled_modules` applies to startup auto-load, watcher-driven `auto_load_modules`, and registry bootstrap.
+
+Requirements for bootstrap (official binaries):
+
+- **`[modules].registry_url`** should point at a **`modules.json`** discovery index (array of `{ "name", "module_toml_url" }`). The default is **`https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json`** (`DEFAULT_MODULE_REGISTRY_INDEX_URL` in `blvm-node` config).
+- **`[modules].enabled_modules`** names each module to install if absent (default: miniscript + zmq).
+
+  Example (explicit; same as defaults):
 
   ```toml
   [modules]

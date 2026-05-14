@@ -162,6 +162,39 @@ pub enum DatabaseBackend {
     TidesDB,
 }
 
+/// String passed to module subprocesses as `MODULE_CONFIG_DATABASE_BACKEND` / `database_backend` merge key.
+///
+/// By default this is the **same backend name as the node's resolved chain store** so configuration
+/// stays uniform. Note: generic module `ModuleDb` / `open_module_db` needs dynamic `open_tree()`;
+/// **RocksDB** and **Redb** in this codebase do not support arbitrary tree names for that API, so
+/// module binaries usually enable **Sled** or **TidesDB** on `blvm-node` and/or set
+/// [`ModuleConfig::module_database_backend`](crate::config::ModuleConfig::module_database_backend)
+/// so the SDK can fall back correctly.
+pub fn module_subprocess_database_backend_preference(
+    chain_backend: DatabaseBackend,
+    modules_table_override: Option<&str>,
+) -> String {
+    if let Some(raw) = modules_table_override {
+        let t = raw.trim();
+        if !t.is_empty() {
+            if t.eq_ignore_ascii_case("auto") {
+                return module_db_backend_derived_from_chain(chain_backend);
+            }
+            return t.to_string();
+        }
+    }
+    module_db_backend_derived_from_chain(chain_backend)
+}
+
+fn module_db_backend_derived_from_chain(chain_backend: DatabaseBackend) -> String {
+    match chain_backend {
+        DatabaseBackend::Sled => "sled".to_string(),
+        DatabaseBackend::TidesDB => "tidesdb".to_string(),
+        DatabaseBackend::RocksDB => "rocksdb".to_string(),
+        DatabaseBackend::Redb => "redb".to_string(),
+    }
+}
+
 /// Resolve config backend to concrete DatabaseBackend.
 /// Returns Err if the requested backend's feature is not enabled.
 pub fn backend_from_config(
@@ -247,6 +280,46 @@ pub fn create_database<P: AsRef<Path>>(
             "TidesDB backend not available (build with --features tidesdb)"
         )),
     }
+}
+
+/// Try to open a **module-process** KV store (dynamic `open_tree()` names).
+///
+/// Attempts backends in order among those **compiled into** this `blvm-node` build:
+/// **Sled** (if `feature = "sled"`), then **TidesDB** (if `feature = "tidesdb"`).
+pub fn try_create_module_kv_database<P: AsRef<Path>>(db_path: P) -> Result<Box<dyn Database>> {
+    let db_path = db_path.as_ref();
+
+    #[cfg(all(not(feature = "sled"), not(feature = "tidesdb")))]
+    {
+        return Err(anyhow::anyhow!(
+            "No dynamic module KV backend compiled into blvm-node (enable `sled` and/or `tidesdb`)"
+        ));
+    }
+
+    let mut last_err: Option<anyhow::Error>;
+
+    #[cfg(feature = "sled")]
+    {
+        match create_database(db_path, DatabaseBackend::Sled, None) {
+            Ok(db) => return Ok(db),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    #[cfg(not(feature = "sled"))]
+    {
+        last_err = None;
+    }
+
+    #[cfg(feature = "tidesdb")]
+    {
+        match create_database(db_path, DatabaseBackend::TidesDB, None) {
+            Ok(db) => return Ok(db),
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("Failed to open module KV store at {:?}", db_path)))
 }
 
 /// Get default database backend
