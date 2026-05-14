@@ -63,6 +63,32 @@ config_key = "Description of this configuration option"
 3. Create `module.toml` manifest in the module directory
 4. Restart blvm-node or use runtime module loading
 
+## Auto-install from registry (bootstrap)
+
+Official modules (`blvm-miniscript`, `blvm-zmq`, …) publish `module.toml` on GitHub with a `[downloads]` table (URLs + SHA-256 per platform). The node can download and install those binaries on first boot when they are listed in **`enabled_modules`** but not yet present under **`modules_dir`**.
+
+Requirements:
+
+- **`[modules].enabled_modules`** must name the modules to pull in (non-empty allowlist).
+- **`[modules].registry_url`** must point at a **`modules.json`** discovery index (array of `{ "name", "module_toml_url" }`).  
+  Example (Bitcoin Commons monorepo):
+
+  ```toml
+  [modules]
+  enabled_modules = ["blvm-miniscript", "blvm-zmq"]
+  registry_url = "https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json"
+  ```
+
+  For backward compatibility, the same URL may instead be set as  
+  **`[modules.blvm-marketplace] registry_url`** — the node uses `registry_url` on `[modules]` when set, otherwise that legacy key.
+
+On startup you should see log lines like `Bootstrap: fetching manifest for 'blvm-miniscript'` and `Bootstrap: installed ...`. Then the normal auto-load path runs.
+
+To sanity-check releases without starting the node, run  
+`scripts/verify-published-modules.sh` (requires Python 3.11+, `curl`).
+
+Configure **`blvm-zmq`** PUB endpoints via **`[modules.blvm-zmq]`** in the same config file (keys match `module.toml` `[config_schema]`, e.g. `hashblock`, `hashtx`, …).
+
 ## Module Development
 
 See `examples/simple-module/` for a complete example module implementation.

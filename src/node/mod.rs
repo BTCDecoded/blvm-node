@@ -1317,17 +1317,20 @@ impl Node {
                         .await
                         .set_enabled_modules(module_config.enabled_modules.clone());
                 }
-                // Pass the marketplace registry URL to the module manager so it can
-                // bootstrap-download any enabled_modules not yet installed locally.
-                if let Some(registry_url) = module_config
-                    .module_configs
-                    .get("blvm-marketplace")
-                    .and_then(|c| c.get("registry_url"))
-                {
+                // Bootstrap registry: prefer [modules] registry_url, else legacy
+                // `[modules.blvm-marketplace] registry_url`.
+                let registry_url = module_config.registry_url.clone().or_else(|| {
+                    module_config
+                        .module_configs
+                        .get("blvm-marketplace")
+                        .and_then(|c| c.get("registry_url"))
+                        .cloned()
+                });
+                if let Some(registry_url) = registry_url {
                     module_manager
                         .lock()
                         .await
-                        .set_registry_url(registry_url.clone());
+                        .set_registry_url(registry_url);
                 }
             }
 

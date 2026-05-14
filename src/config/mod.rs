@@ -106,6 +106,7 @@ where
             let mut data_dir = "data/modules".to_string();
             let mut socket_dir = "data/modules/sockets".to_string();
             let mut enabled_modules = Vec::new();
+            let mut registry_url: Option<String> = None;
             let mut module_configs = HashMap::new();
             let mut watch_enabled = true;
             let mut watch_auto_load = false;
@@ -119,6 +120,7 @@ where
                         "data_dir" => data_dir = map.next_value().unwrap_or(data_dir),
                         "socket_dir" => socket_dir = map.next_value().unwrap_or(socket_dir),
                         "enabled_modules" => enabled_modules = map.next_value().unwrap_or_default(),
+                        "registry_url" => registry_url = map.next_value().unwrap_or_default(),
                         "module_configs" => module_configs = map.next_value().unwrap_or_default(),
                         "watch_enabled" => watch_enabled = map.next_value().unwrap_or(true),
                         "watch_auto_load" => watch_auto_load = map.next_value().unwrap_or(false),
@@ -147,6 +149,7 @@ where
                 data_dir,
                 socket_dir,
                 enabled_modules,
+                registry_url,
                 module_configs,
                 watch_enabled,
                 watch_auto_load,
@@ -164,6 +167,7 @@ const MODULE_CONFIG_KNOWN_KEYS: &[&str] = &[
     "data_dir",
     "socket_dir",
     "enabled_modules",
+    "registry_url",
     "module_configs",
     "watch_enabled",
     "watch_auto_load",
@@ -192,6 +196,11 @@ pub struct ModuleConfig {
     /// List of enabled modules (empty = auto-discover all)
     #[serde(default)]
     pub enabled_modules: Vec<String>,
+
+    /// Discovery index URL (`modules.json`) for bootstrap-download of missing `enabled_modules`.
+    /// If unset, falls back to `[modules.blvm-marketplace] registry_url` when present.
+    #[serde(default)]
+    pub registry_url: Option<String>,
 
     /// Module-specific configuration overrides
     #[serde(default)]
@@ -248,6 +257,7 @@ impl Default for ModuleConfig {
             data_dir: "data/modules".to_string(),
             socket_dir: "data/modules/sockets".to_string(),
             enabled_modules: Vec::new(),
+            registry_url: None,
             module_configs: std::collections::HashMap::new(),
             watch_enabled: true,
             watch_auto_load: false,
