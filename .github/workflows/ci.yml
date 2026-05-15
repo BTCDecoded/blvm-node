@@ -1092,7 +1092,7 @@ jobs:
 
           MAJOR=$(echo "$CURRENT" | cut -d. -f1)
           MINOR=$(echo "$CURRENT" | cut -d. -f2)
-          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          CURRENT_PATCH=$(echo "$CURRENT" | cut -d. -f3)
           CRATE_NAME=$(grep -A 5 '^\[package\]' Cargo.toml | grep '^name = ' | head -1 | sed -E 's/^name = "([^"]+)".*/\1/')
 
           # Fetch all published versions from crates.io in one call (fast, no compilation).
@@ -1113,26 +1113,20 @@ jobs:
             echo "⚠️  crates.io API unavailable or crate not yet published — assuming version is free."
           fi
 
-          # Find the lowest patch version >= PATCH+1 that is not already published.
-          PATCH=$((PATCH + 1))
-          MAX_ATTEMPTS=10
-          ATTEMPT=0
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          TAGGED_VERSIONS=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' | sed 's/-unverified$//')
+          USED_VERSIONS=$(printf '%s\n%s' "$TAGGED_VERSIONS" "$PUBLISHED_VERSIONS" | sort -u | grep -v '^$')
+          echo "All used versions (tag ∪ crates.io): $(echo "$USED_VERSIONS" | tr '\n' ' ')"
+          SAME_LINE_PATCHES=$(printf '%s\n' "$USED_VERSIONS" | grep -E "^${MAJOR}\\.${MINOR}\\.[0-9]+$" | cut -d. -f3 || true)
+          MAX_PATCH=$(printf '%s\n' $SAME_LINE_PATCHES "$CURRENT_PATCH" | grep -E '^[0-9]+$' | sort -n | tail -1)
+          [ -n "$MAX_PATCH" ] || MAX_PATCH="$CURRENT_PATCH"
+          PATCH=$((MAX_PATCH + 1))
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          while echo "$USED_VERSIONS" | grep -qxF "$VERSION"; do
+            echo "⚠️  ${VERSION} already published or tagged, trying next patch..."
+            PATCH=$((PATCH + 1))
             VERSION="${MAJOR}.${MINOR}.${PATCH}"
-            if echo "$PUBLISHED_VERSIONS" | grep -qxF "$VERSION"; then
-              echo "⚠️  ${VERSION} already published, trying next patch..."
-              PATCH=$((PATCH + 1))
-              ATTEMPT=$((ATTEMPT + 1))
-            else
-              echo "✅ Version ${VERSION} is available"
-              break
-            fi
           done
-
-          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-            echo "❌ Failed to find available version after ${MAX_ATTEMPTS} attempts"
-            exit 1
-          fi
+          echo "✅ Version ${VERSION} is available"
 
           # -unverified when manual run skipped tests
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
