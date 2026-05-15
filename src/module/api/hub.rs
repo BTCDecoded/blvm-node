@@ -486,6 +486,12 @@ impl ModuleApiHub {
                 let result = self.node_api.submit_block(block.clone()).await?;
                 ResponsePayload::SubmitBlockResult(result)
             }
+            RequestPayload::QueueReceivedBlock { block_bytes } => {
+                self.node_api
+                    .queue_received_block_bytes(block_bytes.clone())
+                    .await?;
+                ResponsePayload::ReceivedBlockQueued
+            }
             RequestPayload::MergeBlockServeDenylist { block_hashes } => {
                 self.node_api
                     .merge_block_serve_denylist(block_hashes.as_slice())
@@ -634,6 +640,7 @@ impl ModuleApiHub {
             RequestPayload::GetFeeEstimate { .. } => "get_fee_estimate",
             RequestPayload::GetBlockTemplate { .. } => "get_block_template",
             RequestPayload::SubmitBlock { .. } => "submit_block",
+            RequestPayload::QueueReceivedBlock { .. } => "queue_received_block",
             RequestPayload::MergeBlockServeDenylist { .. } => "merge_block_serve_denylist",
             RequestPayload::GetBlockServeDenylistSnapshot => "get_block_serve_denylist_snapshot",
             RequestPayload::ClearBlockServeDenylist => "clear_block_serve_denylist",

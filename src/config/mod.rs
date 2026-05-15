@@ -23,8 +23,6 @@ pub use ibd::*;
 pub mod network;
 pub use network::*;
 
-#[cfg(feature = "fibre")]
-use crate::network::fibre;
 use crate::network::transport::TransportPreference;
 use serde::de::{Deserializer, Error, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -91,7 +89,11 @@ pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str =
 
 /// Official modules pulled in on first boot when `enabled_modules` / `registry_url` use defaults.
 fn default_bootstrap_enabled_modules() -> Vec<String> {
-    vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string()]
+    vec![
+        "blvm-miniscript".to_string(),
+        "blvm-zmq".to_string(),
+        "blvm-fibre".to_string(),
+    ]
 }
 
 fn default_module_registry_url() -> Option<String> {
@@ -712,10 +714,6 @@ pub struct NodeConfig {
     /// Network relay configuration
     pub relay: Option<RelayConfig>,
 
-    /// FIBRE (Fast Internet Bitcoin Relay Engine) configuration
-    #[cfg(feature = "fibre")]
-    pub fibre: Option<fibre::FibreConfig>,
-
     /// Address database configuration
     pub address_database: Option<AddressDatabaseConfig>,
 
@@ -829,8 +827,6 @@ impl Default for NodeConfig {
             ibd_protection: None,
             ibd: None,
             relay: None,
-            #[cfg(feature = "fibre")]
-            fibre: None,
             address_database: None,
             #[cfg(feature = "dandelion")]
             dandelion: None,

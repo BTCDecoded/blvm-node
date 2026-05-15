@@ -172,6 +172,7 @@ impl RequestValidator {
             | RequestPayload::SendStratumV2MessageToPeer { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::GetBlockTemplate { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::SubmitBlock { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::QueueReceivedBlock { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::MergeBlockServeDenylist { .. }
             | RequestPayload::GetBlockServeDenylistSnapshot
             | RequestPayload::ClearBlockServeDenylist

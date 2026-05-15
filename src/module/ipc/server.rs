@@ -1263,6 +1263,15 @@ impl ModuleIpcServer {
                     ResponsePayload::SubmitBlockResult(result),
                 ))
             }
+            RequestPayload::QueueReceivedBlock { block_bytes } => {
+                node_api
+                    .queue_received_block_bytes(block_bytes.clone())
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ReceivedBlockQueued,
+                ))
+            }
             RequestPayload::MergeBlockServeDenylist { block_hashes } => {
                 node_api
                     .merge_block_serve_denylist(block_hashes.as_slice())

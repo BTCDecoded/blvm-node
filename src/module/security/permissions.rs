@@ -36,6 +36,7 @@ pub fn parse_permission_string(perm_str: &str) -> Option<Permission> {
         "call_module" | "CallModule" => Some(Permission::CallModule),
         "register_module_api" | "RegisterModuleApi" => Some(Permission::RegisterModuleApi),
         "submit_block" | "SubmitBlock" => Some(Permission::SubmitBlock),
+        "queue_inbound_block" | "QueueInboundBlock" => Some(Permission::QueueInboundBlock),
         _ => None,
     }
 }
@@ -101,6 +102,8 @@ pub enum Permission {
     RegisterModuleApi,
     /// Submit blocks (mining)
     SubmitBlock,
+    /// Queue inbound block bytes (`BlockReceived` / auxiliary transport path)
+    QueueInboundBlock,
 }
 
 /// Set of permissions for a module
@@ -292,6 +295,7 @@ impl PermissionChecker {
             RequestPayload::UnregisterModuleApi => Permission::RegisterModuleApi,
             RequestPayload::GetBlockTemplate { .. } => Permission::ReadBlockchain,
             RequestPayload::SubmitBlock { .. } => Permission::SubmitBlock,
+            RequestPayload::QueueReceivedBlock { .. } => Permission::QueueInboundBlock,
             RequestPayload::MergeBlockServeDenylist { .. } => Permission::NetworkAccess,
             RequestPayload::GetBlockServeDenylistSnapshot => Permission::ReadNetwork,
             RequestPayload::ClearBlockServeDenylist => Permission::NetworkAccess,

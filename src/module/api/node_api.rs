@@ -2106,6 +2106,16 @@ impl NodeAPI for NodeApiImpl {
         }
     }
 
+    async fn queue_received_block_bytes(&self, block_bytes: Vec<u8>) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.queue_block(block_bytes);
+        Ok(())
+    }
+
     async fn report_module_health(
         &self,
         health: crate::module::process::monitor::ModuleHealth,

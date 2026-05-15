@@ -149,9 +149,6 @@ pub struct NetworkManager {
     /// Event publisher for module event notifications (optional)
     event_publisher:
         Arc<tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>>,
-    /// FIBRE relay manager (for fast block relay)
-    #[cfg(feature = "fibre")]
-    fibre_relay: Option<Arc<Mutex<super::fibre::FibreRelay>>>,
     /// Peer state storage (per-connection state)
     /// Read-heavy: many reads to check peer state, fewer writes when updating state
     peer_states: Arc<RwLock<HashMap<SocketAddr, blvm_protocol::network::PeerState>>>,
@@ -433,8 +430,6 @@ impl NetworkManager {
             module_encryption: Arc::new(tokio::sync::Mutex::new(None)),
             modules_dir: Arc::new(tokio::sync::Mutex::new(None)),
             event_publisher: Arc::new(tokio::sync::Mutex::new(None)),
-            #[cfg(feature = "fibre")]
-            fibre_relay: None,
             peer_states: Arc::new(RwLock::new(HashMap::new())),
             persistent_peers: Arc::new(Mutex::new(HashSet::new())),
             network_active: Arc::new(Mutex::new(true)),
@@ -574,95 +569,76 @@ impl NetworkManager {
         *self.event_publisher.lock().await = event_publisher;
     }
 
-    /// Initialize FIBRE relay (if enabled in config)
-    #[cfg(feature = "fibre")]
-    pub async fn initialize_fibre(
-        &mut self,
-        config: Option<&crate::config::NodeConfig>,
-    ) -> Result<()> {
-        let default_config = blvm_protocol::fibre::FibreConfig::default();
-        let fibre_config = config
-            .and_then(|c| c.fibre.as_ref())
-            .unwrap_or(&default_config);
+    /// Stable string identity for a P2P transport (TCP/QUIC `SocketAddr` display), for module-visible peer maps.
+    pub(crate) fn companion_udp_p2p_peer_key(transport: &TransportAddr) -> Option<String> {
+        match transport {
+            TransportAddr::Tcp(s) => Some(s.to_string()),
+            #[cfg(feature = "quinn")]
+            TransportAddr::Quinn(s) => Some(s.to_string()),
+            #[cfg(feature = "iroh")]
+            TransportAddr::Iroh(_) => None,
+        }
+    }
 
-        if !fibre_config.enabled {
-            debug!("FIBRE relay disabled in configuration");
-            return Ok(());
+    /// Derived companion UDP address: same IP as P2P, port = P2P port + 1 (Commons NODE_FIBRE convention).
+    pub(crate) fn companion_udp_addr_for_p2p_peer(transport: &TransportAddr) -> Option<SocketAddr> {
+        match transport {
+            TransportAddr::Tcp(s) => Some(SocketAddr::new(s.ip(), s.port().saturating_add(1))),
+            #[cfg(feature = "quinn")]
+            TransportAddr::Quinn(s) => Some(SocketAddr::new(s.ip(), s.port().saturating_add(1))),
+            #[cfg(feature = "iroh")]
+            TransportAddr::Iroh(_) => None,
+        }
+    }
+
+    /// After a peer `version`: if they advertise the commons auxiliary-block-relay service bit (`NODE_FIBRE`),
+    /// publish the companion UDP binding for loadable modules (e.g. `blvm-fibre`).
+    pub(crate) async fn publish_companion_udp_peer_after_handshake(
+        &self,
+        transport: &TransportAddr,
+        version_msg: &crate::network::protocol::VersionMessage,
+    ) {
+        if !version_msg.supports_fibre() {
+            return;
+        }
+        let Some(p2p_peer_addr) = Self::companion_udp_p2p_peer_key(transport) else {
+            return;
+        };
+        let Some(udp) = Self::companion_udp_addr_for_p2p_peer(transport) else {
+            return;
+        };
+        let udp_addr_str = udp.to_string();
+
+        let ep_guard = self.event_publisher.lock().await;
+        if let Some(ep) = ep_guard.as_ref() {
+            let ep = Arc::clone(ep);
+            drop(ep_guard);
+            ep.publish_companion_udp_peer_registered(&p2p_peer_addr, &udp_addr_str)
+                .await;
+        }
+    }
+
+    /// On disconnect: if the peer had advertised `NODE_FIBRE`, clear the binding for modules.
+    pub(crate) async fn clear_companion_udp_peer_on_disconnect(&self, transport: &TransportAddr) {
+        let Some(p2p_peer_addr) = Self::companion_udp_p2p_peer_key(transport) else {
+            return;
+        };
+        let had_node_fibre = {
+            let pm = self.peer_manager.lock().await;
+            pm.get_peer(transport)
+                .map(|p| p.has_service(crate::network::protocol::NODE_FIBRE))
+                .unwrap_or(false)
+        };
+        if !had_node_fibre {
+            return;
         }
 
-        // Create FIBRE relay
-        let mut fibre_relay = super::fibre::FibreRelay::with_config(fibre_config.clone());
-
-        // Set message channel for assembled blocks
-        fibre_relay.set_message_sender(self.peer_tx.clone());
-
-        // Initialize UDP transport (use listen_addr + 1 for UDP port, or default)
-        let udp_addr = config
-            .and_then(|c| c.listen_addr)
-            .map(|addr| {
-                let port = addr.port().saturating_add(1); // UDP port = TCP port + 1
-                SocketAddr::new(addr.ip(), port)
-            })
-            .unwrap_or_else(|| "0.0.0.0:8334".parse().unwrap()); // Default FIBRE port
-
-        // Initialize UDP and start receiver
-        let chunk_rx = fibre_relay
-            .initialize_udp(udp_addr)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize FIBRE UDP: {}", e))?;
-
-        // Start chunk processor
-        let fibre_relay_arc = Arc::new(Mutex::new(fibre_relay));
-        super::fibre::start_chunk_processor(fibre_relay_arc.clone(), chunk_rx);
-
-        self.fibre_relay = Some(fibre_relay_arc);
-
-        info!("FIBRE relay initialized on UDP {}", udp_addr);
-        Ok(())
-    }
-
-    /// Get FIBRE relay (if initialized)
-    #[cfg(feature = "fibre")]
-    pub fn fibre_relay(&self) -> Option<Arc<Mutex<super::fibre::FibreRelay>>> {
-        self.fibre_relay.clone()
-    }
-
-    /// Broadcast block via FIBRE to all FIBRE-capable peers
-    #[cfg(feature = "fibre")]
-    pub async fn broadcast_block_via_fibre(&self, block: &blvm_protocol::Block) -> Result<()> {
-        if let Some(fibre_relay) = &self.fibre_relay {
-            // Encode block (need to clone for encoding)
-            let encoded = {
-                let mut relay = fibre_relay.lock().await;
-                relay
-                    .encode_block(block.clone())
-                    .map_err(|e| anyhow::anyhow!("FIBRE encoding failed: {}", e))?
-            };
-
-            // Get peer list and send (separate lock scope)
-            let peer_ids: Vec<String> = {
-                let relay = fibre_relay.lock().await;
-                relay
-                    .get_fibre_peers()
-                    .iter()
-                    .map(|p| p.peer_id.clone())
-                    .collect()
-            };
-
-            // Send to all FIBRE peers
-            for peer_id in peer_ids {
-                let mut relay = fibre_relay.lock().await;
-                if let Err(e) = relay.send_block(&peer_id, encoded.clone()).await {
-                    warn!("Failed to send block via FIBRE to {}: {}", peer_id, e);
-                } else {
-                    debug!("Sent block via FIBRE to {}", peer_id);
-                }
-            }
-
-            Ok(())
-        } else {
-            // FIBRE not initialized, skip
-            Ok(())
+        let ep_guard = self.event_publisher.lock().await;
+        if let Some(ep) = ep_guard.as_ref() {
+            let ep = Arc::clone(ep);
+            drop(ep_guard);
+            ep.publish_companion_udp_peer_unregistered(&p2p_peer_addr)
+                .await;
         }
     }
 
@@ -1479,7 +1455,7 @@ impl NetworkManager {
 
         // Publish MessageSent event for module subscribers
         if let Some(ref ep) = *self.event_publisher.lock().await {
-            let addr_str = format!("{addr:?}");
+            let addr_str = addr.to_string();
             let ep_clone = Arc::clone(ep);
             let msg_type_clone = msg_type.clone();
             tokio::spawn(async move {
@@ -1694,7 +1670,7 @@ impl NetworkManager {
                 // Publish peer connected event
                 let event_publisher_guard = self.event_publisher.lock().await;
                 if let Some(ref event_publisher) = *event_publisher_guard {
-                    let addr_str = format!("{addr:?}");
+                    let addr_str = addr.to_string();
                     let transport_type = match &addr {
                         TransportAddr::Tcp(_) => "tcp",
                         #[cfg(feature = "quinn")]
@@ -1721,13 +1697,14 @@ impl NetworkManager {
             }
             NetworkMessage::PeerDisconnected(addr) => {
                 info!("Peer disconnected (during pending processing): {:?}", addr);
+                self.clear_companion_udp_peer_on_disconnect(&addr).await;
                 let mut pm = self.peer_manager.lock().await;
                 pm.remove_peer(&addr);
                 drop(pm);
 
                 let event_publisher_guard = self.event_publisher.lock().await;
                 if let Some(ref event_publisher) = *event_publisher_guard {
-                    let addr_str = format!("{addr:?}");
+                    let addr_str = addr.to_string();
                     let event_pub_clone = Arc::clone(event_publisher);
                     tokio::spawn(async move {
                         event_pub_clone

@@ -215,6 +215,7 @@ fn test_manifest_validator_valid_capabilities() {
     manifest.capabilities = vec![
         "read_blockchain".to_string(),
         "subscribe_events".to_string(),
+        "queue_inbound_block".to_string(),
     ];
 
     let result = validator.validate(&manifest);

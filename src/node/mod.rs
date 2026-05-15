@@ -1313,6 +1313,12 @@ impl Node {
                 .await
                 .set_default_database_backend(backend_str);
 
+            // FIBRE module parity: subprocesses can derive UDP bind (TCP+1) from node P2P listen.
+            module_manager
+                .lock()
+                .await
+                .set_node_p2p_listen_for_modules(self.network_addr);
+
             // Apply module allowlists from config before auto-loading.
             if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
                 module_manager

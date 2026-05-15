@@ -332,7 +332,7 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
 
     let event_publisher_guard = nm.event_publisher().lock().await;
     if let Some(ref event_publisher) = *event_publisher_guard {
-        let addr_str = format!("{addr:?}");
+        let addr_str = addr.to_string();
         let transport_type = match &addr {
             TransportAddr::Tcp(_) => "tcp",
             #[cfg(feature = "quinn")]
@@ -361,6 +361,9 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
 #[allow(irrefutable_let_patterns)] // TransportAddr is TCP-only without quinn/iroh features
 async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
     info!("Peer disconnected: {:?}", addr);
+
+    nm.clear_companion_udp_peer_on_disconnect(&addr).await;
+
     let mut pm = nm.peer_manager_mutex().lock().await;
     pm.remove_peer(&addr);
     drop(pm);
@@ -416,7 +419,7 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
 
     let event_publisher_guard = nm.event_publisher().lock().await;
     if let Some(ref event_publisher) = *event_publisher_guard {
-        let addr_str = format!("{addr:?}");
+        let addr_str = addr.to_string();
         let event_pub_clone = Arc::clone(event_publisher);
         tokio::spawn(async move {
             event_pub_clone

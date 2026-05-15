@@ -71,6 +71,8 @@ pub struct ModuleManager {
     registry_url: Option<String>,
     /// Node IPC socket path (where node listens; modules connect here)
     node_socket_path: Option<PathBuf>,
+    /// Node P2P listen address injected into module spawn env (`MODULE_CONFIG_NODE_P2P_LISTEN_*`).
+    node_p2p_listen: std::sync::RwLock<Option<std::net::SocketAddr>>,
 }
 
 /// Managed module instance
@@ -196,6 +198,7 @@ impl ModuleManager {
             enabled_modules: Vec::new(),
             disabled_modules: Vec::new(),
             registry_url: None,
+            node_p2p_listen: std::sync::RwLock::new(None),
         }
     }
 
@@ -211,6 +214,37 @@ impl ModuleManager {
         if let Ok(mut guard) = self.module_config_overrides.write() {
             *guard = overrides;
         }
+    }
+
+    /// Set node's P2P listen address for module subprocesses.
+    ///
+    /// Merged into spawn config (unless already overridden) as `node_p2p_listen_ip` and
+    /// `node_p2p_listen_port`, exposed as `MODULE_CONFIG_NODE_P2P_LISTEN_*` env vars.
+    /// Used by **`blvm-fibre`** with `udp_follow_node_tcp_plus_one` to match in-process FIBRE
+    /// (`UDP port = TCP listen port + 1`).
+    pub fn set_node_p2p_listen_for_modules(&self, addr: std::net::SocketAddr) {
+        if let Ok(mut g) = self.node_p2p_listen.write() {
+            *g = Some(addr);
+            debug!(
+                "Module spawn env: node P2P listen {} (for MODULE_CONFIG_NODE_P2P_LISTEN_*)",
+                addr
+            );
+        }
+    }
+
+    fn apply_node_p2p_listen_to_module_config(&self, merged: &mut HashMap<String, String>) {
+        let Ok(g) = self.node_p2p_listen.read() else {
+            return;
+        };
+        let Some(addr) = *g else {
+            return;
+        };
+        merged
+            .entry("node_p2p_listen_ip".to_string())
+            .or_insert_with(|| addr.ip().to_string());
+        merged
+            .entry("node_p2p_listen_port".to_string())
+            .or_insert_with(|| addr.port().to_string());
     }
 
     /// Set default `database_backend` merged into module spawn env (`MODULE_CONFIG_DATABASE_BACKEND`).
@@ -606,6 +640,7 @@ impl ModuleManager {
         })?;
 
         let mut merged_config = self.merge_module_config(module_name, config);
+        self.apply_node_p2p_listen_to_module_config(&mut merged_config);
         merged_config.insert("version".to_string(), metadata.version.clone());
         let config_for_wasm = merged_config.clone();
         let context = ModuleContext::new(

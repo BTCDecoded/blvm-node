@@ -59,8 +59,6 @@ pub mod bip70_handler;
 // Privacy and Performance Enhancements
 #[cfg(feature = "dandelion")]
 pub mod dandelion; // Dandelion++ privacy-preserving transaction relay
-#[cfg(feature = "fibre")]
-pub mod fibre; // FIBRE-style Fast Relay Network
 pub mod package_relay; // BIP 331 Package Relay
 pub mod package_relay_handler; // BIP 331 handlers
 #[cfg(feature = "stratum-v2")]

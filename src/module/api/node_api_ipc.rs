@@ -137,6 +137,7 @@ impl NodeApiIpc {
             }
             RequestPayload::GetBlockTemplate { .. } => MessageType::GetBlockTemplate,
             RequestPayload::SubmitBlock { .. } => MessageType::SubmitBlock,
+            RequestPayload::QueueReceivedBlock { .. } => MessageType::QueueReceivedBlock,
             RequestPayload::MergeBlockServeDenylist { .. } => MessageType::MergeBlockServeDenylist,
             RequestPayload::GetBlockServeDenylistSnapshot => {
                 MessageType::GetBlockServeDenylistSnapshot
@@ -971,6 +972,19 @@ impl NodeAPI for NodeApiIpc {
             RequestPayload::SubmitBlock { block },
             |payload| match payload {
                 ResponsePayload::SubmitBlockResult(result) => Ok(result),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn queue_received_block_bytes(&self, block_bytes: Vec<u8>) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::QueueReceivedBlock { block_bytes },
+            |payload| match payload {
+                ResponsePayload::ReceivedBlockQueued => Ok(()),
                 _ => Err(ModuleError::OperationError(
                     "Unexpected response type".to_string(),
                 )),

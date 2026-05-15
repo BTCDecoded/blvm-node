@@ -329,6 +329,46 @@ impl EventPublisher {
         }
     }
 
+    /// Publish companion UDP endpoint for a P2P peer (`NODE_FIBRE` / port+1). Modules (e.g. `blvm-fibre`) treat it as a FIBRE UDP target.
+    pub async fn publish_companion_udp_peer_registered(
+        &self,
+        p2p_peer_addr: &str,
+        udp_addr: &str,
+    ) {
+        debug!(
+            "Publishing CompanionUdpPeerRegistered: p2p={} udp={}",
+            p2p_peer_addr, udp_addr
+        );
+        let payload = EventPayload::CompanionUdpPeerRegistered {
+            p2p_peer_addr: p2p_peer_addr.to_string(),
+            udp_addr: udp_addr.to_string(),
+        };
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::CompanionUdpPeerRegistered, payload)
+            .await
+        {
+            warn!("Failed to publish CompanionUdpPeerRegistered: {}", e);
+        }
+    }
+
+    pub async fn publish_companion_udp_peer_unregistered(&self, p2p_peer_addr: &str) {
+        debug!(
+            "Publishing CompanionUdpPeerUnregistered: p2p={}",
+            p2p_peer_addr
+        );
+        let payload = EventPayload::CompanionUdpPeerUnregistered {
+            p2p_peer_addr: p2p_peer_addr.to_string(),
+        };
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::CompanionUdpPeerUnregistered, payload)
+            .await
+        {
+            warn!("Failed to publish CompanionUdpPeerUnregistered: {}", e);
+        }
+    }
+
     /// Publish message received event
     pub async fn publish_message_received(
         &self,

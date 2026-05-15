@@ -490,6 +490,17 @@ pub trait NodeAPI: Send + Sync {
     /// SubmitBlockResult indicating acceptance, rejection, or duplicate
     async fn submit_block(&self, block: Block) -> Result<SubmitBlockResult, ModuleError>;
 
+    /// Queue **`bincode`‑serialized `Block`** bytes for processing on the same path as P2P
+    /// `BlockReceived` / in‑process FIBRE (pending block queue → validation).
+    ///
+    /// Loadable modules (e.g. **`blvm-fibre`**) use this for UDP‑assembled blocks. Default:
+    /// not supported (returns an error).
+    async fn queue_received_block_bytes(&self, _block_bytes: Vec<u8>) -> Result<(), ModuleError> {
+        Err(ModuleError::OperationError(
+            "queue_received_block_bytes is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
     /// Merge block hashes into the node's denylist for serving full `block` messages on the network
     /// (e.g. `getdata`). Additive; callers may include selective-sync, policy/compliance, or tests.
     /// Peers receive `notfound` for these hashes instead of a full block.
@@ -767,8 +778,10 @@ pub enum EventType {
     FibreBlockEncoded,
     /// Block sent via FIBRE
     FibreBlockSent,
-    /// FIBRE peer registered
-    FibrePeerRegistered,
+    /// P2P peer gained a companion UDP endpoint (NODE_FIBRE after handshake; modules e.g. blvm-fibre)
+    CompanionUdpPeerRegistered,
+    /// Companion UDP peer removed (disconnect; peer had NODE_FIBRE)
+    CompanionUdpPeerUnregistered,
 
     // === Package Relay Events ===
     /// Transaction package received

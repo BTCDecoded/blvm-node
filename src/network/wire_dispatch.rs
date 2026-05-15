@@ -105,7 +105,7 @@ impl NetworkManager {
             state.version = version_msg.version as u32;
         }
 
-        if let Some(transport_addr) = transport_addr_for_verack {
+        if let Some(ref transport_addr) = transport_addr_for_verack {
             match ProtocolParser::serialize_message(&ProtocolMessage::Verack) {
                 Ok(verack_msg) => {
                     if let Err(e) = self
@@ -121,6 +121,8 @@ impl NetworkManager {
                     warn!("Failed to serialize VerAck for {:?}: {}", transport_addr, e);
                 }
             }
+            self.publish_companion_udp_peer_after_handshake(transport_addr, version_msg)
+                .await;
         }
         Ok(())
     }

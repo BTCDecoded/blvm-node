@@ -129,6 +129,8 @@ pub enum MessageType {
     // Mining API
     GetBlockTemplate,
     SubmitBlock,
+    /// Queue raw block bytes (`bincode` `Block`) like `BlockReceived` from the network.
+    QueueReceivedBlock,
     /// Merge block hashes into the outbound full-block serve denylist (additive).
     /// Used for selective sync, policy, compliance, testing, etc.
     MergeBlockServeDenylist,
@@ -327,6 +329,10 @@ pub enum RequestPayload {
     SubmitBlock {
         block: Block,
     },
+    /// Serialized block (same encoding as `BlockReceived`: `bincode` of `Block`).
+    QueueReceivedBlock {
+        block_bytes: Vec<u8>,
+    },
     /// Block hashes that must not be answered with a full `block` on the wire (e.g. `getdata`).
     MergeBlockServeDenylist {
         block_hashes: Vec<Hash>,
@@ -515,6 +521,8 @@ pub enum ResponsePayload {
     // Mining API responses
     BlockTemplate(blvm_protocol::mining::BlockTemplate),
     SubmitBlockResult(crate::module::traits::SubmitBlockResult),
+    /// Ack for [`RequestPayload::QueueReceivedBlock`].
+    ReceivedBlockQueued,
     BlockServeDenylistMerged,
     TxServeDenylistMerged,
     BlockServeDenylistSnapshot(BlockServeDenylistSnapshot),
@@ -1073,8 +1081,16 @@ pub enum EventPayload {
         height: u64,
         peer_addr: String,
     },
-    FibrePeerRegistered {
-        peer_addr: String,
+
+    // === P2P companion UDP (NODE_FIBRE; e.g. blvm-fibre) ===
+    CompanionUdpPeerRegistered {
+        /// P2P peer key (`SocketAddr` display for TCP/QUIC).
+        p2p_peer_addr: String,
+        /// Companion UDP endpoint (same IP as P2P, port = P2P port + 1).
+        udp_addr: String,
+    },
+    CompanionUdpPeerUnregistered {
+        p2p_peer_addr: String,
     },
 
     // === Package Relay Events ===

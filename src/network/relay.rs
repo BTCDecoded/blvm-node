@@ -8,8 +8,6 @@
 #[cfg(feature = "dandelion")]
 use super::dandelion::DandelionRelay;
 use crate::utils::current_timestamp;
-#[cfg(feature = "fibre")]
-use blvm_protocol::Block;
 use blvm_protocol::Hash;
 use std::collections::HashMap;
 use tracing::debug;
@@ -269,27 +267,6 @@ impl RelayManager {
         }
     }
 
-    /// Try to prioritize block relay via FIBRE (if available)
-    /// Returns true if FIBRE encoding path executed (send is transport-dependent)
-    #[cfg(feature = "fibre")]
-    pub fn prioritize_block_via_fibre(
-        &mut self,
-        fibre: &mut crate::network::fibre::FibreRelay,
-        block: &Block,
-    ) -> bool {
-        if !self.policies.enable_block_relay {
-            return false;
-        }
-        // Encode and cache for FIBRE. Actual UDP send is out-of-scope here.
-        match fibre.encode_block(block.clone()) {
-            Ok(_encoded) => {
-                debug!("Prepared FEC chunks for FIBRE relay");
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
     /// Clean up old relayed items
     fn cleanup_old_items(&mut self) {
         let now = current_timestamp();
@@ -359,35 +336,4 @@ pub struct RelayStats {
     pub relayed_blocks: usize,
     pub relayed_transactions: usize,
     pub policies: RelayPolicies,
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[cfg(feature = "fibre")]
-    use super::RelayManager;
-    #[cfg(feature = "fibre")]
-    use crate::network::fibre::FibreRelay;
-    #[cfg(feature = "fibre")]
-    use blvm_protocol::Block;
-
-    #[test]
-    #[cfg(feature = "fibre")]
-    fn test_prioritize_block_via_fibre_encodes() {
-        let mut relay = RelayManager::new();
-        let mut fibre = FibreRelay::new();
-        let block = Block {
-            header: blvm_protocol::BlockHeader {
-                version: 1,
-                prev_block_hash: [0u8; 32],
-                merkle_root: [0u8; 32],
-                timestamp: 0,
-                bits: 0,
-                nonce: 0,
-            },
-            transactions: vec![].into_boxed_slice(),
-        };
-        let ok = relay.prioritize_block_via_fibre(&mut fibre, &block);
-        assert!(ok);
-    }
 }
