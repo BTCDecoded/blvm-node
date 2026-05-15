@@ -1995,8 +1995,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("wasm-modules"),
-            "expected error to mention wasm-modules, got: {}",
-            msg
+            "expected error to mention wasm-modules, got: {msg}"
         );
     }
 }

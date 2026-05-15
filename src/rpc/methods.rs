@@ -109,7 +109,7 @@ mod tests {
     fn core_rpc_methods_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
         for name in CORE_RPC_METHODS {
-            assert!(seen.insert(*name), "duplicate core RPC method: {}", name);
+            assert!(seen.insert(*name), "duplicate core RPC method: {name}");
         }
     }
 
@@ -120,8 +120,7 @@ mod tests {
         for method in OVERRIDABLE_CORE_RPC_METHODS {
             assert!(
                 core.contains(*method),
-                "overridable method '{}' is not in CORE_RPC_METHODS",
-                method
+                "overridable method '{method}' is not in CORE_RPC_METHODS",
             );
         }
     }
@@ -145,8 +144,7 @@ mod tests {
         for method in OVERRIDABLE_CORE_RPC_METHODS {
             assert!(
                 !forbidden.contains(*method),
-                "dangerous method '{}' must not be in OVERRIDABLE_CORE_RPC_METHODS",
-                method
+                "dangerous method '{method}' must not be in OVERRIDABLE_CORE_RPC_METHODS",
             );
         }
     }

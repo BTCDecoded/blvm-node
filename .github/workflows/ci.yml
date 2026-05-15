@@ -526,6 +526,13 @@ jobs:
             exit 0
           fi
           cargo clippy --lib --bins -- -D warnings
+          # Integration tests: keep -D warnings but avoid per-test-crate #![allow] spam.
+          cargo clippy --tests -- \
+            -D warnings \
+            -A clippy::all \
+            -A unused \
+            -A unused-comparisons \
+            -A deprecated
 
   verify:
     name: Verify

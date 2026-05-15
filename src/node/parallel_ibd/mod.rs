@@ -2533,8 +2533,9 @@ mod tests {
 
     #[test]
     fn test_mainnet_checkpoints_exist() {
-        assert!(
-            !checkpoints::MAINNET_CHECKPOINTS.is_empty(),
+        assert_ne!(
+            checkpoints::MAINNET_CHECKPOINTS.len(),
+            0,
             "Checkpoints should be defined"
         );
     }

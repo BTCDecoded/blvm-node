@@ -290,36 +290,40 @@ pub fn try_create_module_kv_database<P: AsRef<Path>>(db_path: P) -> Result<Box<d
     let db_path = db_path.as_ref();
 
     #[cfg(all(not(feature = "sled"), not(feature = "tidesdb")))]
+    #[allow(clippy::needless_return)] // Early exit: no trailing `try` impl when both backends are off.
     {
         return Err(anyhow::anyhow!(
             "No dynamic module KV backend compiled into blvm-node (enable `sled` and/or `tidesdb`)"
         ));
     }
 
-    let mut last_err: Option<anyhow::Error>;
-
-    #[cfg(feature = "sled")]
+    #[cfg(any(feature = "sled", feature = "tidesdb"))]
     {
-        match create_database(db_path, DatabaseBackend::Sled, None) {
-            Ok(db) => return Ok(db),
-            Err(e) => last_err = Some(e),
+        let mut last_err: Option<anyhow::Error>;
+
+        #[cfg(feature = "sled")]
+        {
+            match create_database(db_path, DatabaseBackend::Sled, None) {
+                Ok(db) => return Ok(db),
+                Err(e) => last_err = Some(e),
+            }
         }
-    }
-    #[cfg(not(feature = "sled"))]
-    {
-        last_err = None;
-    }
-
-    #[cfg(feature = "tidesdb")]
-    {
-        match create_database(db_path, DatabaseBackend::TidesDB, None) {
-            Ok(db) => return Ok(db),
-            Err(e) => last_err = Some(e),
+        #[cfg(not(feature = "sled"))]
+        {
+            last_err = None;
         }
-    }
 
-    Err(last_err
-        .unwrap_or_else(|| anyhow::anyhow!("Failed to open module KV store at {:?}", db_path)))
+        #[cfg(feature = "tidesdb")]
+        {
+            match create_database(db_path, DatabaseBackend::TidesDB, None) {
+                Ok(db) => return Ok(db),
+                Err(e) => last_err = Some(e),
+            }
+        }
+
+        Err(last_err
+            .unwrap_or_else(|| anyhow::anyhow!("Failed to open module KV store at {:?}", db_path)))
+    }
 }
 
 /// Get default database backend

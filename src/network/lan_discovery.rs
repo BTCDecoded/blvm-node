@@ -295,6 +295,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::assertions_on_constants)] // Bounds on `const` scan tuning; outcome fixed at compile time.
     #[test]
     fn test_scan_timeout_reasonable() {
         // Timeout should be fast for LAN scanning but not instant
@@ -308,6 +309,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::assertions_on_constants)] // Bounds on `const` concurrency; outcome fixed at compile time.
     #[test]
     fn test_max_concurrent_scans_reasonable() {
         // Should scan multiple IPs concurrently for speed

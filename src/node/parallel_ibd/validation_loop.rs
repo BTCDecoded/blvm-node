@@ -3209,14 +3209,11 @@ mod tests {
         let final_cap = cap.load(Ordering::Relaxed);
         assert!(
             final_cap >= 100_000,
-            "must respect hard floor (got {})",
-            final_cap
+            "must respect hard floor (got {final_cap})",
         );
         assert!(
             final_cap <= nominal / 8,
-            "must shrink well below nominal (got {} for nominal {})",
-            final_cap,
-            nominal
+            "must shrink well below nominal (got {final_cap} for nominal {nominal})",
         );
     }
 }

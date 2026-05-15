@@ -1357,6 +1357,7 @@ mod tests {
         // At least 1 year
     }
 
+    #[allow(clippy::assertions_on_constants)] // Ordering/caps on `const` multipliers; outcome fixed at compile time.
     #[test]
     fn test_lan_multipliers_are_capped() {
         // Verify multipliers are within security limits
