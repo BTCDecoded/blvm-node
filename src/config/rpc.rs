@@ -198,6 +198,11 @@ pub struct StratumV2Config {
     pub merge_mining_enabled: bool,
     pub secondary_chains: Vec<String>,
     pub merge_mining_fee: Option<MergeMiningFeeConfig>,
+    /// When **`true`** (default), inbound P2P payloads matching the Stratum V2 TLV heuristic are routed to
+    /// `StratumV2MessageReceived` instead of standard Bitcoin P2P parsing. Set **`false`** to disable that path
+    /// (module miner TCP and `send_peer_transport_payload` outbound are unchanged).
+    #[serde(default = "crate::config::default_true")]
+    pub p2p_stratum_demux: bool,
 }
 
 /// Merge mining fee configuration
@@ -233,6 +238,7 @@ impl Default for StratumV2Config {
             merge_mining_enabled: false,
             secondary_chains: Vec::new(),
             merge_mining_fee: None,
+            p2p_stratum_demux: true,
         }
     }
 }
@@ -259,5 +265,6 @@ mod stratum_v2_config_tests {
         let c = StratumV2Config::default();
         assert!(!c.enabled);
         assert!(c.listen_addr.is_none());
+        assert!(c.p2p_stratum_demux);
     }
 }

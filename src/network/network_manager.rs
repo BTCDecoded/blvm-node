@@ -262,6 +262,9 @@ pub struct NetworkManager {
     /// Peers that have already received a GetAddr response this connection.
     /// We answer GetAddr at most once per connection (Core behaviour).
     pub(crate) getaddr_responded: Arc<std::sync::Mutex<HashSet<SocketAddr>>>,
+    /// When false, P2P Stratum TLV demux is skipped (requires `stratum-v2` feature).
+    #[cfg(feature = "stratum-v2")]
+    p2p_stratum_demux_enabled: bool,
 }
 
 /// Pending request metadata (pub(crate) for utxo_commitments_client)
@@ -399,6 +402,12 @@ impl NetworkManager {
             .unwrap_or(&bg_config_default);
         let background_task_config = Arc::new(bg_config.clone());
 
+        #[cfg(feature = "stratum-v2")]
+        let p2p_stratum_demux_enabled = config
+            .and_then(|c| c.stratum_v2.as_ref())
+            .map(|s| s.p2p_stratum_demux)
+            .unwrap_or(true);
+
         Self {
             peer_manager: Arc::new(Mutex::new(PeerManager::new(max_peers))),
             peer_diversity: Arc::new(Mutex::new(HashMap::new())),
@@ -480,6 +489,8 @@ impl NetworkManager {
             block_serve_maintenance: Arc::new(AtomicBool::new(false)),
             local_version_nonces: Arc::new(std::sync::Mutex::new(HashSet::new())),
             getaddr_responded: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            #[cfg(feature = "stratum-v2")]
+            p2p_stratum_demux_enabled,
         }
     }
 
@@ -1831,7 +1842,7 @@ impl NetworkManager {
         // Stratum V2 messages start with [4-byte length][2-byte tag][4-byte length][payload]
         // Valid Stratum V2 tags are in range 0x0001-0x0032 (see blvm-stratum-v2/src/messages.rs)
         #[cfg(feature = "stratum-v2")]
-        if data.len() >= 10 {
+        if self.p2p_stratum_demux_enabled && data.len() >= 10 {
             // Try to parse as Stratum V2 TLV
             let length_prefix = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             if length_prefix >= 6 && length_prefix <= 1024 * 1024 {

@@ -89,11 +89,7 @@ pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str =
 
 /// Official modules pulled in on first boot when `enabled_modules` / `registry_url` use defaults.
 fn default_bootstrap_enabled_modules() -> Vec<String> {
-    vec![
-        "blvm-miniscript".to_string(),
-        "blvm-zmq".to_string(),
-        "blvm-fibre".to_string(),
-    ]
+    vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string()]
 }
 
 fn default_module_registry_url() -> Option<String> {

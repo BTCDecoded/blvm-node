@@ -15,14 +15,10 @@ fn test_module_config_default() {
     assert_eq!(config.modules_dir, "modules");
     assert_eq!(config.data_dir, "data/modules");
     assert_eq!(config.socket_dir, "data/modules/sockets");
-    assert_eq!(config.enabled_modules.len(), 3);
+    assert_eq!(config.enabled_modules.len(), 2);
     assert_eq!(
         config.enabled_modules,
-        vec![
-            "blvm-miniscript".to_string(),
-            "blvm-zmq".to_string(),
-            "blvm-fibre".to_string(),
-        ]
+        vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string(),]
     );
     assert!(config.registry_url.is_some());
     assert!(config.disabled_modules.is_empty());
@@ -123,11 +119,7 @@ transport_preference = "tcponly"
     assert_eq!(modules.modules_dir, "modules");
     assert_eq!(
         modules.enabled_modules,
-        vec![
-            "blvm-miniscript".to_string(),
-            "blvm-zmq".to_string(),
-            "blvm-fibre".to_string(),
-        ]
+        vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string(),]
     );
     assert!(modules.registry_url.is_some());
 }
