@@ -270,17 +270,6 @@ jobs:
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
-      - name: Install tidesdb native dependencies
-        run: |
-          if pkg-config --exists liblz4 libzstd 2>/dev/null && command -v cmake >/dev/null 2>&1 && pkg-config --exists openssl 2>/dev/null; then
-            echo "✅ tidesdb native deps already present."
-          elif command -v apt-get >/dev/null 2>&1; then
-            bash scripts/apt-get-retry.sh update -qq
-            bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
-          elif command -v pacman >/dev/null 2>&1; then
-            pacman -Qq lz4 zstd snappy cmake pkgconf openssl >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
-          fi
-
       - name: Isolate CARGO_HOME for this runner
         run: |
           mkdir -p "${RUNNER_TEMP}/cargo"
@@ -365,17 +354,6 @@ jobs:
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
-
-      - name: Install tidesdb native dependencies
-        run: |
-          if pkg-config --exists liblz4 libzstd 2>/dev/null && command -v cmake >/dev/null 2>&1 && pkg-config --exists openssl 2>/dev/null; then
-            echo "✅ tidesdb native deps already present."
-          elif command -v apt-get >/dev/null 2>&1; then
-            bash scripts/apt-get-retry.sh update -qq
-            bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
-          elif command -v pacman >/dev/null 2>&1; then
-            pacman -Qq lz4 zstd snappy cmake pkgconf openssl >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
-          fi
 
       - name: Isolate CARGO_HOME for this runner
         # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
@@ -817,12 +795,9 @@ jobs:
       
       - name: Run security audit
         run: |
-          # Ignore vulnerabilities in optional iroh-net feature dependencies
-          # These are transitive dependencies that can't be easily fixed without
-          # updating iroh-net to 0.28+ (deprecated, requires API changes)
-          # See Cargo.toml security note for details
-          # hickory-proto/resolver via iroh (DNS): fixed upstream needs newer iroh / hickory stack
-          cargo audit --ignore RUSTSEC-2024-0421 --ignore RUSTSEC-2025-0009 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0007 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2026-0118 --ignore RUSTSEC-2026-0119
+          # Ignores live only in `.cargo/audit.toml` (single source of truth). Temporary suppressions until
+          # upstream bumps; see Cargo.toml security note and workspace docs/CONSENSUS_SECURITY_HARDENING_PLAN.md.
+          cargo audit
 
   # Fuzz is skippable via `[skip_fuzz]` on push. Fuzz does not
   # need `test` so `[skip_tests]` can still run libFuzzer.
@@ -844,17 +819,6 @@ jobs:
 
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
-
-      - name: Install tidesdb native dependencies
-        run: |
-          if pkg-config --exists liblz4 libzstd 2>/dev/null && command -v cmake >/dev/null 2>&1 && pkg-config --exists openssl 2>/dev/null; then
-            echo "✅ tidesdb native deps already present."
-          elif command -v apt-get >/dev/null 2>&1; then
-            bash scripts/apt-get-retry.sh update -qq
-            bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
-          elif command -v pacman >/dev/null 2>&1; then
-            pacman -Qq lz4 zstd snappy cmake pkgconf openssl >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
-          fi
 
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
@@ -983,17 +947,6 @@ jobs:
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
-
-      - name: Install tidesdb native dependencies
-        run: |
-          if pkg-config --exists liblz4 libzstd 2>/dev/null && command -v cmake >/dev/null 2>&1 && pkg-config --exists openssl 2>/dev/null; then
-            echo "✅ tidesdb native deps already present."
-          elif command -v apt-get >/dev/null 2>&1; then
-            bash scripts/apt-get-retry.sh update -qq
-            bash scripts/apt-get-retry.sh install -y -qq liblz4-dev libzstd-dev libsnappy-dev cmake pkg-config libssl-dev
-          elif command -v pacman >/dev/null 2>&1; then
-            pacman -Qq lz4 zstd snappy cmake pkgconf openssl >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lz4 zstd snappy cmake pkgconf openssl
-          fi
 
       - name: Isolate CARGO_HOME for this runner
         # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.

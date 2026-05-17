@@ -164,14 +164,15 @@ rustls = { version = "=0.23", optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }
 
-# Security Note: Migrated from iroh-net 0.12 to iroh 0.95 to fix vulnerabilities:
-# - idna 0.4.0 (RUSTSEC-2024-0421) - FIXED in iroh 0.95
-# - ring 0.16.20 (RUSTSEC-2025-0009) - FIXED in iroh 0.95
-# - rsa 0.9.8 (RUSTSEC-2023-0071) - FIXED in iroh 0.95
-# - paste 1.0.15 (unmaintained) - FIXED in iroh 0.95
-# iroh 0.95 transitive stack: `cargo audit` may still flag optional-path crates (e.g. hickory-proto
-# RUSTSEC-2026-0118 / RUSTSEC-2026-0119 via DNS resolver) until upstream iroh bumps hickory — see
-# `.github/workflows/ci.yml` Run security audit ignores for IDs we accept until then.
+# Security Note: Migrated from iroh-net 0.12 to iroh 0.95 to fix vulnerabilities in that stack:
+# - idna 0.4.0 (RUSTSEC-2024-0421) - addressed for the iroh upgrade path
+# - ring 0.16.20 (RUSTSEC-2025-0009) - addressed for the iroh upgrade path
+# - rsa 0.9.8 (RUSTSEC-2023-0071) - addressed for the iroh upgrade path
+# - paste 1.0.15 (unmaintained) - addressed for the iroh upgrade path
+# `cargo audit` may still report those (or other) IDs while another transitive edge pulls a flagged version.
+# Reconcile periodically: run audit without `.cargo/audit.toml`, use `cargo tree -i`, then trim ignores.
+# Advisory suppressions for CI: **only** `.cargo/audit.toml` (do not duplicate `--ignore` in workflows).
+# iroh 0.95 transitive stack: hickory-proto/resolver (DNS) may lag — see `.cargo/audit.toml` comments.
 
 [features]
 # Storage: `database_backend = "auto"` picks RocksDB when the `rocksdb` feature is enabled

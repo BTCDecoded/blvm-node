@@ -1,7 +1,21 @@
-# cargo audit — align with blvm/.cargo/audit.toml for shared transitive advisories.
+# cargo audit — single source of advisory suppressions for blvm-node.
+# CI runs plain `cargo audit` from this repo root so all ignores come from here (no duplicate `--ignore` flags in workflows).
+#
+# Reconcile quarterly or when bumping iroh/quinn/hickory/time: run `cargo audit` after temporarily clearing `ignore`
+# and use `cargo tree -i <crate>` to confirm whether each ID still applies.
+#
+# Rationale summaries (details also in Cargo.toml security note and docs/CONSENSUS_SECURITY_HARDENING_PLAN.md):
+# - Several IDs may still appear from transitive duplicates even where iroh 0.95 addressed the primary stack; verify before dropping.
+# - Hickory DNS advisories: transitive via iroh until upstream bumps hickory.
+
 [advisories]
 ignore = [
-    # hickory via iroh 0.95; tracked with iroh upgrade (see blvm repo audit.toml).
+    "RUSTSEC-2024-0421",
+    "RUSTSEC-2025-0009",
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0007",
+    "RUSTSEC-2026-0037",
+    "RUSTSEC-2026-0009",
     "RUSTSEC-2026-0118",
     "RUSTSEC-2026-0119",
 ]
