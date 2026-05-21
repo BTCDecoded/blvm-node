@@ -29,8 +29,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '0'
-  # lld uses far less memory than GNU ld; prevents OOM kills when linking blvm-node in parallel.
-  RUSTFLAGS: '-C link-arg=-fuse-ld=lld'
+  # Linker flags set per-run in setup (mold / working lld / default bfd). Do not hardcode -fuse-ld=lld:
+  # stale lld packages (e.g. libLLVM.so.19.1) break all builds on upgraded runners.
   # Parent of per-run dirs: .../<run_id>/target and .../<run_id>/tmp.
   # Prefer pointing the runner's workFolder at a large disk (e.g. /mnt/data/github-runner/<name>/_work)
   # so github.workspace and this default path stay off root — then BLVM_RUNNER_BUILD_ROOT is optional.
@@ -60,6 +60,7 @@ jobs:
       cache-key: ${{ steps.setup-cache.outputs.cache-key }}
       consensus-cache-key: ${{ steps.setup-cache.outputs.consensus-cache-key }}
       protocol-cache-key: ${{ steps.setup-cache.outputs.protocol-cache-key }}
+      rustflags: ${{ steps.linker.outputs.rustflags }}
     steps:
       - name: Emergency pre-flight disk cleanup
         run: |
@@ -231,10 +232,31 @@ jobs:
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
 
+      - name: Configure linker (mold / lld / default)
+        id: linker
+        run: |
+          set -euo pipefail
+          RF=""
+          if command -v mold >/dev/null 2>&1 && mold --version >/dev/null 2>&1; then
+            RF="-C link-arg=-fuse-ld=mold"
+            echo "✅ Using mold linker"
+          elif command -v ld.lld >/dev/null 2>&1 && ld.lld --version >/dev/null 2>&1; then
+            RF="-C link-arg=-fuse-ld=lld"
+            echo "✅ Using lld linker"
+          else
+            echo "⚠️ mold/lld unavailable or broken (e.g. libLLVM.so mismatch); using default bfd linker"
+            if command -v pacman >/dev/null 2>&1; then
+              echo "Hint: on Arch runners: sudo pacman -S --needed lld llvm-libs"
+            fi
+          fi
+          echo "rustflags=$RF" >> "$GITHUB_OUTPUT"
+
   build-dev:
     name: Build (dev, shared)
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     if: |
       (github.event_name != 'push' || github.event.head_commit == null ||
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -337,6 +359,8 @@ jobs:
     name: Test
     needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -445,6 +469,8 @@ jobs:
     name: Clippy
     needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -522,6 +548,8 @@ jobs:
     name: Verify
     needs: setup
     runs-on: [self-hosted, Linux, X64]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     timeout-minutes: 60
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
@@ -690,6 +718,8 @@ jobs:
     name: Docs
     needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -759,6 +789,8 @@ jobs:
     name: Security
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -809,6 +841,8 @@ jobs:
     name: Fuzz
     needs: [setup]
     runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     timeout-minutes: 30
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
@@ -921,6 +955,7 @@ jobs:
     env:
       # Use release-fast for PRs, branches — full release only for push to main
       BLVM_FAST_BUILD: ${{ ((github.event_name != 'push' || github.ref != 'refs/heads/main') && (github.event_name != 'release')) && '1' || '' }}
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     if: |
       always() &&
       needs.setup.result == 'success' &&
@@ -986,8 +1021,10 @@ jobs:
 
   release:
     name: Release
-    needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz]
+    needs: [setup, build, build-dev, test, clippy, fmt, docs, security, verify, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     permissions:
       contents: write
       id-token: write
