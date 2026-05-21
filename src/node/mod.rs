@@ -780,6 +780,11 @@ impl Node {
         // accidentally treating an existing chain as genesis (e.g. wrong --data-dir or BLVM_CLEAN).
         let chain_tip_for_log = self.storage.chain().get_height().ok().flatten();
         let wm_for_log = self.storage.chain().get_utxo_watermark().ok().flatten();
+        if chain_tip_for_log.is_some_and(|h| h > 0) || synced_tip > 0 {
+            info!(
+                "Resuming sync from existing data in this data directory — keep the same --data-dir between runs (do not delete rocksdb/)"
+            );
+        }
         info!(
             "[IBD_RESUME] chain_tip={:?} ibd_utxo_watermark={:?} effective_validated_tip={} next_block_height={}",
             chain_tip_for_log,
@@ -815,20 +820,14 @@ impl Node {
                 peer_addresses
             );
 
-            // Allow 1 peer when preferred_peers is set (e.g. LAN-only IBD)
             let ibd_config_owned = self.config_sub(|c| c.ibd.as_ref()).cloned();
-            let min_peers = if ibd_config_owned
-                .as_ref()
-                .map(|c| !c.preferred_peers.is_empty())
-                .unwrap_or(false)
-                || std::env::var("BLVM_IBD_PEERS")
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-            {
-                1
-            } else {
-                2
-            };
+            let ibd_session_config =
+                crate::node::parallel_ibd::ParallelIBDConfig::resolve_for_session(
+                    ibd_config_owned.as_ref(),
+                    synced_tip,
+                    &peer_addresses,
+                );
+            let min_peers = ibd_session_config.min_peers_for_ibd();
             if peer_addresses.len() >= min_peers {
                 info!(
                     "[START_COMPONENTS] Attempting parallel IBD with {} peers",

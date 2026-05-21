@@ -49,7 +49,16 @@ impl Transport for TcpTransport {
     }
 
     async fn listen(&self, addr: SocketAddr) -> Result<Self::Listener> {
-        let listener = TokioTcpListener::bind(addr).await?;
+        let listener = TokioTcpListener::bind(addr).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow::anyhow!(
+                    "P2P listen address {addr} already in use — is Bitcoin Core (or another node) on port {}? Stop it or change listen_addr in config.",
+                    addr.port()
+                )
+            } else {
+                anyhow::anyhow!("Failed to bind P2P listener on {addr}: {e}")
+            }
+        })?;
         Ok(TcpListener {
             listener,
             max_message_length: self.max_message_length,

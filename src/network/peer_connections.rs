@@ -236,6 +236,9 @@ impl NetworkManager {
     ) -> Result<()> {
         use super::lan_discovery;
 
+        info!(
+            "Peer discovery in progress — IBD block downloads start once peers connect (typically 15–60s on first start)"
+        );
         info!("Discovering LAN sibling nodes...");
         let lan_nodes = lan_discovery::discover_lan_bitcoin_nodes_with_port(port).await;
         let mut lan_connected = 0;
@@ -271,7 +274,7 @@ impl NetworkManager {
                 .join(", ");
             let best = connected_lan[0];
             info!(
-                "LAN Bitcoin node(s) at {addrs} — for reliable IBD set BLVM_IBD_PEERS={best} (optional BLVM_IBD_MODE=earliest); see blvm-mainnet-ibd.toml.example"
+                "LAN Bitcoin node(s) at {addrs} — IBD auto-prefers LAN (override: BLVM_IBD_PEERS={best})"
             );
         }
 

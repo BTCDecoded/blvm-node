@@ -166,6 +166,8 @@ cargo run -- --network testnet
 cargo run -- --network mainnet
 ```
 
+For **release mainnet IBD**, use the **`blvm`** binary — [Mainnet initial sync](https://docs.thebitcoincommons.org/getting-started/mainnet-sync.html).
+
 ### Programmatic Usage
 
 ```rust

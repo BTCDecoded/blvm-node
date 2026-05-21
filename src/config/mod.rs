@@ -890,18 +890,23 @@ impl NodeConfig {
         // Validate file permissions (warn if world-readable)
         #[cfg(unix)]
         {
-            if let Ok(metadata) = std::fs::metadata(path) {
-                use std::os::unix::fs::PermissionsExt;
-                let permissions = metadata.permissions();
-                let mode = permissions.mode();
-                // Check if file is readable by others (group or world)
-                if mode & 0o077 != 0 {
-                    tracing::warn!(
-                        "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
-                         Consider setting permissions to 600 for security. \
-                         Run: chmod 600 {:?}",
-                        path, mode, path
-                    );
+            let path_lossy_for_perm = path.to_string_lossy();
+            let is_example_config = path_lossy_for_perm.ends_with(".toml.example")
+                || path_lossy_for_perm.ends_with(".example");
+            if !is_example_config {
+                if let Ok(metadata) = std::fs::metadata(path) {
+                    use std::os::unix::fs::PermissionsExt;
+                    let permissions = metadata.permissions();
+                    let mode = permissions.mode();
+                    // Check if file is readable by others (group or world)
+                    if mode & 0o077 != 0 {
+                        tracing::warn!(
+                            "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
+                             Consider setting permissions to 600 for security. \
+                             Run: chmod 600 {:?}",
+                            path, mode, path
+                        );
+                    }
                 }
             }
         }

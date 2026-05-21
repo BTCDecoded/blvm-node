@@ -132,6 +132,13 @@ impl Default for ParallelIBDConfig {
 }
 
 impl ParallelIBDConfig {
+    /// True when `BLVM_IBD_PEERS` is set to a non-empty value (empty string = unset).
+    fn ibd_peers_env_explicit() -> bool {
+        std::env::var("BLVM_IBD_PEERS")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+
     /// Build config from optional IbdConfig. ENV overrides config file.
     pub fn from_config(ibd_config: Option<&crate::config::IbdConfig>) -> Self {
         let chunk_size = std::env::var("BLVM_IBD_CHUNK_SIZE")
@@ -147,6 +154,7 @@ impl ParallelIBDConfig {
             .unwrap_or(30);
         let preferred_peers = std::env::var("BLVM_IBD_PEERS")
             .ok()
+            .filter(|s| !s.trim().is_empty())
             .map(|s| {
                 s.split(',')
                     .map(|p| p.trim().to_string())
@@ -161,6 +169,7 @@ impl ParallelIBDConfig {
             .unwrap_or_default();
         let mode = std::env::var("BLVM_IBD_MODE")
             .ok()
+            .filter(|s| !s.trim().is_empty())
             .or_else(|| ibd_config.map(|c| c.mode.clone()))
             .unwrap_or_else(|| "parallel".to_string());
         let max_ahead_blocks = std::env::var("BLVM_IBD_MAX_AHEAD")
@@ -242,6 +251,63 @@ impl ParallelIBDConfig {
             headers_timeout_secs: headers_timeout,
             headers_max_failures,
         }
+    }
+
+    /// Build config for an IBD session: file/ENV defaults, then LAN auto-prefer.
+    /// Does not change `[ibd].mode` — parallel stays parallel unless set in config/ENV.
+    pub fn resolve_for_session(
+        ibd_config: Option<&crate::config::IbdConfig>,
+        _synced_chain_height: u64,
+        peer_addresses: &[String],
+    ) -> Self {
+        let mut config = Self::from_config(ibd_config);
+
+        if config.preferred_peers.is_empty() && !Self::ibd_peers_env_explicit() {
+            let lan_peers: Vec<String> = peer_addresses
+                .iter()
+                .filter(|p| {
+                    p.parse::<SocketAddr>()
+                        .ok()
+                        .is_some_and(|a| is_lan_peer(&a))
+                })
+                .cloned()
+                .collect();
+            if !lan_peers.is_empty() {
+                info!(
+                    "IBD: auto-preferring {} LAN peer(s) for download (set BLVM_IBD_PEERS to override): {}",
+                    lan_peers.len(),
+                    lan_peers.join(", ")
+                );
+                config.preferred_peers = lan_peers;
+            }
+        }
+
+        config
+    }
+
+    /// Minimum connected peers before starting block download.
+    pub fn min_peers_for_ibd(&self) -> usize {
+        if !self.preferred_peers.is_empty() {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// WAN-only multi-peer parallel download stalls IBD; keep single fastest after sort.
+    fn collapse_wan_only_download_peers(mut peers: Vec<String>) -> Vec<String> {
+        if peers.len() > 1
+            && peers.iter().all(|p| {
+                p.parse::<SocketAddr>()
+                    .ok()
+                    .is_none_or(|a| !is_lan_peer(&a))
+            })
+        {
+            if let Some(best) = peers.first().cloned() {
+                peers = vec![best];
+            }
+        }
+        peers
     }
 }
 
@@ -513,8 +579,22 @@ impl ParallelIBD {
             );
         }
 
-        // mode=sequential: single-peer mode. Core-like earliest-first, no chunk-boundary stalls.
+        // WAN-only: round-robin across multiple WAN peers stalls IBD (retry latency at chunk
+        // boundaries). Restrict download to the fastest peer without changing configured mode.
         let ibd_mode: &str = &self.config.mode;
+        filtered_peers = ParallelIBDConfig::collapse_wan_only_download_peers(filtered_peers);
+        if filtered_peers.len() == 1 {
+            if let Ok(addr) = filtered_peers[0].parse::<SocketAddr>() {
+                if !is_lan_peer(&addr) {
+                    info!(
+                        "WAN-only IBD: single fastest peer {} for download (mode={}; set BLVM_IBD_PEERS to override)",
+                        filtered_peers[0], ibd_mode
+                    );
+                }
+            }
+        }
+
+        // mode=sequential: single-peer mode. Core-like earliest-first, no chunk-boundary stalls.
         if ibd_mode.eq_ignore_ascii_case("sequential") {
             if let Some(best) = filtered_peers.first().cloned() {
                 filtered_peers = vec![best.clone()];
@@ -2303,6 +2383,25 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    /// Isolate tests from shell `BLVM_IBD_*` (e.g. left over from manual IBD runs).
+    fn with_ibd_env_cleared<F: FnOnce()>(f: F) {
+        let peers = std::env::var("BLVM_IBD_PEERS").ok();
+        let mode = std::env::var("BLVM_IBD_MODE").ok();
+        std::env::remove_var("BLVM_IBD_PEERS");
+        std::env::remove_var("BLVM_IBD_MODE");
+        f();
+        if let Some(v) = peers {
+            std::env::set_var("BLVM_IBD_PEERS", v);
+        } else {
+            std::env::remove_var("BLVM_IBD_PEERS");
+        }
+        if let Some(v) = mode {
+            std::env::set_var("BLVM_IBD_MODE", v);
+        } else {
+            std::env::remove_var("BLVM_IBD_MODE");
+        }
+    }
+
     #[test]
     fn test_parallel_ibd_config_default() {
         let config = ParallelIBDConfig::default();
@@ -2314,6 +2413,60 @@ mod tests {
             config.chunk_size
         );
         assert_eq!(config.max_concurrent_per_peer, 64);
+    }
+
+    #[test]
+    fn empty_blvm_ibd_peers_env_allows_auto_lan() {
+        with_ibd_env_cleared(|| {
+            std::env::set_var("BLVM_IBD_PEERS", "");
+            let peers = vec!["192.168.2.100:8333".to_string(), "8.8.8.8:8333".to_string()];
+            let config = ParallelIBDConfig::resolve_for_session(None, 0, &peers);
+            assert_eq!(config.preferred_peers, vec!["192.168.2.100:8333"]);
+        });
+    }
+
+    #[test]
+    fn collapse_wan_only_to_single_peer() {
+        let peers = vec!["8.8.8.8:8333".to_string(), "1.1.1.1:8333".to_string()];
+        let out = ParallelIBDConfig::collapse_wan_only_download_peers(peers);
+        assert_eq!(out, vec!["8.8.8.8:8333"]);
+    }
+
+    #[test]
+    fn collapse_keeps_multi_peer_when_lan_present() {
+        let peers = vec!["192.168.1.1:8333".to_string(), "8.8.8.8:8333".to_string()];
+        let out = ParallelIBDConfig::collapse_wan_only_download_peers(peers);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn resolve_wan_only_keeps_parallel_mode() {
+        with_ibd_env_cleared(|| {
+            let peers = vec!["8.8.8.8:8333".to_string(), "1.1.1.1:8333".to_string()];
+            let config = ParallelIBDConfig::resolve_for_session(None, 100_000, &peers);
+            assert_eq!(config.mode, "parallel");
+            assert!(config.preferred_peers.is_empty());
+            assert_eq!(config.min_peers_for_ibd(), 2);
+        });
+    }
+
+    #[test]
+    fn resolve_auto_prefers_lan_peers() {
+        with_ibd_env_cleared(|| {
+            let peers = vec!["192.168.2.100:8333".to_string(), "8.8.8.8:8333".to_string()];
+            let config = ParallelIBDConfig::resolve_for_session(None, 100_000, &peers);
+            assert_eq!(config.preferred_peers, vec!["192.168.2.100:8333"]);
+            assert_eq!(config.min_peers_for_ibd(), 1);
+        });
+    }
+
+    #[test]
+    fn resolve_fresh_chain_keeps_parallel_mode() {
+        with_ibd_env_cleared(|| {
+            let peers = vec!["192.168.1.1:8333".to_string()];
+            let config = ParallelIBDConfig::resolve_for_session(None, 0, &peers);
+            assert_eq!(config.mode, "parallel");
+        });
     }
 
     #[test]
