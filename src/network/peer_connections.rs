@@ -239,12 +239,14 @@ impl NetworkManager {
         info!("Discovering LAN sibling nodes...");
         let lan_nodes = lan_discovery::discover_lan_bitcoin_nodes_with_port(port).await;
         let mut lan_connected = 0;
+        let mut connected_lan: Vec<std::net::SocketAddr> = Vec::new();
 
         for lan_addr in &lan_nodes {
             info!("Connecting to LAN sibling node: {}", lan_addr);
             match self.connect_to_peer(*lan_addr).await {
                 Ok(_) => {
                     lan_connected += 1;
+                    connected_lan.push(*lan_addr);
                     self.add_persistent_peer(*lan_addr);
                     info!(
                         "Connected to LAN sibling node: {} (will be prioritized for IBD)",
@@ -261,6 +263,15 @@ impl NetworkManager {
             info!(
                 "Connected to {} LAN sibling node(s) - these will be prioritized for block downloads",
                 lan_connected
+            );
+            let addrs: String = connected_lan
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let best = connected_lan[0];
+            info!(
+                "LAN Bitcoin node(s) at {addrs} — for reliable IBD set BLVM_IBD_PEERS={best} (optional BLVM_IBD_MODE=earliest); see blvm-mainnet-ibd.toml.example"
             );
         }
 

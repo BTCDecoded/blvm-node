@@ -218,7 +218,13 @@ impl SyncCoordinator {
 
         // Check if we have enough peers for parallel IBD.
         // Allow 1 peer when preferred_peers is set (e.g. LAN-only IBD).
-        let config = ParallelIBDConfig::from_config(ibd_config);
+        let mut config = ParallelIBDConfig::from_config(ibd_config);
+        if synced_chain_height == 0 && std::env::var("BLVM_IBD_MODE").is_err() {
+            config.mode = "earliest".to_string();
+            info!(
+                "Fresh chain: using earliest IBD download mode (set BLVM_IBD_MODE to override)"
+            );
+        }
         let min_peers = if config.preferred_peers.is_empty() {
             2
         } else {

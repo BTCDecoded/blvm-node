@@ -907,8 +907,11 @@ impl NodeConfig {
         }
 
         let content = std::fs::read_to_string(path)?;
+        let path_lossy = path.to_string_lossy();
+        let is_toml = path.extension().and_then(|s| s.to_str()) == Some("toml")
+            || path_lossy.ends_with(".toml.example");
 
-        let mut config: NodeConfig = if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+        let mut config: NodeConfig = if is_toml {
             toml::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?
         } else {
