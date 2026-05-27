@@ -232,112 +232,9 @@ jobs:
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
 
-  build-dev:
-    name: Build (dev, shared)
-    needs: setup
-    runs-on: [self-hosted, Linux, X64, builds]
-
-    if: |
-      (github.event_name != 'push' || github.event.head_commit == null ||
-       (!contains(github.event.head_commit.message, '[skip ci]') &&
-        !contains(github.event.head_commit.message, '[ci skip]') &&
-        !contains(github.event.head_commit.message, '[no ci]'))) &&
-      (github.event_name != 'push' || github.event.head_commit == null ||
-       !contains(github.event.head_commit.message, '[skip_tests]')) &&
-      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
-    steps:
-      - name: Show disk usage (top 10 largest dirs)
-        run: |
-          echo "=== df -h ==="
-          df -h /
-          echo ""
-          echo "=== Top 10 largest directories ==="
-          du -x --max-depth=4 / 2>/dev/null \
-            | sort -rh \
-            | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
-            | head -10 \
-            | awk '{printf "%-10s %s\n", $1, $2}'
-          echo ""
-          echo "=== /tmp ==="
-          du -sh /tmp/* 2>/dev/null | sort -rh | head -10
-          du -sh ${{ github.workspace }}/.build/runner-cache 2>/dev/null || true
-          du -sh "${BLVM_RUNNER_DATA_ROOT}" 2>/dev/null || true
-          du -sh ${{ github.workspace }}/.build/gh-blvm-node-build 2>/dev/null || true
-
-      - uses: actions/checkout@v4
-
-      - name: Strip [patch.crates-io] for crates.io-only CI
-        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
-
-      - name: Clean leftover path overrides
-        run: |
-          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
-          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
-          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
-          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
-
-      - name: Isolate CARGO_HOME for this runner
-        run: |
-          mkdir -p "${RUNNER_TEMP}/cargo"
-          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
-
-      - name: Cache
-        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
-        with:
-          operation: bind-env
-          cache-key: ${{ needs.setup.outputs.cache-key }}
-
-      - name: Restore Cargo cache
-        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
-        with:
-          operation: restore
-
-      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
-      - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-
-      - name: Install Rust
-        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
-
-      - name: Compile (lib + bins + test binaries)
-        # Build everything once into a shared /tmp dir keyed by run ID.
-        # test/clippy/docs jobs point CARGO_TARGET_DIR at the same path and
-        # find pre-built artifacts — no recompile.
-        env:
-          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
-        run: cargo test --no-run
-
-      - name: Dump disk usage on failure
-        if: failure()
-        run: |
-          echo "=== df -h ==="
-          df -h /
-          echo ""
-          echo "=== Top 10 largest directories ==="
-          du -x --max-depth=4 / 2>/dev/null \
-            | sort -rh \
-            | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
-            | head -10 \
-            | awk '{printf "%-10s %s\n", $1, $2}'
-          echo ""
-          echo "=== /tmp ==="
-          du -sh /tmp/* 2>/dev/null | sort -rh | head -10
-
-      - name: Save Cargo cache
-        if: always()
-        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
-        with:
-          operation: save
-
-      - name: Prune old runner caches
-        if: always()
-        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
-        with:
-          operation: prune
-
   test:
     name: Test
-    needs: [setup, build-dev]
+    needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
 
     if: |
@@ -403,16 +300,10 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Run tests
-        # build-dev already compiled everything into BLVM_BUILD_TARGET; cargo test
-        # finds the pre-built binaries and only executes them.
-        env:
-          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: cargo test
 
       # `stratum-v2` is not in default features; compile and run library tests with Stratum code enabled.
       - name: Run tests (stratum-v2 feature, lib)
-        env:
-          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: cargo test --features stratum-v2 --lib
 
       - name: Dump disk usage on failure
@@ -460,7 +351,7 @@ jobs:
 
   clippy:
     name: Clippy
-    needs: [setup, build-dev]
+    needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
 
     if: |
@@ -524,8 +415,6 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Run clippy
-        env:
-          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: |
           cargo clippy --lib --bins --examples -- -D warnings
           # Integration tests: keep -D warnings but avoid per-test-crate #![allow] spam.
@@ -713,7 +602,7 @@ jobs:
 
   docs:
     name: Docs
-    needs: [setup, build-dev]
+    needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
 
     if: |
@@ -777,8 +666,6 @@ jobs:
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Docs
-        env:
-          CARGO_TARGET_DIR: ${{ env.BLVM_BUILD_TARGET }}
         run: cargo doc --no-deps --document-private-items
 
   security:
@@ -937,7 +824,6 @@ jobs:
     name: Build
     needs:
       - setup
-      - build-dev
       - test
       - clippy
       - fmt
@@ -953,7 +839,6 @@ jobs:
     if: |
       always() &&
       needs.setup.result == 'success' &&
-      (needs.build-dev.result == 'success' || needs.build-dev.result == 'skipped') &&
       (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -1015,7 +900,7 @@ jobs:
 
   release:
     name: Release
-    needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz]
+    needs: [build, test, clippy, fmt, docs, security, verify, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
 
     permissions:
@@ -1484,7 +1369,7 @@ jobs:
 
   publish-dev:
     name: Publish develop (crates.io)
-    needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz]
+    needs: [build, test, clippy, fmt, docs, security, verify, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
 
     if: |
@@ -1577,7 +1462,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
 
     if: always()
-    needs: [build-dev, test, clippy, verify, fmt, docs, security, fuzz, build]
+    needs: [test, clippy, verify, fmt, docs, security, fuzz, build]
     steps:
       - name: Delete current run target dir
         run: |
