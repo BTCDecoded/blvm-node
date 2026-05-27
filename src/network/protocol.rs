@@ -9,8 +9,11 @@ use crate::network::transport::TransportType;
 use anyhow::Result;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::wire::{
+    deserialize_addr, deserialize_blocktxn, deserialize_cmpctblock, deserialize_getblocktxn,
     deserialize_getdata, deserialize_headers, deserialize_inv, deserialize_notfound,
-    serialize_getdata, serialize_getheaders, serialize_inv, serialize_notfound,
+    deserialize_ping, deserialize_pong, deserialize_tx, serialize_addr, serialize_blocktxn,
+    serialize_cmpctblock, serialize_getblocktxn, serialize_getdata, serialize_getheaders,
+    serialize_inv, serialize_notfound, serialize_ping, serialize_pong, serialize_tx,
 };
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
@@ -21,6 +24,11 @@ pub use blvm_protocol::network::{AddrV2Message, RejectMessage};
 pub const BITCOIN_MAGIC_MAINNET: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 pub const BITCOIN_MAGIC_TESTNET: [u8; 4] = [0x0b, 0x11, 0x09, 0x07];
 pub const BITCOIN_MAGIC_REGTEST: [u8; 4] = [0xfa, 0xbf, 0xb5, 0xda];
+
+/// Active network magic (LE u32). Set once at node startup via `ProtocolParser::set_network_magic`.
+/// Defaults to mainnet magic so that unit tests that do not call `set_network_magic` still work.
+pub(crate) static ACTIVE_MAGIC: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::from_le_bytes(BITCOIN_MAGIC_MAINNET));
 
 /// Maximum protocol message size (32MB)
 pub const MAX_PROTOCOL_MESSAGE_LENGTH: usize = 32 * 1024 * 1024;
@@ -936,6 +944,18 @@ pub struct SpamBreakdown {
 pub struct ProtocolParser;
 
 impl ProtocolParser {
+    /// Set the network magic used for all subsequent `parse_message` / `serialize_message` calls.
+    ///
+    /// Call this once at node startup with `network_params.magic_bytes` from the active
+    /// `BitcoinProtocolEngine`. The default (mainnet) is preserved when not called so that
+    /// unit tests that do not configure a network continue to work.
+    pub fn set_network_magic(magic_bytes: [u8; 4]) {
+        ACTIVE_MAGIC.store(
+            u32::from_le_bytes(magic_bytes),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// Parse a raw message into a protocol message
     /// Orange Paper 10.1.1: ParseMessage, size bounds, checksum rejection
     #[cfg_attr(feature = "protocol-verification", spec_locked("10.1.1"))]
@@ -953,18 +973,19 @@ impl ProtocolParser {
 
         // Parse message header
         let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let expected_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
         debug!(
             "Parsing message: magic=0x{:08x}, total_len={}",
             magic,
             data.len()
         );
 
-        if magic != 0xd9b4bef9 {
+        if magic != expected_magic {
             // Log first 24 bytes as hex for debugging
             let header_hex: String = data.iter().take(24).map(|b| format!("{b:02x}")).collect();
             warn!(
-                "Invalid magic number 0x{:08x}, expected 0xd9b4bef9. Header hex: {}",
-                magic, header_hex
+                "Invalid magic number 0x{:08x}, expected 0x{:08x}. Header hex: {}",
+                magic, expected_magic, header_hex
             );
             return Err(anyhow::anyhow!("Invalid magic number 0x{:08x}", magic));
         }
@@ -1087,7 +1108,11 @@ impl ProtocolParser {
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize notfound: {}", e))?;
                 Ok(ProtocolMessage::NotFound(msg))
             }
-            cmd::TX => Ok(ProtocolMessage::Tx(bincode::deserialize(payload)?)),
+            cmd::TX => {
+                let tx = deserialize_tx(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize tx: {}", e))?;
+                Ok(ProtocolMessage::Tx(TxMessage { transaction: tx }))
+            }
             cmd::FEEFILTER => {
                 // BIP133: 8-byte feerate (satoshis per KB) in little-endian
                 if payload.len() < 8 {
@@ -1097,10 +1122,37 @@ impl ProtocolParser {
                 Ok(ProtocolMessage::FeeFilter(FeeFilterMessage { feerate }))
             }
             // Compact Block Relay (BIP152)
-            cmd::SENDCMPCT => Ok(ProtocolMessage::SendCmpct(bincode::deserialize(payload)?)),
-            cmd::CMPCTBLOCK => Ok(ProtocolMessage::CmpctBlock(bincode::deserialize(payload)?)),
-            cmd::GETBLOCKTXN => Ok(ProtocolMessage::GetBlockTxn(bincode::deserialize(payload)?)),
-            cmd::BLOCKTXN => Ok(ProtocolMessage::BlockTxn(bincode::deserialize(payload)?)),
+            cmd::SENDCMPCT => {
+                let sc = blvm_protocol::wire::deserialize_sendcmpct(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize sendcmpct: {}", e))?;
+                Ok(ProtocolMessage::SendCmpct(SendCmpctMessage {
+                    prefer_cmpct: sc.prefer_cmpct,
+                    version: sc.version,
+                }))
+            }
+            cmd::CMPCTBLOCK => {
+                let wire = deserialize_cmpctblock(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize cmpctblock: {}", e))?;
+                Ok(ProtocolMessage::CmpctBlock(CompactBlockMessage {
+                    compact_block: blvm_protocol::bip152::CompactBlock::from(&wire),
+                }))
+            }
+            cmd::GETBLOCKTXN => {
+                let wire = deserialize_getblocktxn(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getblocktxn: {}", e))?;
+                Ok(ProtocolMessage::GetBlockTxn(GetBlockTxnMessage {
+                    block_hash: wire.block_hash,
+                    indices: wire.indices,
+                }))
+            }
+            cmd::BLOCKTXN => {
+                let wire = deserialize_blocktxn(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize blocktxn: {}", e))?;
+                Ok(ProtocolMessage::BlockTxn(BlockTxnMessage {
+                    block_hash: wire.block_hash,
+                    transactions: wire.transactions,
+                }))
+            }
             // UTXO commitment protocol extensions
             cmd::GETUTXOSET => Ok(ProtocolMessage::GetUTXOSet(bincode::deserialize(payload)?)),
             cmd::UTXOSET => Ok(ProtocolMessage::UTXOSet(bincode::deserialize(payload)?)),
@@ -1144,7 +1196,21 @@ impl ProtocolParser {
             cmd::GETBANLIST => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
             cmd::BANLIST => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
             cmd::GETADDR => Ok(ProtocolMessage::GetAddr),
-            cmd::ADDR => Ok(ProtocolMessage::Addr(bincode::deserialize(payload)?)),
+            cmd::ADDR => {
+                let wire_msg = deserialize_addr(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize addr: {}", e))?;
+                Ok(ProtocolMessage::Addr(AddrMessage {
+                    addresses: wire_msg
+                        .addresses
+                        .into_iter()
+                        .map(|a| NetworkAddress {
+                            services: a.services,
+                            ip: a.ip,
+                            port: a.port,
+                        })
+                        .collect(),
+                }))
+            }
             cmd::ADDRV2 => {
                 let msg = blvm_protocol::wire::deserialize_addrv2(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize addrv2: {e}"))?;
@@ -1227,8 +1293,20 @@ impl ProtocolParser {
                 cmd::REJECT,
                 blvm_protocol::wire::serialize_reject(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
             ),
-            ProtocolMessage::Ping(msg) => (cmd::PING, bincode::serialize(msg)?),
-            ProtocolMessage::Pong(msg) => (cmd::PONG, bincode::serialize(msg)?),
+            ProtocolMessage::Ping(msg) => {
+                let wire = blvm_protocol::network::PingMessage { nonce: msg.nonce };
+                (
+                    cmd::PING,
+                    serialize_ping(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::Pong(msg) => {
+                let wire = blvm_protocol::network::PongMessage { nonce: msg.nonce };
+                (
+                    cmd::PONG,
+                    serialize_pong(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
             ProtocolMessage::GetHeaders(msg) => {
                 // Use proper Bitcoin wire format for getheaders
                 let wire_msg = blvm_protocol::network::GetHeadersMessage {
@@ -1274,13 +1352,53 @@ impl ProtocolParser {
                 cmd::NOTFOUND,
                 serialize_notfound(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
             ),
-            ProtocolMessage::Tx(msg) => (cmd::TX, bincode::serialize(msg)?),
+            ProtocolMessage::Tx(msg) => (
+                cmd::TX,
+                serialize_tx(&msg.transaction).map_err(|e| anyhow::anyhow!("{e}"))?,
+            ),
             ProtocolMessage::FeeFilter(msg) => (cmd::FEEFILTER, msg.feerate.to_le_bytes().to_vec()),
             // Compact Block Relay (BIP152)
-            ProtocolMessage::SendCmpct(msg) => (cmd::SENDCMPCT, bincode::serialize(msg)?),
-            ProtocolMessage::CmpctBlock(msg) => (cmd::CMPCTBLOCK, bincode::serialize(msg)?),
-            ProtocolMessage::GetBlockTxn(msg) => (cmd::GETBLOCKTXN, bincode::serialize(msg)?),
-            ProtocolMessage::BlockTxn(msg) => (cmd::BLOCKTXN, bincode::serialize(msg)?),
+            ProtocolMessage::SendCmpct(msg) => {
+                let wire = blvm_protocol::network::SendCmpctMessage {
+                    prefer_cmpct: msg.prefer_cmpct,
+                    version: msg.version,
+                };
+                (
+                    cmd::SENDCMPCT,
+                    blvm_protocol::wire::serialize_sendcmpct(&wire)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::CmpctBlock(msg) => {
+                let wire =
+                    blvm_protocol::network::CmpctBlockMessage::try_from(msg.compact_block.clone())
+                        .map_err(|e| anyhow::anyhow!("CmpctBlock conversion error: {}", e))?;
+                (
+                    cmd::CMPCTBLOCK,
+                    serialize_cmpctblock(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::GetBlockTxn(msg) => {
+                let wire = blvm_protocol::network::GetBlockTxnMessage {
+                    block_hash: msg.block_hash,
+                    indices: msg.indices.clone(),
+                };
+                (
+                    cmd::GETBLOCKTXN,
+                    serialize_getblocktxn(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::BlockTxn(msg) => {
+                let wire = blvm_protocol::network::BlockTxnMessage {
+                    block_hash: msg.block_hash,
+                    transactions: msg.transactions.clone(),
+                    witnesses: None,
+                };
+                (
+                    cmd::BLOCKTXN,
+                    serialize_blocktxn(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
             // UTXO commitment protocol extensions
             ProtocolMessage::GetUTXOSet(msg) => (cmd::GETUTXOSET, bincode::serialize(msg)?),
             ProtocolMessage::UTXOSet(msg) => (cmd::UTXOSET, bincode::serialize(msg)?),
@@ -1319,7 +1437,23 @@ impl ProtocolParser {
             ProtocolMessage::BanList(msg) => (cmd::BANLIST, bincode::serialize(msg)?),
             // Address relay
             ProtocolMessage::GetAddr => (cmd::GETADDR, vec![]),
-            ProtocolMessage::Addr(msg) => (cmd::ADDR, bincode::serialize(msg)?),
+            ProtocolMessage::Addr(msg) => {
+                let wire = blvm_protocol::network::AddrMessage {
+                    addresses: msg
+                        .addresses
+                        .iter()
+                        .map(|a| blvm_protocol::network::NetworkAddress {
+                            services: a.services,
+                            ip: a.ip,
+                            port: a.port,
+                        })
+                        .collect(),
+                };
+                (
+                    cmd::ADDR,
+                    serialize_addr(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
             ProtocolMessage::AddrV2(msg) => (
                 cmd::ADDRV2,
                 blvm_protocol::wire::serialize_addrv2(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
@@ -1349,8 +1483,9 @@ impl ProtocolParser {
 
         let mut message = Vec::new();
 
-        // Magic number
-        message.extend_from_slice(&0xd9b4bef9u32.to_le_bytes());
+        // Magic number — use the active network magic set at startup
+        let active_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+        message.extend_from_slice(&active_magic.to_le_bytes());
 
         // Command (12 bytes, null-padded)
         let mut command_bytes = [0u8; 12];

@@ -559,4 +559,18 @@ impl Storage {
             .map(|pm| pm.is_enabled())
             .unwrap_or(false)
     }
+
+    /// Set the active network on the pruning manager so UTXO reconstruction
+    /// uses the correct consensus rules. Must be called before the Storage is
+    /// shared (i.e. before wrapping in Arc).
+    pub fn set_pruning_network(&mut self, network: blvm_protocol::types::Network) {
+        if let Some(pm) = self.pruning_manager.take() {
+            if let Ok(mut inner) = Arc::try_unwrap(pm) {
+                inner.network = network;
+                self.pruning_manager = Some(Arc::new(inner));
+            } else {
+                warn!("set_pruning_network: PruningManager already shared; network not updated");
+            }
+        }
+    }
 }

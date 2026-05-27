@@ -14,6 +14,7 @@ use crate::storage::disk_utxo::{
 };
 use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
 use crate::storage::Storage;
+use crate::utils::time::current_timestamp;
 use anyhow::Result;
 use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::{
@@ -1835,10 +1836,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             recent_snap_buf.extend(recent_headers_buf.iter().cloned());
             let recent_snap = std::mem::replace(&mut recent_snap_buf, Vec::with_capacity(12));
             // Per-job wall clock for header validation (reject future blocks). Cheap vs ECDSA work.
-            let cached_network_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let cached_network_time = current_timestamp();
 
             // Speculative additions (all outputs block h creates) were precomputed on the
             // prefetch worker pool — see `prefetch::build_spec_adds`. Here we only do a cheap
@@ -1938,7 +1936,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
 
         // === COLLECT PHASE: wait for the next in-order result ===
-        let next_process_h = in_flight.front().unwrap().height;
+        // SAFETY: in_flight is non-empty — the is_empty() guard above would have continued.
+        let next_process_h = in_flight
+            .front()
+            .ok_or_else(|| anyhow::anyhow!("IBD coordinator: in_flight empty at collect phase"))?
+            .height;
         // Drain any results that arrived out of order.
         while let Ok(vres) = valres_rx.try_recv() {
             // Early spec_adds drop: once worker_cache_put_protected has run (on the worker,
@@ -1980,8 +1982,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
 
         // === EXTRACT PER-BLOCK VARIABLES FROM IN-FLIGHT ENTRY ===
-        let mut entry = in_flight.pop_front().unwrap();
-        let vres = pending_results.remove(&next_process_h).unwrap();
+        let mut entry = in_flight.pop_front().ok_or_else(|| {
+            anyhow::anyhow!(
+                "IBD coordinator: in_flight drained unexpectedly at height {next_process_h}"
+            )
+        })?;
+        let vres = pending_results.remove(&next_process_h).ok_or_else(|| {
+            anyhow::anyhow!("IBD coordinator: result missing for height {next_process_h}")
+        })?;
         // Safety-net: if the early-drop (on result reception) missed an entry, clean it up now.
         // With the early drop path, this should rarely fire (entry is normally already gone).
         while spec_adds

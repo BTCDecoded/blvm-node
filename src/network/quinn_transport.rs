@@ -15,6 +15,60 @@ use std::net::SocketAddr;
 #[cfg(feature = "quinn")]
 use tracing::{debug, info};
 
+/// Certificate verifier that accepts any server certificate.
+///
+/// SECURITY: This bypasses TLS chain validation. It is intentional for the BLVM P2P
+/// transport where peers use ephemeral self-signed certificates. Trust is established
+/// at the application layer via the Bitcoin P2P version handshake and peer scoring,
+/// not via a PKI chain. Replace with certificate-pinning once peer identity is stable.
+#[cfg(feature = "quinn")]
+struct NoServerCertVerification;
+
+#[cfg(feature = "quinn")]
+impl quinn::rustls::client::danger::ServerCertVerifier for NoServerCertVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &quinn::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[quinn::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &quinn::rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: quinn::rustls::pki_types::UnixTime,
+    ) -> std::result::Result<quinn::rustls::client::danger::ServerCertVerified, quinn::rustls::Error>
+    {
+        Ok(quinn::rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &quinn::rustls::pki_types::CertificateDer<'_>,
+        _dss: &quinn::rustls::DigitallySignedStruct,
+    ) -> std::result::Result<
+        quinn::rustls::client::danger::HandshakeSignatureValid,
+        quinn::rustls::Error,
+    > {
+        Ok(quinn::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &quinn::rustls::pki_types::CertificateDer<'_>,
+        _dss: &quinn::rustls::DigitallySignedStruct,
+    ) -> std::result::Result<
+        quinn::rustls::client::danger::HandshakeSignatureValid,
+        quinn::rustls::Error,
+    > {
+        Ok(quinn::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<quinn::rustls::SignatureScheme> {
+        quinn::rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 /// Quinn transport implementation
 ///
 /// Implements the Transport trait for direct QUIC connections using Quinn.
@@ -94,13 +148,29 @@ impl Transport for QuinnTransport {
             }
         };
 
-        // Create a new endpoint for this connection
-        // For now, use default client endpoint (will need proper cert verification later)
-        let endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
+        // SECURITY: BLVM Quinn peers use ephemeral self-signed certificates (no shared CA).
+        // We cannot use the system root store for verification. Instead we skip TLS chain
+        // verification and rely on the Bitcoin-level P2P authentication (version handshake,
+        // peer scoring, network magic) to establish trust.
+        //
+        // TODO: Replace with certificate-pinning / TOFU once peer identity management is
+        //       implemented (track peer cert fingerprint on first connection, reject changes).
+        let crypto = {
+            use quinn::rustls;
+            let mut tls = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(std::sync::Arc::new(NoServerCertVerification))
+                .with_no_client_auth();
+            tls.alpn_protocols = vec![b"blvm-p2p".to_vec()];
+            quinn::crypto::rustls::QuicClientConfig::try_from(tls)
+                .map_err(|e| anyhow::anyhow!("Failed to build Quinn TLS config: {e}"))?
+        };
+        let client_config = quinn::ClientConfig::new(std::sync::Arc::new(crypto));
+        let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
+        endpoint.set_default_client_config(client_config);
 
-        // Connect to server (use SNI or IP)
-        let server_name = socket_addr.ip().to_string();
-        let conn = endpoint.connect(socket_addr, &server_name)?.await?;
+        let server_name = "blvm-peer";
+        let conn = endpoint.connect(socket_addr, server_name)?.await?;
 
         Ok(QuinnConnection {
             conn,

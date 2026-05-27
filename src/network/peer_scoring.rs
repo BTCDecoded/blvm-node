@@ -164,7 +164,7 @@ impl PeerScorer {
 
     /// Record bytes received from a peer
     pub fn record_bytes(&self, peer: SocketAddr, bytes: u64) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
         let entry = stats.entry(peer).or_insert_with(|| {
             let mut s = PeerStats::default();
             s.is_lan = is_lan_peer(&peer);
@@ -178,7 +178,7 @@ impl PeerScorer {
 
     /// Record a block received from a peer
     pub fn record_block(&self, peer: SocketAddr, block_size: u64, latency_ms: f64) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
         let entry = stats.entry(peer).or_insert_with(|| {
             let mut s = PeerStats::default();
             s.is_lan = is_lan_peer(&peer);
@@ -201,7 +201,7 @@ impl PeerScorer {
 
     /// Record a latency sample (e.g. from header sync) — seeds peer ordering before block downloads.
     pub fn record_latency_sample(&self, peer: SocketAddr, latency_ms: f64) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
         let entry = stats.entry(peer).or_insert_with(|| {
             let mut s = PeerStats::default();
             s.is_lan = is_lan_peer(&peer);
@@ -215,7 +215,7 @@ impl PeerScorer {
 
     /// Record a failure/timeout for a peer
     pub fn record_failure(&self, peer: SocketAddr) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
         let entry = stats.entry(peer).or_insert_with(|| {
             let mut s = PeerStats::default();
             s.is_lan = is_lan_peer(&peer);
@@ -279,12 +279,16 @@ impl PeerScorer {
 
     /// Get stats for a peer
     pub fn get_stats(&self, peer: &SocketAddr) -> Option<PeerStats> {
-        self.stats.read().unwrap().get(peer).cloned()
+        self.stats
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(peer)
+            .cloned()
     }
 
     /// Get all peer scores sorted by score (highest first)
     pub fn get_sorted_peers(&self) -> Vec<(SocketAddr, f64)> {
-        let stats = self.stats.read().unwrap();
+        let stats = self.stats.read().unwrap_or_else(|e| e.into_inner());
         let mut peers: Vec<_> = stats.iter().map(|(addr, s)| (*addr, s.score)).collect();
         peers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         peers
@@ -303,7 +307,7 @@ impl PeerScorer {
             return available.to_vec();
         }
 
-        let stats = self.stats.read().unwrap();
+        let stats = self.stats.read().unwrap_or_else(|e| e.into_inner());
 
         // Get scores for available peers
         let mut scored: Vec<_> = available
@@ -332,7 +336,7 @@ impl PeerScorer {
 
     /// Get summary statistics for logging
     pub fn summary(&self) -> String {
-        let stats = self.stats.read().unwrap();
+        let stats = self.stats.read().unwrap_or_else(|e| e.into_inner());
         if stats.is_empty() {
             return "No peer stats yet".to_string();
         }

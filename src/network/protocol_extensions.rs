@@ -86,13 +86,8 @@ pub async fn handle_get_utxo_set(
         }
     };
 
-    // Generate request_id (use hash of message as ID since GetUTXOSetMessage doesn't have one)
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    message.height.hash(&mut hasher);
-    message.block_hash.hash(&mut hasher);
-    let request_id = hasher.finish();
+    // Generate a cryptographically random request_id to avoid collisions in the pending map.
+    let request_id: u64 = rand::random();
 
     Ok(UTXOSetMessage {
         request_id, // Generate ID from message content

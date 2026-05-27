@@ -203,7 +203,7 @@ impl WalBufferedDb {
             .truncate(true) // Start fresh after replay
             .open(&wal_path)
             .context("Failed to open WAL file")?;
-        *db.wal_file.lock().unwrap() = Some(BufWriter::new(wal_file));
+        *db.wal_file.lock().unwrap_or_else(|e| e.into_inner()) = Some(BufWriter::new(wal_file));
 
         Ok(db)
     }
@@ -279,13 +279,13 @@ impl WalBufferedDb {
         self.write_wal(&op)?;
 
         // Add to in-memory buffer
-        let mut buffer = self.buffer.write().unwrap();
+        let mut buffer = self.buffer.write().unwrap_or_else(|e| e.into_inner());
         buffer
             .entry(tree_name.to_string())
             .or_default()
             .insert(key.to_vec(), Some(value.to_vec()));
 
-        *self.buffered_ops.lock().unwrap() += 1;
+        *self.buffered_ops.lock().unwrap_or_else(|e| e.into_inner()) += 1;
 
         // Check if we should flush
         self.maybe_flush()?;
@@ -303,13 +303,13 @@ impl WalBufferedDb {
         self.write_wal(&op)?;
 
         // Add to in-memory buffer (None = delete)
-        let mut buffer = self.buffer.write().unwrap();
+        let mut buffer = self.buffer.write().unwrap_or_else(|e| e.into_inner());
         buffer
             .entry(tree_name.to_string())
             .or_default()
             .insert(key.to_vec(), None);
 
-        *self.buffered_ops.lock().unwrap() += 1;
+        *self.buffered_ops.lock().unwrap_or_else(|e| e.into_inner()) += 1;
 
         // Check if we should flush
         self.maybe_flush()?;
@@ -320,7 +320,7 @@ impl WalBufferedDb {
     /// Get a value, checking buffer first then underlying DB
     pub fn buffered_get(&self, tree_name: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         // Check buffer first
-        let buffer = self.buffer.read().unwrap();
+        let buffer = self.buffer.read().unwrap_or_else(|e| e.into_inner());
         if let Some(tree_buffer) = buffer.get(tree_name) {
             if let Some(value_opt) = tree_buffer.get(key) {
                 // Found in buffer: Some(value) = exists, None = deleted
@@ -336,7 +336,7 @@ impl WalBufferedDb {
 
     /// Write operation to WAL file
     fn write_wal(&self, op: &WalOp) -> Result<()> {
-        let mut wal_file_guard = self.wal_file.lock().unwrap();
+        let mut wal_file_guard = self.wal_file.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref mut wal_file) = *wal_file_guard {
             let data = op.serialize();
             wal_file.write_all(&data)?;
@@ -349,15 +349,24 @@ impl WalBufferedDb {
 
     /// Mark that we've processed a block
     pub fn block_processed(&self, height: u64) -> Result<()> {
-        *self.current_height.lock().unwrap() = height;
+        *self
+            .current_height
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = height;
         self.maybe_flush()
     }
 
     /// Check if we should flush and do so if needed
     fn maybe_flush(&self) -> Result<()> {
-        let current = *self.current_height.lock().unwrap();
-        let last_flush = *self.last_flush_height.lock().unwrap();
-        let ops = *self.buffered_ops.lock().unwrap();
+        let current = *self
+            .current_height
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let last_flush = *self
+            .last_flush_height
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ops = *self.buffered_ops.lock().unwrap_or_else(|e| e.into_inner());
 
         let should_flush = (current - last_flush >= self.config.flush_interval_blocks)
             || (ops >= self.config.max_buffered_ops);
@@ -371,8 +380,8 @@ impl WalBufferedDb {
 
     /// Flush all buffered operations to the database
     pub fn flush(&self) -> Result<()> {
-        let mut buffer = self.buffer.write().unwrap();
-        let ops_count = *self.buffered_ops.lock().unwrap();
+        let mut buffer = self.buffer.write().unwrap_or_else(|e| e.into_inner());
+        let ops_count = *self.buffered_ops.lock().unwrap_or_else(|e| e.into_inner());
 
         if ops_count == 0 {
             return Ok(());
@@ -405,7 +414,7 @@ impl WalBufferedDb {
 
         // Truncate WAL file (all operations now committed)
         {
-            let mut wal_file_guard = self.wal_file.lock().unwrap();
+            let mut wal_file_guard = self.wal_file.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut wal_file) = *wal_file_guard {
                 wal_file.flush()?;
             }
@@ -419,8 +428,14 @@ impl WalBufferedDb {
         }
 
         // Update state
-        *self.buffered_ops.lock().unwrap() = 0;
-        *self.last_flush_height.lock().unwrap() = *self.current_height.lock().unwrap();
+        *self.buffered_ops.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+        *self
+            .last_flush_height
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = *self
+            .current_height
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let elapsed = start.elapsed();
         info!(
@@ -440,9 +455,15 @@ impl WalBufferedDb {
 
     /// Get current buffer statistics
     pub fn stats(&self) -> (usize, u64, u64) {
-        let ops = *self.buffered_ops.lock().unwrap();
-        let current = *self.current_height.lock().unwrap();
-        let last_flush = *self.last_flush_height.lock().unwrap();
+        let ops = *self.buffered_ops.lock().unwrap_or_else(|e| e.into_inner());
+        let current = *self
+            .current_height
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let last_flush = *self
+            .last_flush_height
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (ops, current, last_flush)
     }
 }
@@ -498,30 +519,45 @@ mod tests {
 
     impl Tree for MockTree {
         fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.db.lock().unwrap().insert(key.to_vec(), value.to_vec());
+            self.db
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key.to_vec(), value.to_vec());
             Ok(())
         }
 
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            Ok(self.db.lock().unwrap().get(key).cloned())
+            Ok(self
+                .db
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(key)
+                .cloned())
         }
 
         fn remove(&self, key: &[u8]) -> Result<()> {
-            self.db.lock().unwrap().remove(key);
+            self.db
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(key);
             Ok(())
         }
 
         fn contains_key(&self, key: &[u8]) -> Result<bool> {
-            Ok(self.db.lock().unwrap().contains_key(key))
+            Ok(self
+                .db
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(key))
         }
 
         fn clear(&self) -> Result<()> {
-            self.db.lock().unwrap().clear();
+            self.db.lock().unwrap_or_else(|e| e.into_inner()).clear();
             Ok(())
         }
 
         fn len(&self) -> Result<usize> {
-            Ok(self.db.lock().unwrap().len())
+            Ok(self.db.lock().unwrap_or_else(|e| e.into_inner()).len())
         }
 
         fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
@@ -551,7 +587,7 @@ mod tests {
         }
 
         fn commit(self: Box<Self>) -> Result<()> {
-            let mut db = self.db.lock().unwrap();
+            let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
             for (key, value) in self.ops {
                 match value {
                     Some(v) => db.insert(key, v),

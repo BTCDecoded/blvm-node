@@ -6,7 +6,7 @@ use crate::utils::current_timestamp;
 use anyhow::Result;
 use constant_time_eq::constant_time_eq;
 use hyper::HeaderMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -138,6 +138,9 @@ pub struct RpcAuthManager {
     method_rate_limiters: Arc<Mutex<HashMap<String, RpcRateLimiter>>>,
     /// Authentication failure tracker for DoS protection
     auth_failure_tracker: AuthFailureTracker,
+    /// Tokens granted admin (destructive-method) access.
+    /// When empty, all authenticated tokens are treated as admin (backward-compatible).
+    admin_tokens: Arc<Mutex<HashSet<String>>>,
 }
 
 impl RpcAuthManager {
@@ -153,6 +156,7 @@ impl RpcAuthManager {
             method_rate_limits: Arc::new(Mutex::new(HashMap::new())),
             method_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             auth_failure_tracker: AuthFailureTracker::new(),
+            admin_tokens: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -168,6 +172,7 @@ impl RpcAuthManager {
             method_rate_limits: Arc::new(Mutex::new(HashMap::new())),
             method_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             auth_failure_tracker: AuthFailureTracker::new(),
+            admin_tokens: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -191,6 +196,33 @@ impl RpcAuthManager {
         Ok(())
     }
 
+    /// Add a token with admin (destructive-method) privileges.
+    /// Also registers it as a valid auth token.
+    pub async fn add_admin_token(&self, token: String) -> Result<()> {
+        self.add_token(token.clone()).await?;
+        self.admin_tokens.lock().await.insert(token);
+        Ok(())
+    }
+
+    /// Returns `true` when `user_id` may call admin-only RPC methods.
+    ///
+    /// The rule: if no admin tokens have been configured (empty set), every authenticated
+    /// user is treated as admin for backward compatibility. Once at least one admin token
+    /// is configured, only explicitly-designated admin tokens are granted admin access.
+    pub async fn is_user_admin(&self, user_id: &UserId) -> bool {
+        let admins = self.admin_tokens.lock().await;
+        if admins.is_empty() {
+            // Backward-compat: all authenticated tokens are admin when no RBAC configured.
+            return true;
+        }
+        if let UserId::Token(ref tok) = user_id {
+            admins.contains(tok.as_str())
+        } else {
+            // Certificate-based users are not admin unless explicitly listed.
+            false
+        }
+    }
+
     /// Remove an authentication token
     pub async fn remove_token(&self, token: &str) -> Result<()> {
         let mut tokens = self.valid_tokens.lock().await;
@@ -198,6 +230,7 @@ impl RpcAuthManager {
             let mut limiters = self.rate_limiters.lock().await;
             limiters.remove(&user_id);
         }
+        self.admin_tokens.lock().await.remove(token);
         Ok(())
     }
 
@@ -314,38 +347,42 @@ impl RpcAuthManager {
             }
         }
 
-        // Try certificate-based authentication (from TLS connection)
-        // Note: This would need to be integrated with TLS connection handling
-        // For now, we'll check a custom header that could be set by TLS middleware
-        if let Some(cert_header) = headers.get("x-client-cert-fingerprint") {
-            if let Ok(fingerprint) = cert_header.to_str() {
-                let certs = self.valid_certificates.lock().await;
+        // Certificate-based authentication via TLS-proxy header.
+        // SECURITY: Only trust this header when the direct TCP connection is from the loopback
+        // interface. A remote peer could forge the header otherwise — this guard ensures only
+        // a local TLS-terminating proxy (127.0.0.1 / ::1) can inject the fingerprint.
+        let is_loopback = client_addr.ip().is_loopback();
+        if is_loopback {
+            if let Some(cert_header) = headers.get("x-client-cert-fingerprint") {
+                if let Ok(fingerprint) = cert_header.to_str() {
+                    let certs = self.valid_certificates.lock().await;
 
-                // Use constant-time comparison for certificate fingerprints
-                let mut matched_user_id = None;
-                for (stored_fingerprint, user_id) in certs.iter() {
-                    if constant_time_eq(stored_fingerprint.as_bytes(), fingerprint.as_bytes()) {
-                        matched_user_id = Some(user_id.clone());
-                        break;
+                    // Use constant-time comparison for certificate fingerprints
+                    let mut matched_user_id = None;
+                    for (stored_fingerprint, user_id) in certs.iter() {
+                        if constant_time_eq(stored_fingerprint.as_bytes(), fingerprint.as_bytes()) {
+                            matched_user_id = Some(user_id.clone());
+                            break;
+                        }
                     }
-                }
 
-                if let Some(user_id) = matched_user_id {
-                    debug!("Certificate authentication successful for {}", client_addr);
-                    SecurityEvent::AuthSuccess {
-                        user_id: format!("{user_id:?}"),
-                        client_addr,
-                        auth_method: "certificate".to_string(),
+                    if let Some(user_id) = matched_user_id {
+                        debug!("Certificate authentication successful for {}", client_addr);
+                        SecurityEvent::AuthSuccess {
+                            user_id: format!("{user_id:?}"),
+                            client_addr,
+                            auth_method: "certificate".to_string(),
+                        }
+                        .log();
+                        return AuthResult {
+                            user_id: Some(user_id),
+                            requires_auth: self.auth_required,
+                            error: None,
+                        };
                     }
-                    .log();
-                    return AuthResult {
-                        user_id: Some(user_id),
-                        requires_auth: self.auth_required,
-                        error: None,
-                    };
                 }
             }
-        }
+        } // end is_loopback guard
 
         // If authentication is required but not provided, reject
         if self.auth_required {

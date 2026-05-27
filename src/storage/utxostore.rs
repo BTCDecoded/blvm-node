@@ -465,7 +465,7 @@ impl CachedUtxoStore {
     pub fn get(&self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
         // Check cache first
         {
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
             if let Some(utxo) = cache.get(outpoint) {
                 self.stats
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // Cache hit
@@ -476,7 +476,7 @@ impl CachedUtxoStore {
         // Cache miss - fetch from disk
         if let Some(utxo) = self.inner.get_utxo(outpoint)? {
             // Add to cache
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
             cache.put(*outpoint, utxo.clone());
             return Ok(Some(utxo));
         }
@@ -488,13 +488,13 @@ impl CachedUtxoStore {
     pub fn add(&self, outpoint: OutPoint, utxo: UTXO) -> Result<()> {
         // Add to cache
         {
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
             cache.put(outpoint, utxo.clone());
         }
 
         // Add to pending writes
         {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             pending.push((outpoint, Some(utxo)));
         }
 
@@ -505,7 +505,7 @@ impl CachedUtxoStore {
     pub fn spend(&self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
         // Remove from cache
         let utxo = {
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
             cache.pop(outpoint)
         };
 
@@ -517,7 +517,7 @@ impl CachedUtxoStore {
 
         // Add delete to pending writes
         {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             pending.push((*outpoint, None));
         }
 
@@ -532,7 +532,7 @@ impl CachedUtxoStore {
         use crate::storage::database::BatchWriter;
 
         let pending_ops = {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *pending)
         };
 
@@ -567,7 +567,7 @@ impl CachedUtxoStore {
 
     /// Get number of pending writes
     pub fn pending_count(&self) -> usize {
-        self.pending.lock().unwrap().len()
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Get cache statistics (hit count since creation)

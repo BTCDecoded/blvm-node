@@ -25,7 +25,39 @@ use crate::module::rpc::handler::ModuleRpcHandler;
 use crate::network::dos_protection::ConnectionRateLimiter;
 use crate::node::metrics::MetricsCollector;
 use crate::utils::{RPC_CLIENT_READ_TIMEOUT, RPC_SERVER_STARTUP_WAIT};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+/// Methods that require admin-level access (destructive or privileged operations).
+/// Authenticated but non-admin callers receive HTTP 403.
+fn admin_rpc_methods() -> &'static HashSet<&'static str> {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| {
+        HashSet::from([
+            // Node control
+            "stop",
+            "loadmodule",
+            "unloadmodule",
+            "reloadmodule",
+            "runmodulecli",
+            "logging",
+            // Blockchain manipulation
+            "invalidateblock",
+            "reconsiderblock",
+            "pruneblockchain",
+            "preciousblock",
+            // Network manipulation
+            "addnode",
+            "disconnectnode",
+            "setban",
+            "clearbanned",
+            "setnetworkactive",
+            // Mining (template generation is privileged)
+            "getblocktemplate",
+            "submitblock",
+        ])
+    })
+}
 
 /// Default maximum request body size (1MB) when not configured.
 /// Matches config rpc.max_request_size_bytes default.
@@ -979,6 +1011,20 @@ impl RpcServer {
                     status: StatusCode::TOO_MANY_REQUESTS,
                     message: format!("Method '{method_name}' rate limit exceeded"),
                 };
+            }
+
+            // RBAC: admin-only methods require an admin token.
+            if admin_rpc_methods().contains(method_name.as_str()) {
+                let caller_is_admin = match auth_result.as_ref().and_then(|r| r.user_id.as_ref()) {
+                    Some(uid) => auth_manager.is_user_admin(uid).await,
+                    None => false,
+                };
+                if !caller_is_admin {
+                    return DispatchJsonRpcPostOutcome::Error {
+                        status: StatusCode::FORBIDDEN,
+                        message: format!("Method '{method_name}' requires admin privileges"),
+                    };
+                }
             }
         }
 

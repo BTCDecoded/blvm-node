@@ -28,4 +28,4 @@ This page records **why** each advisory remains suppressed and how to **re-verif
 
 **Owner:** Bitcoin Commons maintainers / release sheriffs for **`blvm-node`**.
 
-See also: **`docs/CONSENSUS_SECURITY_HARDENING_PLAN.md`** on the multi-repo workspace root (Track **B** / **B′**).
+Track **B** / **B′** (temporary **`cargo audit`** policy and suppressions narrative) stays with security maintainers; this repo keeps reasons in **`Cargo.toml`** comments and this table — use **`cargo tree`** and upstream advisories when re-verifying suppressions.

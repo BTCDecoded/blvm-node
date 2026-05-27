@@ -26,6 +26,7 @@ jobs:
   coverage:
     name: Coverage Report
     runs-on: [self-hosted, Linux, X64, builds]
+
     # Only run if manually triggered with run_coverage=true
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_coverage == true
     

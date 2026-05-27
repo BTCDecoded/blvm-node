@@ -350,6 +350,23 @@ pub(crate) async fn start_iroh_listener(
                         continue;
                     }
 
+                    // Per-node-ID rate limit for Iroh (no real IP; derive a synthetic
+                    // IP from the leading key bytes — same approach as the placeholder addr).
+                    let iroh_synthetic_ip: std::net::IpAddr = match &iroh_addr {
+                        TransportAddr::Iroh(key) if key.len() >= 4 => std::net::IpAddr::V4(
+                            std::net::Ipv4Addr::new(key[0], key[1], key[2], key[3]),
+                        ),
+                        _ => std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    };
+                    if !dos_protection.check_connection(iroh_synthetic_ip).await {
+                        warn!(
+                            "Iroh connection rate limit exceeded for node {:?}",
+                            iroh_addr
+                        );
+                        drop(conn);
+                        continue;
+                    }
+
                     let _ = peer_tx.send(NetworkMessage::PeerConnected(iroh_addr.clone()));
 
                     let peer_tx_clone = peer_tx.clone();

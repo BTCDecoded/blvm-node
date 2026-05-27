@@ -19,6 +19,7 @@ jobs:
   cleanup:
     name: Cleanup self-hosted runner disk
     runs-on: [self-hosted, Linux, X64, builds]
+
     env:
       # Match ci.yml: optional large-disk path via repo/org variable BLVM_RUNNER_BUILD_ROOT.
       BLVM_RUNNER_DATA_ROOT: ${{ vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace) }}

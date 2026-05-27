@@ -20,16 +20,22 @@ This document describes formal verification of Bitcoin P2P protocol message pars
 
 ## Running Verification
 
-### blvm-spec-lock (Dandelion)
+### blvm-spec-lock (Dandelion-focused run)
+
+With **blvm-spec** as a sibling directory (`../blvm-spec`, same layout as CI’s **`setup-blvm-spec`**), you can narrow verification to §**10.6** (optional; omit **`--section`** to verify all **`#[spec_locked]`** sites including the merged **`F_*`** registry when **`--spec-path`** is set):
 
 ```bash
 cd blvm-node
-cargo spec-lock verify --crate-path . --section 10.6
+export SPEC_LOCK_STRICT=1
+cargo spec-lock verify --crate-path . \
+  --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md \
+  --section 10.6 \
+  --timeout 120
 ```
 
 ### CI
 
-Formal verification runs via blvm-spec-lock in CI. See `.github/workflows/ci.yml` for spec-lock verification steps.
+Formal verification runs via **blvm-spec-lock** in **`.github/workflows/ci.yml`** (**verify** job): installs **`cargo-spec-lock`** from crates.io, runs **`verify`** on the published **blvm-consensus** sources and again on **blvm-node** (merged **`F_*`** gate + Rust rows; **`formula_registry`** in **`spec_lock_*_verify.json`**). Report shape and **`jq`**: **`blvm-spec-lock`** **`docs/VERIFY_JSON.md`**.
 
 ## References
 

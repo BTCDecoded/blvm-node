@@ -208,9 +208,10 @@ impl ProtocolAdapter {
         // Build message
         let mut message = Vec::new();
 
-        // Magic bytes (mainnet)
-        // Mainnet: wire order f9 be b4 d9 == u32 LE value 0xd9b4bef9 (must match ProtocolParser)
-        message.extend_from_slice(&0xd9b4bef9u32.to_le_bytes());
+        // Magic bytes — must match ProtocolParser's active network magic
+        use crate::network::protocol::ACTIVE_MAGIC;
+        let active_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+        message.extend_from_slice(&active_magic.to_le_bytes());
 
         // Command
         message.extend_from_slice(&command_bytes);

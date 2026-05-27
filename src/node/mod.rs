@@ -105,6 +105,10 @@ impl Node {
         // Initialize components
         let protocol_version = protocol_version.unwrap_or(ProtocolVersion::Regtest);
         let protocol = BitcoinProtocolEngine::new(protocol_version)?;
+        // Set the P2P network magic before any protocol parser calls
+        crate::network::protocol::ProtocolParser::set_network_magic(
+            protocol.get_network_params().magic_bytes,
+        );
         let protocol_arc = Arc::new(protocol);
 
         // Create storage with configuration
@@ -118,7 +122,7 @@ impl Node {
         };
         info!("[NODE_INIT] Using backend: {:?}", backend);
         info!("[NODE_INIT] Calling Storage::with_backend_pruning_and_indexing()...");
-        let storage = Storage::with_backend_pruning_and_indexing(
+        let mut storage = Storage::with_backend_pruning_and_indexing(
             data_dir,
             backend,
             pruning_config,
@@ -126,6 +130,12 @@ impl Node {
             storage_config,
         )?;
         info!("[NODE_INIT] Storage created successfully");
+        let pruning_network = match protocol_version {
+            ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
+            ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
+            ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
+        };
+        storage.set_pruning_network(pruning_network);
         let storage_arc = Arc::new(storage);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
 

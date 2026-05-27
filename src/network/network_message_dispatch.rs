@@ -267,38 +267,60 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
         TransportAddr::Iroh(_) => None,
     };
 
+    // Track per-IP connection count for Sybil monitoring (TCP/QUIC only).
     if let Some(peer_socket) = socket_addr {
-        // Track per-IP connection count for Sybil monitoring.
-        {
-            let mut per_ip = nm.connections_per_ip().lock().await;
-            *per_ip.entry(peer_socket.ip()).or_insert(0) += 1;
-        }
+        let mut per_ip = nm.connections_per_ip().lock().await;
+        *per_ip.entry(peer_socket.ip()).or_insert(0) += 1;
+    }
 
+    {
+        // Send the Bitcoin P2P Version handshake to ALL transports (including Iroh).
+        // Iroh peers that speak Bitcoin-over-Iroh must still perform the version handshake;
+        // skipping it allows unauthenticated peers to skip protocol negotiation entirely.
         let start_height = nm
             .storage()
             .as_ref()
             .and_then(|s| s.chain().get_height().ok().flatten())
             .unwrap_or(0) as i32;
 
-        let peer_ip = match peer_socket.ip() {
-            std::net::IpAddr::V4(ip) => {
-                let mut addr_bytes = [0u8; 16];
-                addr_bytes[10] = 0xff;
-                addr_bytes[11] = 0xff;
-                addr_bytes[12..16].copy_from_slice(&ip.octets());
-                addr_bytes
-            }
-            std::net::IpAddr::V6(ip) => ip.octets(),
-        };
-        let addr_recv = NetworkAddress {
-            services: 0,
-            ip: peer_ip,
-            port: peer_socket.port(),
-        };
-        let addr_from = NetworkAddress {
-            services: 0,
-            ip: [0u8; 16],
-            port: 0,
+        let (addr_recv, addr_from) = if let Some(peer_socket) = socket_addr {
+            let peer_ip = match peer_socket.ip() {
+                std::net::IpAddr::V4(ip) => {
+                    let mut addr_bytes = [0u8; 16];
+                    addr_bytes[10] = 0xff;
+                    addr_bytes[11] = 0xff;
+                    addr_bytes[12..16].copy_from_slice(&ip.octets());
+                    addr_bytes
+                }
+                std::net::IpAddr::V6(ip) => ip.octets(),
+            };
+            (
+                NetworkAddress {
+                    services: 0,
+                    ip: peer_ip,
+                    port: peer_socket.port(),
+                },
+                NetworkAddress {
+                    services: 0,
+                    ip: [0u8; 16],
+                    port: 0,
+                },
+            )
+        } else {
+            // Non-TCP transport (e.g. Iroh): use zeroed addresses; the version
+            // handshake still conveys protocol version and services.
+            (
+                NetworkAddress {
+                    services: 0,
+                    ip: [0u8; 16],
+                    port: 0,
+                },
+                NetworkAddress {
+                    services: 0,
+                    ip: [0u8; 16],
+                    port: 0,
+                },
+            )
         };
 
         let version_msg = nm.create_version_message(

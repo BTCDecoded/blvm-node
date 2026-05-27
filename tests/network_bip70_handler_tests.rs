@@ -59,6 +59,9 @@ async fn test_handle_get_payment_request_not_found() {
 
 #[tokio::test]
 async fn test_handle_get_payment_request_found() {
+    // The bip70_handler rejects unsigned PaymentRequests (security: no unsigned P2P BIP70 payloads).
+    // PaymentProcessor::create_payment_request with no merchant key produces an unsigned request.
+    // Verify the handler correctly rejects it rather than forwarding an unsigned payload.
     let config = PaymentConfig::default();
     let processor = Arc::new(PaymentProcessor::new(config).expect("payment processor"));
 
@@ -68,7 +71,7 @@ async fn test_handle_get_payment_request_found() {
                 script: vec![0x76, 0xa9, 0x14],
                 amount: Some(100000),
             }],
-            None,
+            None, // no merchant key → unsigned
             None,
         )
         .await
@@ -80,14 +83,17 @@ async fn test_handle_get_payment_request_found() {
     let request = GetPaymentRequestMessage {
         network: "mainnet".to_string(),
         merchant_pubkey: vec![4, 5, 6],
-        payment_id: payment_id_bytes.clone(),
+        payment_id: payment_id_bytes,
     };
 
+    // Handler must reject unsigned requests — forwarding unsigned BIP70 over P2P is disallowed.
     let result = handle_get_payment_request(&request, Some(processor)).await;
-    assert!(result.is_ok());
-
-    let response = result.unwrap();
-    assert_eq!(response.payment_id, payment_id_bytes);
+    assert!(result.is_err(), "unsigned PaymentRequest must be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("unsigned") || msg.contains("signature"),
+        "error should mention unsigned payload, got: {msg}"
+    );
 }
 
 #[tokio::test]

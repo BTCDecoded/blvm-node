@@ -51,6 +51,7 @@ jobs:
   setup:
     name: Setup
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -235,6 +236,7 @@ jobs:
     name: Build (dev, shared)
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null ||
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -337,6 +339,7 @@ jobs:
     name: Test
     needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -459,6 +462,7 @@ jobs:
     name: Clippy
     needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -568,23 +572,20 @@ jobs:
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
 
-      - name: Verify spec-lock build deps (Z3 / clang / jq)
+      # Deps → install tool → crates.io consensus src → dual **verify** (+ attestation env) in one blocking step.
+      - name: Verify
         run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+
           pkg-config --exists z3 || { echo "❌ z3 not found; install it on the runner."; exit 1; }
           command -v clang >/dev/null 2>&1 || { echo "❌ clang not found; install it on the runner."; exit 1; }
           command -v jq >/dev/null 2>&1 || { echo "❌ jq not found; install it on the runner."; exit 1; }
           pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1 || { echo "❌ openssl not found; install it on the runner."; exit 1; }
           echo "✅ Z3 + clang + jq + openssl present."
 
-      - name: Install cargo-spec-lock from crates.io
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
           cargo install blvm-spec-lock --version '>=0.1, <1' --locked --features z3
 
-      - name: Fetch blvm-consensus sources from crates.io
-        id: consensus_src
-        run: |
-          # crates.io returns 403 without a descriptive User-Agent (see https://crates.io/policies)
           UA='BTCDecoded/blvm-node verify job (https://github.com/BTCDecoded/blvm-node)'
           CONS_VER=$(curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
             'https://crates.io/api/v1/crates/blvm-consensus' \
@@ -598,13 +599,10 @@ jobs:
           curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
             "https://crates.io/api/v1/crates/blvm-consensus/${CONS_VER}/download" \
             | tar -xz -C "$GITHUB_WORKSPACE/_spec_verify"
-          echo "path=$GITHUB_WORKSPACE/_spec_verify/blvm-consensus-${CONS_VER}" >> "$GITHUB_OUTPUT"
+          CONS_PATH="$GITHUB_WORKSPACE/_spec_verify/blvm-consensus-${CONS_VER}"
 
-      - name: Run blvm-spec-lock verify (blvm-consensus)
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          echo "🔒 Running blvm-spec-lock verify on crates.io blvm-consensus (merged F_* registry + #[spec_locked] rows)..."
-          SPEC_ARGS="--crate-path ${{ steps.consensus_src.outputs.path }}"
+          echo "🔒 Running cargo-spec-lock verify on crates.io blvm-consensus (merged F_* + #[spec_locked])..."
+          SPEC_ARGS="--crate-path $CONS_PATH"
           if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
             SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
             echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
@@ -627,24 +625,17 @@ jobs:
           fi
           echo "✅ blvm-consensus verification passed"
 
-      - name: Run blvm-spec-lock verify (blvm-node)
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          echo "🔒 Running blvm-spec-lock verify on blvm-node (merged F_* registry + #[spec_locked] rows)..."
           cd "$GITHUB_WORKSPACE"
+          echo "🔒 Running cargo-spec-lock verify on blvm-node (merged F_* + #[spec_locked])..."
           SPEC_ARGS="--crate-path ."
           if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
             SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
-            echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
           elif [ -f "../blvm-spec/THE_ORANGE_PAPER.md" ]; then
             SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/THE_ORANGE_PAPER.md"
-            echo "Using THE_ORANGE_PAPER.md for spec-derived contracts"
           else
             echo "❌ No spec at ../blvm-spec"
             exit 1
           fi
-          export SPEC_LOCK_STRICT=1
-          export SPEC_LOCK_Z3_TIMEOUT_SECS="${SPEC_LOCK_Z3_TIMEOUT_SECS:-120}"
           cargo-spec-lock verify $SPEC_ARGS --timeout 120 --format human \
             --json-out "$GITHUB_WORKSPACE/spec_lock_node_verify.json" \
             2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
@@ -654,9 +645,7 @@ jobs:
             exit $EXIT_CODE
           fi
           echo "✅ blvm-node verification passed"
-      
-      - name: Create spec-lock attestation data
-        run: |
+
           command -v jq >/dev/null 2>&1 || { echo "❌ jq required"; exit 1; }
           test -s "$GITHUB_WORKSPACE/spec_lock_consensus_verify.json" || { echo "❌ spec_lock_consensus_verify.json missing after verify"; exit 1; }
           test -s "$GITHUB_WORKSPACE/spec_lock_node_verify.json" || { echo "❌ spec_lock_node_verify.json missing after verify"; exit 1; }
@@ -697,6 +686,7 @@ jobs:
     name: Format
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -725,6 +715,7 @@ jobs:
     name: Docs
     needs: [setup, build-dev]
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -794,6 +785,7 @@ jobs:
     name: Security
     needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -835,7 +827,7 @@ jobs:
       - name: Run security audit
         run: |
           # Ignores live only in `.cargo/audit.toml` (single source of truth). Temporary suppressions until
-          # upstream bumps; see Cargo.toml security note and workspace docs/CONSENSUS_SECURITY_HARDENING_PLAN.md.
+          # upstream bumps; see Cargo.toml security note and docs/AUDIT_SUPPRESSIONS.md.
           cargo audit
 
   # Fuzz is skippable via `[skip_fuzz]` on push. Fuzz does not
@@ -844,6 +836,7 @@ jobs:
     name: Fuzz
     needs: [setup]
     runs-on: [self-hosted, Linux, X64, builds]
+
     timeout-minutes: 30
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
@@ -953,6 +946,7 @@ jobs:
       - verify
       - fuzz
     runs-on: [self-hosted, Linux, X64, builds]
+
     env:
       # Use release-fast for PRs, branches — full release only for push to main
       BLVM_FAST_BUILD: ${{ ((github.event_name != 'push' || github.ref != 'refs/heads/main') && (github.event_name != 'release')) && '1' || '' }}
@@ -1023,6 +1017,7 @@ jobs:
     name: Release
     needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
+
     permissions:
       contents: write
       id-token: write
@@ -1491,6 +1486,7 @@ jobs:
     name: Publish develop (crates.io)
     needs: [build, build-dev, test, clippy, fmt, docs, security, verify, fuzz]
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: |
       always() &&
       needs.build.result == 'success' &&
@@ -1579,6 +1575,7 @@ jobs:
   teardown:
     name: Teardown (cleanup runner disk)
     runs-on: [self-hosted, Linux, X64, builds]
+
     if: always()
     needs: [build-dev, test, clippy, verify, fmt, docs, security, fuzz, build]
     steps:

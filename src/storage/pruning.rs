@@ -39,6 +39,7 @@ pub struct PruningStats {
 /// Pruning manager
 pub struct PruningManager {
     pub config: PruningConfig,
+    pub(crate) network: blvm_protocol::types::Network,
     blockstore: Arc<BlockStore>,
     #[cfg(feature = "utxo-commitments")]
     commitment_store: Option<Arc<CommitmentStore>>,
@@ -53,6 +54,7 @@ impl PruningManager {
     pub fn new(config: PruningConfig, blockstore: Arc<BlockStore>) -> Self {
         Self {
             config,
+            network: blvm_protocol::types::Network::Mainnet,
             blockstore,
             #[cfg(feature = "utxo-commitments")]
             commitment_store: None,
@@ -61,6 +63,12 @@ impl PruningManager {
             filter_service: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
+    }
+
+    /// Set the network for consensus-sensitive operations (e.g. UTXO reconstruction).
+    pub fn with_network(mut self, network: blvm_protocol::types::Network) -> Self {
+        self.network = network;
+        self
     }
 
     /// Create a new pruning manager with UTXO commitments support
@@ -73,6 +81,7 @@ impl PruningManager {
     ) -> Self {
         Self {
             config,
+            network: blvm_protocol::types::Network::Mainnet,
             blockstore,
             commitment_store: Some(commitment_store),
             utxostore: Some(utxostore),
@@ -91,6 +100,7 @@ impl PruningManager {
     ) -> Self {
         Self {
             config,
+            network: blvm_protocol::types::Network::Mainnet,
             blockstore,
             #[cfg(feature = "utxo-commitments")]
             commitment_store,
@@ -742,11 +752,8 @@ impl PruningManager {
                                 block.transactions.iter().map(|_| Vec::new()).collect()
                             });
 
-                    // Apply block to UTXO set using connect_block
-                    // This properly handles coinbase transactions and input/output processing
-                    let ctx = blvm_protocol::block::BlockValidationContext::for_network(
-                        blvm_protocol::types::Network::Mainnet,
-                    );
+                    let ctx =
+                        blvm_protocol::block::BlockValidationContext::for_network(self.network);
                     let (validation_result, new_utxo_set, _undo_log) =
                         connect_block(&block, &witnesses, utxo_set, height, &ctx)?;
 

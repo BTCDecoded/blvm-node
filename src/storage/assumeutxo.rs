@@ -182,11 +182,16 @@ pub struct AssumeutxoData {
     pub hash_serialized: Option<[u8; 32]>,
 }
 
-/// Known AssumeUTXO snapshots (mainnet). Empty until snapshots are created.
+/// Known AssumeUTXO snapshots (mainnet).
+///
+/// NOTE (LC-S34-08): Intentionally empty until BLVM publishes signed snapshot distributions.
+/// Bitcoin Core's assumeutxo hashes (e.g. height 840_000) cannot be used directly because
+/// BLVM's UTXO serialization format differs from Core's. Adding Core's hashes here would
+/// cause all snapshot verifications to fail with a misleading "hash mismatch" error.
+///
+/// Add entries here once BLVM generates and publishes its own snapshot manifests.
 fn mainnet_assumeutxo_data() -> Vec<AssumeutxoData> {
-    vec![
-        // AssumeutxoData { height, block_hash, chain_tx_count, hash_serialized } - add when snapshots exist
-    ]
+    vec![]
 }
 
 /// Known AssumeUTXO snapshots (regtest). Entry at height 100 for feature_assumeutxo tests.

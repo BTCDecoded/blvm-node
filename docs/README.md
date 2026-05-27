@@ -10,6 +10,10 @@ Documentation for the blvm-node implementation.
 - **[QUIC_RPC.md](QUIC_RPC.md)** - QUIC-based RPC implementation
 - **[QUINN_INTEGRATION.md](QUINN_INTEGRATION.md)** - Quinn transport integration
 
+## Spec-lock / Orange Paper CI
+
+Authoritative **`cargo spec-lock verify`** (merged **`F_*`** registry + **`#[spec_locked]`** rows; **`formula_registry`** in **`verify`** JSON with **`--spec-path`**) is defined in **`.github/workflows/ci.yml`**. Structured report: **`blvm-spec-lock`** **`docs/VERIFY_JSON.md`**.
+
 ## Transport Documentation
 
 - **[transport/](transport/)** - Transport abstraction documentation

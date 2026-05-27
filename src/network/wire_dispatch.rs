@@ -487,6 +487,20 @@ impl NetworkManager {
                     );
                     return Ok(());
                 }
+                // No pending getheaders request matched this peer — unsolicited headers.
+                // Penalize the peer to deter flooding; do not ban (might be a race).
+                warn!(
+                    "Unsolicited headers message from {} ({} headers) — penalizing peer",
+                    peer_addr,
+                    headers_msg.headers.len()
+                );
+                return self
+                    .disconnect_for_protocol_violation(
+                        peer_addr,
+                        "unsolicited headers message",
+                        false, // don't ban — could be a race with a legitimate request
+                    )
+                    .await;
             }
             ProtocolMessage::Block(block_msg) => {
                 info!(

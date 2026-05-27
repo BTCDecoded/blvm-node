@@ -230,6 +230,20 @@ impl RpcManager {
             }
         }
 
+        // Add admin tokens to auth manager
+        if !auth_config.admin_tokens.is_empty() {
+            info!(
+                "Loaded {} RPC admin token(s) with destructive-method access",
+                auth_config.admin_tokens.len()
+            );
+        }
+        for token in auth_config.admin_tokens {
+            if let Err(e) = auth_manager.add_admin_token(token.clone()).await {
+                let redacted_error = auth::redact_tokens_from_log(&format!("{e}"), &[token]);
+                error!("Failed to add RPC admin token: {}", redacted_error);
+            }
+        }
+
         // Add certificates to auth manager
         for cert in auth_config.certificates {
             if let Err(e) = auth_manager.add_certificate(cert).await {

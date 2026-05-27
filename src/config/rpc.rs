@@ -92,13 +92,22 @@ pub struct RpcAuthConfig {
     #[serde(default)]
     pub required: bool,
 
-    /// Valid authentication tokens (env RPC_AUTH_TOKENS, token_file, or this field)
+    /// Valid authentication tokens (env RPC_AUTH_TOKENS, token_file, or this field).
+    /// These tokens have read-only access when `admin_tokens` is also set; otherwise
+    /// all tokens are treated as admin for backward compatibility.
     #[serde(default)]
     pub tokens: Vec<String>,
 
     /// Path to file containing tokens (one per line)
     #[serde(default)]
     pub token_file: Option<String>,
+
+    /// Tokens with admin privileges (may call destructive methods: stop, loadmodule,
+    /// invalidateblock, pruneblockchain, etc.). When non-empty, tokens listed in
+    /// `tokens` / `token_file` are restricted to read-only methods. When empty,
+    /// all authenticated tokens are treated as admin (backward-compatible default).
+    #[serde(default)]
+    pub admin_tokens: Vec<String>,
 
     /// Valid certificate fingerprints (for certificate-based auth)
     #[serde(default)]
@@ -124,9 +133,10 @@ pub struct RpcAuthConfig {
 impl Default for RpcAuthConfig {
     fn default() -> Self {
         Self {
-            required: false,
+            required: true,
             tokens: Vec::new(),
             token_file: None,
+            admin_tokens: Vec::new(),
             certificates: Vec::new(),
             rate_limit_burst: 100,
             rate_limit_rate: 10,
@@ -144,6 +154,7 @@ impl RpcAuthConfig {
             required: false,
             tokens: Vec::new(),
             token_file: None,
+            admin_tokens: Vec::new(),
             certificates: Vec::new(),
             rate_limit_burst: burst,
             rate_limit_rate: rate,

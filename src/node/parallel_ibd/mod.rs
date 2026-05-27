@@ -83,6 +83,8 @@ use tracing::{debug, error, info, warn};
 /// Parallel IBD configuration
 #[derive(Debug, Clone)]
 pub struct ParallelIBDConfig {
+    /// Network (mainnet/testnet/regtest) for consensus rule selection
+    pub network: blvm_protocol::types::Network,
     /// Number of parallel workers (default: CPU count)
     pub num_workers: usize,
     /// Chunk size in blocks (default: 16)
@@ -219,6 +221,7 @@ impl ParallelIBDConfig {
             .or_else(|| ibd_config.map(|c| c.headers_max_failures))
             .unwrap_or(10);
         Self {
+            network: blvm_protocol::types::Network::Mainnet,
             num_workers: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4),
@@ -1141,9 +1144,11 @@ impl ParallelIBD {
                 // Prevents unbounded growth when downloads outpace validation.
                 if reorder_buffer.len() >= dynamic_buffer_limit {
                     while reorder_buffer.contains_key(&next_prefetch_height) {
-                        let (block, witnesses) = reorder_buffer
-                            .remove(&next_prefetch_height)
-                            .expect("contains_key");
+                        let Some((block, witnesses)) = reorder_buffer.remove(&next_prefetch_height)
+                        else {
+                            error!("IBD coordinator: reorder_buffer key {} vanished unexpectedly (backpressure drain)", next_prefetch_height);
+                            break;
+                        };
                         block_input_keys_and_tx_ids_filtered(
                             &block,
                             &mut coord_tx_ids_buf,
@@ -1274,9 +1279,11 @@ impl ParallelIBD {
                     );
                     // Channel closed — drain remaining reorder_buffer, then exit
                     while reorder_buffer.contains_key(&next_prefetch_height) {
-                        let (block, witnesses) = reorder_buffer
-                            .remove(&next_prefetch_height)
-                            .expect("contains_key");
+                        let Some((block, witnesses)) = reorder_buffer.remove(&next_prefetch_height)
+                        else {
+                            error!("IBD coordinator: reorder_buffer key {} vanished on channel-close drain", next_prefetch_height);
+                            break;
+                        };
                         block_input_keys_and_tx_ids_filtered(
                             &block,
                             &mut coord_tx_ids_buf,
@@ -1381,9 +1388,14 @@ impl ParallelIBD {
                         reorder_buffer.insert(height, (block, witnesses));
                     }
                     while reorder_buffer.contains_key(&next_prefetch_height) {
-                        let (block, witnesses) = reorder_buffer
-                            .remove(&next_prefetch_height)
-                            .expect("contains_key");
+                        let Some((block, witnesses)) = reorder_buffer.remove(&next_prefetch_height)
+                        else {
+                            error!(
+                                "IBD coordinator: reorder_buffer key {} vanished on rx-drain",
+                                next_prefetch_height
+                            );
+                            break;
+                        };
                         block_input_keys_and_tx_ids_filtered(
                             &block,
                             &mut coord_tx_ids_buf,
@@ -1643,7 +1655,7 @@ impl ParallelIBD {
 
         let bip54_active = blvm_protocol::bip_validation::is_bip54_active_at(
             height,
-            blvm_protocol::types::Network::Mainnet,
+            self.config.network,
             bip54_activation_override,
         );
         let bip54_boundary = if bip54_active {
@@ -1682,7 +1694,7 @@ impl ParallelIBD {
         let context = blvm_protocol::block::BlockValidationContext::from_connect_block_ibd_args(
             recent_headers,
             network_time,
-            blvm_protocol::types::Network::Mainnet,
+            self.config.network,
             bip54_activation_override,
             bip54_boundary,
         );

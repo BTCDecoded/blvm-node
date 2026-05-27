@@ -31,9 +31,18 @@ pub async fn handle_get_payment_request(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get payment request: {}", e))?;
 
-    // Extract signature from embedded PaymentRequest signature field
-    // The PaymentRequest is already signed when created via PaymentProcessor
-    let merchant_signature = payment_request.signature.clone().unwrap_or_default();
+    // Extract signature from embedded PaymentRequest signature field.
+    // The PaymentRequest is already signed when created via PaymentProcessor.
+    // If unsigned (None), reject rather than forwarding an unsigned payload over P2P.
+    let merchant_signature = match payment_request.signature.clone() {
+        Some(sig) if !sig.is_empty() => sig,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "PaymentRequest for {} is unsigned; refusing to forward unsigned BIP70 payload over P2P",
+                payment_id
+            ));
+        }
+    };
 
     // Extract merchant pubkey from PaymentRequest if available, otherwise use from request
     let merchant_pubkey = payment_request
@@ -77,9 +86,17 @@ pub async fn handle_payment(
         .await
         .map_err(|e| anyhow::anyhow!("Payment processing failed: {}", e))?;
 
-    // Extract signature from embedded PaymentACK signature field
-    // The PaymentACK is already signed by PaymentProtocolServer::process_payment() if merchant_key was provided
-    let merchant_signature = payment_ack.signature.clone().unwrap_or_default();
+    // Extract signature from embedded PaymentACK signature field.
+    // The PaymentACK is signed by PaymentProtocolServer::process_payment() when a merchant key is
+    // provided. Reject unsigned ACKs to prevent forwarding unsigned P2P payloads.
+    let merchant_signature = match payment_ack.signature.clone() {
+        Some(sig) if !sig.is_empty() => sig,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "PaymentACK is unsigned (no merchant_key provided?); refusing to forward unsigned BIP70 payload over P2P"
+            ));
+        }
+    };
 
     // Convert to P2P message format
     Ok(PaymentACKMessage {

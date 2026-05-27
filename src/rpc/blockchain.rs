@@ -810,10 +810,10 @@ impl BlockchainRpc {
         );
 
         if let Some(ref storage) = self.storage {
-            use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
-            // Use protocol engine which provides the correct validate_block signature
-            let engine = BitcoinProtocolEngine::new(ProtocolVersion::Regtest)
-                .map_err(|e| anyhow::anyhow!("Failed to create protocol engine: {}", e))?;
+            let engine_arc = self
+                .protocol
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Protocol engine not initialised"))?;
 
             let check_level = checklevel.unwrap_or(3);
             let num_blocks = numblocks.unwrap_or(288);
@@ -837,7 +837,7 @@ impl BlockchainRpc {
                 if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height) {
                     if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
                         // Validate block using protocol engine (expects &HashMap, returns Result<ValidationResult>)
-                        match engine.validate_block(&block, &utxo_set, height) {
+                        match engine_arc.validate_block(&block, &utxo_set, height) {
                             Ok(blvm_protocol::ValidationResult::Valid) => {
                                 // Block is valid, update UTXO set for next block
                                 // (Simplified - in full implementation would apply block to UTXO set)
@@ -1326,8 +1326,21 @@ impl BlockchainRpc {
     /// Invalidate block
     ///
     /// Params: ["blockhash"] (block hash to invalidate)
+    ///
+    /// NOTE: Only permitted on regtest and testnet. On mainnet this can cause irreversible chain
+    /// state corruption and is therefore blocked.
     pub async fn invalidate_block(&self, params: &Value) -> Result<Value> {
         debug!("RPC: invalidateblock");
+
+        // Guard: only allow invalidateblock on non-mainnet networks to prevent accidental
+        // production chain corruption (same pattern as generatetoaddress).
+        if let Some(ref protocol) = self.protocol {
+            if protocol.get_protocol_version() == blvm_protocol::ProtocolVersion::BitcoinV1 {
+                return Err(anyhow::anyhow!(
+                    "invalidateblock is not permitted on mainnet; use regtest or testnet"
+                ));
+            }
+        }
 
         let blockhash = params
             .get(0)

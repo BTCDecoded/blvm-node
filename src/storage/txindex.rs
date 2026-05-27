@@ -527,7 +527,10 @@ impl TxIndex {
 
         // Check if address is already indexed
         let mut indexed = {
-            let indexed_set = self.indexed_addresses.lock().unwrap();
+            let indexed_set = self
+                .indexed_addresses
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             indexed_set.contains(&address_hash)
         };
 
@@ -537,7 +540,10 @@ impl TxIndex {
                 indexed = !tx_hashes.is_empty();
                 if indexed {
                     // Mark as indexed in memory
-                    let mut indexed_set = self.indexed_addresses.lock().unwrap();
+                    let mut indexed_set = self
+                        .indexed_addresses
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     indexed_set.insert(address_hash);
                 }
             }

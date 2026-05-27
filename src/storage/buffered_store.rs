@@ -85,7 +85,7 @@ impl BufferedBlockStore {
         };
 
         let should_flush = {
-            let mut buffer = self.buffer.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             buffer.push_back(deferred);
             buffer.len() >= self.flush_threshold
         };
@@ -108,7 +108,7 @@ impl BufferedBlockStore {
     /// Uses batch writes for efficient database operations.
     pub fn flush(&self) -> Result<()> {
         let blocks: Vec<DeferredBlock> = {
-            let mut buffer = self.buffer.lock().unwrap();
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             buffer.drain(..).collect()
         };
 
@@ -166,7 +166,7 @@ impl BufferedBlockStore {
         }
 
         // Update total stored count
-        *self.total_stored.lock().unwrap() += count as u64;
+        *self.total_stored.lock().unwrap_or_else(|e| e.into_inner()) += count as u64;
 
         let elapsed = start.elapsed();
         info!(
@@ -181,12 +181,12 @@ impl BufferedBlockStore {
 
     /// Get the number of buffered (unflushed) blocks
     pub fn buffered_count(&self) -> usize {
-        self.buffer.lock().unwrap().len()
+        self.buffer.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Get the total number of blocks stored (including buffered)
     pub fn total_stored(&self) -> u64 {
-        *self.total_stored.lock().unwrap() + self.buffered_count() as u64
+        *self.total_stored.lock().unwrap_or_else(|e| e.into_inner()) + self.buffered_count() as u64
     }
 
     /// Get reference to underlying blockstore

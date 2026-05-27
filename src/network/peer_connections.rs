@@ -444,7 +444,9 @@ impl NetworkManager {
             }
         }
 
-        if !transports.iter().any(|t| matches!(t, TransportType::Tcp)) {
+        // Only fall back to TCP if the transport preference actually allows it.
+        // Previously this always appended TCP, breaking IrohOnly / QuinnOnly modes.
+        if transports.is_empty() && self.transport_preference().allows_tcp() {
             transports.push(TransportType::Tcp);
         }
 

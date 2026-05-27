@@ -76,9 +76,31 @@ pub struct ControlRpc {
     cached_memory_info: Option<(Instant, Value)>,
     /// Module manager for load/unload/reload (optional)
     module_manager: Option<Arc<tokio::sync::Mutex<ModuleManager>>>,
+    /// Whether marketplace auto-fetch is permitted for unknown modules.
+    /// Defaults to false to prevent remote code load via RPC.
+    marketplace_fetch_enabled: bool,
 }
 
 impl ControlRpc {
+    /// Validate a module name: only allow `[a-zA-Z0-9_-]`, reject path separators.
+    fn validate_module_name(name: &str) -> RpcResult<()> {
+        if name.is_empty() || name.len() > 64 {
+            return Err(RpcError::invalid_params(
+                "module name must be 1–64 characters".to_string(),
+            ));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(RpcError::invalid_params(
+                "module name may only contain ASCII letters, digits, hyphens, and underscores"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Create a new control RPC handler
     pub fn new() -> Self {
         Self {
@@ -88,7 +110,14 @@ impl ControlRpc {
             #[cfg(feature = "sysinfo")]
             cached_memory_info: None,
             module_manager: None,
+            marketplace_fetch_enabled: false,
         }
+    }
+
+    /// Enable marketplace auto-fetch for `loadmodule` (opt-in, off by default).
+    pub fn with_marketplace_fetch(mut self, enabled: bool) -> Self {
+        self.marketplace_fetch_enabled = enabled;
+        self
     }
 
     /// Create with shutdown capability
@@ -103,6 +132,7 @@ impl ControlRpc {
             #[cfg(feature = "sysinfo")]
             cached_memory_info: None,
             module_manager: None,
+            marketplace_fetch_enabled: false,
         }
     }
 
@@ -296,6 +326,7 @@ impl ControlRpc {
         let name = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
             RpcError::invalid_params("loadmodule requires module name".to_string())
         })?;
+        Self::validate_module_name(name)?;
 
         // Helper: try local discovery + load.
         let try_local = |manager: &mut ModuleManager| {
@@ -315,6 +346,13 @@ impl ControlRpc {
         let discovered = match local_result {
             Ok(d) => d,
             Err(_local_err) => {
+                // Marketplace fetch is opt-in (disabled by default) to prevent remote code load
+                // via RPC. Enable with `with_marketplace_fetch(true)` in node configuration.
+                if !self.marketplace_fetch_enabled {
+                    return Err(RpcError::invalid_params(format!(
+                        "Module '{name}' not found locally. Marketplace auto-fetch is disabled."
+                    )));
+                }
                 // Module not found locally — ask marketplace to fetch + install it.
                 // The module_manager lock is already released at this point.
                 debug!(
@@ -503,9 +541,19 @@ impl ControlRpc {
         let module_name = params.get(0).and_then(|p| p.as_str()).ok_or_else(|| {
             RpcError::invalid_params("runmodulecli requires module_name".to_string())
         })?;
+        Self::validate_module_name(module_name)?;
         let subcommand = params.get(1).and_then(|p| p.as_str()).ok_or_else(|| {
             RpcError::invalid_params("runmodulecli requires subcommand".to_string())
         })?;
+        // Validate subcommand: no shell metacharacters
+        if !subcommand
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
+        {
+            return Err(RpcError::invalid_params(
+                "runmodulecli subcommand may only contain ASCII letters, digits, hyphens, underscores, and colons".to_string(),
+            ));
+        }
         let args: Vec<String> = params
             .as_array()
             .map(|a| {

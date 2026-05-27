@@ -1625,7 +1625,10 @@ impl NetworkManager {
 
                     let nonce: u64 = rand::random();
                     // Track this nonce so we can detect self-connections.
-                    self.local_version_nonces.lock().unwrap().insert(nonce);
+                    self.local_version_nonces
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(nonce);
 
                     let version_msg = self.create_version_message(
                         70015,

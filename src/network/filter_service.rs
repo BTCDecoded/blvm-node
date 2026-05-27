@@ -36,7 +36,11 @@ impl BlockFilterService {
 
     /// Get filter for a block hash
     pub fn get_filter(&self, block_hash: &Hash) -> Option<CompactBlockFilter> {
-        self.filters.read().unwrap().get(block_hash).cloned()
+        self.filters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(block_hash)
+            .cloned()
     }
 
     /// Generate and cache filter for a block
@@ -84,7 +88,10 @@ impl BlockFilterService {
 
         // Extend filter header chain if needed
         // Release read lock before acquiring write lock to avoid deadlock
-        let mut headers = self.filter_headers.write().unwrap();
+        let mut headers = self
+            .filter_headers
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let current_len = headers.len() as u32;
         if height >= current_len {
             headers.resize((height + 1) as usize, filter_header.clone());
@@ -93,8 +100,14 @@ impl BlockFilterService {
         }
 
         // Update current height (avoid holding read and write locks simultaneously)
-        let current = *self.current_height.read().unwrap();
-        *self.current_height.write().unwrap() = height.max(current);
+        let current = *self
+            .current_height
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        *self
+            .current_height
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = height.max(current);
 
         Ok(filter)
     }
@@ -121,8 +134,14 @@ impl BlockFilterService {
         start_height: u32,
         stop_hash: Hash,
     ) -> Result<Vec<Hash>> {
-        let headers = self.filter_headers.read().unwrap();
-        let height_to_hash = self.block_hash_to_height.read().unwrap();
+        let headers = self
+            .filter_headers
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let height_to_hash = self
+            .block_hash_to_height
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
 
         // Find stop height
         let stop_height = height_to_hash
@@ -152,13 +171,19 @@ impl BlockFilterService {
     /// # Returns
     /// Vector of filter header hashes at checkpoint intervals
     pub fn get_filter_checkpoints(&self, stop_hash: Hash) -> Result<Vec<Hash>> {
-        let height_to_hash = self.block_hash_to_height.read().unwrap();
+        let height_to_hash = self
+            .block_hash_to_height
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let stop_height = height_to_hash
             .get(&stop_hash)
             .copied()
             .ok_or_else(|| anyhow!("Stop hash not found"))?;
 
-        let headers = self.filter_headers.read().unwrap();
+        let headers = self
+            .filter_headers
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut checkpoints = Vec::new();
 
         // Checkpoints every 1000 blocks (per BIP157)
@@ -204,7 +229,10 @@ impl BlockFilterService {
 
     /// Get current chain height
     pub fn current_height(&self) -> u32 {
-        *self.current_height.read().unwrap()
+        *self
+            .current_height
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Remove filter for a pruned block (keeps filter header for verification)
@@ -213,7 +241,10 @@ impl BlockFilterService {
     /// but we must keep the filter header for chain verification.
     pub fn remove_filter_for_pruned_block(&self, block_hash: &Hash) -> Result<()> {
         // Remove filter from cache
-        self.filters.write().unwrap().remove(block_hash);
+        self.filters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(block_hash);
 
         // Note: We do NOT remove the filter header - it's required for verification
         // The filter header chain must remain intact even after pruning
@@ -223,12 +254,20 @@ impl BlockFilterService {
 
     /// Check if a filter exists for a block
     pub fn has_filter(&self, block_hash: &Hash) -> bool {
-        self.filters.read().unwrap().contains_key(block_hash)
+        self.filters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(block_hash)
     }
 
     /// Get all block hashes that have filters cached
     pub fn get_cached_filter_hashes(&self) -> Vec<Hash> {
-        self.filters.read().unwrap().keys().cloned().collect()
+        self.filters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 
