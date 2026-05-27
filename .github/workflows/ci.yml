@@ -851,7 +851,6 @@ jobs:
     name: Build
     needs:
       - setup
-      -
       - test
       - clippy
       - fmt
