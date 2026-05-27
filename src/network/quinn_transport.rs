@@ -22,6 +22,7 @@ use tracing::{debug, info};
 /// at the application layer via the Bitcoin P2P version handshake and peer scoring,
 /// not via a PKI chain. Replace with certificate-pinning once peer identity is stable.
 #[cfg(feature = "quinn")]
+#[derive(Debug)]
 struct NoServerCertVerification;
 
 #[cfg(feature = "quinn")]
