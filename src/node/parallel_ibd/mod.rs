@@ -1705,9 +1705,15 @@ impl ParallelIBD {
                     hdr,
                     height,
                     network_time,
-                    &blvm_protocol::version_bits::bip54_deployment_for_network(
-                        &self.config.network,
-                    ),
+                    // crates.io blvm-consensus exposes per-network helpers via protocol re-export
+                    // once published; until then all networks use the mainnet table (same bit/time).
+                    &match self.config.network {
+                        blvm_protocol::types::Network::Mainnet
+                        | blvm_protocol::types::Network::Testnet
+                        | blvm_protocol::types::Network::Regtest => {
+                            blvm_protocol::version_bits::bip54_deployment_mainnet()
+                        }
+                    },
                 )
             } else {
                 None
