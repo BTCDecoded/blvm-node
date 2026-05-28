@@ -159,18 +159,19 @@ impl Transport for QuinnTransport {
         //
         // Under the `production` feature this verifier is not compiled — production nodes
         // must implement certificate-pinning or TOFU (Track G / P1-S).
-        let crypto = {
-            use quinn::rustls;
-            #[cfg(feature = "production")]
-            {
-                return Err(anyhow::anyhow!(
-                    "Quinn outbound TLS: NoServerCertVerification is not available in production \
-                     builds. Implement certificate-pinning or TOFU before enabling QUIC on \
-                     production nodes."
-                ));
-            }
-            #[cfg(not(feature = "production"))]
-            {
+        #[cfg(feature = "production")]
+        {
+            return Err(anyhow::anyhow!(
+                "Quinn outbound TLS: NoServerCertVerification is not available in production \
+                 builds. Implement certificate-pinning or TOFU before enabling QUIC on \
+                 production nodes."
+            ));
+        }
+
+        #[cfg(not(feature = "production"))]
+        {
+            let crypto = {
+                use quinn::rustls;
                 let mut tls = rustls::ClientConfig::builder()
                     .dangerous()
                     .with_custom_certificate_verifier(std::sync::Arc::new(NoServerCertVerification))
@@ -178,21 +179,21 @@ impl Transport for QuinnTransport {
                 tls.alpn_protocols = vec![b"blvm-p2p".to_vec()];
                 quinn::crypto::rustls::QuicClientConfig::try_from(tls)
                     .map_err(|e| anyhow::anyhow!("Failed to build Quinn TLS config: {e}"))?
-            }
-        };
-        let client_config = quinn::ClientConfig::new(std::sync::Arc::new(crypto));
-        let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
-        endpoint.set_default_client_config(client_config);
+            };
+            let client_config = quinn::ClientConfig::new(std::sync::Arc::new(crypto));
+            let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
+            endpoint.set_default_client_config(client_config);
 
-        let server_name = "blvm-peer";
-        let conn = endpoint.connect(socket_addr, server_name)?.await?;
+            let server_name = "blvm-peer";
+            let conn = endpoint.connect(socket_addr, server_name)?.await?;
 
-        Ok(QuinnConnection {
-            conn,
-            peer_addr: TransportAddr::Quinn(socket_addr),
-            connected: true,
-            max_message_length: self.max_message_length,
-        })
+            Ok(QuinnConnection {
+                conn,
+                peer_addr: TransportAddr::Quinn(socket_addr),
+                connected: true,
+                max_message_length: self.max_message_length,
+            })
+        }
     }
 }
 
