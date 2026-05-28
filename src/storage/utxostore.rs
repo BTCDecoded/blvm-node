@@ -188,7 +188,7 @@ impl UtxoStore {
                 };
 
                 #[cfg(not(feature = "production"))]
-                let value = bincode::serialize(utxo)?;
+                let value = bincode::serialize(utxo.as_ref())?;
 
                 // Compress if enabled
                 #[cfg(feature = "utxo-compression")]

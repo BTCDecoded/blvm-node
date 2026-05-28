@@ -3,6 +3,7 @@
 //! Implements blockchain-related JSON-RPC methods for querying blockchain state.
 
 use crate::config::RequestTimeoutConfig;
+use crate::node::block_processor::{prepare_block_validation_context, validate_block_with_context};
 use crate::node::event_publisher::EventPublisher;
 use crate::rpc::errors::{
     BlockNotFoundError, RpcError, BLOCK_HASH_PARAM_REQUIRED_MSG, BLOCK_NOT_FOUND_MSG,
@@ -827,22 +828,41 @@ impl BlockchainRpc {
             let start_height = tip_height.saturating_sub(num_blocks);
 
             let mut errors = Vec::new();
-            let utxo_set = storage
+            let mut utxo_set = storage
                 .utxos()
                 .get_all_utxos()
                 .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
+
+            let blockstore = storage.blocks();
 
             // Verify blocks from start_height to tip
             for height in start_height..=tip_height {
                 if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height) {
                     if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
-                        // Validate block using protocol engine (expects &HashMap, returns Result<ValidationResult>)
-                        match engine_arc.validate_block(&block, &utxo_set, height) {
-                            Ok(blvm_protocol::ValidationResult::Valid) => {
-                                // Block is valid, update UTXO set for next block
-                                // (Simplified - in full implementation would apply block to UTXO set)
-                                // For now, just continue
-                            }
+                        let (witnesses, _) =
+                            prepare_block_validation_context(blockstore.as_ref(), &block, height)
+                                .unwrap_or_else(|_| {
+                                    (
+                                        block
+                                            .transactions
+                                            .iter()
+                                            .map(|tx| {
+                                                tx.inputs.iter().map(|_| Vec::new()).collect()
+                                            })
+                                            .collect(),
+                                        None,
+                                    )
+                                });
+
+                        match validate_block_with_context(
+                            blockstore.as_ref(),
+                            engine_arc,
+                            &block,
+                            &witnesses,
+                            &mut utxo_set,
+                            height,
+                        ) {
+                            Ok(blvm_protocol::ValidationResult::Valid) => {}
                             Ok(blvm_protocol::ValidationResult::Invalid(reason)) => {
                                 errors.push(format!("Block at height {height} invalid: {reason}"));
                                 if check_level >= 4 {

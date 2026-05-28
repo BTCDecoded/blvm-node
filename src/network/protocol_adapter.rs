@@ -197,13 +197,18 @@ impl ProtocolAdapter {
         #[cfg(feature = "production")]
         let checksum = &checksum_bytes[..4];
 
+        // Non-production: compute double-SHA256 with sha2 directly and store as owned bytes.
+        // The previous approach returned &hash2[..4] (reference to a block-local), which is a
+        // dangling-reference bug.  Use a fixed [u8; 4] array to keep the value alive.
         #[cfg(not(feature = "production"))]
-        let checksum_bytes = {
+        let checksum_bytes: [u8; 4] = {
             use sha2::{Digest, Sha256};
             let hash1 = Sha256::digest(&payload);
             let hash2 = Sha256::digest(hash1);
-            &hash2[..4]
+            hash2[..4].try_into().expect("slice is exactly 4 bytes")
         };
+        #[cfg(not(feature = "production"))]
+        let checksum = checksum_bytes.as_ref();
 
         // Build message
         let mut message = Vec::new();
@@ -367,7 +372,7 @@ impl ProtocolAdapter {
             ConsensusNetworkMessage::GetData(_) => "getdata",
             ConsensusNetworkMessage::GetHeaders(_) => "getheaders",
             ConsensusNetworkMessage::Headers(_) => "headers",
-            ConsensusNetworkMessage::Block(_) => "block",
+            ConsensusNetworkMessage::Block(..) => "block",
             ConsensusNetworkMessage::Tx(_) => "tx",
             ConsensusNetworkMessage::Ping(_) => "ping",
             ConsensusNetworkMessage::Pong(_) => "pong",

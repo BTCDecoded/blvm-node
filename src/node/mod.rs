@@ -830,79 +830,89 @@ impl Node {
                 peer_addresses
             );
 
-            let ibd_config_owned = self.config_sub(|c| c.ibd.as_ref()).cloned();
-            let ibd_session_config =
-                crate::node::parallel_ibd::ParallelIBDConfig::resolve_for_session(
-                    ibd_config_owned.as_ref(),
-                    synced_tip,
-                    &peer_addresses,
-                );
-            let min_peers = ibd_session_config.min_peers_for_ibd();
-            if peer_addresses.len() >= min_peers {
-                info!(
-                    "[START_COMPONENTS] Attempting parallel IBD with {} peers",
-                    peer_addresses.len()
-                );
-
-                info!(
-                    "[START_COMPONENTS] Starting parallel IBD: synced_tip={}, first_block={}, target_height={}",
-                    synced_tip, ibd_first_block_height, target_height
-                );
-
-                // Attempt parallel IBD (initial_utxo_set is snapshot when AssumeUTXO loaded, else empty)
-                let blockstore = Arc::clone(&self.storage.blocks());
-                let storage_arc = Arc::clone(&self.storage);
-                let protocol_arc = Arc::clone(&self.protocol);
-                let mut utxo_set = initial_utxo_set;
-
-                info!("[START_COMPONENTS] Calling sync_coordinator.start_parallel_ibd()...");
-                match self
-                    .sync_coordinator
-                    .start_parallel_ibd(
-                        synced_tip,
-                        ibd_first_block_height,
-                        target_height,
-                        blockstore,
-                        Some(storage_arc),
-                        protocol_arc,
-                        &mut utxo_set,
-                        Some(Arc::clone(&self.network)),
-                        peer_addresses,
+            #[cfg(feature = "production")]
+            {
+                let ibd_config_owned = self.config_sub(|c| c.ibd.as_ref()).cloned();
+                let ibd_session_config =
+                    crate::node::parallel_ibd::ParallelIBDConfig::resolve_for_session(
                         ibd_config_owned.as_ref(),
-                        self.rpc.event_publisher(),
-                        Some(self.data_dir.as_path()),
-                    )
-                    .await
-                {
-                    Ok(true) => {
-                        info!("[START_COMPONENTS] Parallel IBD completed successfully");
-                        if let Err(e) = crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
-                            self.data_dir.as_path(),
-                        ) {
-                            warn!(
-                                "Failed to clear IBD UTXO autorepair marker: {} (safe to delete {} manually)",
-                                e,
-                                crate::storage::ibd_autorepair::repair_marker_path(self.data_dir.as_path())
-                                    .display()
+                        synced_tip,
+                        &peer_addresses,
+                    );
+                let min_peers = ibd_session_config.min_peers_for_ibd();
+                if peer_addresses.len() >= min_peers {
+                    info!(
+                        "[START_COMPONENTS] Attempting parallel IBD with {} peers",
+                        peer_addresses.len()
+                    );
+
+                    info!(
+                        "[START_COMPONENTS] Starting parallel IBD: synced_tip={}, first_block={}, target_height={}",
+                        synced_tip, ibd_first_block_height, target_height
+                    );
+
+                    // Attempt parallel IBD (initial_utxo_set is snapshot when AssumeUTXO loaded, else empty)
+                    let blockstore = Arc::clone(&self.storage.blocks());
+                    let storage_arc = Arc::clone(&self.storage);
+                    let protocol_arc = Arc::clone(&self.protocol);
+                    let mut utxo_set = initial_utxo_set;
+
+                    info!("[START_COMPONENTS] Calling sync_coordinator.start_parallel_ibd()...");
+                    match self
+                        .sync_coordinator
+                        .start_parallel_ibd(
+                            synced_tip,
+                            ibd_first_block_height,
+                            target_height,
+                            blockstore,
+                            Some(storage_arc),
+                            protocol_arc,
+                            &mut utxo_set,
+                            Some(Arc::clone(&self.network)),
+                            peer_addresses,
+                            ibd_config_owned.as_ref(),
+                            self.rpc.event_publisher(),
+                            Some(self.data_dir.as_path()),
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            info!("[START_COMPONENTS] Parallel IBD completed successfully");
+                            if let Err(e) =
+                                crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
+                                    self.data_dir.as_path(),
+                                )
+                            {
+                                warn!(
+                                    "Failed to clear IBD UTXO autorepair marker: {} (safe to delete {} manually)",
+                                    e,
+                                    crate::storage::ibd_autorepair::repair_marker_path(self.data_dir.as_path())
+                                        .display()
+                                );
+                            }
+                            // Update current height after parallel IBD
+                            let new_height = self.storage.chain().get_height()?.unwrap_or(0);
+                            info!(
+                                "[START_COMPONENTS] IBD completed, current height: {}",
+                                new_height
                             );
                         }
-                        // Update current height after parallel IBD
-                        let new_height = self.storage.chain().get_height()?.unwrap_or(0);
-                        info!(
-                            "[START_COMPONENTS] IBD completed, current height: {}",
-                            new_height
-                        );
+                        Ok(false) => {
+                            warn!("[START_COMPONENTS] Parallel IBD not available (not enough peers or already synced)");
+                        }
+                        Err(e) => {
+                            error!("[START_COMPONENTS] Parallel IBD failed: {}. Sequential sync is not supported.", e);
+                            return Err(e);
+                        }
                     }
-                    Ok(false) => {
-                        warn!("[START_COMPONENTS] Parallel IBD not available (not enough peers or already synced)");
-                    }
-                    Err(e) => {
-                        error!("[START_COMPONENTS] Parallel IBD failed: {}. Sequential sync is not supported.", e);
-                        return Err(e);
-                    }
+                } else {
+                    info!("[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need {}), waiting for more peers...", peer_addresses.len(), min_peers);
                 }
-            } else {
-                info!("[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need {}), waiting for more peers...", peer_addresses.len(), min_peers);
+            }
+            #[cfg(not(feature = "production"))]
+            {
+                info!("[START_COMPONENTS] Parallel IBD not available without production feature; skipping.");
+                let _ = initial_utxo_set;
             }
         } else {
             info!(

@@ -102,8 +102,10 @@ hkdf = "=0.12.4"  # Key derivation for module encryption
 rand = "=0.8.5"
 # Directory utilities for Bitcoin Core detection
 dirs = "=5.0"
-# SmallVec for production optimizations
-smallvec = { version = "=1.15.1", optional = true, features = ["serde", "const_generics"] }
+# SmallVec: required because blvm-protocol's Transaction always uses SmallVec regardless
+# of feature flags in published versions.  The production feature previously made this
+# optional but that's incompatible with the published blvm-protocol API.
+smallvec = { version = "=1.15.1", features = ["serde", "const_generics"] }
 
 # Multi-consumer channel for prefetch workers
 crossbeam-channel = "=0.5"
@@ -130,7 +132,9 @@ async-trait = "=0.1.75"
 # Bitflags for transport preference combinations
 bitflags = "^2.6"
 
-# lru and rayon come from blvm-protocol when production is enabled
+# lru: always a direct dep so serialization_cache.rs can import it without the
+# production feature gate (blvm_protocol::lru is only exposed with production).
+lru = "=0.16.4"
 
 # Concurrent HashMap for IBD v2 (zero lock contention); works on all platforms
 dashmap = "=6.0"
@@ -211,7 +215,7 @@ libc = ["dep:libc"]
 # Rayon parallel iterators (enabled by production)
 rayon = []
 # Production optimizations (parallel block validation, etc.)
-production = ["blvm-protocol/production", "dep:blvm-consensus", "dep:smallvec", "rayon", "mimalloc", "libc"]
+production = ["blvm-protocol/production", "dep:blvm-consensus", "rayon", "mimalloc", "libc"]
 # Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
 profile = ["blvm-protocol/profile", "dep:blvm-consensus"]
 # Privacy relay (Dandelion++) compiled behind feature flag; default OFF

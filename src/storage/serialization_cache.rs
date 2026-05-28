@@ -3,8 +3,8 @@
 //! Provides LRU caches for frequently serialized data structures to avoid
 //! redundant serialization operations during IBD.
 
-use blvm_protocol::lru::LruCache;
 use blvm_protocol::types::Hash;
+use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -73,7 +73,9 @@ pub fn get_cached_serialized_header(block_hash: &Hash) -> Option<Arc<Vec<u8>>> {
         return None;
     }
     let shard = header_shard(block_hash);
-    let mut guard = header_caches()[shard].lock().unwrap();
+    let mut guard = header_caches()[shard]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     guard.get(block_hash).map(Arc::clone)
 }
 
@@ -83,7 +85,9 @@ pub fn cache_serialized_header(block_hash: Hash, serialized: Vec<u8>) {
         return;
     }
     let shard = header_shard(&block_hash);
-    let mut guard = header_caches()[shard].lock().unwrap();
+    let mut guard = header_caches()[shard]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     guard.put(block_hash, Arc::new(serialized));
 }
 
@@ -101,14 +105,14 @@ fn tx_caches() -> &'static [Mutex<LruCache<Hash, Arc<Vec<u8>>>>; TX_CACHE_SHARDS
 /// Get cached serialized transaction, or None if not in cache
 pub fn get_cached_serialized_tx(tx_hash: &Hash) -> Option<Arc<Vec<u8>>> {
     let shard = tx_shard(tx_hash);
-    let mut guard = tx_caches()[shard].lock().unwrap();
+    let mut guard = tx_caches()[shard].lock().unwrap_or_else(|e| e.into_inner());
     guard.get(tx_hash).map(Arc::clone)
 }
 
 /// Cache a serialized transaction
 pub fn cache_serialized_tx(tx_hash: Hash, serialized: Vec<u8>) {
     let shard = tx_shard(&tx_hash);
-    let mut guard = tx_caches()[shard].lock().unwrap();
+    let mut guard = tx_caches()[shard].lock().unwrap_or_else(|e| e.into_inner());
     guard.put(tx_hash, Arc::new(serialized));
 }
 
@@ -116,13 +120,13 @@ pub fn cache_serialized_tx(tx_hash: Hash, serialized: Vec<u8>) {
 pub fn clear_all_caches() {
     if let Some(caches) = HEADER_SERIALIZE_CACHE.get() {
         for m in caches {
-            let mut guard = m.lock().unwrap();
+            let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
             guard.clear();
         }
     }
     if let Some(caches) = TX_SERIALIZE_CACHE.get() {
         for m in caches {
-            let mut guard = m.lock().unwrap();
+            let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
             guard.clear();
         }
     }

@@ -1884,10 +1884,11 @@ macro_rules! createrawtransaction_tx {
         }
         #[cfg(not(feature = "production"))]
         {
+            use smallvec::SmallVec;
             Transaction {
                 version: $version,
-                inputs: $inputs,
-                outputs: $outputs,
+                inputs: SmallVec::from_vec($inputs),
+                outputs: SmallVec::from_vec($outputs),
                 lock_time: $locktime,
             }
         }
