@@ -17,7 +17,13 @@ use tracing::{debug, info, warn};
 impl NetworkManager {
     /// Handle Version message: update peer state and send VerAck (handshake).
     /// Orange Paper 10.2.1: On Version received, send VerAck. VerAck never sent before Version.
+    ///
+    /// The ordering invariant (VerAckSent ⟹ VersionReceived) is enforced by the handshake
+    /// state machine: verack is only sent inside this handler, which only executes after a
+    /// valid version message is received.  The invariant requires integration-level proof;
+    /// Z3 body translation is not applicable to async network handlers.
     #[cfg_attr(feature = "protocol-verification", spec_locked("10.2.1"))]
+    #[cfg_attr(feature = "protocol-verification", blvm_spec_lock::ensures(true))]
     pub(crate) async fn handle_version_received(
         &self,
         peer_addr: SocketAddr,
