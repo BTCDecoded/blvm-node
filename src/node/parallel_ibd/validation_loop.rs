@@ -673,15 +673,19 @@ fn run_validation_worker_shared(
         //                            ran. Serial deserialize per worker (no rayon).
         let t_view = std::time::Instant::now();
         utxo_base.clear();
-        utxo_base.reserve(job.keys.len());
+        utxo_base.reserve(job.prefetched.len());
         let still_missing = &mut keys_missing_buf;
         still_missing.clear();
 
+        // Drain prefetched map directly into utxo_base: move Arcs (no clone), single
+        // key-conversion pass. Previously this was a get+Arc::clone per prefetched key
+        // followed by a separate insert — two passes and one extra Arc refcount bump per input.
+        for (k, arc) in job.prefetched.drain() {
+            utxo_base.insert(key_to_outpoint(&k), arc);
+        }
+        // Compute still_missing: keys the prefetcher didn't resolve (cache/disk misses).
         for k in job.keys.iter() {
-            let op = key_to_outpoint(k);
-            if let Some(arc) = job.prefetched.get(k) {
-                utxo_base.insert(op, Arc::clone(arc));
-            } else {
+            if !utxo_base.contains_key(&key_to_outpoint(k)) {
                 still_missing.push(*k);
             }
         }

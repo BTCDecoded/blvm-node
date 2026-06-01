@@ -28,18 +28,33 @@ use std::sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use tracing::debug;
 
-/// Per-op MuHash in [`Self::flush_prepared_package`] is **on by default** (running checkpoint
-/// matches durable UTXO rows). Each delete does a synchronous `disk.get(key)` for correctness
-/// vs create+spend folding — that can cap retire throughput on slow disks.
+/// Per-op MuHash during IBD flush is **off by default**. Each delete previously required a
+/// synchronous `disk.get(key)` for correctness vs create+spend folding — a serial disk read
+/// per deletion that caps retire throughput on slow disks.
 ///
-/// Set `BLVM_IBD_SKIP_PER_OP_MUHASH=1` (or `true`) to skip MuHash updates during IBD flush
-/// for throughput experiments only; checkpoints will not track the MuHash over `ibd_utxos`.
+/// Default off: MuHash is recomputed in bulk from the committed UTXO set at the IBD watermark
+/// (Phase 3 export), where a single sequential scan is far cheaper than per-op disk reads.
+///
+/// Set `BLVM_IBD_ENABLE_PER_OP_MUHASH=1` to restore running per-op MuHash updates (e.g. for
+/// checkpoint consistency debugging). `BLVM_IBD_SKIP_PER_OP_MUHASH=1` is now a no-op (already
+/// the default) but kept for backwards compatibility.
 fn ibd_per_op_muhash_enabled() -> bool {
-    static SKIP: OnceLock<bool> = OnceLock::new();
-    !*SKIP.get_or_init(|| {
-        std::env::var("BLVM_IBD_SKIP_PER_OP_MUHASH")
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        // Explicit opt-in overrides the default-off.
+        if std::env::var("BLVM_IBD_ENABLE_PER_OP_MUHASH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
+        {
+            return true;
+        }
+        // Legacy env var: BLVM_IBD_SKIP_PER_OP_MUHASH=0 re-enables (skip=false → enabled=true).
+        // BLVM_IBD_SKIP_PER_OP_MUHASH=1 is now the default behaviour, so it's a no-op.
+        if let Ok(val) = std::env::var("BLVM_IBD_SKIP_PER_OP_MUHASH") {
+            let skip = val == "1" || val.eq_ignore_ascii_case("true");
+            return !skip;
+        }
+        false // default: per-op MuHash disabled during IBD
     })
 }
 
