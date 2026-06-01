@@ -82,9 +82,12 @@ impl UtxoDatabase {
     ///
     /// `ids` must be pre-filled with `OutputId::MAX`. After this call, `ids[i]` is the
     /// table ID for `sorted_keys[i]`, or `OutputId::MAX` if not found (disk fallback needed).
-    pub fn query(&self, sorted_keys: &[OutputKey], ids: &mut [OutputId]) {
+    ///
+    /// `before` is an exclusive upper bound on entry height. `SpendSession` passes `before =
+    /// current_height` so that Deletes appended for the current block do not shadow the Adds.
+    pub fn query(&self, sorted_keys: &[OutputKey], ids: &mut [OutputId], before: i32) {
         debug_assert_eq!(sorted_keys.len(), ids.len());
-        self.index.batch_query(sorted_keys, ids);
+        self.index.batch_query(sorted_keys, ids, before);
     }
 
     /// Fetch `OutputDetail` for resolved IDs. IDs are sorted by offset internally for read locality.
@@ -200,7 +203,7 @@ mod tests {
         key[32..36].copy_from_slice(&0u32.to_be_bytes());
 
         let mut ids = [OutputId::MAX; 1];
-        db.query(&[key], &mut ids);
+        db.query(&[key], &mut ids, i32::MAX);
         assert_ne!(ids[0], OutputId::MAX, "coinbase output should be in index");
 
         let mut details = Vec::new();
@@ -242,7 +245,7 @@ mod tests {
         key[32..36].copy_from_slice(&0u32.to_be_bytes());
 
         let mut ids = [OutputId::MAX; 1];
-        db.query(&[key], &mut ids);
+        db.query(&[key], &mut ids, i32::MAX);
         assert_ne!(ids[0], OutputId::MAX, "tx1 Add should be in index (intra-block Delete for tx2 filtered)");
     }
 
@@ -260,7 +263,7 @@ mod tests {
         let mut key: OutputKey = [0u8; 36];
         key[..32].copy_from_slice(&txid);
         let mut ids = [OutputId::MAX; 1];
-        db.query(&[key], &mut ids);
+        db.query(&[key], &mut ids, i32::MAX);
         assert_eq!(ids[0], OutputId::MAX, "entry should be gone after erase_since");
     }
 

@@ -39,10 +39,12 @@ pub mod database;
 pub mod index;
 pub mod memory_age;
 pub mod memory_run;
+pub mod spend_session;
 pub mod table;
 pub mod types;
 
 pub use database::UtxoDatabase;
+pub use spend_session::{session_to_utxo_set, SpendSession};
 pub use types::{
     output_key_to_outpoint, outpoint_to_output_key, to_output_key, IdCodec, OutputDetail,
     OutputHeader, OutputId, OutputKey, OutputKV,

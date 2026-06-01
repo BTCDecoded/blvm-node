@@ -171,14 +171,18 @@ impl UtxoIndex {
     ///
     /// `ids` must be pre-filled with `OutputId::MAX` (sentinel for "not yet resolved").
     /// Ages are queried newest-to-oldest; once all ids are resolved the loop short-circuits.
-    pub fn batch_query(&self, keys: &[[u8; 36]], ids: &mut [OutputId]) {
+    ///
+    /// `before` is an exclusive upper bound on `entry.height`. Pass `i32::MAX` to see all heights.
+    /// `SpendSession` passes `before = height` so that Deletes recorded for the current block
+    /// are invisible — only prior-block Adds are returned.
+    pub fn batch_query(&self, keys: &[[u8; 36]], ids: &mut [OutputId], before: i32) {
         debug_assert_eq!(keys.len(), ids.len());
         for age in self.ages.iter() {
             // Short-circuit: if all ids are resolved, stop early.
             if ids.iter().all(|id| *id != OutputId::MAX) {
                 break;
             }
-            age.batch_query(keys, ids, 0, i32::MAX);
+            age.batch_query(keys, ids, 0, before);
         }
     }
 
@@ -266,7 +270,7 @@ mod tests {
         let _p1 = idx.append(vec![OutputKV::new_add(k1, 100, 10)], 100);
         let _p2 = idx.append(vec![OutputKV::new_add(k2, 101, 20)], 101);
         let mut ids = [OutputId::MAX; 2];
-        idx.batch_query(&[k1, k2], &mut ids);
+        idx.batch_query(&[k1, k2], &mut ids, i32::MAX);
         assert_eq!(ids[0], 10);
         assert_eq!(ids[1], 20);
     }

@@ -1545,6 +1545,36 @@ impl ParallelIBD {
         let utxo_mutex_valid = Arc::clone(&utxo_mutex);
         let utxo_nominal_max_entries = mem_guard.utxo_max_entries;
         let utxo_pf = self.config.utxo_prefetch_lookahead.clamp(1, 128) as usize;
+
+        // Phase 2: optionally initialize the age-tiered UTXO engine.
+        // Enable with BLVM_IBD_ENGINE=1. The engine's flat file defaults to
+        // $TMPDIR/blvm_ibd_engine_<pid>.bin or can be set via BLVM_IBD_ENGINE_PATH.
+        let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> =
+            if std::env::var("BLVM_IBD_ENGINE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                let engine_path = std::env::var("BLVM_IBD_ENGINE_PATH")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        std::env::temp_dir()
+                            .join(format!("blvm_ibd_engine_{}.bin", std::process::id()))
+                    });
+                info!("IBD engine (Phase 2) enabled; flat-file table at {}", engine_path.display());
+                match crate::storage::ibd_engine::UtxoDatabase::open(&engine_path) {
+                    Ok(db) => Some(Arc::new(db)),
+                    Err(e) => {
+                        warn!(
+                            "Failed to open IBD engine at {:?}: {e:#}. Falling back to legacy path.",
+                            engine_path
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
         let params = validation_loop::ValidationParams {
             feeder_state: feeder_state_valid,
             ibd_store: ibd_store_v2_valid,
@@ -1562,6 +1592,7 @@ impl ParallelIBD {
             utxo_nominal_max_entries,
             utxo_prefetch_lookahead: utxo_pf,
             stall_tx: stall_tx.clone(),
+            utxo_engine,
         };
         let validation_handle =
             std::thread::spawn(move || validation_loop::run_validation_loop(params));

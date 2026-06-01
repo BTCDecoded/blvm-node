@@ -12,6 +12,7 @@ use crate::storage::disk_utxo::{
     block_input_keys_batch_into_arc, block_input_keys_into_filtered,
     block_input_keys_into_filtered_with_tx_ids, key_to_outpoint, outpoint_to_key, OutPointKey,
 };
+use crate::storage::ibd_engine::{session_to_utxo_set, SpendSession, UtxoDatabase};
 use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
 use crate::storage::Storage;
 use crate::utils::time::current_timestamp;
@@ -555,6 +556,10 @@ struct ValidateJob {
     /// Optional UTXO map preloaded by the upstream IBD prefetcher; when non-empty, worker
     /// uses it as the initial fill (skipping the full cache scan).
     prefetched: rustc_hash::FxHashMap<OutPointKey, Arc<UTXO>>,
+    /// Pre-resolved UTXO session from the age-tiered engine (Phase 2).
+    /// When `Some`, the worker calls `session_to_utxo_set` and skips the prefetch/cache path.
+    /// When `None` (engine disabled), the legacy prefetch/cache/supplement path is used.
+    session: Option<SpendSession>,
 }
 
 /// Results returned from the validation worker for one block.
@@ -658,78 +663,76 @@ fn run_validation_worker_shared(
         let height = job.height;
 
         // ─── Build View(h) ──────────────────────────────────────────────────
-        // Key-driven layered lookup. For each input key we check (in order):
-        //   1. job.prefetched      — UTXOs the prefetch pool pre-loaded into RAM.
-        //   2. store.cache_get     — DashMap (lock-free shards). Catches every UTXO
-        //                            from already-validated blocks (staged + flushed).
-        //                            `worker_cache_put_protected` populated it; the
-        //                            `worker_preinserted` DashSet protects from eviction
-        //                            until disk-flush, so this is the canonical fast hit.
-        //   3. spec_adds_snapshot  — speculative additions from in-flight blocks whose
-        //                            workers have NOT yet returned (so cache_put hasn't
-        //                            run for them). Bounded by `pipeline_depth` (~32).
-        //   4. store.supplement    — store cache (re-checked) + RocksDB. The disk
-        //                            fallback for the rare miss after the prefetcher
-        //                            ran. Serial deserialize per worker (no rayon).
         let t_view = std::time::Instant::now();
         utxo_base.clear();
-        utxo_base.reserve(job.prefetched.len());
-        let still_missing = &mut keys_missing_buf;
-        still_missing.clear();
 
-        // Drain prefetched map directly into utxo_base: move Arcs (no clone), single
-        // key-conversion pass. Previously this was a get+Arc::clone per prefetched key
-        // followed by a separate insert — two passes and one extra Arc refcount bump per input.
-        for (k, arc) in job.prefetched.drain() {
-            utxo_base.insert(key_to_outpoint(&k), arc);
-        }
-        // Compute still_missing: keys the prefetcher didn't resolve (cache/disk misses).
-        for k in job.keys.iter() {
-            if !utxo_base.contains_key(&key_to_outpoint(k)) {
-                still_missing.push(*k);
+        if let Some(session) = job.session.take() {
+            // ── Engine path (BLVM_IBD_ENGINE=1) ─────────────────────────────
+            // The dispatch thread called SpendSession::resolve, which already queried the
+            // age-tiered UtxoDatabase for all external inputs and resolved intra-block spends.
+            // Convert the session into the UtxoSet view required by validate_block_only.
+            // One Arc<UTXO> per entry (down from 2-3 in the prefetch path).
+            // The session's Pin is dropped at end of this scope, allowing the compacter to
+            // merge the height tier once validation completes.
+            utxo_base = session_to_utxo_set(&session);
+        } else {
+            // ── Legacy prefetch/cache/supplement path ────────────────────────
+            // Key-driven layered lookup. For each input key we check (in order):
+            //   1. job.prefetched      — UTXOs the prefetch pool pre-loaded into RAM.
+            //   2. store.cache_get     — DashMap (lock-free shards). Catches every UTXO
+            //                            from already-validated blocks (staged + flushed).
+            //   3. spec_adds_snapshot  — speculative additions from in-flight blocks whose
+            //                            workers have NOT yet returned.
+            //   4. store.supplement    — store cache (re-checked) + RocksDB disk fallback.
+            utxo_base.reserve(job.prefetched.len());
+            let still_missing = &mut keys_missing_buf;
+            still_missing.clear();
+
+            // Drain prefetched map directly into utxo_base: move Arcs (no clone), single
+            // key-conversion pass.
+            for (k, arc) in job.prefetched.drain() {
+                utxo_base.insert(key_to_outpoint(&k), arc);
             }
-        }
-
-        // FAST PATH: by the time this worker runs, every retired-but-not-flushed block (i.e.
-        // every entry in `staged_snapshot`) has called `worker_cache_put_protected`, so its
-        // outputs are in the cache (DashMap, lock-free) and protected from eviction by
-        // `worker_preinserted` until disk flush completes. A direct `cache_get` here replaces
-        // the O(staged_snapshot.len() × still_missing.len()) walk that dominated `utxo_base_ms`
-        // (~100 ms/block at h>270k where staged backed up behind retire). The staged_snapshot
-        // walk is fully redundant once cache is consulted, so we drop it entirely.
-        if !still_missing.is_empty() {
-            still_missing.retain(|k| {
-                if let Some(ref r) = store.cache_get(k) {
-                    let op = key_to_outpoint(k);
-                    utxo_base.insert(op, Arc::clone(&r.utxo));
-                    return false;
+            // Compute still_missing: keys the prefetcher didn't resolve.
+            for k in job.keys.iter() {
+                if !utxo_base.contains_key(&key_to_outpoint(k)) {
+                    still_missing.push(*k);
                 }
-                true
-            });
-        }
+            }
 
-        // SLOW PATH (rare): keys for in-flight blocks whose worker has not yet returned and so
-        // hasn't run `worker_cache_put_protected`. Bounded by `pipeline_depth` (~32), and most
-        // entries are quickly drained as workers finish — so this loop is small in practice.
-        if !still_missing.is_empty() && !job.spec_adds_snapshot.is_empty() {
-            still_missing.retain(|k| {
-                let op = key_to_outpoint(k);
-                for (_sh, set) in job.spec_adds_snapshot.iter().rev() {
-                    if let Some(u) = set.get(&op) {
-                        utxo_base.insert(op, Arc::clone(u));
+            // FAST PATH: cache_get covers every retired block's outputs (DashMap, lock-free).
+            if !still_missing.is_empty() {
+                still_missing.retain(|k| {
+                    if let Some(ref r) = store.cache_get(k) {
+                        let op = key_to_outpoint(k);
+                        utxo_base.insert(op, Arc::clone(&r.utxo));
                         return false;
                     }
-                }
-                true
-            });
-        }
+                    true
+                });
+            }
 
-        if !still_missing.is_empty() {
-            store.supplement_utxo_map_with_buf(
-                &mut utxo_base,
-                still_missing,
-                &mut supplement_cache_buf,
-            );
+            // SLOW PATH: spec_adds_snapshot for in-flight blocks. Bounded by pipeline_depth.
+            if !still_missing.is_empty() && !job.spec_adds_snapshot.is_empty() {
+                still_missing.retain(|k| {
+                    let op = key_to_outpoint(k);
+                    for (_sh, set) in job.spec_adds_snapshot.iter().rev() {
+                        if let Some(u) = set.get(&op) {
+                            utxo_base.insert(op, Arc::clone(u));
+                            return false;
+                        }
+                    }
+                    true
+                });
+            }
+
+            if !still_missing.is_empty() {
+                store.supplement_utxo_map_with_buf(
+                    &mut utxo_base,
+                    still_missing,
+                    &mut supplement_cache_buf,
+                );
+            }
         }
         let view_build_ms = t_view.elapsed().as_millis() as u64;
 
@@ -964,6 +967,9 @@ pub struct ValidationParams {
     /// Broadcast sender: validation loop broadcasts the height it is waiting for when stalled.
     /// Download workers subscribe and abort/retry stuck chunks that contain the stall height.
     pub stall_tx: tokio::sync::broadcast::Sender<u64>,
+    /// Age-tiered UTXO engine (Phase 2). `Some` when `BLVM_IBD_ENGINE=1`; `None` uses
+    /// the legacy IbdUtxoStore prefetch/cache/supplement path.
+    pub utxo_engine: Option<Arc<UtxoDatabase>>,
 }
 
 /// Run the IBD validation loop. Called from std::thread::spawn.
@@ -988,6 +994,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let nominal_max_ahead = params.nominal_max_ahead;
     let utxo_nominal_max_entries = params.utxo_nominal_max_entries;
     let stall_tx = params.stall_tx;
+    let utxo_engine = params.utxo_engine;
     let nominal_prefetch_lookahead = params.utxo_prefetch_lookahead.clamp(1, 128);
     let utxo_prefetch_lookahead_live = AtomicUsize::new(nominal_prefetch_lookahead);
 
@@ -1877,6 +1884,24 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 bip30_index.clone()
             };
 
+            // Phase 2: if the age-tiered engine is enabled, resolve this block's inputs
+            // via SpendSession before dispatching. The session carries resolved OutputDetails +
+            // the Pin that prevents the compacter from merging this height tier away until the
+            // worker finishes. On error (shouldn't happen during IBD), fall back gracefully.
+            let engine_session: Option<SpendSession> = if let Some(ref db) = utxo_engine {
+                let tx_ids_for_engine: Vec<[u8; 32]> =
+                    tx_ids_precomputed_d.iter().copied().collect();
+                match SpendSession::resolve(db, block_arc_d.as_ref(), &tx_ids_for_engine, h as i32) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        warn!("[IBD_ENGINE] SpendSession::resolve failed at h={h}: {e:#}, falling back to legacy path");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             let job_send = valjob_tx.send(ValidateJob {
                 height: h,
                 block_arc: Arc::clone(&block_arc_d),
@@ -1888,6 +1913,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 keys: keys_for_job,
                 spec_adds_snapshot,
                 prefetched: prefetched_utxos_d,
+                session: engine_session,
             });
             if job_send.is_err() {
                 return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
