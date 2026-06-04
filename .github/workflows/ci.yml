@@ -278,6 +278,8 @@ jobs:
           if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
       - name: Checkout develop scripts (blvm)
@@ -396,6 +398,8 @@ jobs:
           if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
@@ -474,6 +478,8 @@ jobs:
           if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
       - name: Setup blvm-spec (Orange Paper for spec-lock verification)
@@ -650,6 +656,8 @@ jobs:
           if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
@@ -892,6 +900,8 @@ jobs:
           if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
           if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
           if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
 
       - name: Isolate CARGO_HOME for this runner

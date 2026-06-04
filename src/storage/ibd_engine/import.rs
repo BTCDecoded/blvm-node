@@ -71,8 +71,7 @@ pub fn seed_from_ibd_utxos(
 
     // Producer: iterate tree → import to flat table → send OutputKVs to writer.
     let mut total = 0usize;
-    let mut batch_items: Vec<(OutputKey, OutputHeader, Vec<u8>)> =
-        Vec::with_capacity(SEED_BATCH);
+    let mut batch_items: Vec<(OutputKey, OutputHeader, Vec<u8>)> = Vec::with_capacity(SEED_BATCH);
     let mut entry_buf = Vec::<OutputKV>::with_capacity(SEED_BATCH);
     let mut send_err = false;
 
@@ -129,9 +128,7 @@ pub fn seed_from_ibd_utxos(
         .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))??;
 
     if send_err {
-        anyhow::bail!(
-            "ibd-seed-writer thread exited early; disk segment may be incomplete"
-        );
+        anyhow::bail!("ibd-seed-writer thread exited early; disk segment may be incomplete");
     }
 
     if total == 0 && checkpoint_height > 0 {

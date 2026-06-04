@@ -691,7 +691,10 @@ impl MemoryGuard {
                     // Also respect available_mb × 75% so a genuinely-loaded machine still adapts.
                     let from_total = total_mb * 65 / 100;
                     let from_avail = available_mb * 75 / 100;
-                    return from_total.max(from_avail).min(total_mb * 80 / 100).max(2048);
+                    return from_total
+                        .max(from_avail)
+                        .min(total_mb * 80 / 100)
+                        .max(2048);
                 } else if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
                     // 8–18 GiB physical. Budget from available_mb (not total_mb): a desktop
                     // workload already consumes ~6 GB, so total_mb×54% = 8.6 GB on a 15.9 GB
