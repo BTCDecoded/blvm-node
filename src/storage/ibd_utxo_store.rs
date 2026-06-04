@@ -109,10 +109,22 @@ pub struct PendingFlushPackage {
 /// Some((slab_start, slab_len)))` for adds and `(key, None)` for deletes. This eliminates
 /// the per-add `Vec<u8>` clone that previously allocated one ~80-byte heap object per UTXO
 /// (250k allocs × 80 B = ~20 MB per 500k-op flush reduced to a single slab).
+#[derive(Clone)]
 pub struct PreparedFlushPackage {
     pub rows: Arc<Vec<(OutPointKey, Option<(u32, u32)>)>>,
     pub slab: Arc<Vec<u8>>,
     pub max_block_height: u64,
+}
+
+/// Controls which operation types are written to RocksDB in a flush call.
+/// Used to implement two-phase crash-safe commit: ADDs flushed before watermark,
+/// DELs flushed after watermark. See `flush_prepared_package_adds_only` /
+/// `flush_prepared_package_dels_only`.
+#[derive(Clone, Copy, PartialEq)]
+enum FlushFilter {
+    All,
+    AddsOnly,
+    DelsOnly,
 }
 
 /// Sentinel `block_height` value for cache entries that require no eviction protection
@@ -1430,6 +1442,25 @@ impl IbdUtxoStore {
         Some(pkg)
     }
 
+    /// Like [`Self::maybe_take_flush_batch`] but drains only ADD ops, leaving DEL ops in place.
+    /// Non-durable async flushes use this instead of `maybe_take_flush_batch` so that spend
+    /// tombstones never reach SST ahead of the watermark (see `drain_pending_adds_only`).
+    pub fn maybe_take_flush_batch_adds_only(&self) -> Option<PendingFlushPackage> {
+        let secondary = if self.max_entries_effective() == usize::MAX {
+            usize::MAX
+        } else {
+            (self.max_entries_effective() * 20 / 100).max(1)
+        };
+        let n = self.pending_log_size.load(Ordering::Relaxed);
+        if n < self.flush_threshold && n < secondary {
+            return None;
+        }
+        let raw = self.drain_pending_adds_only();
+        let pkg = pack_flush_package(raw)?;
+        self.register_in_flight(&pkg);
+        Some(pkg)
+    }
+
     /// Force-flush all pending ops (`u64::MAX` height bound). See [`Self::maybe_take_flush_batch`].
     pub fn take_flush_batch_force(&self) -> Option<PendingFlushPackage> {
         self.take_flush_batch_force_through(u64::MAX)
@@ -1443,6 +1474,55 @@ impl IbdUtxoStore {
             return None;
         }
         let raw = self.drain_pending_through_height(max_block_height_inclusive);
+        let pkg = pack_flush_package(raw)?;
+        self.register_in_flight(&pkg);
+        Some(pkg)
+    }
+
+    /// Drain only ADD (insert) ops from the pending log, leaving DEL (delete/spend) ops in place.
+    ///
+    /// Used by non-durable async flushes so that tombstones are never auto-flushed to SST
+    /// before the watermark has advanced past their spend height. If we write DEL tombstones
+    /// to the memtable without WAL, RocksDB can auto-flush them to SST (when the write buffer
+    /// fills) even though the watermark hasn't yet advanced past that block. On crash+resume
+    /// RocksDB would return "not found" for a UTXO whose ADD is in an older SST but whose DEL
+    /// tombstone is in a newer one — causing UTXO_TOTAL_MISS. Keeping DELs in the pending_log
+    /// until the next durable checkpoint (Phase 3) guarantees they are only persisted after
+    /// `persist_ibd_utxo_flush_checkpoint` has advanced the watermark past their spend height.
+    fn drain_pending_adds_only(&self) -> Vec<PendingLogEntry> {
+        let approx = self.pending_log_size.load(Ordering::Relaxed);
+        let mut all = Vec::with_capacity(approx);
+        let mut drained = 0usize;
+        for shard in self.pending_shards.iter() {
+            let mut s = shard.lock().expect("pending shard lock");
+            if s.is_empty() {
+                continue;
+            }
+            let mut i = 0;
+            while i < s.len() {
+                // PendingValue = Option<Arc<UTXO>>; Some = ADD, None = DEL
+                if s[i].1.is_some() {
+                    all.push(s.swap_remove(i));
+                    drained += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        let prev = self.pending_log_size.load(Ordering::Relaxed);
+        self.pending_log_size
+            .store(prev.saturating_sub(drained), Ordering::Relaxed);
+        all
+    }
+
+    /// Force-flush only ADD ops, leaving DEL (spend) ops in the pending log for the next
+    /// durable checkpoint's Phase 3. Non-durable async flushes use this to prevent phantom
+    /// DEL tombstones from reaching SST files ahead of the watermark.
+    pub fn take_flush_batch_adds_only(&self) -> Option<PendingFlushPackage> {
+        if self.all_pending_shards_empty() {
+            return None;
+        }
+        let raw = self.drain_pending_adds_only();
         let pkg = pack_flush_package(raw)?;
         self.register_in_flight(&pkg);
         Some(pkg)
@@ -1614,10 +1694,32 @@ impl IbdUtxoStore {
         Ok(())
     }
 
+    /// Filter for two-phase crash-safe commit: write only ADDs in phase 1 (before watermark),
+    /// write only DELs in phase 2 (after watermark). Both phases use `flush_disk()` afterwards.
+    /// The invariant: if we crash after phase 2's `flush_disk()` but before the next checkpoint,
+    /// the stale (undeleted) UTXOs are harmless — Bitcoin double-spend prevention guarantees
+    /// they will never be referenced again after the watermark has advanced past their spend block.
     pub fn flush_prepared_package(
         &self,
         pkg: &PreparedFlushPackage,
         mut muhash: Option<&mut MuHash3072>,
+    ) -> Result<usize> {
+        self.flush_prepared_package_filtered(pkg, muhash, FlushFilter::All)
+    }
+
+    pub fn flush_prepared_package_adds_only(&self, pkg: &PreparedFlushPackage) -> Result<usize> {
+        self.flush_prepared_package_filtered(pkg, None, FlushFilter::AddsOnly)
+    }
+
+    pub fn flush_prepared_package_dels_only(&self, pkg: &PreparedFlushPackage) -> Result<usize> {
+        self.flush_prepared_package_filtered(pkg, None, FlushFilter::DelsOnly)
+    }
+
+    fn flush_prepared_package_filtered(
+        &self,
+        pkg: &PreparedFlushPackage,
+        mut muhash: Option<&mut MuHash3072>,
+        filter: FlushFilter,
     ) -> Result<usize> {
         let mut total_flushed = 0;
         let slab = pkg.slab.as_slice();
@@ -1724,16 +1826,27 @@ impl IbdUtxoStore {
                 }
             }
             let mut b = self.disk.batch()?;
+            let mut ops_in_batch = 0usize;
             for (key, value_opt) in chunk {
                 match value_opt {
                     Some((start, len)) => {
-                        b.put(key.as_slice(), &slab[*start as usize..][..*len as usize])
+                        if filter != FlushFilter::DelsOnly {
+                            b.put(key.as_slice(), &slab[*start as usize..][..*len as usize]);
+                            ops_in_batch += 1;
+                        }
                     }
-                    None => b.delete(key.as_slice()),
+                    None => {
+                        if filter != FlushFilter::AddsOnly {
+                            b.delete(key.as_slice());
+                            ops_in_batch += 1;
+                        }
+                    }
                 }
             }
-            b.commit_no_wal()?;
-            total_flushed += chunk.len();
+            if ops_in_batch > 0 {
+                b.commit_no_wal()?;
+            }
+            total_flushed += ops_in_batch;
         }
         if total_flushed == 0 {
             return Ok(0);

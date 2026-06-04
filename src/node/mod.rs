@@ -764,12 +764,55 @@ impl Node {
                     )?;
                 }
 
-                let effective_tip = chain_tip.min(watermark_val);
+                // Engine checkpoint exports write a full UTXO snapshot to ibd_utxos at export
+                // height. Incremental legacy retire flushes may advance watermark further without
+                // a matching export — resume must not start past the last export or engine seed
+                // will miss UTXOs (see seed_from_ibd_utxos).
+                let engine_enabled = std::env::var("BLVM_IBD_ENGINE")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let export_height = if engine_enabled {
+                    std::env::var("BLVM_IBD_EXPORT_HEIGHT_OVERRIDE")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .or_else(|| {
+                            self.storage
+                                .chain()
+                                .get_engine_export_height()
+                                .ok()
+                                .flatten()
+                        })
+                } else {
+                    None
+                };
+                let durable_watermark = match export_height {
+                    Some(eh) if eh > 0 => {
+                        if watermark_val > eh {
+                            warn!(
+                                "[START_COMPONENTS] ibd_utxo_watermark ({}) > last engine export \
+                                 ({}) — clamping durable resume to export height (re-validate {} \
+                                 blocks)",
+                                watermark_val,
+                                eh,
+                                watermark_val.saturating_sub(eh),
+                            );
+                        }
+                        if watermark_val == 0 {
+                            // Engine mode: legacy watermark may be unset; checkpoint export is authoritative.
+                            eh
+                        } else {
+                            watermark_val.min(eh)
+                        }
+                    }
+                    _ => watermark_val,
+                };
+
+                let effective_tip = chain_tip.min(durable_watermark);
                 if effective_tip < chain_tip {
                     warn!(
                         "[START_COMPONENTS] UTXO watermark ({}) < chain tip ({}); \
                          IBD will re-validate {} block(s) from height {} to restore UTXO consistency",
-                        watermark_val,
+                        durable_watermark,
                         chain_tip,
                         chain_tip - effective_tip,
                         effective_tip + 1,
@@ -790,15 +833,22 @@ impl Node {
         // accidentally treating an existing chain as genesis (e.g. wrong --data-dir or BLVM_CLEAN).
         let chain_tip_for_log = self.storage.chain().get_height().ok().flatten();
         let wm_for_log = self.storage.chain().get_utxo_watermark().ok().flatten();
+        let export_for_log = self
+            .storage
+            .chain()
+            .get_engine_export_height()
+            .ok()
+            .flatten();
         if chain_tip_for_log.is_some_and(|h| h > 0) || synced_tip > 0 {
             info!(
                 "Resuming sync from existing data in this data directory — keep the same --data-dir between runs (do not delete rocksdb/)"
             );
         }
         info!(
-            "[IBD_RESUME] chain_tip={:?} ibd_utxo_watermark={:?} effective_validated_tip={} next_block_height={}",
+            "[IBD_RESUME] chain_tip={:?} ibd_utxo_watermark={:?} engine_export_height={:?} effective_validated_tip={} next_block_height={}",
             chain_tip_for_log,
             wm_for_log,
+            export_for_log,
             synced_tip,
             ibd_first_block_height
         );

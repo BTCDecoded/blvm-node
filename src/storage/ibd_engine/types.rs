@@ -2,11 +2,11 @@
 //!
 //! Key design choices vs the existing disk_utxo layer:
 //! - `OutputKey = [u8; 36]` (txid 32B + vout u32 BE 4B) vs legacy `OutPointKey = [u8; 40]`
-//!   (txid 32B + vout u64 LE 8B). 36B fits tighter in cache and matches Hornet's key layout.
+//!   (txid 32B + vout u64 LE 8B). 36B fits tighter in cache and sorts lexicographically.
 //! - `OutputHeader` is `repr(C)` fixed-layout — memcpy safe, no bincode round-trip.
-//! - `OutputKV` is 52 bytes: fits ~78 per 4096-byte cache line group (vs 48 at Hornet).
-//!   We keep height as i32 and id as u64 separately to avoid bit-packing complexity.
-//! - `IdCodec` packs `{offset: 44 bits, length: 20 bits}` into u64 — same as Hornet.
+//! - `OutputKV` is 52 bytes: fits ~78 per 4096-byte cache line group; height and table id
+//!   are separate fields rather than bit-packed into the key.
+//! - `IdCodec` packs `{offset: 44 bits, length: 20 bits}` into a single `u64` table id.
 
 /// 36-byte UTXO key: txid (32 bytes) || vout (u32 big-endian, 4 bytes).
 ///
@@ -18,6 +18,13 @@ pub type OutputKey = [u8; 36];
 /// - Offset: upper 44 bits → max 16 TB flat file.
 /// - Length: lower 20 bits → max 1 MB per UTXO (sufficient for any script).
 pub type OutputId = u64;
+
+/// Sentinel: UTXO found in the memory age hierarchy but already spent (Delete entry visible).
+///
+/// Distinguishes "spent in memory" from `OutputId::MAX` ("not found anywhere yet").
+/// When set, disk-index lookup is skipped — the memory Delete has already resolved the key.
+/// After all lookups, callers treat this identically to `OutputId::MAX` (UTXO unavailable).
+pub const OUTPUT_ID_DELETED: OutputId = OutputId::MAX - 1;
 
 /// Fixed-layout UTXO metadata in the flat table file.
 ///
@@ -66,11 +73,23 @@ impl OutputKV {
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
     pub fn new_add(key: OutputKey, height: i32, id: OutputId) -> Self {
-        Self { key, height, op: 0, _pad: [0; 3], id }
+        Self {
+            key,
+            height,
+            op: 0,
+            _pad: [0; 3],
+            id,
+        }
     }
 
     pub fn new_delete(key: OutputKey, height: i32) -> Self {
-        Self { key, height, op: -1, _pad: [0; 3], id: 0 }
+        Self {
+            key,
+            height,
+            op: -1,
+            _pad: [0; 3],
+            id: 0,
+        }
     }
 
     pub fn is_add(self) -> bool {
@@ -118,7 +137,10 @@ impl IdCodec {
     const LEN_MASK: u64 = (1 << Self::LEN_BITS) - 1;
 
     pub fn encode(offset: u64, length: usize) -> OutputId {
-        debug_assert!(length < (1 << Self::LEN_BITS), "script too long for IdCodec");
+        debug_assert!(
+            length < (1 << Self::LEN_BITS),
+            "script too long for IdCodec"
+        );
         (offset << Self::LEN_BITS) | (length as u64 & Self::LEN_MASK)
     }
 
@@ -209,9 +231,17 @@ mod tests {
 
     #[test]
     fn test_output_header_flags() {
-        let h = OutputHeader { height: 100, flags: 1, amount: 5000 };
+        let h = OutputHeader {
+            height: 100,
+            flags: 1,
+            amount: 5000,
+        };
         assert!(h.is_coinbase());
-        let h2 = OutputHeader { height: 100, flags: 0, amount: 5000 };
+        let h2 = OutputHeader {
+            height: 100,
+            flags: 0,
+            amount: 5000,
+        };
         assert!(!h2.is_coinbase());
     }
 }

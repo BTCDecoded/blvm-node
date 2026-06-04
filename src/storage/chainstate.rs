@@ -321,6 +321,87 @@ impl ChainState {
         Ok(())
     }
 
+    /// Height of the last **full** engine checkpoint export (`run_checkpoint_export`).
+    /// Unlike `ibd_utxo_watermark`, this is only advanced by the periodic checkpoint thread —
+    /// never by incremental legacy retire flushes. Resume seeds the engine from `ibd_utxos` at
+    /// this height; if watermark > export_height the gap blocks are re-validated.
+    pub fn get_engine_export_height(&self) -> Result<Option<u64>> {
+        if let Some(data) = self.chain_info.get(b"ibd_engine_export_height")? {
+            if data.len() < 8 {
+                return Ok(None);
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[..8]);
+            Ok(Some(u64::from_be_bytes(bytes)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Record a completed engine checkpoint export (monotonic).
+    pub fn persist_engine_export_height(&self, height: u64) -> Result<()> {
+        let current = self.get_engine_export_height()?.unwrap_or(0);
+        if height > current {
+            self.chain_info
+                .insert(b"ibd_engine_export_height", &height.to_be_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Active ping-pong checkpoint tree slot (0 = `ibd_utxos_ckpt_a`, 1 = `ibd_utxos_ckpt_b`).
+    pub fn get_engine_ckpt_slot(&self) -> Result<u8> {
+        Ok(match self.chain_info.get(b"ibd_engine_ckpt_slot")? {
+            Some(data) if !data.is_empty() => data[0] & 1,
+            _ => 0,
+        })
+    }
+
+    /// UTXO count in the last completed engine checkpoint export.
+    pub fn get_engine_export_utxo_count(&self) -> Result<Option<u64>> {
+        if let Some(data) = self.chain_info.get(b"ibd_engine_export_utxo_count")? {
+            if data.len() < 8 {
+                return Ok(None);
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[..8]);
+            Ok(Some(u64::from_be_bytes(bytes)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Atomically record a completed engine checkpoint: height, active slot, UTXO count, MuHash.
+    pub fn persist_engine_checkpoint_complete(
+        &self,
+        height: u64,
+        slot: u8,
+        utxo_count: u64,
+        muhash_running: &[u8; MUHASH_RUNNING_STATE_BYTES],
+    ) -> Result<()> {
+        self.persist_ibd_utxo_flush_checkpoint(height, muhash_running)?;
+        self.persist_engine_export_height(height)?;
+        self.chain_info
+            .insert(b"ibd_engine_ckpt_slot", &[slot & 1])?;
+        self.chain_info
+            .insert(b"ibd_engine_export_utxo_count", &utxo_count.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Reset all engine checkpoint metadata to "no checkpoint" state.
+    ///
+    /// Used by aggressive autorepair in engine mode after the checkpoint trees themselves
+    /// have been cleared. Resets `ibd_engine_export_height`, `ibd_engine_ckpt_slot`, and
+    /// `ibd_engine_export_utxo_count` so the next startup treats the engine as if it has
+    /// never exported a checkpoint.
+    pub fn force_reset_engine_checkpoint_metadata(&self) -> Result<()> {
+        self.chain_info
+            .insert(b"ibd_engine_export_height", &0u64.to_be_bytes())?;
+        self.chain_info.insert(b"ibd_engine_ckpt_slot", &[0u8])?;
+        self.chain_info
+            .insert(b"ibd_engine_export_utxo_count", &0u64.to_be_bytes())?;
+        Ok(())
+    }
+
     /// Get current chain tip hash
     pub fn get_tip_hash(&self) -> Result<Option<Hash>> {
         if let Some(info) = self.load_chain_info()? {

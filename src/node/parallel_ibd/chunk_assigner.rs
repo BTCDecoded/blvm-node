@@ -158,7 +158,11 @@ impl ChunkAssigner {
         if until > *entry {
             *entry = until;
         }
-        tracing::warn!("IBD: blacklisted peer {} for {}s", peer_id, duration.as_secs());
+        tracing::warn!(
+            "IBD: blacklisted peer {} for {}s",
+            peer_id,
+            duration.as_secs()
+        );
     }
 
     /// Returns true if the peer is currently blacklisted.
@@ -248,10 +252,7 @@ impl ChunkAssigner {
             return None;
         }
         // Peer binding check: skip in work_stealing mode (WAN multi-peer).
-        if !self.work_stealing
-            && !self.chunk_peers.is_empty()
-            && self.chunk_peers[idx] != peer_id
-        {
+        if !self.work_stealing && !self.chunk_peers.is_empty() && self.chunk_peers[idx] != peer_id {
             return None;
         }
         let (start, end) = self.chunks[idx];

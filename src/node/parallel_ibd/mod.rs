@@ -50,8 +50,8 @@ use crate::node::block_processor::validate_block_with_context;
 use crate::storage::blockstore::{block_height_row_key, BlockMetadata, BlockStore};
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::{
-    block_input_keys_and_tx_ids_filtered, block_input_keys_batch_into_arc, key_to_outpoint,
-    outpoint_to_key, OutPointKey, SyncBatch,
+    block_input_keys_and_tx_ids_filtered, block_input_keys_batch_into_arc, compute_tx_ids_only,
+    key_to_outpoint, outpoint_to_key, OutPointKey, SyncBatch,
 };
 #[cfg(feature = "production")]
 use crate::storage::ibd_utxo_store::IbdUtxoStore;
@@ -781,7 +781,11 @@ impl ParallelIBD {
         ));
         info!(
             "IBD: {} chunk assignment — {} chunks (work_stealing={})",
-            if wan_multi_peer { "work-stealing" } else { "sequential" },
+            if wan_multi_peer {
+                "work-stealing"
+            } else {
+                "sequential"
+            },
             assigner.total_chunks(),
             wan_multi_peer
         );
@@ -835,6 +839,147 @@ impl ParallelIBD {
             store
         };
 
+        // Age-tiered UTXO engine (Phase 2). Opened here (before coordinator) so `coord_engine_mode`
+        // reflects the actual runtime path — including resume-after-SIGKILL when we re-seed from
+        // the durable `ibd_utxos` checkpoint.
+        let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> = {
+            let engine_enabled = std::env::var("BLVM_IBD_ENGINE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !engine_enabled {
+                None
+            } else {
+                let engine_path = std::env::var("BLVM_IBD_ENGINE_PATH")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        std::env::temp_dir()
+                            .join(format!("blvm_ibd_engine_{}.bin", std::process::id()))
+                    });
+                let checkpoint_height = std::env::var("BLVM_IBD_EXPORT_HEIGHT_OVERRIDE")
+                    .ok()
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .or_else(|| {
+                        storage
+                            .chain()
+                            .get_engine_export_height()
+                            .ok()
+                            .flatten()
+                            .map(|h| h as i32)
+                    })
+                    .unwrap_or_else(|| start_height.saturating_sub(1) as i32);
+                let resume_seed = start_height > 1 && checkpoint_height > 0;
+
+                // Wipe stale on-disk engine state whenever resuming or epoch/dirty mismatch.
+                {
+                    let mut epoch_os = engine_path.as_os_str().to_owned();
+                    epoch_os.push(".epoch");
+                    let epoch_path = std::path::PathBuf::from(&epoch_os);
+                    let mut dirty_os = engine_path.as_os_str().to_owned();
+                    dirty_os.push(".dirty");
+                    let dirty_path = std::path::PathBuf::from(&dirty_os);
+                    let was_dirty = dirty_path.exists();
+                    let stored_epoch: Option<u64> = std::fs::read_to_string(&epoch_path)
+                        .ok()
+                        .and_then(|s| s.trim().parse().ok());
+                    let needs_wipe = resume_seed
+                        || (engine_path.exists()
+                            && ((stored_epoch != Some(start_height)) || was_dirty));
+                    if needs_wipe {
+                        info!(
+                            "IBD engine: wiping stale engine files at {} (start_height={}, resume_seed={}, stored_epoch={:?}, was_dirty={})",
+                            engine_path.display(),
+                            start_height,
+                            resume_seed,
+                            stored_epoch,
+                            was_dirty,
+                        );
+                        let _ = std::fs::remove_file(&engine_path);
+                        let mut segs_os = engine_path.as_os_str().to_owned();
+                        segs_os.push(".segs");
+                        let _ = std::fs::remove_dir_all(std::path::PathBuf::from(segs_os));
+                        let _ = std::fs::remove_file(&epoch_path);
+                    }
+                    let _ = std::fs::write(&dirty_path, b"1" as &[u8]);
+                    let _ = std::fs::write(&epoch_path, format!("{start_height}\n"));
+                }
+
+                match crate::storage::ibd_engine::UtxoDatabase::open(
+                    &engine_path,
+                    mem_guard.engine_avail_mb(),
+                ) {
+                    Ok(db) => {
+                        if resume_seed {
+                            let ckpt_slot = storage.chain().get_engine_ckpt_slot().unwrap_or(0);
+                            let ckpt_tree_name =
+                                crate::storage::ibd_engine::ckpt_tree_for_slot(ckpt_slot);
+                            let expected_count = storage
+                                .chain()
+                                .get_engine_export_utxo_count()
+                                .ok()
+                                .flatten();
+                            let seed_ok = match storage.open_tree(ckpt_tree_name) {
+                                Ok(tree) if tree.is_empty().unwrap_or(true) => {
+                                    warn!(
+                                        "IBD engine: resume at height {} but {} empty — legacy path",
+                                        start_height, ckpt_tree_name
+                                    );
+                                    false
+                                }
+                                Ok(tree) => {
+                                    match crate::storage::ibd_engine::seed_from_ibd_utxos(
+                                        &db,
+                                        tree.as_ref(),
+                                        checkpoint_height,
+                                        expected_count,
+                                    ) {
+                                        Ok(n) => {
+                                            info!(
+                                                "IBD engine: resume from height {} — re-seeded {} UTXOs from {} (slot {})",
+                                                start_height, n, ckpt_tree_name, ckpt_slot
+                                            );
+                                            true
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "IBD engine: seed from {} failed at checkpoint {}: {e:#} — falling back to legacy path",
+                                                ckpt_tree_name, checkpoint_height
+                                            );
+                                            false
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "IBD engine: could not open {} for seed: {e:#}",
+                                        ckpt_tree_name
+                                    );
+                                    false
+                                }
+                            };
+                            if !seed_ok {
+                                None
+                            } else {
+                                Some(Arc::new(db))
+                            }
+                        } else {
+                            info!(
+                                "IBD engine (Phase 2) enabled; flat-file table at {}",
+                                engine_path.display()
+                            );
+                            Some(Arc::new(db))
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to open IBD engine at {:?}: {e:#}. Falling back to legacy path.",
+                            engine_path
+                        );
+                        None
+                    }
+                }
+            }
+        };
+
         // Ready-queue: ALWAYS created. Validation ONLY receives from ready_rx — fully isolated.
         // Prefetch workers load UTXOs; coordinator feeds them. Larger queue = less overflow to gap-fill.
         // Core does ~1k BPS; 2048 gives runway when validation briefly stalls.
@@ -853,13 +998,24 @@ impl ParallelIBD {
                 None => guard_limit,
             }
         };
-        let prefetch_workers: usize = self.config.prefetch_workers.unwrap_or_else(|| {
-            let n = std::thread::available_parallelism()
-                .map(|p| p.get())
-                .unwrap_or(8);
-            (n.saturating_mul(2)).clamp(4, 24)
-        });
-        let gap_fill_workers: usize = prefetch_workers;
+        let prefetch_workers: usize = if utxo_engine.is_some() {
+            // Engine mode: workers do near-zero work (no UTXO loads, just passthrough).
+            // 1 worker + 1 gap-fill is enough to drain the channel without blocking the
+            // coordinator. Spawning N×2 idle threads adds unnecessary bridge-mutex contention.
+            self.config.prefetch_workers.unwrap_or(1).min(2)
+        } else {
+            self.config.prefetch_workers.unwrap_or_else(|| {
+                let n = std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(8);
+                (n.saturating_mul(2)).clamp(4, 24)
+            })
+        };
+        let gap_fill_workers: usize = if utxo_engine.is_some() {
+            1
+        } else {
+            prefetch_workers
+        };
         let (prefetch_input_tx_v2, gap_fill_tx_v2, ready_bridge, ready_rx) = {
             let store = Arc::clone(&ibd_store_v2);
             let (in_tx, in_rx) =
@@ -949,7 +1105,7 @@ impl ParallelIBD {
                     let mut chunks_completed = 0u64;
                     let mut blocks_downloaded = 0u64;
                     let mut consecutive_failures = 0u32;
-                    const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+                    const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
                     loop {
                         let maybe_work = loop {
@@ -1101,8 +1257,11 @@ impl ParallelIBD {
                                     // Blacklist the peer so it gets no more chunks for 60s.
                                     // Chunks it had in-flight are already requeued with exclude=peer.
                                     // Other peers will steal the work via work-stealing.
-                                    let blacklist_secs = 60u64;
-                                    assigner_clone.blacklist_peer(&peer_id, std::time::Duration::from_secs(blacklist_secs));
+                                    let blacklist_secs = 300u64;
+                                    assigner_clone.blacklist_peer(
+                                        &peer_id,
+                                        std::time::Duration::from_secs(blacklist_secs),
+                                    );
                                     warn!(
                                         "Peer {} exceeded max failures — blacklisted for {}s, stopping worker",
                                         peer_id, blacklist_secs
@@ -1123,7 +1282,8 @@ impl ParallelIBD {
                                     continue;
                                 }
 
-                                let backoff_secs = (1u64 << (consecutive_failures - 1).min(3)).min(8);
+                                let backoff_secs =
+                                    (1u64 << (consecutive_failures - 1).min(3)).min(8);
                                 tokio::time::sleep(std::time::Duration::from_secs(backoff_secs))
                                     .await;
                             }
@@ -1171,12 +1331,19 @@ impl ParallelIBD {
             }
         };
         if wan_multi_peer {
-            info!("Coordinator: WAN multi-peer reorder buffer={} blocks", coord_buffer_limit);
+            info!(
+                "Coordinator: WAN multi-peer reorder buffer={} blocks",
+                coord_buffer_limit
+            );
         }
         let gap_fill_tx_v2_for_coord = gap_fill_tx_v2.clone();
         let prefetch_input_tx_v2_for_coord = prefetch_input_tx_v2.clone();
         let ibd_store_v2_for_coord = Arc::clone(&ibd_store_v2);
         let stall_tx_for_coord = stall_tx.clone();
+        // When engine mode is active, prefetch workers skip prefetch_build_utxo_map and
+        // build_spec_adds (both results are discarded by the engine validation path), and the
+        // coordinator skips input key extraction (only tx_ids needed for SpendSession::append).
+        let coord_engine_mode: bool = utxo_engine.is_some();
         // Seq-1: When single peer (BLVM_IBD_SEQUENTIAL), blocks arrive in order; skip reorder_buffer.
         let sequential = num_peers == 1;
         if sequential {
@@ -1200,7 +1367,13 @@ impl ParallelIBD {
                 u64,
                 (SharedBlock, SharedWitnesses),
             > = std::collections::BTreeMap::new();
+            // `next_prefetch_height`: tracks the watermark for stale-duplicate detection and
+            // stall logging. With out-of-order dispatch (below) this is the *max* height + 1
+            // of all blocks we have dispatched so far, used only for stale-dup filtering.
             let mut next_prefetch_height = start_height;
+            // Heights already dispatched to prefetch workers. Prevents re-dispatching stale
+            // duplicates from re-queued chunks. Pruned periodically against validation_height.
+            let mut dispatched: rustc_hash::FxHashSet<u64> = rustc_hash::FxHashSet::default();
             let mut total_received = 0u64;
             const BATCH_DRAIN_LIMIT: usize = 2000; // 10K BPS: larger batches reduce recv overhead
             let mut batch: Vec<(u64, SharedBlock, SharedWitnesses)> =
@@ -1208,6 +1381,9 @@ impl ParallelIBD {
             // S2: Reuse buffer for block_input_keys (avoids alloc per block)
             let mut coord_keys_buf: Vec<OutPointKey> = Vec::new();
             let mut coord_tx_ids_buf: Vec<Hash> = Vec::new();
+            // Scratch buffer for out-of-order dispatch: heights to dispatch this iteration.
+            // Reused across loop iterations to avoid a per-loop Vec<u64> allocation.
+            let mut dispatch_heights_buf: Vec<u64> = Vec::new();
             // Dispatch a block to prefetch workers. The prefetch pool warm-loads input UTXOs
             // (cache miss → RocksDB MultiGet) on N background threads before the validation
             // worker ever sees the block — so the validation worker only has to do CPU work
@@ -1226,6 +1402,7 @@ impl ParallelIBD {
                 u64,
                 SharedBlock,
                 SharedWitnesses,
+                bool,
             )| {
                 tokio::task::block_in_place(|| {
                     let item = match prefetch_input_tx_v2_for_coord.try_send(item) {
@@ -1275,101 +1452,118 @@ impl ParallelIBD {
                         tokio::time::sleep(Duration::from_millis(200)).await;
                     }
                 }
-                // Backpressure: when reorder_buffer full, drain contiguous blocks before receiving more.
-                // Prevents unbounded growth when downloads outpace validation.
-                if reorder_buffer.len() >= dynamic_buffer_limit {
-                    while reorder_buffer.contains_key(&next_prefetch_height) {
-                        let Some((block, witnesses)) = reorder_buffer.remove(&next_prefetch_height)
-                        else {
-                            error!("IBD coordinator: reorder_buffer key {} vanished unexpectedly (backpressure drain)", next_prefetch_height);
+                // Periodically prune the dispatched set to keep it bounded.
+                // Heights below the current validation cursor have been retired; duplicates at
+                // those heights can no longer reach the prefetch pipeline.
+                {
+                    let val_h = validation_height_for_coord.load(Ordering::Relaxed);
+                    if val_h > start_height + 1024 {
+                        dispatched.retain(|&h| h >= val_h.saturating_sub(512));
+                    }
+                }
+
+                // Out-of-order dispatch: drain ALL blocks in the reorder_buffer to prefetch
+                // workers, regardless of whether they are contiguous from next_prefetch_height.
+                // The OrderedReadyBridge enforces ascending delivery to the feeder, so it is safe
+                // to dispatch future heights first — they will be buffered in the bridge's pending
+                // map until any gaps are filled (i.e. when a retried chunk finally arrives).
+                // This eliminates HOL (head-of-line) blocking entirely: one slow/failed peer can
+                // no longer stall all heights above its chunk.
+                //
+                // Backpressure: if buffer is full AND we've dispatched everything in it already,
+                // receive more blocks before looping. If buffer has undispatched entries, drain them.
+                let undispatched_in_buffer = reorder_buffer.keys().any(|h| !dispatched.contains(h));
+                if reorder_buffer.len() >= dynamic_buffer_limit && !undispatched_in_buffer {
+                    // Buffer full, nothing new to dispatch. Try to receive more blocks.
+                    let mut gap_drained = 0usize;
+                    while let Ok((h, block, witnesses)) = block_rx.try_recv() {
+                        total_received += 1;
+                        if dispatched.contains(&h) {
+                            gap_drained += 1;
+                            continue; // already dispatched, stale duplicate
+                        }
+                        reorder_buffer.insert(h, (block, witnesses));
+                        gap_drained += 1;
+                        if gap_drained >= 200 {
                             break;
+                        }
+                    }
+                    if !reorder_buffer.keys().any(|h| !dispatched.contains(h)) {
+                        // Still nothing undispatched. Check for stall.
+                        let min_undispatched_needed = {
+                            let val_h = validation_height_for_coord.load(Ordering::Relaxed);
+                            // The bridge's pending holds dispatched-but-not-yet-released blocks.
+                            // If validation is stalled, the gap height is around val_h+1.
+                            val_h + 1
                         };
-                        block_input_keys_and_tx_ids_filtered(
-                            &block,
-                            &mut coord_tx_ids_buf,
-                            &mut coord_keys_buf,
-                        );
-                        let h = next_prefetch_height;
-                        next_prefetch_height += 1;
+                        let now = std::time::Instant::now();
+                        let stall_start = *coord_buffer_full_since.get_or_insert(now);
+                        let stuck_secs = now.duration_since(stall_start).as_secs();
+                        if stuck_secs >= coord_stall_log_secs {
+                            warn!(
+                                "Coordinator stall: buffer full ({}) but height {} not in buffer for {}s — requeuing",
+                                reorder_buffer.len(), min_undispatched_needed, stuck_secs
+                            );
+                            let _ = stall_tx_for_coord.send(min_undispatched_needed);
+                            assigner_for_coord
+                                .requeue_chunk_containing_height(min_undispatched_needed);
+                            coord_buffer_full_since = None;
+                        }
+                        tokio::time::sleep(IBD_YIELD_SLEEP).await;
+                        continue;
+                    }
+                    coord_buffer_full_since = None;
+                }
+                // Dispatch all undispatched heights from the reorder_buffer.
+                // Reuse scratch buffer to avoid a per-loop Vec allocation.
+                {
+                    dispatch_heights_buf.clear();
+                    dispatch_heights_buf.extend(
+                        reorder_buffer
+                            .keys()
+                            .filter(|&&h| !dispatched.contains(&h))
+                            .copied(),
+                    );
+                    for h in dispatch_heights_buf.drain(..) {
+                        let Some((block, witnesses)) = reorder_buffer.remove(&h) else {
+                            continue;
+                        };
+                        dispatched.insert(h);
+                        if h >= next_prefetch_height {
+                            next_prefetch_height = h + 1;
+                        }
                         if h == bootstrap_end {
                             assigner_for_coord.mark_bootstrap_complete();
                             info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
                         }
-                        {
-                            let store = &ibd_store_v2_for_coord;
-                            let keys_owned = std::mem::take(&mut coord_keys_buf);
-                            let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
-                            let item = (
-                                Arc::clone(store),
-                                keys_owned,
-                                tx_ids_owned,
-                                h,
-                                block,
-                                witnesses,
-                            );
-                            // Hand the block to a prefetch worker. The worker warm-loads input
-                            // UTXOs from disk in parallel with validation, then routes to the
-                            // feeder via OrderedReadyBridge (height order preserved). This is
-                            // what unblocks the validation workers from doing serial RocksDB
-                            // MultiGets on their own threads — the entire reason BPS plateaus
-                            // at 80–130 in the 340k+ range with workers stuck at ~11% CPU.
-                            dispatch_to_prefetch(item);
-                        }
-                        if reorder_buffer.len() < dynamic_buffer_limit {
-                            break;
-                        }
-                    }
-                    if reorder_buffer.len() >= dynamic_buffer_limit
-                        && !reorder_buffer.contains_key(&next_prefetch_height)
-                    {
-                        // Gap: next_prefetch_height is missing. Drain block_rx
-                        // to see if it arrived after the buffer filled.
-                        let mut found_missing = false;
-                        let mut gap_drained = 0usize;
-                        while let Ok((h, block, witnesses)) = block_rx.try_recv() {
-                            total_received += 1;
-                            if h < next_prefetch_height {
-                                // Stale duplicate from a re-queued chunk that was already
-                                // processed by the coordinator. Inserting it would bloat the
-                                // reorder_buffer with an entry that can never be drained
-                                // (next_prefetch_height only advances forward), eventually
-                                // causing buffer-full stalls and a download livelock.
-                                gap_drained += 1;
-                                continue;
-                            }
-                            if h == next_prefetch_height {
-                                found_missing = true;
-                            }
-                            reorder_buffer.insert(h, (block, witnesses));
-                            gap_drained += 1;
-                            if found_missing || gap_drained >= 200 {
-                                break;
-                            }
-                        }
-                        if !found_missing {
-                            // Still missing after draining channel. Track how long.
-                            let now = std::time::Instant::now();
-                            let stall_start = *coord_buffer_full_since.get_or_insert(now);
-                            let stuck_secs = now.duration_since(stall_start).as_secs();
-                            if stuck_secs >= coord_stall_log_secs {
-                                warn!(
-                                    "Coordinator stall: buffer full ({}) but height {} missing for {}s (drained {} from rx), signalling retry",
-                                    reorder_buffer.len(), next_prefetch_height, stuck_secs, gap_drained
-                                );
-                                let _ = stall_tx_for_coord.send(next_prefetch_height);
-                                assigner_for_coord
-                                    .requeue_chunk_containing_height(next_prefetch_height);
-                                coord_buffer_full_since = None;
-                            }
-                            tokio::time::sleep(IBD_YIELD_SLEEP).await;
+                        // In engine mode skip key extraction: keys are unused by the engine
+                        // validation path. Only tx_ids are needed for SpendSession::append.
+                        if coord_engine_mode {
+                            compute_tx_ids_only(&block, &mut coord_tx_ids_buf);
                         } else {
-                            coord_buffer_full_since = None;
-                            // Found the missing block — loop will drain contiguous blocks next iteration
+                            block_input_keys_and_tx_ids_filtered(
+                                &block,
+                                &mut coord_tx_ids_buf,
+                                &mut coord_keys_buf,
+                            );
                         }
-                    } else if reorder_buffer.len() >= dynamic_buffer_limit {
-                        coord_buffer_full_since = None;
-                        tokio::time::sleep(IBD_YIELD_SLEEP).await;
+                        let store = &ibd_store_v2_for_coord;
+                        let keys_owned = std::mem::take(&mut coord_keys_buf);
+                        let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                        let item = (
+                            Arc::clone(store),
+                            keys_owned,
+                            tx_ids_owned,
+                            h,
+                            block,
+                            witnesses,
+                            coord_engine_mode,
+                        );
+                        dispatch_to_prefetch(item);
                     }
+                }
+                if reorder_buffer.len() >= dynamic_buffer_limit {
+                    tokio::time::sleep(IBD_YIELD_SLEEP).await;
                     continue;
                 }
                 let recv_fut = block_rx.recv_many(&mut batch, BATCH_DRAIN_LIMIT);
@@ -1384,24 +1578,20 @@ impl ParallelIBD {
                         // partially failed. Requeue that chunk explicitly so the missing block is
                         // re-downloaded. Without this fix the coordinator keeps requeuing chunks
                         // ahead of the gap, leaving the missing block unreachable indefinitely.
-                        let stall_height = next_prefetch_height;
+                        // With out-of-order dispatch, stall is always at next_needed (the height
+                        // validation is waiting for, i.e. bridge's gap). Requeue that chunk.
+                        let stall_height = if !dispatched.contains(&next_needed) {
+                            next_needed // not yet dispatched → gap in downloads
+                        } else {
+                            next_prefetch_height // dispatched but not delivered → bridge gap
+                        };
                         warn!(
                             "Coordinator stall: no blocks for {}s, waiting for height {} (total_received={}, next_prefetch={}, stall_requeue={})",
                             coord_stall_log_secs, next_needed, total_received, next_prefetch_height, stall_height
                         );
                         let _ = stall_tx_for_coord.send(stall_height);
                         assigner_for_coord.requeue_chunk_containing_height(stall_height);
-                        // If the height validation needs is missing from the reorder_buffer,
-                        // re-request its chunk (it may have partially failed mid-download).
-                        if next_needed < next_prefetch_height
-                            && !reorder_buffer.contains_key(&next_needed)
-                        {
-                            warn!(
-                                "Coordinator stall: height {} missing from reorder_buffer \
-                                 (size={}) — requeuing its chunk for re-download",
-                                next_needed,
-                                reorder_buffer.len()
-                            );
+                        if stall_height != next_needed {
                             assigner_for_coord.requeue_chunk_containing_height(next_needed);
                         }
                         continue;
@@ -1412,44 +1602,47 @@ impl ParallelIBD {
                         "Coordinator: block_rx closed (total_received={})",
                         total_received
                     );
-                    // Channel closed — drain remaining reorder_buffer, then exit
-                    while reorder_buffer.contains_key(&next_prefetch_height) {
-                        let Some((block, witnesses)) = reorder_buffer.remove(&next_prefetch_height)
-                        else {
-                            error!("IBD coordinator: reorder_buffer key {} vanished on channel-close drain", next_prefetch_height);
-                            break;
+                    // Channel closed — drain remaining reorder_buffer (any order), then exit.
+                    dispatch_heights_buf.clear();
+                    dispatch_heights_buf.extend(
+                        reorder_buffer
+                            .keys()
+                            .filter(|&&h| !dispatched.contains(&h))
+                            .copied(),
+                    );
+                    for h in dispatch_heights_buf.drain(..) {
+                        let Some((block, witnesses)) = reorder_buffer.remove(&h) else {
+                            continue;
                         };
-                        block_input_keys_and_tx_ids_filtered(
-                            &block,
-                            &mut coord_tx_ids_buf,
-                            &mut coord_keys_buf,
-                        );
-                        let h = next_prefetch_height;
-                        next_prefetch_height += 1;
+                        dispatched.insert(h);
                         if h == bootstrap_end {
                             assigner_for_coord.mark_bootstrap_complete();
                             info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
                         }
-                        {
-                            let store = &ibd_store_v2_for_coord;
-                            let keys_owned = std::mem::take(&mut coord_keys_buf);
-                            let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
-                            let item = (
-                                Arc::clone(store),
-                                keys_owned,
-                                tx_ids_owned,
-                                h,
-                                block,
-                                witnesses,
+                        // In engine mode skip key extraction: keys are unused by the engine
+                        // validation path. Only tx_ids are needed for SpendSession::append.
+                        if coord_engine_mode {
+                            compute_tx_ids_only(&block, &mut coord_tx_ids_buf);
+                        } else {
+                            block_input_keys_and_tx_ids_filtered(
+                                &block,
+                                &mut coord_tx_ids_buf,
+                                &mut coord_keys_buf,
                             );
-                            // Hand the block to a prefetch worker. The worker warm-loads input
-                            // UTXOs from disk in parallel with validation, then routes to the
-                            // feeder via OrderedReadyBridge (height order preserved). This is
-                            // what unblocks the validation workers from doing serial RocksDB
-                            // MultiGets on their own threads — the entire reason BPS plateaus
-                            // at 80–130 in the 340k+ range with workers stuck at ~11% CPU.
-                            dispatch_to_prefetch(item);
                         }
+                        let store = &ibd_store_v2_for_coord;
+                        let keys_owned = std::mem::take(&mut coord_keys_buf);
+                        let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                        let item = (
+                            Arc::clone(store),
+                            keys_owned,
+                            tx_ids_owned,
+                            h,
+                            block,
+                            witnesses,
+                            coord_engine_mode,
+                        );
+                        dispatch_to_prefetch(item);
                     }
                     info!("Coordinator: done, sent {} blocks", total_received);
                     break;
@@ -1478,11 +1671,17 @@ impl ParallelIBD {
                         // (same call the parallel path uses) so the prefetch worker has a key
                         // list to MultiGet — sending an empty `keys` would force the validation
                         // worker to re-derive them and fall through to a synchronous disk load.
-                        block_input_keys_and_tx_ids_filtered(
-                            &block,
-                            &mut coord_tx_ids_buf,
-                            &mut coord_keys_buf,
-                        );
+                        // In engine mode skip key extraction: keys are unused by the engine
+                        // validation path. Only tx_ids are needed for SpendSession::append.
+                        if coord_engine_mode {
+                            compute_tx_ids_only(&block, &mut coord_tx_ids_buf);
+                        } else {
+                            block_input_keys_and_tx_ids_filtered(
+                                &block,
+                                &mut coord_tx_ids_buf,
+                                &mut coord_keys_buf,
+                            );
+                        }
                         let store = &ibd_store_v2_for_coord;
                         let keys_owned = std::mem::take(&mut coord_keys_buf);
                         let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
@@ -1493,12 +1692,15 @@ impl ParallelIBD {
                             h,
                             block,
                             witnesses,
+                            coord_engine_mode,
                         );
                         dispatch_to_prefetch(item);
                         next_prefetch_height = h + 1;
                     }
                 } else {
-                    // Parallel: drain batch into reorder_buffer, then drain contiguous to prefetch
+                    // Parallel: drain batch into reorder_buffer, then dispatch ALL available
+                    // heights (out-of-order) to prefetch. The OrderedReadyBridge reorders them
+                    // before the feeder sees them, eliminating HOL blocking at the coordinator.
                     for (height, block, witnesses) in batch.drain(..) {
                         if total_received == 0 {
                             info!("Coordinator: first block received, height {}", height);
@@ -1512,59 +1714,60 @@ impl ParallelIBD {
                                 reorder_buffer.len() + 1
                             );
                         }
-                        if height < next_prefetch_height {
-                            // Stale duplicate from a re-queued chunk whose heights have already
-                            // been dispatched to prefetch. Drop it — inserting into reorder_buffer
-                            // would create an entry that can never be drained (next_prefetch_height
-                            // only moves forward), growing the buffer without bound and blocking
-                            // workers from sending newer blocks (livelock).
+                        if dispatched.contains(&height) {
+                            // Stale duplicate from a re-queued chunk already dispatched.
                             continue;
                         }
                         reorder_buffer.insert(height, (block, witnesses));
                     }
-                    while reorder_buffer.contains_key(&next_prefetch_height) {
-                        let Some((block, witnesses)) = reorder_buffer.remove(&next_prefetch_height)
-                        else {
-                            error!(
-                                "IBD coordinator: reorder_buffer key {} vanished on rx-drain",
-                                next_prefetch_height
-                            );
-                            break;
+                    // Dispatch all undispatched blocks from the buffer (any order).
+                    // Reuse scratch buffer to avoid per-loop Vec allocation.
+                    dispatch_heights_buf.clear();
+                    dispatch_heights_buf.extend(
+                        reorder_buffer
+                            .keys()
+                            .filter(|&&h| !dispatched.contains(&h))
+                            .copied(),
+                    );
+                    for h in dispatch_heights_buf.drain(..) {
+                        if reorder_buffer.len() >= dynamic_buffer_limit {
+                            break; // respect backpressure cap
+                        }
+                        let Some((block, witnesses)) = reorder_buffer.remove(&h) else {
+                            continue;
                         };
-                        block_input_keys_and_tx_ids_filtered(
-                            &block,
-                            &mut coord_tx_ids_buf,
-                            &mut coord_keys_buf,
-                        );
-                        let h = next_prefetch_height;
-                        next_prefetch_height += 1;
+                        dispatched.insert(h);
+                        if h >= next_prefetch_height {
+                            next_prefetch_height = h + 1;
+                        }
                         if h == bootstrap_end {
                             assigner_for_coord.mark_bootstrap_complete();
                             info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
                         }
-                        {
-                            let store = &ibd_store_v2_for_coord;
-                            let keys_owned = std::mem::take(&mut coord_keys_buf);
-                            let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
-                            let item = (
-                                Arc::clone(store),
-                                keys_owned,
-                                tx_ids_owned,
-                                h,
-                                block,
-                                witnesses,
+                        // In engine mode skip key extraction: keys are unused by the engine
+                        // validation path. Only tx_ids are needed for SpendSession::append.
+                        if coord_engine_mode {
+                            compute_tx_ids_only(&block, &mut coord_tx_ids_buf);
+                        } else {
+                            block_input_keys_and_tx_ids_filtered(
+                                &block,
+                                &mut coord_tx_ids_buf,
+                                &mut coord_keys_buf,
                             );
-                            // Hand the block to a prefetch worker. The worker warm-loads input
-                            // UTXOs from disk in parallel with validation, then routes to the
-                            // feeder via OrderedReadyBridge (height order preserved). This is
-                            // what unblocks the validation workers from doing serial RocksDB
-                            // MultiGets on their own threads — the entire reason BPS plateaus
-                            // at 80–130 in the 340k+ range with workers stuck at ~11% CPU.
-                            dispatch_to_prefetch(item);
                         }
-                        if reorder_buffer.len() >= dynamic_buffer_limit {
-                            break;
-                        }
+                        let store = &ibd_store_v2_for_coord;
+                        let keys_owned = std::mem::take(&mut coord_keys_buf);
+                        let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                        let item = (
+                            Arc::clone(store),
+                            keys_owned,
+                            tx_ids_owned,
+                            h,
+                            block,
+                            witnesses,
+                            coord_engine_mode,
+                        );
+                        dispatch_to_prefetch(item);
                     }
                 }
             }
@@ -1596,39 +1799,193 @@ impl ParallelIBD {
         let utxo_nominal_max_entries = mem_guard.utxo_max_entries;
         let utxo_pf = self.config.utxo_prefetch_lookahead.clamp(1, 128) as usize;
 
-        // Phase 2: optionally initialize the age-tiered UTXO engine.
-        // Enable with BLVM_IBD_ENGINE=1. The engine's flat file defaults to
-        // $TMPDIR/blvm_ibd_engine_<pid>.bin or can be set via BLVM_IBD_ENGINE_PATH.
-        let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> =
-            if std::env::var("BLVM_IBD_ENGINE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-            {
-                let engine_path = std::env::var("BLVM_IBD_ENGINE_PATH")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| {
-                        std::env::temp_dir()
-                            .join(format!("blvm_ibd_engine_{}.bin", std::process::id()))
-                    });
-                info!("IBD engine (Phase 2) enabled; flat-file table at {}", engine_path.display());
-                match crate::storage::ibd_engine::UtxoDatabase::open(&engine_path) {
-                    Ok(db) => Some(Arc::new(db)),
-                    Err(e) => {
-                        warn!(
-                            "Failed to open IBD engine at {:?}: {e:#}. Falling back to legacy path.",
-                            engine_path
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
         // Keep a clone of the engine Arc for Phase 3 watermark export after IBD completes.
         // The engine is also moved into ValidationParams so the dispatch thread can call
         // SpendSession::resolve. Both arcs point to the same UtxoDatabase.
         let utxo_engine_for_export = utxo_engine.clone();
+
+        // Periodic mid-IBD checkpoint export (engine mode only). Every BLVM_IBD_CHECKPOINT_INTERVAL
+        // blocks (default: adaptive based on UTXO count) the background thread writes an exact live
+        // UTXO snapshot to the inactive ping-pong tree (`ibd_utxos_ckpt_a` / `ibd_utxos_ckpt_b`),
+        // then atomically flips the active slot in chain_info. On SIGKILL the node resumes from the
+        // last completed snapshot.
+        //
+        // Adaptive interval: at low heights the UTXO set is small and exports are fast; at 400k+
+        // with 80M+ UTXOs each export takes 100–300s (before SST ingestion) or 10–30s (after SST).
+        // We target ~60s per export by scaling the interval inversely with UTXO count, clamped to
+        // [2_000, 20_000]. With SST ingestion, this is effectively constant-time regardless.
+        // Override via BLVM_IBD_CHECKPOINT_INTERVAL env var.
+        let periodic_checkpoint_handle: Option<std::thread::JoinHandle<()>> = if let Some(
+            ref engine_arc,
+        ) =
+            utxo_engine_for_export
+        {
+            let engine_clone = Arc::clone(engine_arc);
+            let storage_ckpt = Arc::clone(storage);
+            let fixed_interval: Option<i32> = std::env::var("BLVM_IBD_CHECKPOINT_INTERVAL")
+                .ok()
+                .and_then(|v| v.parse().ok());
+            let end_h = effective_end_height as i32;
+            let handle = std::thread::Builder::new()
+                    .name("ibd-checkpoint-export".to_string())
+                    .spawn(move || {
+                        // Lower this thread's I/O scheduling class to "best-effort, priority 7"
+                        // (lowest within BE class) so validation workers' io_uring reads are
+                        // preferred over the export's sequential flat-file reads under contention.
+                        #[cfg(target_os = "linux")]
+                        {
+                            // IOPRIO_WHO_PROCESS=1, IOPRIO_CLASS_BE=2, prio=7 (lowest)
+                            // IOPRIO_PRIO_VALUE(class, prio) = (class << 13) | prio
+                            let ioprio: libc::c_long = (2 << 13) | 7;
+                            unsafe { libc::syscall(libc::SYS_ioprio_set, 1i32, 0i32, ioprio) };
+                        }
+                        let mut last_exported: i32 = 0;
+                        let mut last_utxo_count: u64 = 0;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(5));
+                            let cl = engine_clone.contiguous_length();
+                            if cl <= 0 {
+                                continue;
+                            }
+                            // Adaptive interval: scale with UTXO count to keep export time bounded.
+                            // Use the last known UTXO count to avoid scanning the index every poll.
+                            let interval: i32 = fixed_interval.unwrap_or_else(|| {
+                                // Under memory pressure, export more often so GC fence advances
+                                // and cross-height Add+Delete pairs can cancel (lowers RSS).
+                                if crate::node::parallel_ibd::memory::ibd_pressure_level_snapshot()
+                                    >= crate::node::parallel_ibd::memory::PressureLevel::Critical
+                                {
+                                    return 2_000;
+                                }
+                                // At 25M UTXOs (height ~300k) → 10_000 blocks
+                                // At 80M UTXOs (height ~400k) → ~3_125 blocks
+                                // Clamped to [2_000, 10_000]
+                                const BASE_UTXOS: u64 = 25_000_000;
+                                const BASE_INTERVAL: i32 = 10_000;
+                                if last_utxo_count == 0 {
+                                    BASE_INTERVAL
+                                } else {
+                                    let scaled = (BASE_INTERVAL as u64).saturating_mul(BASE_UTXOS)
+                                        / last_utxo_count.max(1);
+                                    (scaled as i32).clamp(2_000, 10_000)
+                                }
+                            });
+                            let ckpt = (cl / interval) * interval;
+                            if ckpt <= last_exported || ckpt <= 0 {
+                                continue;
+                            }
+                            // Only export if the engine has fully processed the checkpoint height.
+                            if cl < ckpt {
+                                continue;
+                            }
+                            let active_slot =
+                                storage_ckpt.chain().get_engine_ckpt_slot().unwrap_or(0);
+                            let write_slot =
+                                crate::storage::ibd_engine::ckpt_inactive_slot(active_slot);
+                            let ckpt_tree_name =
+                                crate::storage::ibd_engine::ckpt_tree_for_slot(write_slot);
+                            let tree = match storage_ckpt.open_tree(ckpt_tree_name) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    warn!(
+                                        "IBD checkpoint: failed to open {}: {e:#}",
+                                        ckpt_tree_name
+                                    );
+                                    continue;
+                                }
+                            };
+                            // Set the GC fence *before* starting the scan so that
+                            // concurrent MemoryRun compactions do not cancel Add+Delete
+                            // pairs where the Delete is above this checkpoint height.
+                            // Without the fence, UTXOs created before `ckpt` but spent
+                            // after `ckpt` can be GC'd out of the engine while
+                            // `scan_live_at_height(ckpt)` is running, producing an
+                            // incomplete checkpoint that fails on resume.
+                            crate::storage::ibd_engine::set_gc_fence(ckpt);
+                            info!(
+                                "IBD engine: starting periodic checkpoint export at height {} \
+                                 (engine_height={}, tree={}) [GC fence={}]",
+                                ckpt, cl, ckpt_tree_name, ckpt
+                            );
+                            match crate::storage::ibd_engine::run_checkpoint_export_replace(
+                                &engine_clone,
+                                &tree,
+                                ckpt,
+                            ) {
+                                Ok((muhash, count)) => {
+                                    let muhash_bytes = muhash.serialize_running_state();
+                                    match storage_ckpt.chain().persist_engine_checkpoint_complete(
+                                        ckpt as u64,
+                                        write_slot,
+                                        count as u64,
+                                        &muhash_bytes,
+                                    ) {
+                                        Ok(()) => {
+                                            info!(
+                                                "IBD engine: checkpoint persisted at height {} \
+                                                 (slot {}, {} UTXOs)",
+                                                ckpt, write_slot, count
+                                            );
+                                            last_exported = ckpt;
+                                            last_utxo_count = count as u64;
+                                            // Immediately advance the GC fence to the NEXT
+                                            // expected checkpoint height. This allows compaction
+                                            // to cancel Add+Delete pairs that are no longer
+                                            // needed, while protecting only the pairs that cross
+                                            // the upcoming checkpoint boundary.
+                                            // This bounds non-GC'd accumulation to one interval
+                                            // (~840 MB) rather than letting it grow without bound
+                                            // while validation races ahead of the exporter.
+                                            let next_interval: i32 =
+                                                fixed_interval.unwrap_or_else(|| {
+                                                    if crate::node::parallel_ibd::memory::ibd_pressure_level_snapshot()
+                                                        >= crate::node::parallel_ibd::memory::PressureLevel::Critical
+                                                    {
+                                                        return 2_000;
+                                                    }
+                                                    const BASE_UTXOS: u64 = 25_000_000;
+                                                    const BASE_INTERVAL: i32 = 10_000;
+                                                    if last_utxo_count == 0 {
+                                                        BASE_INTERVAL
+                                                    } else {
+                                                        let scaled = (BASE_INTERVAL as u64)
+                                                            .saturating_mul(BASE_UTXOS)
+                                                            / last_utxo_count.max(1);
+                                                        (scaled as i32).clamp(2_000, 10_000)
+                                                    }
+                                                });
+                                            crate::storage::ibd_engine::set_gc_fence(
+                                                ckpt + next_interval,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "IBD engine: failed to persist checkpoint \
+                                                 metadata at {ckpt}: {e:#}"
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "IBD engine: checkpoint export failed at height {ckpt}: \
+                                         {e:#}"
+                                    );
+                                    // On failure the fence stays at ckpt so the retry scan is
+                                    // protected. The retry will re-advance the fence when it
+                                    // starts the next export attempt.
+                                }
+                            }
+                            if ckpt >= end_h {
+                                break;
+                            }
+                        }
+                    })
+                    .expect("spawn ibd-checkpoint-export");
+            Some(handle)
+        } else {
+            None
+        };
 
         let params = validation_loop::ValidationParams {
             feeder_state: feeder_state_valid,
@@ -1648,6 +2005,7 @@ impl ParallelIBD {
             utxo_prefetch_lookahead: utxo_pf,
             stall_tx: stall_tx.clone(),
             utxo_engine,
+            checkpoint_tx: None,
         };
         let validation_handle =
             std::thread::spawn(move || validation_loop::run_validation_loop(params));
@@ -1705,6 +2063,11 @@ impl ParallelIBD {
         }
         // Feeder exits when ready_rx disconnects; join to avoid stray thread
         let _ = feeder_handle.join();
+        // Periodic checkpoint export thread: join (it detects engine completion via end_h check
+        // and exits, or the engine Arc drop will cause its next poll to see cl == 0).
+        if let Some(h) = periodic_checkpoint_handle {
+            let _ = h.join();
+        }
         *utxo_set = match Arc::try_unwrap(utxo_mutex) {
             Ok(mutex) => mutex
                 .into_inner()
@@ -1728,10 +2091,10 @@ impl ParallelIBD {
                     ) {
                         Ok(muhash) => {
                             let muhash_bytes = muhash.serialize_running_state();
-                            if let Err(e) = storage
-                                .chain()
-                                .persist_ibd_utxo_flush_checkpoint(effective_end_height, &muhash_bytes)
-                            {
+                            if let Err(e) = storage.chain().persist_ibd_utxo_flush_checkpoint(
+                                effective_end_height,
+                                &muhash_bytes,
+                            ) {
                                 warn!("IBD engine: failed to persist watermark checkpoint: {e:#}");
                             } else {
                                 info!(
@@ -1744,6 +2107,20 @@ impl ParallelIBD {
                     }
                 }
                 Err(e) => warn!("IBD engine: failed to open ibd_utxos tree for export: {e:#}"),
+            }
+
+            // IBD completed cleanly — remove the dirty flag so the next restart knows
+            // this was a clean shutdown and won't force-wipe the engine unnecessarily.
+            {
+                let engine_path_clean = std::env::var("BLVM_IBD_ENGINE_PATH")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        std::env::temp_dir()
+                            .join(format!("blvm_ibd_engine_{}.bin", std::process::id()))
+                    });
+                let mut dirty_os = engine_path_clean.as_os_str().to_owned();
+                dirty_os.push(".dirty");
+                let _ = std::fs::remove_file(std::path::PathBuf::from(&dirty_os));
             }
         }
 
@@ -2529,8 +2906,10 @@ mod tests {
     fn with_ibd_env_cleared<F: FnOnce()>(f: F) {
         let peers = std::env::var("BLVM_IBD_PEERS").ok();
         let mode = std::env::var("BLVM_IBD_MODE").ok();
+        let wan_single = std::env::var("BLVM_IBD_WAN_SINGLE_PEER").ok();
         std::env::remove_var("BLVM_IBD_PEERS");
         std::env::remove_var("BLVM_IBD_MODE");
+        std::env::remove_var("BLVM_IBD_WAN_SINGLE_PEER");
         f();
         if let Some(v) = peers {
             std::env::set_var("BLVM_IBD_PEERS", v);
@@ -2541,6 +2920,11 @@ mod tests {
             std::env::set_var("BLVM_IBD_MODE", v);
         } else {
             std::env::remove_var("BLVM_IBD_MODE");
+        }
+        if let Some(v) = wan_single {
+            std::env::set_var("BLVM_IBD_WAN_SINGLE_PEER", v);
+        } else {
+            std::env::remove_var("BLVM_IBD_WAN_SINGLE_PEER");
         }
     }
 
@@ -2568,10 +2952,10 @@ mod tests {
     }
 
     #[test]
-    fn collapse_wan_only_to_single_peer() {
+    fn wan_multi_peer_keeps_all_peers_by_default() {
         let peers = vec!["8.8.8.8:8333".to_string(), "1.1.1.1:8333".to_string()];
         let out = ParallelIBDConfig::collapse_wan_only_download_peers(peers);
-        assert_eq!(out, vec!["8.8.8.8:8333"]);
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

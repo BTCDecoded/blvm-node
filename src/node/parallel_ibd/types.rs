@@ -76,8 +76,11 @@ pub type FeederBufferValue = (
     usize,
 );
 
-/// IBD v2 prefetch work item: (store, keys_raw, tx_ids, height, block, witnesses).
+/// IBD v2 prefetch work item: (store, keys_raw, tx_ids, height, block, witnesses, engine_mode).
 /// Block and witnesses are Arc-shared from the download layer — no per-stage deep copies.
+/// `engine_mode`: when true the age-tiered engine owns UTXO resolution; the prefetch worker
+/// skips `prefetch_build_utxo_map` and `build_spec_adds` (their outputs are never consumed by
+/// the engine validation path), saving ~440 cache lookups and ~2000 Arc allocs per block.
 #[cfg(feature = "production")]
 pub type PrefetchWorkItemV2 = (
     Arc<IbdUtxoStore>,
@@ -86,6 +89,7 @@ pub type PrefetchWorkItemV2 = (
     u64,
     SharedBlock,
     SharedWitnesses,
+    bool, // engine_mode
 );
 
 /// Chunk work item for re-queue on drop. Live log 2026-02-21: workers_in_flight=[], chunks lost every 100 blocks.

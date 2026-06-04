@@ -197,11 +197,22 @@ pub(crate) fn run_prefetch_worker(
     let _ = store; // store handed to closures via the work item; kept on signature for future reuse
     let mut local_blocks: u64 = 0;
     // `block: SharedBlock` and `witnesses: SharedWitnesses` are Arc — no deep copy.
-    while let Ok((s, keys, tx_ids, h, block, witnesses)) = rx.recv() {
-        let full_map = prefetch_build_utxo_map(&s, &keys);
-        // Build spec_adds on this worker thread (was on the dispatcher; see `build_spec_adds`).
-        // Deref Arc<Block> to &Block for the pure-read spec_adds computation.
-        let spec_adds = Arc::new(build_spec_adds(&block, &tx_ids, h));
+    while let Ok((s, keys, tx_ids, h, block, witnesses, engine_mode)) = rx.recv() {
+        // In engine mode the age-tiered UtxoDatabase resolves all UTXOs on the worker thread
+        // via PartialSpendSession::complete(). The prefetch map and spec_adds are consumed only
+        // by the legacy IbdUtxoStore path — skip both to avoid ~440 wasted DashMap lookups +
+        // RocksDB MultiGet + ~2000 Arc<UTXO> allocs per block that are immediately discarded.
+        let (full_map, spec_adds) = if engine_mode {
+            (
+                rustc_hash::FxHashMap::default(),
+                Arc::new(blvm_protocol::UtxoSet::default()),
+            )
+        } else {
+            let full_map = prefetch_build_utxo_map(&s, &keys);
+            // Build spec_adds on this worker thread (was on the dispatcher; see `build_spec_adds`).
+            let spec_adds = Arc::new(build_spec_adds(&block, &tx_ids, h));
+            (full_map, spec_adds)
+        };
         let item: ReadyItem = (h, block, witnesses, keys, full_map, tx_ids, spec_adds);
         bridge.worker_complete(h, item);
         local_blocks += 1;

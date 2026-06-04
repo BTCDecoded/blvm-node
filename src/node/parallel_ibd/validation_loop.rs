@@ -12,7 +12,9 @@ use crate::storage::disk_utxo::{
     block_input_keys_batch_into_arc, block_input_keys_into_filtered,
     block_input_keys_into_filtered_with_tx_ids, key_to_outpoint, outpoint_to_key, OutPointKey,
 };
-use crate::storage::ibd_engine::{session_to_utxo_set, SpendSession, UtxoDatabase};
+use crate::storage::ibd_engine::{
+    session_fill_utxo_set, session_to_utxo_set, PartialSpendSession, SpendSession, UtxoDatabase,
+};
 use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
 use crate::storage::Storage;
 use crate::utils::time::current_timestamp;
@@ -250,7 +252,13 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         // Elevated: don't disturb the pipeline. Take a normal-threshold flush if it's already due,
         // skip heap_trim. The download-ahead reduction (already applied by adjust_max_ahead_live)
         // is enough to ease the pressure.
-        let batch = store.maybe_take_flush_batch();
+        //
+        // Use adds-only drain: non-durable async flushes must never write DEL tombstones to SST.
+        // If a DEL reaches SST without the watermark having advanced past its spend height, a
+        // crash+resume will find "not found" for the UTXO (DEL in newer SST beats ADD in older
+        // SST) and fail with UTXO_TOTAL_MISS. DELs stay in the pending_log and are written
+        // correctly by Phase 3 of the next durable checkpoint flush.
+        let batch = store.maybe_take_flush_batch_adds_only();
         (0u64, protect_evict_ms, batch, false)
     } else if ibd_defer_flush {
         let at_checkpoint = next_height > 0 && next_height % ibd_defer_checkpoint == 0;
@@ -259,9 +267,14 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         } else {
             None
         };
-        (0u64, protect_evict_ms, batch, false)
+        // Return at_checkpoint as the 4th value so the caller can set force_durability=true
+        // on the push_utxo_flush_from_retire call, ensuring each checkpoint advances the
+        // watermark immediately rather than waiting for the Nth-batch counter.
+        (0u64, protect_evict_ms, batch, at_checkpoint)
     } else {
-        let batch = store.maybe_take_flush_batch();
+        // Non-deferred mode: use adds-only drain for the same reason as rss_pressure_elevated_only.
+        // DEL tombstones must not reach SST before the watermark advances past their spend height.
+        let batch = store.maybe_take_flush_batch_adds_only();
         (0u64, protect_evict_ms, batch, false)
     }
 }
@@ -352,8 +365,9 @@ fn retire_flush_batch_size() -> usize {
 ///
 /// Crash safety: between durability boundaries the watermark stays at the last persisted
 /// height; on restart the soft autorepair pass detects `chain_tip > watermark` and replays
-/// the gap. The strict `flush_disk` → `persist_checkpoint` ordering inside the durability
-/// path preserves the invariant that watermark never advances past durable ibd_utxos rows.
+/// the gap. Two-phase commit inside the durability path (ADDs → flush_disk → watermark →
+/// DELs → flush_disk) ensures that a SIGKILL can only leave stale (already-spent) UTXOs on
+/// disk — never missing UTXOs — so resume always finds what it expects.
 fn push_utxo_flush_from_retire(
     store: &Arc<IbdUtxoStore>,
     storage_wm: &Arc<Storage>,
@@ -363,13 +377,19 @@ fn push_utxo_flush_from_retire(
     max_utxo_flushes_in_flight: usize,
     pkg: PendingFlushPackage,
     ibd_muhash: &Arc<Mutex<blvm_muhash::MuHash3072>>,
+    // When true, force the durability path (flush_disk + persist_ibd_utxo_flush_checkpoint)
+    // regardless of the Nth-batch counter. Used for deferred-checkpoint flushes where each
+    // call is already throttled to once per `defer_checkpoint_interval` blocks — if we waited
+    // for the Nth counter to fire it would only trigger at block N*interval (e.g. 160,000 with
+    // N=16, interval=10k), making resume accuracy 160k blocks instead of 10k.
+    force_durability: bool,
 ) -> Result<()> {
     let flush_limit = memory::utxo_flush_concurrency_cap(max_utxo_flushes_in_flight).max(1);
     let batch_count = retire_flush_batch_size();
     let n = retire_flush_counter.fetch_add(1, Ordering::Relaxed);
-    // Do durability on the first call (cold-start: nothing in memtable yet, but we
-    // want a clean checkpoint before workload heats up) and every Nth thereafter.
-    let do_durability = batch_count <= 1 || n % batch_count == 0;
+    // Do durability on the first call, every Nth call, or whenever the caller requests it
+    // (e.g. deferred-checkpoint mode where each call is already rate-limited by interval).
+    let do_durability = force_durability || batch_count <= 1 || n % batch_count == 0;
     let mut q = utxo_flush_handles.lock();
     // flush_limit cap: join the oldest in-flight commit to keep concurrency bounded.
     // Each joined thread returns its local MuHash3072 sub-accumulator; we fold it into
@@ -439,16 +459,32 @@ fn push_utxo_flush_from_retire(
             *mh_guard = std::mem::take(&mut *mh_guard)
                 .multiply(&combined_sub_mh)
                 .multiply(&shutdown_local_mh);
-            // Commit the durability batch to RocksDB (muhash already computed above, skip it).
-            store.flush_prepared_package(&prepared, None)?;
             mh_guard.serialize_running_state()
         };
-        // `commit_no_wal` leaves rows in the memtable until flush_cf — persist SST first so a
-        // crash cannot advance `ibd_utxo_watermark` past durable ibd_utxos rows.
+        // Two-phase crash-safe commit:
+        //
+        // Phase 1 — ADD ops only → flush_disk():  SST gains new UTXOs; no tombstones yet.
+        //   • SIGKILL here: resume re-validates from old watermark, DashMap overlays re-created
+        //     UTXOs, safe.
+        //
+        // Phase 2 — persist_watermark():  advances the resume point.
+        //   • Tiny (<1ms) unsafe window between Phase 1 and Phase 3. A crash here leaves
+        //     stale UTXOs (ADD'd but never DEL'd) in ibd_utxos; they are harmless because
+        //     Bitcoin double-spend prevention guarantees no block after the watermark will
+        //     reference them again.
+        //
+        // Phase 3 — DEL ops only → flush_disk():  tombstones prune the stale entries.
+        //   • SIGKILL here: watermark already advanced; stale entries linger but are harmless.
+        //
+        // This ordering avoids the original bug where DEL tombstones became durable BEFORE the
+        // watermark advanced, causing UTXO_TOTAL_MISS on resume for cross-batch spends.
+        store.flush_prepared_package_adds_only(&prepared)?;
         store.flush_disk()?;
         storage_wm
             .chain()
             .persist_ibd_utxo_flush_checkpoint(prepared.max_block_height, &muhash_running)?;
+        store.flush_prepared_package_dels_only(&prepared)?;
+        store.flush_disk()?;
         store.release_protected_heights(&heights);
         store.note_utxo_flush_completed(prepared.max_block_height);
         debug!(
@@ -478,9 +514,12 @@ fn push_utxo_flush_from_retire(
         q.push_back(std::thread::spawn(move || {
             // Compute muhash in the async thread: concurrent with other threads and with
             // retire loop processing. Retire loop is never blocked by this I/O.
+            // Use adds_only: non-durable async flushes must never write DEL tombstones.
+            // The caller uses take_flush_batch_adds_only / maybe_take_flush_batch_adds_only
+            // so the package should already contain only ADDs; this is a safety net.
             let mut local_mh = blvm_muhash::MuHash3072::new();
             store_clone.compute_package_muhash(&prepared, &mut local_mh)?;
-            store_clone.flush_prepared_package(&prepared, None)?;
+            store_clone.flush_prepared_package_adds_only(&prepared)?;
             store_clone.release_protected_heights(&heights);
             store_clone.note_utxo_flush_completed(prepared.max_block_height);
             Ok(local_mh)
@@ -556,10 +595,15 @@ struct ValidateJob {
     /// Optional UTXO map preloaded by the upstream IBD prefetcher; when non-empty, worker
     /// uses it as the initial fill (skipping the full cache scan).
     prefetched: rustc_hash::FxHashMap<OutPointKey, Arc<UTXO>>,
-    /// Pre-resolved UTXO session from the age-tiered engine (Phase 2).
-    /// When `Some`, the worker calls `session_to_utxo_set` and skips the prefetch/cache path.
+    /// Phase-1 engine result: append done, query+fetch deferred to the worker (Phase 2).
+    /// When `Some`, the worker calls `partial.complete()` then `session_to_utxo_set`, skipping
+    /// the legacy prefetch/cache/supplement path entirely.
     /// When `None` (engine disabled), the legacy prefetch/cache/supplement path is used.
-    session: Option<SpendSession>,
+    partial_session: Option<PartialSpendSession>,
+    /// When true the engine is the authoritative UTXO store during IBD: skip
+    /// `worker_cache_put_protected`, `apply_utxo_delta`, and the backpressure spin.
+    /// The IbdUtxoStore is populated after IBD via the Phase-3 watermark export.
+    engine_mode: bool,
 }
 
 /// Results returned from the validation worker for one block.
@@ -666,15 +710,30 @@ fn run_validation_worker_shared(
         let t_view = std::time::Instant::now();
         utxo_base.clear();
 
-        if let Some(session) = job.session.take() {
+        if let Some(partial) = job.partial_session {
             // ── Engine path (BLVM_IBD_ENGINE=1) ─────────────────────────────
-            // The dispatch thread called SpendSession::resolve, which already queried the
-            // age-tiered UtxoDatabase for all external inputs and resolved intra-block spends.
-            // Convert the session into the UtxoSet view required by validate_block_only.
-            // One Arc<UTXO> per entry (down from 2-3 in the prefetch path).
-            // The session's Pin is dropped at end of this scope, allowing the compacter to
-            // merge the height tier once validation completes.
-            utxo_base = session_to_utxo_set(&session);
+            // Dispatch thread did Phase 1 (append only). We do Phase 2 here (query + fetch)
+            // in parallel across workers — this is the hot path the old dispatch bottleneck
+            // prevented from running concurrently.
+            match partial.complete() {
+                Ok(session) => {
+                    // Fill into `utxo_base` directly, reusing its HashMap allocation across
+                    // blocks. Avoids one heap alloc+dealloc per block vs session_to_utxo_set.
+                    session_fill_utxo_set(&session, &mut utxo_base);
+                    // session (and its Pin) is dropped at end of this arm.
+                }
+                Err(e) => {
+                    // Engine failure mid-IBD: propagate as a validation error.
+                    let _ = tx.send(ValidateResult {
+                        height,
+                        result: Err(e.context("IBD engine Phase 2 failed")),
+                        bip30_post: job.bip30_index,
+                        elapsed: std::time::Duration::ZERO,
+                        view_build_ms: 0,
+                    });
+                    continue;
+                }
+            }
         } else {
             // ── Legacy prefetch/cache/supplement path ────────────────────────
             // Key-driven layered lookup. For each input key we check (in order):
@@ -772,8 +831,19 @@ fn run_validation_worker_shared(
         // (until apply removes it), then in `pending.key_set` (until take_for_flush), then in
         // `in_flight_insertions` (until disk flush completes). `maybe_evict` checks all three.
         if let Ok(Some(ref delta)) = &result {
-            store.worker_cache_put_protected(&delta.additions, height);
-            store.apply_utxo_delta(delta, height, &mut del_scratch, &mut add_scratch, true);
+            if job.engine_mode {
+                // Engine path: the age-tiered store is the authoritative UTXO source during IBD.
+                // Skip all IbdUtxoStore writes — the engine's in-memory state tracks the live
+                // UTXO set; incremental pending writes are incorrect due to concurrent workers
+                // potentially writing future-block deletions before those heights are retired.
+                // Durability is instead provided by the periodic Phase-3 export thread which
+                // runs run_watermark_export() every N blocks, writing a consistent UTXO snapshot
+                // to RocksDB and updating the watermark. On resume (start_height > 1) the engine
+                // is disabled and the IbdUtxoStore serves UTXOs from that snapshot.
+            } else {
+                store.worker_cache_put_protected(&delta.additions, height);
+                store.apply_utxo_delta(delta, height, &mut del_scratch, &mut add_scratch, true);
+            }
         }
         let _ = tx.send(ValidateResult {
             height,
@@ -801,7 +871,11 @@ fn run_validation_worker_shared(
         //
         // Overshoot: up to N_workers × max_block_ops past the cap before parking. On a 16 GiB
         // host that is ≈12 × 5000 = 60k ops × ~300 B ≈ 18 MB — negligible.
-        let cap = max_pending_ops.load(Ordering::Relaxed);
+        let cap = if job.engine_mode {
+            0
+        } else {
+            max_pending_ops.load(Ordering::Relaxed)
+        };
         if cap > 0 {
             let mut spins = 0u32;
             let spin_start = std::time::Instant::now();
@@ -970,6 +1044,10 @@ pub struct ValidationParams {
     /// Age-tiered UTXO engine (Phase 2). `Some` when `BLVM_IBD_ENGINE=1`; `None` uses
     /// the legacy IbdUtxoStore prefetch/cache/supplement path.
     pub utxo_engine: Option<Arc<UtxoDatabase>>,
+    /// Sender for periodic mid-IBD checkpoint heights. The retire loop sends a height here
+    /// when it reaches each checkpoint multiple; the background export thread in mod.rs
+    /// picks it up and runs `run_checkpoint_export`. `None` in non-engine mode.
+    pub checkpoint_tx: Option<std::sync::mpsc::SyncSender<u64>>,
 }
 
 /// Run the IBD validation loop. Called from std::thread::spawn.
@@ -995,6 +1073,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let utxo_nominal_max_entries = params.utxo_nominal_max_entries;
     let stall_tx = params.stall_tx;
     let utxo_engine = params.utxo_engine;
+    let checkpoint_tx = params.checkpoint_tx;
     let nominal_prefetch_lookahead = params.utxo_prefetch_lookahead.clamp(1, 128);
     let utxo_prefetch_lookahead_live = AtomicUsize::new(nominal_prefetch_lookahead);
 
@@ -1327,6 +1406,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let retire_err_outer = Arc::clone(&retire_err);
         let mpo_outer = Arc::clone(&max_pending_ops);
         let mpo_last_outer = Arc::clone(&max_pending_ops_last_adapt_ms);
+        let utxo_engine_outer = utxo_engine.clone();
+        let engine_mode_for_retire = utxo_engine.is_some();
         super::retire_dispatcher::RetireDispatcher::spawn(
             num_retire_shards,
             start_height.saturating_sub(1),
@@ -1346,6 +1427,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let retire_err = Arc::clone(&retire_err_outer);
                 let mpo = Arc::clone(&mpo_outer);
                 let mpo_last = Arc::clone(&mpo_last_outer);
+                let utxo_engine = utxo_engine_outer.clone();
                 std::thread::Builder::new()
                     .name(format!("ibd-retire-{i}"))
                     .spawn(move || {
@@ -1373,6 +1455,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             mpo,
                             max_pending_ops_nominal,
                             mpo_last,
+                            engine_mode_for_retire,
+                            utxo_engine,
                         );
                     })
                     .expect("spawn IBD retire shard")
@@ -1393,6 +1477,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let retire_err_outer = Arc::clone(&retire_err);
         let mpo_outer = Arc::clone(&max_pending_ops);
         let mpo_last_outer = Arc::clone(&max_pending_ops_last_adapt_ms);
+        let engine_mode_for_retire = utxo_engine.is_some();
         super::retire_dispatcher::RetireDispatcher::spawn(
             num_retire_shards,
             start_height.saturating_sub(1),
@@ -1433,6 +1518,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             mpo,
                             max_pending_ops_nominal,
                             mpo_last,
+                            engine_mode_for_retire,
                         );
                     })
                     .expect("spawn IBD retire shard")
@@ -1795,17 +1881,19 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             };
 
             // Dispatch: snapshot only, view-build runs on the worker.
-            // Extract input keys (cheap; uses precomputed feeder keys when available).
-            if input_keys_from_feeder.is_empty() {
-                // Feeder already computed tx_ids for this block; avoid `compute_block_tx_ids` +
-                // a fresh `Vec<Hash>` alloc inside `block_input_keys_into_filtered`.
-                block_input_keys_into_filtered_with_tx_ids(
-                    block_arc_d.as_ref(),
-                    tx_ids_precomputed_d.as_slice(),
-                    &mut keys_v2_buf,
-                );
-            } else {
-                std::mem::swap(&mut keys_v2_buf, &mut input_keys_from_feeder);
+            // In engine mode the worker uses `partial_session` (query+fetch via the age-tiered
+            // index) rather than the legacy prefetch/cache key path, so `keys_v2_buf` is dead
+            // work — skip the input-key extraction entirely.
+            if utxo_engine.is_none() {
+                if input_keys_from_feeder.is_empty() {
+                    block_input_keys_into_filtered_with_tx_ids(
+                        block_arc_d.as_ref(),
+                        tx_ids_precomputed_d.as_slice(),
+                        &mut keys_v2_buf,
+                    );
+                } else {
+                    std::mem::swap(&mut keys_v2_buf, &mut input_keys_from_feeder);
+                }
             }
             if h <= 200 {
                 debug!(
@@ -1817,21 +1905,16 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             }
 
             // Spec snapshot: shallow Arc clones of in-flight blocks' speculative additions.
-            // List grows with pipeline_depth (max pipeline_depth_live - 1); the pre-alloc buf
-            // is sized for the configured depth so reuse is cheap.
-            //
-            // staged_snapshot was eliminated: every staged block has already called
-            // `worker_cache_put_protected` so its outputs live in the cache (DashMap) and
-            // are protected from eviction by `worker_preinserted` until disk flush. The
-            // worker hits them via a single `cache_get` (lock-free shard) — fully replaces
-            // the O(staged.len() × still_missing) walk that dominated `utxo_base_ms` (~100
-            // ms/block when retire was behind).
-            spec_adds_snapshot_buf.clear();
-            spec_adds_snapshot_buf.extend(spec_adds.iter().map(|(sh, set)| (*sh, Arc::clone(set))));
-            // Move the filled buffer into the job; replace with a fresh pre-sized buf for the
-            // next dispatch. Avoids the second Vec alloc + Arc-tuple memcpy from .clone().
-            let spec_adds_snapshot =
-                std::mem::replace(&mut spec_adds_snapshot_buf, Vec::with_capacity(64));
+            // Dead in engine mode — workers use `partial_session` (age-tiered query+fetch)
+            // and never consult `spec_adds_snapshot`.  Skip the Arc-clone loop entirely.
+            let spec_adds_snapshot: Vec<(u64, Arc<UtxoSet>)> = if utxo_engine.is_none() {
+                spec_adds_snapshot_buf.clear();
+                spec_adds_snapshot_buf
+                    .extend(spec_adds.iter().map(|(sh, set)| (*sh, Arc::clone(set))));
+                std::mem::replace(&mut spec_adds_snapshot_buf, Vec::with_capacity(64))
+            } else {
+                Vec::new()
+            };
 
             // Optional debug/profile snapshot (rare, off by default).
             if let Some(ref base) = snapshot_dir_base {
@@ -1884,17 +1967,21 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 bip30_index.clone()
             };
 
-            // Phase 2: if the age-tiered engine is enabled, resolve this block's inputs
-            // via SpendSession before dispatching. The session carries resolved OutputDetails +
-            // the Pin that prevents the compacter from merging this height tier away until the
-            // worker finishes. On error (shouldn't happen during IBD), fall back gracefully.
-            let engine_session: Option<SpendSession> = if let Some(ref db) = utxo_engine {
-                let tx_ids_for_engine: Vec<[u8; 32]> =
-                    tx_ids_precomputed_d.iter().copied().collect();
-                match SpendSession::resolve(db, block_arc_d.as_ref(), &tx_ids_for_engine, h as i32) {
-                    Ok(s) => Some(s),
+            // Engine Phase 1 (dispatch thread, sequential): append outputs + delete-markers to
+            // the age-tiered index. Fast — write-only, no disk reads. The returned
+            // PartialSpendSession is sent to a worker which completes Phase 2 (query + fetch)
+            // in parallel. This moves the expensive read path off the dispatch bottleneck.
+            let partial_session: Option<PartialSpendSession> = if let Some(ref db) = utxo_engine {
+                // Pass the precomputed tx_ids slice directly; no Vec copy needed.
+                match SpendSession::append(
+                    Arc::clone(db),
+                    block_arc_d.as_ref(),
+                    tx_ids_precomputed_d.as_slice(),
+                    h as i32,
+                ) {
+                    Ok(p) => Some(p),
                     Err(e) => {
-                        warn!("[IBD_ENGINE] SpendSession::resolve failed at h={h}: {e:#}, falling back to legacy path");
+                        warn!("[IBD_ENGINE] SpendSession::append failed at h={h}: {e:#}, falling back to legacy path");
                         None
                     }
                 }
@@ -1913,7 +2000,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 keys: keys_for_job,
                 spec_adds_snapshot,
                 prefetched: prefetched_utxos_d,
-                session: engine_session,
+                engine_mode: utxo_engine.is_some(),
+                partial_session,
             });
             if job_send.is_err() {
                 return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
@@ -2506,6 +2594,17 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
         // Periodic mimalloc page return. 5a: adaptive — every 1000 blocks, or sooner
         // when RSS grew >50MB since last collect (heavy allocation bursts).
+        // Engine mode: retire skips legacy UTXO-store pressure; poll RSS here and spill index tiers.
+        if utxo_engine.is_some() && blocks_synced > 0 && blocks_synced % 200 == 0 {
+            memory::ibd_memory_pressure_maintenance(
+                &mem_mtx,
+                &max_ahead_live,
+                nominal_max_ahead,
+                storage_clone.as_ref(),
+                utxo_engine.as_deref(),
+            );
+        }
+
         if blocks_synced > 0 && blocks_synced % 500 == 0 {
             #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
             {
@@ -2637,6 +2736,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         .unwrap_or(0)
                 );
             }
+
             // BPS CSV for Core-comparable metrics (height,elapsed_sec) — same format as bitcoin-core-ibd-bench.sh
             if let Some(ref path) = ibd_bps_csv_path {
                 let elapsed_sec = validation_start.elapsed().as_secs();
@@ -2706,6 +2806,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // mh_acc mutex) and fold them into the global accumulator before persisting the final
     // checkpoint.
     let mut shutdown_pkg_height: Option<u64> = None;
+    // Keep a clone for the DELs phase of the two-phase commit (Arc internals, cheap clone).
+    let mut shutdown_prepared_for_dels: Option<
+        crate::storage::ibd_utxo_store::PreparedFlushPackage,
+    > = None;
     if let Some(pkg) = ibd_store_v2_for_validation.take_remaining_flush_package() {
         shutdown_pkg_height = Some(pkg.max_block_height);
         let heights = Arc::clone(&pkg.heights);
@@ -2714,11 +2818,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         drop(pkg);
         let mut local_mh = blvm_muhash::MuHash3072::new();
         ibd_store_v2_for_validation.compute_package_muhash(&prepared, &mut local_mh)?;
+        // Keep a clone for the DELs phase (Phase 3 of two-phase commit).
+        shutdown_prepared_for_dels = Some(prepared.clone());
         let store_clone = Arc::clone(&ibd_store_v2_for_validation);
         utxo_flush_handles
             .lock()
             .push_back(std::thread::spawn(move || {
-                store_clone.flush_prepared_package(&prepared, None)?;
+                // Phase 1: ADDs only. DELs are written after watermark is persisted.
+                store_clone.flush_prepared_package_adds_only(&prepared)?;
                 store_clone.release_protected_heights(&heights);
                 store_clone.note_utxo_flush_completed(prepared.max_block_height);
                 Ok(local_mh)
@@ -2743,14 +2850,22 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let mut mh_guard = ibd_muhash_accumulator.lock();
         *mh_guard = std::mem::take(&mut *mh_guard).multiply(&combined_shutdown_sub_mh);
     }
-    // Persist the final checkpoint only when there was a remaining flush package (the flush_disk
-    // + persist_checkpoint pair ensures the watermark advances past the last UTXO batch).
+    // Persist the final checkpoint using two-phase crash-safe commit (same as periodic
+    // checkpoints): ADDs flushed before watermark, DELs flushed after.
     if let Some(max_height) = shutdown_pkg_height {
         let muhash_running = ibd_muhash_accumulator.lock().serialize_running_state();
+        // Phase 1 ADDs → disk already written by spawned thread; flush_disk makes them durable.
         ibd_store_v2_for_validation.flush_disk()?;
+        // Phase 2: advance watermark (safe point — any crash after this leaves stale UTXOs,
+        // not missing UTXOs; stale UTXOs are harmless per Bitcoin double-spend prevention).
         storage_clone
             .chain()
             .persist_ibd_utxo_flush_checkpoint(max_height, &muhash_running)?;
+        // Phase 3: DELs → disk, then flush.
+        if let Some(ref dels_pkg) = shutdown_prepared_for_dels {
+            ibd_store_v2_for_validation.flush_prepared_package_dels_only(dels_pkg)?;
+            ibd_store_v2_for_validation.flush_disk()?;
+        }
     }
     let last_validated = next_validation_height.saturating_sub(1);
     if let Err(e) = ibd_store_v2_for_validation.flush_disk() {
@@ -2832,6 +2947,8 @@ fn run_ibd_retire_loop_with_commitment(
     max_pending_ops: Arc<AtomicUsize>,
     max_pending_ops_nominal: usize,
     max_pending_ops_last_adapt_ms: Arc<AtomicU64>,
+    engine_mode: bool,
+    utxo_engine: Option<Arc<UtxoDatabase>>,
 ) {
     let mut keys_buf: Vec<OutPointKey> = Vec::new();
     let mut keys_seen = rustc_hash::FxHashSet::default();
@@ -2841,26 +2958,27 @@ fn run_ibd_retire_loop_with_commitment(
             Ok(w) => w,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Retire went idle — coordinator is paused in EMERGENCY admission. The
-                // pressure atomic is only updated from `ibd_v2_retire_apply_utxo_delta`, so
-                // if we block here the coordinator never sees recovery. Re-read /proc, publish,
-                // and run flush+evict to actively break the deadlock.
+                // Retire went idle — coordinator is paused in EMERGENCY admission. Re-read
+                // /proc and publish so admission can recover (engine mode skips legacy retire).
                 if memory::ibd_pressure_is_emergency() {
-                    let level = {
-                        let mut mem = mem_mtx.lock();
-                        let level = mem.should_flush(Some((&max_ahead_live, nominal_max_ahead)));
-                        memory::publish_ibd_pressure(level);
-                        level
-                    };
-                    if level >= PressureLevel::Critical {
+                    let level = memory::ibd_memory_pressure_maintenance(
+                        &mem_mtx,
+                        &max_ahead_live,
+                        nominal_max_ahead,
+                        storage_wm.as_ref(),
+                        utxo_engine.as_deref(),
+                    );
+                    if !engine_mode && level >= PressureLevel::Critical {
                         let evictable = store.len().saturating_sub(store.protected_len());
                         if evictable >= IBD_EMERGENCY_EVICT_MIN_UNPROTECTED {
                             store.evict_aggressive_for_rss();
                         }
-                        // Idle-flush: drain everything. Workers push pending strictly
-                        // before dispatching retire work, so all in-pending entries are
-                        // safe to flush; the watermark may advance past local_last_retired
-                        // and that's correct (`retire_dispatcher.rs` invariant 2).
+                        // Idle-flush: durable two-phase commit. Workers push pending strictly
+                        // before dispatching retire work, so all in-pending entries are safe to
+                        // flush; the watermark may advance past local_last_retired and that's
+                        // correct (`retire_dispatcher.rs` invariant 2). force_durability=true
+                        // ensures DEL tombstones are only written after the watermark advances
+                        // (Phase 3), preventing UTXO_TOTAL_MISS on crash+resume.
                         let _ = local_last_retired;
                         if let Some(pkg) = store.take_flush_batch_force() {
                             if let Err(e) = push_utxo_flush_from_retire(
@@ -2872,6 +2990,7 @@ fn run_ibd_retire_loop_with_commitment(
                                 max_utxo_flushes_under_pressure,
                                 pkg,
                                 &ibd_muhash,
+                                true,
                             ) {
                                 *retire_err.lock() = Some(e);
                                 return;
@@ -2913,8 +3032,46 @@ fn run_ibd_retire_loop_with_commitment(
                 }
             }
         }
+
+        if engine_mode {
+            if h % 64 == 0 {
+                memory::ibd_memory_pressure_maintenance(
+                    &mem_mtx,
+                    &max_ahead_live,
+                    nominal_max_ahead,
+                    storage_wm.as_ref(),
+                    utxo_engine.as_deref(),
+                );
+            }
+            if let (Some(cref), Some(cstore)) =
+                (commitment_tree.as_ref(), commitment_cstore.as_ref())
+            {
+                let block_hash = blockstore.get_block_hash(work.block.as_ref());
+                let commitment = {
+                    let t = cref.lock();
+                    t.generate_commitment(block_hash, h)
+                };
+                if let Err(e) = cstore.store_commitment(&block_hash, h, &commitment) {
+                    warn!("IBD commitment: store failed at height {}: {}", h, e);
+                    *retire_err.lock() = Some(e);
+                    return;
+                }
+            }
+            publisher.publish(&local_last_retired, h);
+            adapt_max_pending_ops_tick(
+                &max_pending_ops,
+                max_pending_ops_nominal,
+                memory::ibd_pressure_level_snapshot(),
+                store.pending_len(),
+                &max_pending_ops_last_adapt_ms,
+            );
+            staged.lock().remove(&h);
+            staged_count.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        }
+
         let mut mem = mem_mtx.lock();
-        let (opt_pkg, _) = {
+        let (opt_pkg, is_defer_checkpoint) = {
             let (_s, _e, p, r) = ibd_v2_retire_apply_utxo_delta(
                 h,
                 store.as_ref(),
@@ -2973,6 +3130,7 @@ fn run_ibd_retire_loop_with_commitment(
                 max_utxo_flushes_under_pressure,
                 pkg,
                 &ibd_muhash,
+                is_defer_checkpoint,
             ) {
                 *retire_err.lock() = Some(e);
                 return;
@@ -3018,6 +3176,7 @@ fn run_ibd_retire_loop_no_commitment(
     max_pending_ops: Arc<AtomicUsize>,
     max_pending_ops_nominal: usize,
     max_pending_ops_last_adapt_ms: Arc<AtomicU64>,
+    engine_mode: bool,
 ) {
     let mut keys_buf: Vec<OutPointKey> = Vec::new();
     let mut keys_seen = rustc_hash::FxHashSet::default();
@@ -3034,9 +3193,9 @@ fn run_ibd_retire_loop_no_commitment(
                 // called from `ibd_v2_retire_apply_utxo_delta` — which only runs when retire
                 // receives work. So we must re-read /proc and publish fresh pressure here.
                 //
-                // Additionally, flush pending ops and evict to actually free memory, otherwise
-                // even if the atomic cleared, RSS would still be too high to re-enter.
-                if memory::ibd_pressure_is_emergency() {
+                // In engine mode the IbdUtxoStore is empty and pressure is never triggered;
+                // skip the emergency handler to avoid useless lock contention.
+                if !engine_mode && memory::ibd_pressure_is_emergency() {
                     let level = {
                         let mut mem = mem_mtx.lock();
                         let level = mem.should_flush(Some((&max_ahead_live, nominal_max_ahead)));
@@ -3048,10 +3207,12 @@ fn run_ibd_retire_loop_no_commitment(
                         if evictable >= IBD_EMERGENCY_EVICT_MIN_UNPROTECTED {
                             store.evict_aggressive_for_rss();
                         }
-                        // Idle-flush: drain everything. Workers push pending strictly before
-                        // dispatching retire work, so any in-pending entry is for a block
+                        // Idle-flush: durable two-phase commit. Workers push pending strictly
+                        // before dispatching retire work, so any in-pending entry is for a block
                         // that already finished validation; advancing the watermark past
                         // local_last_retired is allowed (`retire_dispatcher.rs` invariant 2).
+                        // force_durability=true ensures DEL tombstones are only written after the
+                        // watermark advances (Phase 3), preventing UTXO_TOTAL_MISS on crash+resume.
                         let _ = local_last_retired;
                         if let Some(pkg) = store.take_flush_batch_force() {
                             if let Err(e) = push_utxo_flush_from_retire(
@@ -3063,6 +3224,7 @@ fn run_ibd_retire_loop_no_commitment(
                                 max_utxo_flushes_under_pressure,
                                 pkg,
                                 &ibd_muhash,
+                                true,
                             ) {
                                 *retire_err.lock() = Some(e);
                                 return;
@@ -3075,10 +3237,23 @@ fn run_ibd_retire_loop_no_commitment(
             }
         };
         let h = work.height;
+
+        if engine_mode {
+            // Engine-mode fast path: the age-tiered engine owns all UTXO state; the
+            // IbdUtxoStore (`ibd_utxos` CF) is empty and receives no writes from workers.
+            // Skip the entire `ibd_v2_retire_apply_utxo_delta` call (eviction, flush-batch
+            // building, memory-pressure publishing).  Just drain staged and advance the
+            // progress cursor so the orchestrator's backpressure cap releases.
+            staged.lock().remove(&h);
+            staged_count.fetch_sub(1, Ordering::Relaxed);
+            publisher.publish(&local_last_retired, h);
+            continue;
+        }
+
         // Workers have already mutated cache + pending log for this height;
         // retire only runs the *coordinated* per-block work (eviction + flush decisions).
         let mut mem = mem_mtx.lock();
-        let (opt_pkg, _) = {
+        let (opt_pkg, is_defer_checkpoint) = {
             let (_s, _e, p, r) = ibd_v2_retire_apply_utxo_delta(
                 h,
                 store.as_ref(),
@@ -3127,6 +3302,7 @@ fn run_ibd_retire_loop_no_commitment(
                 max_utxo_flushes_under_pressure,
                 pkg,
                 &ibd_muhash,
+                is_defer_checkpoint,
             ) {
                 *retire_err.lock() = Some(e);
                 return;

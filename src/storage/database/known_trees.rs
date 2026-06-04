@@ -11,6 +11,8 @@ pub const KNOWN_TREE_NAMES: &[&str] = &[
     "recent_headers",
     "utxos",
     "ibd_utxos",
+    "ibd_utxos_ckpt_a",
+    "ibd_utxos_ckpt_b",
     "spent_outputs",
     "chain_info",
     "work_cache",

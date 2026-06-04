@@ -64,9 +64,11 @@ pub fn validation_error_suggests_utxo_repair(err: &anyhow::Error) -> bool {
         || s.contains("Failed to open IBD UTXO tree")
 }
 
-/// If `ibd_utxo_watermark` is non-zero but the `ibd_utxos` tree has no rows, persisted watermark
-/// cannot reflect flushed state (common after watermark was bumped to match chain tip without a
-/// matching UTXO flush). Reset watermark to **0** so startup uses safe replay semantics.
+/// If `ibd_utxo_watermark` is non-zero but the durable UTXO tree has no rows, persisted watermark
+/// cannot reflect flushed state. Reset watermark to **0** so startup uses safe replay semantics.
+///
+/// In engine mode (`BLVM_IBD_ENGINE=1`) checkpoints live in ping-pong trees (`ibd_utxos_ckpt_*`),
+/// not `ibd_utxos` — skip the empty-tree reset when a checkpoint snapshot is present.
 #[cfg(feature = "production")]
 pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
     storage: &crate::storage::Storage,
@@ -74,6 +76,28 @@ pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
 ) -> Result<u64> {
     if watermark_val == 0 {
         return Ok(0);
+    }
+    let engine_enabled = std::env::var("BLVM_IBD_ENGINE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if engine_enabled {
+        if let Some(_eh) = storage
+            .chain()
+            .get_engine_export_height()?
+            .filter(|&h| h > 0)
+        {
+            let slot = storage.chain().get_engine_ckpt_slot()?;
+            let ckpt_name = crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
+            if let Ok(tree) = storage.open_tree(ckpt_name) {
+                if !tree.is_empty()? {
+                    return Ok(watermark_val);
+                }
+            }
+            warn!(
+                "[ibd_autorepair] engine export height set but {} empty — falling through to ibd_utxos check",
+                ckpt_name
+            );
+        }
     }
     let tree = storage.open_tree("ibd_utxos")?;
     if tree.is_empty()? {
@@ -111,20 +135,39 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
         .unwrap_or(false);
 
     if aggressive {
-        // Legacy destructive path: full wipe + watermark reset. Re-validates the entire
-        // chain from height 1. Only used now when the operator explicitly opts in because
-        // soft repair kept looping (i.e. corruption is below the watermark).
-        info!(
-            "IBD UTXO autorepair (aggressive): clearing ibd_utxos and forcing ibd_utxo_watermark to 0 \
-             (BLVM_IBD_AGGRESSIVE_REPAIR=1, marker was present)"
-        );
-        let tree = storage.open_tree("ibd_utxos")?;
-        tree.clear()?;
+        // Destructive path: wipe the UTXO state and reset to height 0. On-disk blocks are
+        // kept, so only consensus validation needs to be re-run.
+        let engine_mode = std::env::var("BLVM_IBD_ENGINE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if engine_mode {
+            // Engine mode: checkpoints live in ibd_utxos_ckpt_a/b, not ibd_utxos.
+            // Clear both ping-pong trees, reset engine metadata, then reset watermark.
+            info!(
+                "IBD UTXO autorepair (aggressive, engine mode): clearing checkpoint trees \
+                 (ibd_utxos_ckpt_a + ibd_utxos_ckpt_b) and resetting engine metadata \
+                 (BLVM_IBD_AGGRESSIVE_REPAIR=1, marker was present)"
+            );
+            for tree_name in &["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
+                let tree = storage.open_tree(tree_name)?;
+                tree.clear()?;
+            }
+            storage.chain().force_reset_engine_checkpoint_metadata()?;
+        } else {
+            info!(
+                "IBD UTXO autorepair (aggressive): clearing ibd_utxos and forcing \
+                 ibd_utxo_watermark to 0 (BLVM_IBD_AGGRESSIVE_REPAIR=1, marker was present)"
+            );
+            let tree = storage.open_tree("ibd_utxos")?;
+            tree.clear()?;
+        }
         storage.chain().force_set_ibd_utxo_watermark(0)?;
         storage.flush()?;
         clear_ibd_utxo_repair_flag(data_dir)?;
         warn!(
-            "IBD UTXO autorepair applied (aggressive); on-disk blocks kept; full re-validation will follow"
+            "IBD UTXO autorepair applied (aggressive{}); on-disk blocks kept; full re-validation will follow",
+            if engine_mode { ", engine mode" } else { "" }
         );
         return Ok(());
     }

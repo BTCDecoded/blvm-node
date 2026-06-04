@@ -55,6 +55,27 @@ pub(crate) fn publish_ibd_pressure(level: PressureLevel) {
     IBD_PRESSURE_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
+/// Poll `/proc`, publish pressure, throttle RocksDB, and drive engine index spill.
+pub(crate) fn ibd_memory_pressure_maintenance(
+    mem_mtx: &parking_lot::Mutex<MemoryGuard>,
+    max_ahead_live: &AtomicU64,
+    nominal_max_ahead: u64,
+    storage: &crate::storage::Storage,
+    utxo_engine: Option<&crate::storage::ibd_engine::UtxoDatabase>,
+) -> PressureLevel {
+    let level = {
+        let mut mem = mem_mtx.lock();
+        let level = mem.should_flush(Some((max_ahead_live, nominal_max_ahead)));
+        publish_ibd_pressure(level);
+        level
+    };
+    storage.ibd_memory_pressure_tick(level as u8);
+    if let Some(db) = utxo_engine {
+        db.memory_pressure_tick(level as u8);
+    }
+    level
+}
+
 #[inline]
 pub(crate) fn ibd_pressure_is_emergency() -> bool {
     IBD_PRESSURE_LEVEL.load(Ordering::Relaxed) >= PressureLevel::Emergency as u8
@@ -226,6 +247,10 @@ fn proc_rss_mb_from_status(s: &str) -> u64 {
 /// UTXO flush and (via `max_ahead_live`) shrink download-ahead automatically.
 pub(crate) struct MemoryGuard {
     total_mb: u64,
+    /// `MemAvailable` (MiB) at the time `MemoryGuard::new()` ran (boot probe, after env overrides).
+    /// Shared with subsystems (e.g. UTXO index eviction age) that need the same hardware snapshot
+    /// without re-reading `/proc/meminfo`.
+    pub(crate) avail_mb: u64,
     budget_mb: u64,
     /// Derived UTXO cache max in MB (50% of budget).
     utxo_cache_mb: usize,
@@ -501,13 +526,22 @@ impl MemoryGuard {
             || std::env::var("BLVM_IBD_DEFER_FLUSH")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-        let defer_checkpoint_interval = if total_gb >= 64 {
-            50_000
+        // UTXO flush cadence: how many blocks between pending-log flushes to RocksDB.
+        // 50k on 64+ GB was too large — a single 130M-entry flush stalls RocksDB (write stall).
+        // 10k keeps each batch to ~26M ops (~2.6 GB) which the write buffer handles without stall.
+        // Overrideable via BLVM_IBD_DEFER_CHECKPOINT_INTERVAL for benchmarking.
+        let defer_checkpoint_interval_base = if total_gb >= 64 {
+            10_000
         } else if total_gb >= 32 {
             2_000
         } else {
             25_000
         };
+        let defer_checkpoint_interval = std::env::var("BLVM_IBD_DEFER_CHECKPOINT_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| (100..=500_000).contains(&n))
+            .unwrap_or(defer_checkpoint_interval_base);
 
         // Block buffer: 10% of budget. 16GB caps lower (500KB estimate from early blocks
         // doesn't hold at h>300k where blocks average ~1MB).
@@ -612,8 +646,8 @@ impl MemoryGuard {
 
         tracing::info!(
             "MemoryGuard: total={}MB available={}MB spare≈{}MB budget={}MB (live /proc pressure) \
-             utxo_cache={}MB ({}entries) flush_threshold={} defer_flush={} buffer={} \
-             prefetch={} prefetch_queue={} max_ahead={} storage_flush={} feeder_bytes={}MB \
+             utxo_cache={}MB ({}entries) flush_threshold={} defer_flush={} defer_checkpoint={} \
+             buffer={} prefetch={} prefetch_queue={} max_ahead={} storage_flush={} feeder_bytes={}MB \
              max_utxo_flush={} max_block_flush={}",
             total_mb,
             available_mb,
@@ -623,6 +657,7 @@ impl MemoryGuard {
             utxo_max_entries,
             utxo_flush_threshold,
             defer_flush,
+            defer_checkpoint_interval,
             block_buffer_base,
             prefetch_limit,
             prefetch_queue_size,
@@ -648,8 +683,17 @@ impl MemoryGuard {
                     60
                 } else if total_mb >= 24 * 1024 {
                     57
+                } else if total_mb <= 8 * 1024 {
+                    // ≤8 GiB: small dedicated node (Raspberry Pi 5, etc.).
+                    // On a headless node the OS uses ≤1–2 GB; blvm can use the rest.
+                    // Base on total_mb × 60% (= 4915 MB for 8 GB) so a lightly-loaded Pi 5
+                    // doesn’t trip EMERGENCY during normal IBD.
+                    // Also respect available_mb × 75% so a genuinely-loaded machine still adapts.
+                    let from_total = total_mb * 65 / 100;
+                    let from_avail = available_mb * 75 / 100;
+                    return from_total.max(from_avail).min(total_mb * 80 / 100).max(2048);
                 } else if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
-                    // ≤~18 GiB physical. Budget from available_mb (not total_mb): a desktop
+                    // 8–18 GiB physical. Budget from available_mb (not total_mb): a desktop
                     // workload already consumes ~6 GB, so total_mb×54% = 8.6 GB on a 15.9 GB
                     // machine left only ~1.4 GB system headroom → OOM at h≈64k (swap-full).
                     // available_mb×60% accounts for what the OS can actually spare at boot.
@@ -670,6 +714,7 @@ impl MemoryGuard {
 
         Self {
             total_mb,
+            avail_mb: available_mb,
             budget_mb,
             utxo_cache_mb,
             utxo_max_entries,
@@ -873,7 +918,46 @@ impl MemoryGuard {
     /// `cancel_all_background_work` calls in the hot validation path.
     pub(crate) fn pressure_level(&self, snap: &MemorySnapshot) -> PressureLevel {
         let current = PressureLevel::from_u8(self.last_reported_pressure.load(Ordering::Relaxed));
-        self.pressure_level_for(snap, current)
+        self.clamp_pressure_to_process_budget(self.pressure_level_for(snap, current), snap)
+    }
+
+    /// Raise pressure when **process RSS** nears `rss_budget_mb`, even if host MemAvailable
+    /// still looks ample (shared RAM with vLLM, IDE, etc.). Engine-mode IBD ignores the
+    /// legacy UTXO cache; without this, only the age-tiered index grows toward OOM.
+    fn clamp_pressure_to_process_budget(
+        &self,
+        mut level: PressureLevel,
+        snap: &MemorySnapshot,
+    ) -> PressureLevel {
+        let b = self.rss_budget_mb;
+        let r = snap.rss_mb;
+        if b == 0 || r == 0 {
+            return level;
+        }
+        if r >= b {
+            return PressureLevel::Emergency;
+        }
+        if r >= b * 92 / 100 {
+            level = level.max(PressureLevel::Critical);
+        } else if r >= b * 82 / 100 {
+            level = level.max(PressureLevel::Elevated);
+        }
+        level
+    }
+
+    /// RAM budget (MiB) for sizing the IBD engine index at open — derived from `rss_budget_mb`,
+    /// not raw MemAvailable (which ignores other workloads on the host).
+    pub(crate) fn engine_avail_mb(&self) -> u64 {
+        const PIPELINE_RESERVE_MB: u64 = 6144;
+        const LEGACY_CACHE_CAP_MB: u64 = 4096;
+        let legacy = (self.utxo_cache_mb as u64).min(LEGACY_CACHE_CAP_MB);
+        let engine_mb = self
+            .rss_budget_mb
+            .saturating_sub(PIPELINE_RESERVE_MB)
+            .saturating_sub(legacy);
+        // ~28% of RSS budget → eviction age 5 on 64+ GiB hosts (age 6 caused ~67 GiB RSS OOM).
+        let capped = (self.rss_budget_mb * 28 / 100).max(2048);
+        capped.min(engine_mb).min(self.avail_mb)
     }
 
     fn pressure_level_for(&self, snap: &MemorySnapshot, current: PressureLevel) -> PressureLevel {

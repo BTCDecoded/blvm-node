@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 #[test]
 fn test_config_with_all_transport_preferences() {
-    let mut preferences = vec![TransportPreferenceConfig::TcpOnly];
+    let preferences = vec![TransportPreferenceConfig::TcpOnly];
 
     #[cfg(feature = "quinn")]
     preferences.push(TransportPreferenceConfig::QuinnOnly);

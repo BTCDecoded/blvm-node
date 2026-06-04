@@ -145,6 +145,7 @@ dashmap = "=6.0"
 # resolve them when default features enable `sysinfo` / `governance` (they are not Unix-only).
 sysinfo = { version = "=0.30", optional = true }
 reqwest = { version = "=0.12", optional = true, features = ["json"] }
+io-uring = "0.7"
 
 # Memory allocator optimization
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)

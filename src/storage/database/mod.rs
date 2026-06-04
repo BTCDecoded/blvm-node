@@ -93,6 +93,30 @@ pub trait Tree: Send + Sync {
     /// Iterate over all key-value pairs
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_>;
 
+    /// Bulk-load pre-sorted key-value pairs in a single operation.
+    ///
+    /// `sorted_kv` **must** be in lexicographically ascending key order (same comparator as the
+    /// tree). Violating this constraint may produce silent data corruption on SST-based backends.
+    ///
+    /// Default implementation uses batched `batch().commit_no_wal()` writes (correct on all
+    /// backends). The RocksDB backend overrides this with `SstFileWriter` +
+    /// `ingest_external_file_cf` for 10–50× higher throughput at millions of entries — the
+    /// primary speedup for the IBD checkpoint export at heights ≥ 300k.
+    fn bulk_load_sorted_kv(&self, sorted_kv: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        const BATCH: usize = 10_000;
+        let mut i = 0;
+        while i < sorted_kv.len() {
+            let end = (i + BATCH).min(sorted_kv.len());
+            let mut b = self.batch()?;
+            for (k, v) in &sorted_kv[i..end] {
+                b.put(k, v);
+            }
+            b.commit_no_wal()?;
+            i = end;
+        }
+        Ok(())
+    }
+
     /// Create a batch writer for efficient bulk operations
     ///
     /// Batch writes are 10-100x faster than individual inserts because they
@@ -1208,8 +1232,8 @@ pub mod rocksdb_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use rocksdb::{
-        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, Options, ReadOptions,
-        WriteOptions, DB,
+        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, IngestExternalFileOptions,
+        Options, ReadOptions, SstFileWriter, WriteOptions, DB,
     };
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1786,7 +1810,9 @@ pub mod rocksdb_impl {
             };
             let cf_opts_for = |name: &str| -> Options {
                 match name {
-                    "ibd_utxos" => make_ibd_utxo_cf_opts(&utxo_cache),
+                    "ibd_utxos" | "ibd_utxos_ckpt_a" | "ibd_utxos_ckpt_b" => {
+                        make_ibd_utxo_cf_opts(&utxo_cache)
+                    }
                     "utxos" => make_utxo_cf_opts(&utxo_cache),
                     "blocks" | "headers" | "witnesses" | "height_index" => {
                         make_bulk_cf_opts(&cache)
@@ -2159,6 +2185,55 @@ pub mod rocksdb_impl {
                 batch: rocksdb::WriteBatch::default(),
                 op_count: 0,
             }))
+        }
+
+        /// RocksDB fast path: write all KV pairs to an SST file, then ingest it.
+        ///
+        /// This is 10–50× faster than repeated `WriteBatch::put_cf` for millions of entries
+        /// because RocksDB ingests the SST directly into the LSM without memtable pressure or
+        /// WAL overhead. The SST is written to the DB directory (same filesystem as the
+        /// MANIFEST), so `set_move_files(true)` is a rename rather than a copy.
+        ///
+        /// Precondition: `sorted_kv` must be in ascending key order (same comparator as CF).
+        fn bulk_load_sorted_kv(&self, sorted_kv: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+            if sorted_kv.is_empty() {
+                return Ok(());
+            }
+
+            let db_path = self.db.path();
+            // Use a CF-specific temp name to avoid collisions when multiple CFs export concurrently.
+            let sst_path = db_path.join(format!("_blvm_bulk_{}.sst", self.cf_name));
+            // Remove any leftover SST from a prior interrupted export.
+            let _ = std::fs::remove_file(&sst_path);
+
+            let opts = Options::default();
+            let mut writer = SstFileWriter::create(&opts);
+            writer.open(&sst_path).map_err(|e| {
+                anyhow::anyhow!("SstFileWriter::open({}): {}", sst_path.display(), e)
+            })?;
+
+            for (k, v) in sorted_kv {
+                writer
+                    .put(k, v)
+                    .map_err(|e| anyhow::anyhow!("SstFileWriter::put: {}", e))?;
+            }
+            writer
+                .finish()
+                .map_err(|e| anyhow::anyhow!("SstFileWriter::finish: {}", e))?;
+            drop(writer);
+
+            let cf = self.cf()?;
+            let mut ingest_opts = IngestExternalFileOptions::default();
+            // Move (rename) instead of copy — same filesystem, O(1) cost even for multi-GB SSTs.
+            ingest_opts.set_move_files(true);
+            self.db
+                .ingest_external_file_cf_opts(cf, &ingest_opts, vec![sst_path.clone()])
+                .map_err(|e| anyhow::anyhow!("ingest_external_file_cf: {}", e))?;
+
+            // RocksDB moves the file on ingest; ignore if already gone.
+            let _ = std::fs::remove_file(&sst_path);
+
+            Ok(())
         }
     }
 

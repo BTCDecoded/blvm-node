@@ -95,51 +95,139 @@ impl MemoryAge {
         Arc::clone(&*self.runs.read())
     }
 
-    /// Append a new batch of entries at `height`.
+    /// Maximum entries in a mutable run before it is auto-frozen.
     ///
-    /// For the mutable tip: extends the last run (if mutable) or creates a new one.
-    /// For frozen ages: creates a new run (called by compacter after merge).
+    /// Each block appends N entries and calls `append_and_rebuild` which does an
+    /// O(n log n) sort + directory + bloom rebuild over the entire mutable run.
+    /// Without a cap, a single mutable run accumulates O(height × outputs_per_block)
+    /// entries, making each append O(n log n) in the total IBD entry count — O(n²)
+    /// overall.
+    ///
+    /// Reduced from 50,000 to 10,000:
+    ///   • Per-block clone: 520 KB vs 2.6 MB  (5× improvement)
+    ///   • Per-block sort:  O(10k×14) vs O(50k×17)  (6× improvement)
+    ///   • Freeze frequency: ~every 1-2 blocks at late heights (more compacter work,
+    ///     but compacter runs on a background thread and processes the same total data).
+    ///
+    /// At 400k heights with ~10k entries/block, the run fills in ~1 block → steady-state
+    /// clone+sort cost is always O(10k) regardless of height. The compacter keeps
+    /// up via its own merge pipeline.
+    const MUTABLE_RUN_MAX_ENTRIES: usize = 10_000;
+
+    /// Append a new batch of UTXO entries into this mutable age at `height`.
+    ///
+    /// **All expensive work (clone, sort, bloom/directory rebuild) happens OUTSIDE the write
+    /// lock.** The write lock is held only for the final `Arc` pointer swap — a few
+    /// nanoseconds — so concurrent readers (validation workers) are never blocked for more
+    /// than a pointer swap.
+    ///
+    /// Invariant exploited: only the dispatch thread calls `append` on mutable ages; the
+    /// compacter only ever removes frozen runs from the *front* of the Vec (oldest). The
+    /// mutable tip is always the *last* element and is never touched by the compacter.
+    /// Therefore snapshotting the tip before the lock and swapping it back under the lock
+    /// is race-free.
     pub fn append(&self, entries: Vec<OutputKV>, height: i32) {
         debug_assert!(!entries.is_empty());
-        let mut lock = self.runs.write();
-        let old = Arc::clone(&*lock);
+        debug_assert!(self.is_mutable, "use push_frozen_run for frozen ages");
 
-        // If the last run is mutable (tip only), extend it in place.
-        // Otherwise create a new immutable run.
-        let new_arc: Arc<Vec<Arc<MemoryRun>>> = if self.is_mutable {
-            if let Some(last) = old.last() {
-                if last.is_mutable {
-                    let mut new_runs = (*old).clone();
-                    let mut run = (**last).clone();
-                    run.append_and_rebuild(&entries);
-                    *new_runs.last_mut().unwrap() = Arc::new(run);
-                    Arc::new(new_runs)
-                } else {
-                    let mut new_run = MemoryRun::new_mutable();
-                    new_run.append_and_rebuild(&entries);
-                    let mut new_runs = (*old).clone();
-                    new_runs.push(Arc::new(new_run));
-                    Arc::new(new_runs)
-                }
-            } else {
-                let mut new_run = MemoryRun::new_mutable();
-                new_run.append_and_rebuild(&entries);
-                Arc::new(vec![Arc::new(new_run)])
-            }
-        } else {
-            // Frozen age (receiving from compacter merge): always a new immutable run.
-            let run = MemoryRun::build(entries);
-            let mut new_runs = (*old).clone();
-            new_runs.push(Arc::new(run));
-            Arc::new(new_runs)
+        // ── Phase 1: snapshot the mutable tip (brief read lock) ──────────────────
+        let tip_snapshot: Option<Arc<MemoryRun>> = {
+            let r = self.runs.read();
+            r.last().cloned()
         };
 
-        *lock = new_arc;
-        drop(lock);
+        // ── Phase 2: build new run state OUTSIDE any lock ────────────────────────
+        // This is where the expensive work lives: clone (≤50k × 52B), sort, bloom, dir.
+        // No lock is held during this phase.
+        enum NewState {
+            Replace(Arc<MemoryRun>),
+            FreezeAndNew {
+                frozen: Arc<MemoryRun>,
+                new_tip: Arc<MemoryRun>,
+            },
+        }
+
+        let new_state = match tip_snapshot {
+            Some(ref last)
+                if last.is_mutable
+                    && last.len() + entries.len() <= Self::MUTABLE_RUN_MAX_ENTRIES =>
+            {
+                // Extend mutable run in place (bounded: ≤ MUTABLE_RUN_MAX_ENTRIES).
+                let mut run = (**last).clone();
+                run.append_and_rebuild(&entries);
+                NewState::Replace(Arc::new(run))
+            }
+            Some(ref last) if last.is_mutable => {
+                // Mutable run is full: freeze it, start a fresh mutable run.
+                let mut frozen = (**last).clone();
+                frozen.freeze();
+                let mut new_run = MemoryRun::new_mutable();
+                new_run.append_and_rebuild(&entries);
+                NewState::FreezeAndNew {
+                    frozen: Arc::new(frozen),
+                    new_tip: Arc::new(new_run),
+                }
+            }
+            _ => {
+                // Empty age or last run already frozen: create the first mutable run.
+                let mut new_run = MemoryRun::new_mutable();
+                new_run.append_and_rebuild(&entries);
+                NewState::Replace(Arc::new(new_run))
+            }
+        };
+
+        // ── Phase 3: swap under write lock (nanoseconds — only Arc clones + ptr write) ──
+        {
+            let mut w = self.runs.write();
+            // Re-read the current vec. The compacter may have removed frozen runs from the
+            // *front* between Phase 1 and now; their removals are reflected here. The mutable
+            // tip (last element) is guaranteed unchanged since only we modify it.
+            let current_len = w.len();
+            let mut new_runs: Vec<Arc<MemoryRun>> = (**w).clone(); // cheap: Vec of Arc
+            match new_state {
+                NewState::Replace(new_tip) => {
+                    if new_runs.last().map(|r| r.is_mutable).unwrap_or(false) {
+                        *new_runs.last_mut().unwrap() = new_tip;
+                    } else {
+                        // Edge: last run was frozen by compacter (shouldn't happen, but safe).
+                        new_runs.push(new_tip);
+                    }
+                }
+                NewState::FreezeAndNew { frozen, new_tip } => {
+                    if new_runs.last().map(|r| r.is_mutable).unwrap_or(false) {
+                        *new_runs.last_mut().unwrap() = frozen;
+                    } else {
+                        new_runs.push(frozen);
+                    }
+                    new_runs.push(new_tip);
+                }
+            }
+            let _ = current_len;
+            *w = Arc::new(new_runs);
+        }
 
         // Notify compacter if fan-in threshold reached.
-        let run_count = self.runs.read().len();
-        if run_count >= self.merge_fan_in {
+        if self.runs.read().len() >= self.merge_fan_in {
+            if let Some(ref eq) = self.enqueue {
+                eq();
+            }
+        }
+    }
+
+    /// Push an already-built `MemoryRun` into this (frozen) age.
+    ///
+    /// Used by the compacter to deliver a merged run without rebuilding it. The run must
+    /// already be frozen (sorted, bloom, directory built). The write lock is held only for
+    /// the Vec append — no expensive work is done under the lock.
+    pub fn push_frozen_run(&self, run: Arc<MemoryRun>) {
+        debug_assert!(!run.is_mutable, "push_frozen_run: run must be frozen");
+        {
+            let mut w = self.runs.write();
+            let mut new_runs = (**w).clone();
+            new_runs.push(run);
+            *w = Arc::new(new_runs);
+        }
+        if self.runs.read().len() >= self.merge_fan_in {
             if let Some(ref eq) = self.enqueue {
                 eq();
             }
@@ -216,17 +304,38 @@ impl MemoryAge {
         if merge_candidates.is_empty() {
             return false;
         }
-        let merge_min = merge_candidates.iter().map(|r| r.height_range.0).min().unwrap_or(i32::MAX);
-        let merge_max = merge_candidates.iter().map(|r| r.height_range.1).max().unwrap_or(i32::MIN);
+        let merge_min = merge_candidates
+            .iter()
+            .map(|r| r.height_range.0)
+            .min()
+            .unwrap_or(i32::MAX);
+        let merge_max = merge_candidates
+            .iter()
+            .map(|r| r.height_range.1)
+            .max()
+            .unwrap_or(i32::MIN);
         let pins = self.pins.lock();
-        !pins.range(merge_min..=merge_max).next().is_some()
+        pins.range(merge_min..=merge_max).next().is_none()
     }
 
     /// Take the oldest `merge_fan_in` runs for merging. Returns them (or None if not ready).
     ///
     /// Marks `is_merging = true` via CAS. Caller must call `complete_merge` when done.
+    /// Snapshot the oldest `merge_fan_in` runs for merging, WITHOUT removing them from the age.
+    ///
+    /// The runs remain in `self.runs` and continue to be visible to concurrent queries
+    /// throughout the merge. Only after `complete_merge` (which receives the same runs back)
+    /// are they atomically replaced by the merged result.
+    ///
+    /// This prevents the UTXO-invisible window that occurred when runs were removed eagerly:
+    /// during the compacter's merge pass, any UTXO in the removed runs would return
+    /// `OutputId::MAX` from queries, causing "UTXO not found" errors.
     pub fn take_for_merge(&self) -> Option<Vec<Arc<MemoryRun>>> {
-        if self.is_merging.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+        if self
+            .is_merging
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
             return None; // another thread is already merging
         }
         if !self.merge_ready() {
@@ -235,16 +344,33 @@ impl MemoryAge {
         }
         let snapshot = self.snapshot_runs();
         let take_n = self.merge_fan_in.min(snapshot.len());
-        // Take the oldest (first in Vec) runs.
+        // Snapshot the oldest runs — but leave them in self.runs so queries still find them.
         let taken: Vec<Arc<MemoryRun>> = snapshot[..take_n].to_vec();
-        // Remove them from the age.
-        let remaining: Vec<Arc<MemoryRun>> = snapshot[take_n..].to_vec();
-        *self.runs.write() = Arc::new(remaining);
         Some(taken)
     }
 
-    /// Called after merge is complete to clear the merge guard and update watermark.
-    pub fn complete_merge(&self, merged_height: i32) {
+    /// Called after merge is complete.
+    ///
+    /// Atomically removes the `taken` runs from `self.runs` (they were kept in place during
+    /// the merge so queries remained valid) and updates the watermark.
+    /// The caller has already pushed the merged result to the next older age.
+    pub fn complete_merge(&self, merged_height: i32, taken: &[Arc<MemoryRun>]) {
+        // Build a set of raw pointers for the runs to remove (pointer identity, not clone).
+        let taken_ptrs: std::collections::HashSet<*const MemoryRun> =
+            taken.iter().map(Arc::as_ptr).collect();
+
+        let mut lock = self.runs.write();
+        let old = Arc::clone(&*lock);
+        // Remove only the exact Arc instances that were merged (by pointer identity).
+        // Newer runs added after take_for_merge are preserved.
+        let new_runs: Vec<Arc<MemoryRun>> = old
+            .iter()
+            .filter(|r| !taken_ptrs.contains(&Arc::as_ptr(r)))
+            .cloned()
+            .collect();
+        *lock = Arc::new(new_runs);
+        drop(lock);
+
         self.merged_to.fetch_max(merged_height, Ordering::Relaxed);
         self.is_merging.store(false, Ordering::Release);
     }
@@ -278,8 +404,8 @@ impl MemoryAge {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::OutputKV;
+    use super::*;
 
     fn make_key(n: u8) -> [u8; 36] {
         let mut k = [0u8; 36];
@@ -299,13 +425,23 @@ mod tests {
     #[test]
     fn test_pin_prevents_merge() {
         let age = MemoryAge::new(false, 2);
-        // Add 2 runs to trigger fan-in.
-        age.append(vec![OutputKV::new_add(make_key(1), 10, 1)], 10);
-        age.freeze_tip();
-        age.append(vec![OutputKV::new_add(make_key(2), 20, 2)], 20);
+        // Add 2 frozen runs to trigger fan-in.
+        age.push_frozen_run(Arc::new(MemoryRun::build(vec![OutputKV::new_add(
+            make_key(1),
+            10,
+            1,
+        )])));
+        age.push_frozen_run(Arc::new(MemoryRun::build(vec![OutputKV::new_add(
+            make_key(2),
+            20,
+            2,
+        )])));
         // Pin height 10 — in the merge range.
         let _pin = age.pin_height(10);
-        assert!(!age.merge_ready(), "merge_ready should be false while height is pinned");
+        assert!(
+            !age.merge_ready(),
+            "merge_ready should be false while height is pinned"
+        );
     }
 
     #[test]

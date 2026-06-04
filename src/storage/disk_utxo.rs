@@ -297,6 +297,13 @@ pub fn block_input_keys_and_tx_ids_filtered(
     block_input_keys_into_filtered_with_tx_ids(block, tx_ids_buf, keys_out)
 }
 
+/// Engine-mode variant: only compute tx_ids (keys are not needed when the age-tiered engine
+/// owns UTXO resolution). Avoids iterating all inputs a second time for key extraction.
+pub fn compute_tx_ids_only(block: &Block, tx_ids_buf: &mut Vec<Hash>) {
+    use blvm_protocol::block::compute_block_tx_ids_into;
+    compute_block_tx_ids_into(block, tx_ids_buf);
+}
+
 pub fn block_input_keys_into_filtered(block: &Block, keys_out: &mut Vec<OutPointKey>) -> usize {
     use blvm_protocol::block::compute_block_tx_ids;
     let tx_ids = compute_block_tx_ids(block);

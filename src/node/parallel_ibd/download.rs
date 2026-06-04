@@ -369,17 +369,17 @@ pub(crate) async fn download_chunk(
                         }
                         continue;
                     }
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                        warn!("Chunk {} to {}: no first block in 1s, failing for retry", start_height, end_height);
-                        return Err(anyhow::anyhow!("Block download stalled (no first block in 1s)"));
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        warn!("Chunk {} to {}: no first block in 5s, failing for retry", start_height, end_height);
+                        return Err(anyhow::anyhow!("Block download stalled (no first block in 5s)"));
                     }
                 }
             } else {
                 tokio::select! {
                     r = in_flight.next() => r,
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                        warn!("Chunk {} to {}: no first block in 1s, failing for retry", start_height, end_height);
-                        return Err(anyhow::anyhow!("Block download stalled (no first block in 1s)"));
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        warn!("Chunk {} to {}: no first block in 5s, failing for retry", start_height, end_height);
+                        return Err(anyhow::anyhow!("Block download stalled (no first block in 5s)"));
                     }
                 }
             }

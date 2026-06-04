@@ -19,7 +19,7 @@ pub mod database;
 pub mod disk_utxo;
 pub mod hashing;
 pub mod ibd_autorepair;
-/// Age-tiered IBD UTXO engine (Hornet port). Phase 1: built in isolation; Phase 2: wired in.
+/// Age-tiered IBD UTXO engine for high-throughput Initial Block Download validation.
 pub mod ibd_engine;
 #[cfg(feature = "production")]
 pub mod ibd_utxo_muhash;
