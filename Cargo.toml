@@ -33,7 +33,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 # Protocol / consensus / spec-lock from crates.io (monorepo: checkout siblings for local iteration).
 blvm-protocol = { version = ">=0.1, <1" }
-blvm-consensus = { version = ">=0.1, <1", optional = true }
+blvm-consensus = { version = ">=0.1.26, <1", optional = true }
 blvm-spec-lock = { version = ">=0.1, <1", optional = true, default-features = false }
 # crates.io releases use 0.1 semver; sibling [patch.crates-io] path for monorepo work.
 # Node requires current MuHash APIs (running-state serde, insert_mut/remove_mut hot path).
@@ -283,7 +283,7 @@ blvm-muhash = { path = "../blvm-muhash" }
 
 [dev-dependencies]
 blvm-protocol = { version = ">=0.1, <1", features = ["test-utils"] }
-blvm-consensus = { version = ">=0.1, <1", features = ["test-utils"] }
+blvm-consensus = { version = ">=0.1.26, <1", features = ["test-utils"] }
 tempfile = "=3.8.1"
 rand = "0.8"
 # For iroh SecretKey generation in iroh-gated tests (avoids RNG version conflicts)
