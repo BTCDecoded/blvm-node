@@ -1509,7 +1509,10 @@ impl ProtocolParser {
     ///
     /// Computes double SHA256 of payload and returns first 4 bytes.
     /// Orange Paper 10.1.1: CalculateChecksum, |result| = 4
-    #[cfg_attr(feature = "protocol-verification", spec_locked("10.1.1", "CalculateChecksum"))]
+    #[cfg_attr(
+        feature = "protocol-verification",
+        spec_locked("10.1.1", "CalculateChecksum")
+    )]
     #[cfg_attr(
         feature = "protocol-verification",
         blvm_spec_lock::ensures(result.len() == 4)
