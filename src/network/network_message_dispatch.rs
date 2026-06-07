@@ -453,3 +453,214 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::transport::TransportAddr;
+    use std::net::SocketAddr;
+
+    fn manager() -> NetworkManager {
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        NetworkManager::new(addr)
+    }
+
+    #[tokio::test]
+    async fn block_received_queues_block_for_run_loop() {
+        let nm = manager();
+        let payload = vec![0x01, 0x02, 0x03];
+        handle_network_message(&nm, NetworkMessage::BlockReceived(payload.clone()))
+            .await
+            .unwrap();
+        assert_eq!(nm.try_recv_block(), Some(payload));
+    }
+
+    #[tokio::test]
+    async fn inventory_and_pkgtxn_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::InventoryReceived(vec![]))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::SendPkgTxnReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_connected_and_disconnected_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18335".parse().unwrap();
+        let transport = TransportAddr::Tcp(addr);
+        handle_network_message(&nm, NetworkMessage::PeerConnected(transport.clone()))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::PeerDisconnected(transport))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_received_invalid_wire_is_noop() {
+        let nm = manager();
+        handle_network_message(&nm, NetworkMessage::TransactionReceived(vec![0xff]))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mesh_packet_received_without_publisher_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::MeshPacketReceived(vec![1, 2, 3], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn payment_ack_received_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::PaymentACKReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn headers_and_settlement_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18336".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::HeadersReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::SettlementNotificationReceived(vec![], addr),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn utxo_commitment_messages_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18337".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::UTXOSetReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::FilteredBlockReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::GetUTXOSetReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn payment_request_received_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18338".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::PaymentRequestReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::ModuleReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_message_received_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18339".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::RawMessageReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_module_list_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18341".parse().unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::GetModuleListReceived(vec![0xff, 0xee], addr),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_module_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18342".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::GetModuleReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_module_by_hash_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18343".parse().unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::GetModuleByHashReceived(vec![0xff], addr),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn module_list_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18344".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::ModuleListReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bip157_filter_messages_invalid_wire_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18345".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::GetCfiltersReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::GetCfheadersReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::GetCfcheckptReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pkgtxn_and_payment_wire_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18346".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::PkgTxnReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::GetPaymentRequestReceived(vec![0xff], addr),
+        )
+        .await
+        .unwrap();
+        handle_network_message(&nm, NetworkMessage::PaymentReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::ModuleByHashReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn module_by_hash_response_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18347".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::ModuleByHashReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+}

@@ -642,10 +642,57 @@ pub async fn run_utxo_commitments_initial_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blvm_protocol::{Block, BlockHeader, Transaction};
 
     #[test]
     fn test_sync_coordinator_new() {
         let coordinator = SyncCoordinator::new();
         assert_eq!(coordinator.progress(), 0.0);
+    }
+
+    #[test]
+    fn test_in_memory_block_provider_round_trip() {
+        let mut provider = InMemoryBlockProvider::new();
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [1u8; 32],
+                timestamp: 1_231_006_505,
+                bits: 0x0f00ffff,
+                nonce: 0,
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: vec![].into(),
+                outputs: vec![].into(),
+                lock_time: 0,
+            }]
+            .into_boxed_slice(),
+        };
+        provider.store_block(&block).unwrap();
+        let hash = provider.calculate_block_hash(&block);
+        assert!(provider.get_block(&hash).unwrap().is_some());
+        assert_eq!(provider.get_block_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_mock_block_provider_best_header() {
+        let mut provider = MockBlockProvider::new();
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [2u8; 32],
+            timestamp: 1_231_006_505,
+            bits: 0x0f00ffff,
+            nonce: 0,
+        };
+        provider.add_header(header.clone());
+        assert_eq!(
+            provider.get_best_header().unwrap().unwrap().timestamp,
+            header.timestamp
+        );
+        provider.set_block_count(5);
+        assert_eq!(provider.get_block_count().unwrap(), 5);
     }
 }

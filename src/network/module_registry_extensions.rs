@@ -398,3 +398,40 @@ pub fn deserialize_module_by_hash(data: &[u8]) -> Result<ModuleByHashMessage> {
         _ => Err(anyhow::anyhow!("Expected ModuleByHash message")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_module_list_without_registry_errors() {
+        let msg = GetModuleListMessage {
+            name_prefix: None,
+            max_count: None,
+        };
+        assert!(handle_get_module_list(msg, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_module_without_registry_errors() {
+        let msg = GetModuleMessage {
+            request_id: 1,
+            name: "test-mod".into(),
+            version: None,
+            payment_id: None,
+        };
+        assert!(handle_get_module(msg, None, None, None, None, None, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn get_module_by_hash_without_registry_errors() {
+        let msg = GetModuleByHashMessage {
+            request_id: 2,
+            hash: [0xab; 32],
+            include_binary: true,
+        };
+        assert!(handle_get_module_by_hash(msg, None).await.is_err());
+    }
+}

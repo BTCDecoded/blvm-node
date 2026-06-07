@@ -238,3 +238,47 @@ pub(crate) fn run_prefetch_worker(
         }
     }
 }
+
+#[cfg(all(test, feature = "production"))]
+mod tests {
+    use super::*;
+    use blvm_protocol::{Block, BlockHeader, Hash, UtxoSet};
+    use crossbeam_channel::unbounded;
+
+    fn dummy_ready(height: u64) -> ReadyItem {
+        let block = Arc::new(Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [height as u8; 32],
+                timestamp: 1,
+                bits: 0x0f00ffff,
+                nonce: 0,
+            },
+            transactions: vec![].into(),
+        });
+        (
+            height,
+            block,
+            Arc::new(Vec::new()),
+            Vec::new(),
+            rustc_hash::FxHashMap::default(),
+            Vec::<Hash>::new(),
+            Arc::new(UtxoSet::default()),
+        )
+    }
+
+    #[test]
+    fn ordered_ready_bridge_emits_in_height_order() {
+        let (tx, rx) = unbounded();
+        let bridge = OrderedReadyBridge::new(tx);
+        bridge.coordinator_will_send_height(10);
+        bridge.worker_complete(11, dummy_ready(11));
+        assert!(rx.try_recv().is_err());
+        bridge.worker_complete(10, dummy_ready(10));
+        assert_eq!(rx.recv().unwrap().0, 10);
+        assert_eq!(rx.recv().unwrap().0, 11);
+        bridge.worker_complete(12, dummy_ready(12));
+        assert_eq!(rx.recv().unwrap().0, 12);
+    }
+}

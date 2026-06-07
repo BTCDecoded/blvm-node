@@ -521,3 +521,56 @@ impl NetworkManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NodeConfig;
+    use std::net::SocketAddr;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discover_peers_from_dns_unknown_network_is_noop() {
+        let listen: SocketAddr = "127.0.0.1:18450".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        nm.discover_peers_from_dns("regtest", 8333, &NodeConfig::default())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_peers_from_database_empty_returns_zero() {
+        let listen: SocketAddr = "127.0.0.1:18451".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let connected = nm.connect_peers_from_database(8).await.unwrap();
+        assert_eq!(connected, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_persistent_peers_smoke() {
+        let listen: SocketAddr = "127.0.0.1:18452".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let peer: SocketAddr = "127.0.0.1:18453".parse().unwrap();
+        nm.connect_persistent_peers(&[peer]).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discover_peers_from_dns_mainnet_and_testnet_smoke() {
+        let listen: SocketAddr = "127.0.0.1:18454".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let config = NodeConfig::default();
+        nm.discover_peers_from_dns("mainnet", 8333, &config)
+            .await
+            .unwrap();
+        nm.discover_peers_from_dns("testnet", 18333, &config)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_to_peer_unreachable_returns_error() {
+        let listen: SocketAddr = "127.0.0.1:18455".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        assert!(nm.connect_to_peer(dead).await.is_err());
+    }
+}

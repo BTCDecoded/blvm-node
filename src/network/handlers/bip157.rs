@@ -142,3 +142,26 @@ impl NetworkManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn filter_handlers_reject_invalid_wire() {
+        let listen: SocketAddr = "127.0.0.1:18476".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18477".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let bad = vec![0xff, 0xfe];
+        assert!(nm
+            .handle_getcfilters_request(bad.clone(), peer)
+            .await
+            .is_err());
+        assert!(nm
+            .handle_getcfheaders_request(bad.clone(), peer)
+            .await
+            .is_err());
+        assert!(nm.handle_getcfcheckpt_request(bad, peer).await.is_err());
+    }
+}

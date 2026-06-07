@@ -47,3 +47,43 @@ impl NetworkManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::protocol::GetPaymentRequestMessage;
+    use std::net::SocketAddr;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_get_payment_request_without_processor_errors() {
+        let listen: SocketAddr = "127.0.0.1:18470".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18471".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let request = GetPaymentRequestMessage {
+            merchant_pubkey: vec![0x02; 33],
+            payment_id: vec![0x01; 32],
+            network: "regtest".into(),
+        };
+        assert!(nm.handle_get_payment_request(peer, request).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_payment_without_processor_errors() {
+        use crate::network::protocol::PaymentMessage;
+
+        let listen: SocketAddr = "127.0.0.1:18472".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18473".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let payment = PaymentMessage {
+            payment_id: vec![0x02; 32],
+            payment: blvm_protocol::payment::Payment {
+                merchant_data: None,
+                transactions: vec![],
+                refund_to: None,
+                memo: None,
+            },
+            customer_signature: None,
+        };
+        assert!(nm.handle_payment(peer, payment).await.is_err());
+    }
+}

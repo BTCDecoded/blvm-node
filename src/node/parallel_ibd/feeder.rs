@@ -136,3 +136,65 @@ pub(crate) fn run_feeder_thread(
         feeder_state.1.notify_one();
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blvm_protocol::{Block, BlockHeader};
+
+    fn dummy_feeder_value(height: u64) -> FeederBufferValue {
+        let block = Arc::new(Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [height as u8; 32],
+                timestamp: 1,
+                bits: 0x0f00ffff,
+                nonce: 0,
+            },
+            transactions: vec![].into(),
+        });
+        (
+            block,
+            Arc::new(Vec::new()),
+            Vec::new(),
+            rustc_hash::FxHashMap::default(),
+            Vec::new(),
+            Arc::new(blvm_consensus::types::UtxoSet::default()),
+            100,
+        )
+    }
+
+    #[test]
+    fn feeder_buffer_routes_by_height_modulo_shards() {
+        let buf = FeederBuffer::new(3);
+        assert_eq!(buf.shard_idx(0), 0);
+        assert_eq!(buf.shard_idx(1), 1);
+        assert_eq!(buf.shard_idx(3), 0);
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn feeder_buffer_insert_remove_and_min_height() {
+        let mut buf = FeederBuffer::new(2);
+        buf.insert(5, dummy_feeder_value(5));
+        buf.insert(2, dummy_feeder_value(2));
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.min_buffered_height(), Some(2));
+        assert!(buf.get(5).is_some());
+        buf.remove(2);
+        assert_eq!(buf.min_buffered_height(), Some(5));
+        assert!(buf.is_empty() == false);
+        buf.remove(5);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn feeder_shard_count_defaults_and_clamps() {
+        std::env::remove_var("BLVM_IBD_FEEDER_SHARDS");
+        assert_eq!(feeder_shard_count(), 1);
+        std::env::set_var("BLVM_IBD_FEEDER_SHARDS", "999");
+        assert_eq!(feeder_shard_count(), 64);
+        std::env::remove_var("BLVM_IBD_FEEDER_SHARDS");
+    }
+}

@@ -35,7 +35,7 @@ env:
   # Prefer pointing the runner's workFolder at a large disk (e.g. /mnt/data/github-runner/<name>/_work)
   # so github.workspace and this default path stay off root — then BLVM_RUNNER_BUILD_ROOT is optional.
   # If workspace is still on a small volume, set repository (or org) variable BLVM_RUNNER_BUILD_ROOT
-  # to an absolute path on a large disk — CI, teardown, and cleanup-runner-disk.yml use it.
+  # to an absolute path on a large disk — CI and teardown use it.
   #
   # Isolation: BLVM_RUNNER_BUILD_ROOT must designate space used only for blvm-node CI on this host.
   # Emergency disk steps remove sibling per-run directories under BLVM_RUNNER_DATA_ROOT; pointing this

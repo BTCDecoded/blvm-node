@@ -179,3 +179,70 @@ impl NetworkManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::ban_list_merging::calculate_ban_list_hash;
+    use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
+    use crate::network::NetworkManager;
+    use crate::utils::current_timestamp;
+    use std::net::SocketAddr;
+
+    fn legacy_ban_entry(port: u16) -> BanEntry {
+        let mut ip = [0u8; 16];
+        ip[12..16].copy_from_slice(&[203, 0, 113, 1]);
+        BanEntry {
+            addr: NetworkAddress {
+                services: 0,
+                ip,
+                port,
+            },
+            unban_timestamp: current_timestamp() + 3600,
+            reason: Some("test".into()),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_ban_list_hash_only_skips_merge() {
+        let listen: SocketAddr = "127.0.0.1:18420".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18422".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        nm.handle_ban_list(
+            peer,
+            BanListMessage {
+                is_full: false,
+                ban_list_hash: [0u8; 32],
+                ban_entries: vec![],
+                timestamp: current_timestamp(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_ban_list_merges_valid_entry() {
+        let listen: SocketAddr = "127.0.0.1:18423".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18425".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let entries = vec![legacy_ban_entry(8333)];
+        let hash = calculate_ban_list_hash(&entries);
+        nm.handle_ban_list(
+            peer,
+            BanListMessage {
+                is_full: true,
+                ban_list_hash: hash,
+                ban_entries: entries,
+                timestamp: current_timestamp(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(nm
+            .ban_list()
+            .read()
+            .await
+            .contains_key(&"203.0.113.1:8333".parse::<SocketAddr>().unwrap()));
+    }
+}

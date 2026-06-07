@@ -203,3 +203,41 @@ impl NetworkManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::protocol::{AddrMessage, NetworkAddress};
+    use crate::network::NetworkManager;
+    use std::net::SocketAddr;
+
+    fn legacy_addr(port: u16) -> NetworkAddress {
+        let mut ip = [0u8; 16];
+        ip[12..16].copy_from_slice(&[127, 0, 0, 1]);
+        NetworkAddress {
+            services: 1,
+            ip,
+            port,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_get_addr_smoke() {
+        let listen: SocketAddr = "127.0.0.1:18400".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18401".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let _ = nm.handle_get_addr(peer).await;
+        nm.handle_get_addr(peer).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_addr_stores_and_relays() {
+        let listen: SocketAddr = "127.0.0.1:18402".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18403".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let msg = AddrMessage {
+            addresses: vec![legacy_addr(8333)],
+        };
+        nm.handle_addr(peer, msg).await.unwrap();
+    }
+}

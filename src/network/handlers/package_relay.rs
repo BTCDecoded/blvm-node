@@ -70,3 +70,20 @@ impl NetworkManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_pkgtxn_invalid_wire_errors() {
+        let listen: SocketAddr = "127.0.0.1:18474".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18475".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        assert!(nm
+            .handle_pkgtxn_request(vec![0xff, 0xfe], peer)
+            .await
+            .is_err());
+    }
+}

@@ -530,3 +530,32 @@ impl NetworkManager {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dos_protection_cleanup_smoke() {
+        let listen: SocketAddr = "127.0.0.1:18460".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        nm.dos_protection().cleanup().await;
+        nm.bandwidth_protection().evict_stale_entries(90_000).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_task_starters_smoke() {
+        let listen: SocketAddr = "127.0.0.1:18461".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        nm.start_ban_cleanup_task();
+        nm.start_request_cleanup_task();
+        nm.start_chain_sync_timeout_check_task();
+        nm.start_ping_task();
+        nm.start_outbound_peer_eviction_task();
+        nm.start_dos_protection_cleanup_task();
+        nm.start_ping_timeout_check_task();
+        nm.start_peer_reconnection_task();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}

@@ -305,4 +305,52 @@ mod tests {
     }
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Work at height `h` must land on shard `h % num_shards`.
+    #[test]
+    fn dispatcher_routes_work_by_height_modulo_shards() {
+        use super::super::IbdRetireWork;
+        use crate::Block;
+        use std::sync::Mutex;
+
+        let dummy_block = Arc::new(Block {
+            header: blvm_protocol::BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1,
+                bits: 0x0f00ffff,
+                nonce: 0,
+            },
+            transactions: vec![].into_boxed_slice(),
+        });
+
+        let routes: Arc<Mutex<Vec<(usize, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let routes_clone = Arc::clone(&routes);
+        let mut dispatcher = RetireDispatcher::spawn(3, 0, move |shard, rx, _local, _pub| {
+            let routes = Arc::clone(&routes_clone);
+            std::thread::spawn(move || {
+                while let Ok(work) = rx.recv() {
+                    routes.lock().unwrap().push((shard, work.height));
+                }
+            })
+        });
+
+        for height in 0..9u64 {
+            let work = IbdRetireWork {
+                height,
+                blocks_buf: vec![Arc::clone(&dummy_block)],
+                block: Arc::clone(&dummy_block),
+            };
+            dispatcher.send(work).unwrap();
+        }
+        dispatcher.shutdown_and_join().unwrap();
+
+        let mut seen = routes.lock().unwrap().clone();
+        seen.sort_by_key(|(shard, h)| (*h, *shard));
+        assert_eq!(seen.len(), 9);
+        for (shard, height) in seen {
+            assert_eq!(shard, height as usize % 3);
+        }
+    }
 }

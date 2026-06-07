@@ -94,6 +94,16 @@ mod tests {
     }
 
     #[test]
+    fn test_sendpkgtxn_smoke() {
+        let relay = PackageRelay::new();
+        let msg = SendPkgTxnMessage {
+            package_id: vec![0x01; 32],
+            tx_hashes: vec![[0x02; 32]],
+        };
+        handle_sendpkgtxn(&relay, &msg).unwrap();
+    }
+
+    #[test]
     fn test_pkgtxn_reject_on_bad_deserialization() {
         let mut relay = PackageRelay::new();
         let msg = PkgTxnMessage {

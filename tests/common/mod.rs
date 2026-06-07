@@ -387,8 +387,15 @@ pub fn setup_mining_chain(
     storage: &std::sync::Arc<blvm_node::storage::Storage>,
     total_blocks: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    setup_mining_chain_on(storage.as_ref(), total_blocks)
+}
+
+/// Like [`setup_mining_chain`] but accepts borrowed storage (e.g. from `Node::storage()`).
+pub fn setup_mining_chain_on(
+    storage: &blvm_node::storage::Storage,
+    total_blocks: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     use blvm_protocol::Block;
-    use sha2::{Digest, Sha256};
 
     assert!(
         total_blocks >= 2,
@@ -418,18 +425,15 @@ pub fn setup_mining_chain(
         .into_boxed_slice(),
     };
 
-    let genesis_bytes = bincode::serialize(&genesis_block.header)?;
-    let genesis_hash = Sha256::digest(Sha256::digest(genesis_bytes));
-    let mut genesis_hash_array = [0u8; 32];
-    genesis_hash_array.copy_from_slice(&genesis_hash);
+    let genesis_hash = storage.blocks().get_block_hash(&genesis_block);
 
     storage.blocks().store_block(&genesis_block)?;
-    storage.blocks().store_height(0, &genesis_hash_array)?;
+    storage.blocks().store_height(0, &genesis_hash)?;
     storage
         .blocks()
         .store_recent_header(0, &genesis_block.header)?;
 
-    let mut prev_hash = genesis_hash_array;
+    let mut prev_hash = genesis_hash;
     let mut prev_timestamp = genesis_header.timestamp;
 
     for height in 1..total_blocks {
@@ -453,21 +457,18 @@ pub fn setup_mining_chain(
             .into_boxed_slice(),
         };
 
-        let block_bytes = bincode::serialize(&block.header)?;
-        let block_hash = Sha256::digest(Sha256::digest(block_bytes));
-        let mut block_hash_array = [0u8; 32];
-        block_hash_array.copy_from_slice(&block_hash);
+        let block_hash = storage.blocks().get_block_hash(&block);
 
         storage.blocks().store_block(&block)?;
-        storage.blocks().store_height(height, &block_hash_array)?;
+        storage.blocks().store_height(height, &block_hash)?;
         storage
             .blocks()
             .store_recent_header(height, &block.header)?;
         storage
             .chain()
-            .update_tip(&block_hash_array, &block_header, height)?;
+            .update_tip(&block_hash, &block_header, height)?;
 
-        prev_hash = block_hash_array;
+        prev_hash = block_hash;
         prev_timestamp = block_header.timestamp;
     }
 

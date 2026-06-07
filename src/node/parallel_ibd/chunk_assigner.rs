@@ -73,9 +73,13 @@ pub fn create_chunks(
             );
         }
 
-        let peer_id = fastest_peer
-            .clone()
-            .unwrap_or_else(|| peer_ids[chunk_index % num_peers].clone());
+        let peer_id = fastest_peer.clone().unwrap_or_else(|| {
+            if peer_ids.is_empty() {
+                String::new()
+            } else {
+                peer_ids[chunk_index % num_peers].clone()
+            }
+        });
 
         chunks.push(BlockChunk {
             start_height: current_height,
@@ -360,5 +364,95 @@ impl Drop for ChunkGuard {
         if let Some(peer_id) = self.peer_id.take() {
             self.assigner.on_chunk_complete(&peer_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    fn assigner_for_heights(
+        chunks: &[(u64, u64)],
+        peers: &[&str],
+        start_height: u64,
+        work_stealing: bool,
+    ) -> ChunkAssigner {
+        let chunk_peers: Vec<String> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, _)| peers[i % peers.len()].to_string())
+            .collect();
+        ChunkAssigner::new(
+            chunks.to_vec(),
+            chunk_peers,
+            Arc::new(AtomicU64::new(0)),
+            start_height,
+            work_stealing,
+        )
+    }
+
+    #[test]
+    fn get_work_assigns_sequential_chunks_per_peer() {
+        let chunks = vec![(200, 263), (264, 327)];
+        let assigner = assigner_for_heights(&chunks, &["p1", "p2"], 200, false);
+        let w0 = assigner.get_work("p1", 1000).expect("chunk 0");
+        assert_eq!(w0, (200, 263));
+        assert!(
+            assigner.get_work("p1", 1000).is_none(),
+            "one in flight per peer"
+        );
+        assigner.on_chunk_complete("p1");
+        let w1 = assigner.get_work("p2", 1000).expect("chunk 1");
+        assert_eq!(w1, (264, 327));
+    }
+
+    #[test]
+    fn bootstrap_serializes_until_marked_complete() {
+        let chunks = vec![(0, 127), (128, 255)];
+        let assigner = assigner_for_heights(&chunks, &["p1"], 0, false);
+        assert_eq!(assigner.get_work("p1", 1000), Some((0, 127)));
+        assigner.on_chunk_complete("p1");
+        assert!(
+            assigner.get_work("p1", 1000).is_none(),
+            "second chunk blocked until bootstrap done"
+        );
+        assigner.mark_bootstrap_complete();
+        assert_eq!(assigner.get_work("p1", 1000), Some((128, 255)));
+    }
+
+    #[test]
+    fn requeue_chunk_containing_height_is_idempotent() {
+        let chunks = vec![(100, 199)];
+        let assigner = assigner_for_heights(&chunks, &["p1"], 100, false);
+        assigner.requeue_chunk_containing_height(150);
+        assigner.requeue_chunk_containing_height(150);
+        assert_eq!(assigner.remaining_count(), 2);
+    }
+
+    #[test]
+    fn blacklist_blocks_peer_until_expired() {
+        let chunks = vec![(0, 63)];
+        let assigner = assigner_for_heights(&chunks, &["p1"], 0, false);
+        assigner.blacklist_peer("p1", Duration::from_secs(3600));
+        assert!(assigner.get_work("p1", 1000).is_none());
+    }
+
+    #[test]
+    fn work_stealing_ignores_peer_binding() {
+        let chunks = vec![(0, 63)];
+        let assigner = assigner_for_heights(&chunks, &["p1"], 0, true);
+        assert_eq!(assigner.get_work("other-peer", 1000), Some((0, 63)));
+    }
+
+    #[test]
+    fn chunk_guard_requeues_on_drop() {
+        let chunks = vec![(0, 63)];
+        let assigner = Arc::new(assigner_for_heights(&chunks, &["p1"], 0, false));
+        let work = assigner.get_work("p1", 1000).unwrap();
+        {
+            let _guard = ChunkGuard::new(work.0, work.1, None, "p1".into(), Arc::clone(&assigner));
+        }
+        assert_eq!(assigner.remaining_count(), 1);
     }
 }

@@ -127,3 +127,33 @@ pub fn validate_payment_ack_message(
         merchant_pubkey,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_payment_request_requires_processor() {
+        let request = GetPaymentRequestMessage {
+            merchant_pubkey: vec![0x02; 33],
+            payment_id: vec![0xab; 32],
+            network: "regtest".into(),
+        };
+        assert!(handle_get_payment_request(&request, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_payment_requires_processor() {
+        let payment = PaymentMessage {
+            payment_id: vec![0xcd; 32],
+            payment: blvm_protocol::payment::Payment {
+                merchant_data: None,
+                transactions: vec![],
+                refund_to: None,
+                memo: None,
+            },
+            customer_signature: None,
+        };
+        assert!(handle_payment(&payment, None, None).await.is_err());
+    }
+}

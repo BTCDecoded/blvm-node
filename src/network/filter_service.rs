@@ -280,6 +280,30 @@ impl Default for BlockFilterService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blvm_protocol::{Transaction, TransactionOutput};
+
+    fn sample_block(merkle_byte: u8, nonce: u64) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [merkle_byte; 32],
+                timestamp: 1_231_006_505,
+                bits: 0x0f00ffff,
+                nonce,
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 0,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into_boxed_slice(),
+        }
+    }
 
     #[test]
     fn test_filter_service_creation() {
@@ -292,5 +316,55 @@ mod tests {
         let service = BlockFilterService::new();
         let hash = [0u8; 32];
         assert!(service.get_filter(&hash).is_none());
+    }
+
+    #[test]
+    fn test_generate_cache_headers_and_checkpoints() {
+        let service = BlockFilterService::new();
+        let block0 = sample_block(0x01, 1);
+        let block1 = sample_block(0x02, 2);
+
+        service.generate_and_cache_filter(&block0, &[], 0).unwrap();
+        let hash0 = *service
+            .get_cached_filter_hashes()
+            .first()
+            .expect("first cached hash");
+        service.generate_and_cache_filter(&block1, &[], 1).unwrap();
+        let hash1 = service
+            .get_cached_filter_hashes()
+            .into_iter()
+            .find(|hash| hash != &hash0)
+            .expect("second cached hash");
+        assert_eq!(service.current_height(), 1);
+        assert_eq!(service.get_cached_filter_hashes().len(), 2);
+
+        let headers = service.get_filter_headers_range(0, hash1).unwrap();
+        assert_eq!(headers.len(), 2);
+
+        let checkpoints = service.get_filter_checkpoints(hash1).unwrap();
+        assert!(!checkpoints.is_empty());
+
+        assert!(service.get_filter_header(0).is_some());
+        assert!(service.get_prev_filter_header(1).is_some());
+        assert!(service.get_prev_filter_header(0).is_none());
+
+        service.remove_filter_for_pruned_block(&hash1).unwrap();
+        assert!(!service.has_filter(&hash1));
+        assert!(service.get_filter_header(1).is_some());
+    }
+
+    #[test]
+    fn test_filter_headers_range_errors() {
+        let service = BlockFilterService::new();
+        let block = sample_block(0x03, 3);
+        service.generate_and_cache_filter(&block, &[], 5).unwrap();
+        let hash = service.get_cached_filter_hashes()[0];
+
+        assert!(service
+            .get_filter_headers_range(10, hash)
+            .unwrap_err()
+            .to_string()
+            .contains("Start height > stop height"));
+        assert!(service.get_filter_checkpoints([0xee; 32]).is_err());
     }
 }
