@@ -1,4 +1,4 @@
-//! IPC ModuleAPI proxy registration for subprocess modules (C0).
+//! IPC ModuleAPI proxy registration for subprocess modules.
 
 use std::sync::Arc;
 
@@ -7,7 +7,6 @@ use blvm_node::module::inter_module::api::ModuleAPI;
 use blvm_node::module::inter_module::{IpcForwardingModuleAPI, ModuleApiRegistry};
 use blvm_node::module::ipc::server::ModuleIpcServer;
 use blvm_node::module::traits::ModuleError;
-use tokio::sync::Mutex;
 
 struct EchoApi;
 
@@ -38,12 +37,10 @@ impl ModuleAPI for EchoApi {
 
 #[tokio::test]
 async fn ipc_forwarding_module_api_lists_registered_methods() {
-    let ipc = Arc::new(Mutex::new(ModuleIpcServer::new(
-        "/tmp/blvm-mesh-ipc-test.sock",
-    )));
+    let server = ModuleIpcServer::new("/tmp/blvm-mesh-ipc-test.sock");
     let proxy = IpcForwardingModuleAPI::new(
         "blvm-mesh_test".to_string(),
-        ipc,
+        server.handle(),
         vec![
             "send_packet".to_string(),
             "poll_local_deliveries".to_string(),
@@ -57,12 +54,10 @@ async fn ipc_forwarding_module_api_lists_registered_methods() {
 #[tokio::test]
 async fn module_api_registry_accepts_ipc_proxy() {
     let registry = ModuleApiRegistry::new();
-    let ipc = Arc::new(Mutex::new(ModuleIpcServer::new(
-        "/tmp/blvm-mesh-reg-test.sock",
-    )));
+    let server = ModuleIpcServer::new("/tmp/blvm-mesh-reg-test.sock");
     let proxy = IpcForwardingModuleAPI::new(
         "blvm-mesh_abc".to_string(),
-        ipc,
+        server.handle(),
         vec!["send_packet".to_string()],
         1,
     );

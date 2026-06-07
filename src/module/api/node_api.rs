@@ -1624,13 +1624,9 @@ impl NodeAPI for NodeApiImpl {
         let ipc_handle = {
             #[cfg(unix)]
             {
-                module_manager
-                    .lock()
-                    .await
-                    .ipc_handle()
-                    .ok_or_else(|| {
-                        ModuleError::OperationError("IPC handle not available".to_string())
-                    })?
+                module_manager.lock().await.ipc_handle().ok_or_else(|| {
+                    ModuleError::OperationError("IPC handle not available".to_string())
+                })?
             }
             #[cfg(not(unix))]
             {
