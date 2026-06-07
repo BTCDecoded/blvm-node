@@ -55,5 +55,8 @@ fn main() -> Result<()> {
         network: args.network,
         verify: args.verify,
         verbose: args.verbose,
+        dest_backend: None,
+        stop_after: None,
+        reuse_core_block_files: false,
     })
 }

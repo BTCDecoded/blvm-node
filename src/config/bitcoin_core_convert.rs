@@ -31,6 +31,7 @@ pub struct BitcoinCoreConfig {
     pub rpc_threads: Option<usize>,
     pub daemon: bool,
     pub printtoconsole: bool,
+    pub datadir: Option<String>,
     pub logtimestamps: bool,
     pub logips: bool,
     pub logtimemicros: bool,
@@ -108,6 +109,7 @@ pub fn parse_bitcoin_conf(path: &Path) -> std::io::Result<BitcoinCoreConfig> {
                     }
                 }
                 "daemon" => config.daemon = value == "1" || value == "true",
+                "datadir" => config.datadir = Some(value.to_string()),
                 "printtoconsole" => config.printtoconsole = value == "1" || value == "true",
                 "logtimestamps" => config.logtimestamps = value == "1" || value == "true",
                 "logips" => config.logips = value == "1" || value == "true",
@@ -121,6 +123,44 @@ pub fn parse_bitcoin_conf(path: &Path) -> std::io::Result<BitcoinCoreConfig> {
     }
 
     Ok(config)
+}
+
+/// Expand a leading `~` in Core-style paths (e.g. `datadir=~/.bitcoin`).
+fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        return dirs::home_dir()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
+fn default_core_datadir_base() -> Option<String> {
+    dirs::home_dir().map(|h| h.join(".bitcoin").to_string_lossy().into_owned())
+}
+
+/// Resolve Core `datadir=` plus network flags to the directory containing `chainstate/`.
+///
+/// Core stores testnet at `<datadir>/testnet3`, regtest at `<datadir>/regtest`, mainnet at `<datadir>`.
+pub fn effective_core_datadir(config: &BitcoinCoreConfig) -> Option<String> {
+    let base = config
+        .datadir
+        .as_ref()
+        .map(|s| expand_tilde(s))
+        .or_else(default_core_datadir_base)?;
+    let base = base.trim_end_matches('/').to_string();
+    if config.regtest {
+        Some(format!("{base}/regtest"))
+    } else if config.testnet {
+        Some(format!("{base}/testnet3"))
+    } else {
+        Some(base)
+    }
 }
 
 /// Generate blvm-node TOML config from parsed Bitcoin Core config.
@@ -139,7 +179,34 @@ pub fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &Path) -> St
             .unwrap()
             .as_secs()
     ));
-    toml.push_str("\n# NOTE: Data directories are NOT converted - configure separately\n\n");
+    toml.push('\n');
+
+    if let Some(effective) = effective_core_datadir(config) {
+        toml.push_str("[storage]\n");
+        toml.push_str(&format!("data_dir = \"{effective}\"\n"));
+        if let Some(ref raw) = config.datadir {
+            if config.testnet || config.regtest {
+                let net = if config.regtest {
+                    "regtest"
+                } else {
+                    "testnet3"
+                };
+                toml.push_str(&format!(
+                    "# Core datadir=\"{raw}\" + {net} → effective path above\n"
+                ));
+            }
+        } else if config.testnet || config.regtest {
+            toml.push_str("# Default Core base ~/.bitcoin with network subdir applied\n");
+        }
+        toml.push_str("# When data_dir contains a synced Core layout (chainstate/ + blocks/),\n");
+        toml.push_str("# blvm start auto-migrates to <data_dir>/blvm/ unless disabled.\n");
+        toml.push_str("auto_migrate_core = true\n");
+        toml.push('\n');
+    } else {
+        toml.push_str("# [storage]\n");
+        toml.push_str("# data_dir = \"~/.bitcoin\"  # set from Core datadir= if present\n");
+        toml.push('\n');
+    }
 
     toml.push_str("[network]\n");
     if let Some(ref network) = config.network {
@@ -223,9 +290,84 @@ pub fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &Path) -> St
     }
 
     toml.push_str("\n# Additional notes:\n");
-    toml.push_str("# - Data directories are NOT converted (configure separately)\n");
+    toml.push_str(
+        "# - storage.data_dir targets the network-specific Core tree (see subdir comments)\n",
+    );
     toml.push_str("# - Some Bitcoin Core options may not have direct equivalents\n");
     toml.push_str("# - Review and adjust settings as needed\n");
 
     toml
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn parse_and_emit_datadir_in_storage_section() {
+        let dir = TempDir::new().unwrap();
+        let conf = dir.path().join("bitcoin.conf");
+        let mut f = std::fs::File::create(&conf).unwrap();
+        writeln!(f, "datadir=/var/lib/bitcoind").unwrap();
+        writeln!(f, "rpcuser=u").unwrap();
+        drop(f);
+
+        let parsed = parse_bitcoin_conf(&conf).unwrap();
+        assert_eq!(parsed.datadir.as_deref(), Some("/var/lib/bitcoind"));
+        assert_eq!(
+            effective_core_datadir(&parsed).as_deref(),
+            Some("/var/lib/bitcoind")
+        );
+
+        let toml = generate_toml_config(&parsed, &conf);
+        assert!(toml.contains("[storage]"));
+        assert!(toml.contains("data_dir = \"/var/lib/bitcoind\""));
+        assert!(toml.contains("auto_migrate_core = true"));
+    }
+
+    #[test]
+    fn effective_datadir_uses_network_subdir() {
+        let mut cfg = BitcoinCoreConfig::default();
+        cfg.datadir = Some("/data/btc".to_string());
+        cfg.testnet = true;
+        assert_eq!(
+            effective_core_datadir(&cfg).as_deref(),
+            Some("/data/btc/testnet3")
+        );
+
+        cfg.testnet = false;
+        cfg.regtest = true;
+        assert_eq!(
+            effective_core_datadir(&cfg).as_deref(),
+            Some("/data/btc/regtest")
+        );
+    }
+
+    #[test]
+    fn effective_datadir_expands_tilde() {
+        let home = dirs::home_dir().expect("home");
+        let mut cfg = BitcoinCoreConfig::default();
+        cfg.datadir = Some("~/.bitcoin".to_string());
+        assert_eq!(
+            effective_core_datadir(&cfg).as_deref(),
+            Some(home.join(".bitcoin").to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn testnet_without_datadir_emits_default_storage_path() {
+        let dir = TempDir::new().unwrap();
+        let conf = dir.path().join("bitcoin.conf");
+        let mut f = std::fs::File::create(&conf).unwrap();
+        writeln!(f, "testnet=1").unwrap();
+        drop(f);
+
+        let parsed = parse_bitcoin_conf(&conf).unwrap();
+        let toml = generate_toml_config(&parsed, &conf);
+        assert!(toml.contains("[storage]"));
+        assert!(toml.contains("testnet3"));
+        assert!(toml.contains("auto_migrate_core = true"));
+    }
 }

@@ -1865,29 +1865,35 @@ pub mod rocksdb_impl {
             })
         }
 
-        /// Open RocksDB with LevelDB format
-        ///
-        /// Opens an existing chainstate database (LevelDB format).
-        /// RocksDB can read LevelDB databases directly (backward compatible).
-        pub fn open_bitcoin_core<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
-            // Open existing chainstate database (LevelDB format)
-            // RocksDB can read LevelDB databases directly
-            let chainstate_path = data_dir.as_ref().join("chainstate");
-
+        /// Open an existing Core LevelDB directory (chainstate, blocks/index, …).
+        pub fn open_core_leveldb<P: AsRef<Path>>(leveldb_dir: P) -> Result<Self> {
+            let leveldb_path = leveldb_dir.as_ref();
             let mut opts = Options::default();
-            opts.create_if_missing(false); // Don't create, must exist
+            opts.create_if_missing(false);
 
-            // RocksDB will automatically detect LevelDB format
-            // Note: LevelDB uses a single "default" column family
             let cfs = vec![ColumnFamilyDescriptor::new("default", Options::default())];
-
-            let db = DB::open_cf_descriptors(&opts, &chainstate_path, cfs)?;
+            let db = DB::open_cf_descriptors(&opts, leveldb_path, cfs)?;
 
             Ok(Self {
                 cache: std::sync::Mutex::new(None),
                 cache_nominal_bytes: 0,
                 db: Arc::new(db),
             })
+        }
+
+        /// Open RocksDB with LevelDB format
+        ///
+        /// Opens an existing chainstate database (LevelDB format) under `data_dir/chainstate`.
+        /// RocksDB can read LevelDB databases directly (backward compatible).
+        pub fn open_bitcoin_core<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+            let chainstate_path = data_dir.as_ref().join("chainstate");
+            Self::open_core_leveldb(chainstate_path)
+        }
+
+        /// Open Core `blocks/index` LevelDB under `data_dir/blocks/index`.
+        pub fn open_bitcoin_core_block_index<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+            let index_path = data_dir.as_ref().join("blocks").join("index");
+            Self::open_core_leveldb(index_path)
         }
     }
 

@@ -4,10 +4,12 @@
 
 #[cfg(feature = "rocksdb")]
 mod bitcoin_core_tests {
+    use blvm_node::config::StorageConfig;
     use blvm_node::storage::bitcoin_core_blocks::BitcoinCoreBlockReader;
     use blvm_node::storage::bitcoin_core_format::{
         convert_key, get_key_prefix, parse_block_index, parse_coin,
     };
+    use blvm_node::storage::bitcoin_core_storage::BitcoinCoreStorage;
     use blvm_node::storage::bitcoin_detection::{BitcoinCoreDetection, CoreDataNetwork};
     use std::fs::{create_dir_all, File};
     use std::io::Write;
@@ -205,6 +207,57 @@ mod bitcoin_core_tests {
         let count2 = reader2.block_count().unwrap();
 
         assert_eq!(count1, count2);
+    }
+
+    #[test]
+    fn test_ensure_not_locked_rejects_live_pid_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let pid = std::process::id();
+        std::fs::write(temp_dir.path().join("bitcoind.pid"), pid.to_string()).unwrap();
+        assert!(BitcoinCoreStorage::ensure_not_locked(temp_dir.path()).is_err());
+    }
+
+    #[test]
+    fn test_ensure_not_locked_ignores_stale_pid_and_lock_files() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("bitcoind.pid"), b"99999999").unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("chainstate")).unwrap();
+        std::fs::write(temp_dir.path().join("chainstate/LOCK"), b"").unwrap();
+        assert!(BitcoinCoreStorage::ensure_not_locked(temp_dir.path()).is_ok());
+    }
+
+    #[test]
+    fn test_storage_config_auto_migrate_env_override() {
+        let cfg = StorageConfig {
+            auto_migrate_core: true,
+            ..Default::default()
+        };
+        std::env::set_var("BLVM_NO_AUTO_MIGRATE_CORE", "1");
+        assert!(!cfg.auto_migrate_core_effective());
+        std::env::remove_var("BLVM_NO_AUTO_MIGRATE_CORE");
+
+        std::env::set_var("BLVM_AUTO_MIGRATE_CORE", "0");
+        assert!(!cfg.auto_migrate_core_effective());
+        std::env::remove_var("BLVM_AUTO_MIGRATE_CORE");
+    }
+
+    #[test]
+    fn test_storage_config_reuse_core_block_files_env() {
+        let cfg = StorageConfig {
+            reuse_core_block_files: false,
+            ..Default::default()
+        };
+        std::env::set_var("BLVM_REUSE_CORE_BLOCK_FILES", "1");
+        assert!(cfg.reuse_core_block_files_effective());
+        std::env::remove_var("BLVM_REUSE_CORE_BLOCK_FILES");
+    }
+
+    #[test]
+    fn test_is_core_layout_requires_chainstate_and_blocks() {
+        let temp = TempDir::new().unwrap();
+        assert!(!BitcoinCoreDetection::is_core_layout_at(temp.path()));
+        create_dir_all(temp.path().join("blocks")).unwrap();
+        assert!(!BitcoinCoreDetection::is_core_layout_at(temp.path()));
     }
 }
 

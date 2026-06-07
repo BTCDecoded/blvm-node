@@ -72,7 +72,7 @@ impl BitcoinCoreDetection {
         let possible_dirs = Self::get_standard_paths(network);
 
         for dir in possible_dirs.into_iter().flatten() {
-            if Self::is_bitcoin_core_dir(&dir, network) {
+            if Self::is_core_layout_at(&dir) {
                 return Ok(Some(dir));
             }
         }
@@ -105,26 +105,25 @@ impl BitcoinCoreDetection {
         paths
     }
 
-    /// Check if directory contains Bitcoin Core data
-    fn is_bitcoin_core_dir(dir: &Path, network: CoreDataNetwork) -> bool {
-        // Check for chainstate database (required)
+    /// Check if `dir` contains a Bitcoin Core datadir layout.
+    pub fn is_core_layout_at(dir: &Path) -> bool {
         let chainstate = dir.join("chainstate");
         if !chainstate.exists() {
             return false;
         }
-
-        // Check for blocks directory (required)
         let blocks = dir.join("blocks");
         if !blocks.exists() {
             return false;
         }
-
-        // Verify chainstate is a valid database
         if Self::detect_db_format(&chainstate).is_err() {
             return false;
         }
-
         true
+    }
+
+    /// Check if directory contains Bitcoin Core data (alias for [`is_core_layout_at`]).
+    fn is_bitcoin_core_dir(dir: &Path, _network: CoreDataNetwork) -> bool {
+        Self::is_core_layout_at(dir)
     }
 
     /// Detect database format (LevelDB)
@@ -223,6 +222,17 @@ impl BitcoinCoreDetection {
             ));
         }
 
+        Ok(())
+    }
+
+    /// Fail when Core block files do not cover the indexed chain (pruned datadir).
+    #[cfg(feature = "rocksdb")]
+    pub fn ensure_blocks_available(source_dir: &Path, network: CoreDataNetwork) -> Result<()> {
+        use crate::storage::bitcoin_core_migrate::assess_core_block_coverage;
+        let coverage = assess_core_block_coverage(source_dir, network)?;
+        if let Some(msg) = coverage.pruned_error_message() {
+            anyhow::bail!("{msg}");
+        }
         Ok(())
     }
 }

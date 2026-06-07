@@ -8,6 +8,8 @@ pub mod bitcoin_core_blocks;
 pub mod bitcoin_core_format;
 #[cfg(feature = "rocksdb")]
 pub mod bitcoin_core_migrate;
+#[cfg(feature = "rocksdb")]
+pub mod bitcoin_core_obfuscation;
 pub mod bitcoin_core_storage;
 pub mod bitcoin_detection;
 pub mod blockstore;
@@ -34,7 +36,7 @@ pub mod wal;
 use crate::config::PruningConfig;
 use anyhow::Result;
 use database::{create_database, default_backend, fallback_backend, Database, DatabaseBackend};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -136,14 +138,19 @@ impl Storage {
             {
                 if backend == DatabaseBackend::RocksDB {
                     info!("Existing node data detected, opening with RocksDB backend");
+                    let core_dir = if BitcoinCoreDetection::is_core_layout_at(data_dir.as_ref()) {
+                        data_dir.as_ref().to_path_buf()
+                    } else if let Some(d) = BitcoinCoreDetection::detect_data_dir(core_network)? {
+                        d
+                    } else {
+                        data_dir.as_ref().to_path_buf()
+                    };
                     let db = Arc::from(BitcoinCoreStorage::open_bitcoin_core_database(
-                        data_dir.as_ref(),
+                        &core_dir,
                         core_network,
                     )?);
 
-                    let block_reader = if let Some(core_dir) =
-                        BitcoinCoreDetection::detect_data_dir(core_network)?
-                    {
+                    let block_reader = {
                         let blocks_dir = core_dir.join("blocks");
                         if blocks_dir.exists() {
                             match bitcoin_core_blocks::BitcoinCoreBlockReader::new_with_cache(
@@ -163,8 +170,6 @@ impl Storage {
                         } else {
                             None
                         }
-                    } else {
-                        None
                     };
 
                     // Initialize storage components with the opened database and block reader
@@ -216,6 +221,288 @@ impl Storage {
         }
     }
 
+    /// Resolve and optionally migrate the BLVM store path for node startup.
+    #[cfg(feature = "rocksdb")]
+    pub fn prepare_node_store<P: AsRef<Path>>(
+        data_dir: P,
+        network: blvm_protocol::types::Network,
+        storage_config: Option<&crate::config::StorageConfig>,
+    ) -> Result<PathBuf> {
+        Self::resolve_node_store_path(
+            data_dir.as_ref(),
+            Self::protocol_to_core_network(network),
+            storage_config,
+        )
+    }
+
+    /// Same as [`prepare_node_store`] using [`ProtocolVersion`].
+    #[cfg(feature = "rocksdb")]
+    pub fn prepare_node_store_from_protocol<P: AsRef<Path>>(
+        data_dir: P,
+        protocol: blvm_protocol::ProtocolVersion,
+        storage_config: Option<&crate::config::StorageConfig>,
+    ) -> Result<PathBuf> {
+        let network = match protocol {
+            blvm_protocol::ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
+            blvm_protocol::ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
+            blvm_protocol::ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
+        };
+        Self::prepare_node_store(data_dir, network, storage_config)
+    }
+
+    /// Create storage for node startup: resolves Core auto-migrate, then opens the BLVM store.
+    pub fn open_for_node<P: AsRef<Path>>(
+        data_dir: P,
+        network: blvm_protocol::types::Network,
+        storage_config: Option<&crate::config::StorageConfig>,
+    ) -> Result<Self> {
+        #[cfg(feature = "rocksdb")]
+        let store_path = Self::resolve_node_store_path(
+            data_dir.as_ref(),
+            Self::protocol_to_core_network(network),
+            storage_config,
+        )?;
+        #[cfg(not(feature = "rocksdb"))]
+        let store_path = data_dir.as_ref().to_path_buf();
+
+        let (backend, pruning_config, indexing_config) = if let Some(sc) = storage_config {
+            let backend = database::backend_from_config(sc.database_backend)?;
+            (backend, sc.pruning.clone(), sc.indexing.clone())
+        } else {
+            (default_backend(), None, None)
+        };
+
+        info!(
+            "[NODE_INIT] Opening BLVM store at {:?} (backend {:?})",
+            store_path, backend
+        );
+        Self::with_backend_pruning_and_indexing(
+            store_path,
+            backend,
+            pruning_config,
+            indexing_config,
+            storage_config,
+            Some(data_dir.as_ref()),
+        )
+    }
+
+    #[cfg(feature = "rocksdb")]
+    fn protocol_to_core_network(network: blvm_protocol::types::Network) -> CoreDataNetwork {
+        match network {
+            blvm_protocol::types::Network::Mainnet => CoreDataNetwork::Mainnet,
+            blvm_protocol::types::Network::Testnet => CoreDataNetwork::Testnet,
+            blvm_protocol::types::Network::Regtest => CoreDataNetwork::Regtest,
+        }
+    }
+
+    /// Decide where the BLVM native database lives; auto-migrate from Core when needed.
+    #[cfg(feature = "rocksdb")]
+    fn resolve_node_store_path(
+        data_dir: &Path,
+        core_network: CoreDataNetwork,
+        storage_config: Option<&crate::config::StorageConfig>,
+    ) -> Result<PathBuf> {
+        use bitcoin_core_migrate::{
+            has_migration_marker, migrate_core_data, read_migration_marker, MigrateCoreArgs,
+        };
+
+        let auto_migrate = storage_config
+            .map(|s| s.auto_migrate_core_effective())
+            .unwrap_or_else(|| !crate::utils::env_bool("BLVM_NO_AUTO_MIGRATE_CORE"));
+
+        let dest = storage_config
+            .map(|s| s.resolve_core_migrate_destination(data_dir))
+            .unwrap_or_else(|| data_dir.join("blvm"));
+
+        if BitcoinCoreStorage::has_blvm_database(data_dir) {
+            info!(
+                "[CORE_IMPORT] layout=blvm-native action=open path={:?}",
+                data_dir
+            );
+            return Ok(data_dir.to_path_buf());
+        }
+
+        if BitcoinCoreStorage::has_blvm_database(&dest) || has_migration_marker(&dest) {
+            Self::warn_if_core_chainstate_newer_than_marker(data_dir, &dest);
+            let marker_tip = read_migration_marker(&dest)
+                .ok()
+                .flatten()
+                .map(|m| format!(" height={} tip={}", m.height, m.tip_hash))
+                .unwrap_or_default();
+            info!(
+                "[CORE_IMPORT] layout=core-migrated action=open path={:?}{}",
+                dest, marker_tip
+            );
+            return Ok(dest);
+        }
+
+        if auto_migrate && BitcoinCoreDetection::is_core_layout_at(data_dir) {
+            BitcoinCoreStorage::ensure_not_locked(data_dir)?;
+
+            info!(
+                "[CORE_IMPORT] layout=core action=migrate source={:?} dest={:?} network={:?}",
+                data_dir, dest, core_network
+            );
+
+            let backend = if let Some(sc) = storage_config {
+                database::backend_from_config(sc.database_backend)?
+            } else {
+                default_backend()
+            };
+
+            migrate_core_data(MigrateCoreArgs {
+                source: data_dir.to_path_buf(),
+                destination: dest.clone(),
+                network: core_network,
+                verify: false,
+                verbose: false,
+                dest_backend: Some(backend),
+                stop_after: None,
+                reuse_core_block_files: storage_config
+                    .map(|s| s.reuse_core_block_files_effective())
+                    .unwrap_or(false),
+            })?;
+
+            return Ok(dest);
+        }
+
+        Ok(data_dir.to_path_buf())
+    }
+
+    #[cfg(feature = "rocksdb")]
+    fn warn_if_core_chainstate_newer_than_marker(core_dir: &Path, blvm_store: &Path) {
+        use bitcoin_core_migrate::{read_core_best_block_hash, read_migration_marker};
+
+        let Ok(Some(marker)) = read_migration_marker(blvm_store) else {
+            return;
+        };
+
+        if marker.source != core_dir {
+            warn!(
+                "[CORE_IMPORT] Migration marker source {:?} != current datadir {:?}; \
+                 ensure you are using the same Core datadir that was migrated.",
+                marker.source, core_dir
+            );
+        }
+
+        if !marker.tip_hash.is_empty() {
+            if let Ok(marker_tip) = crate::storage::hashing::hash_from_rpc_hex(&marker.tip_hash) {
+                if let Ok(Some(core_tip)) = read_core_best_block_hash(core_dir) {
+                    if core_tip != marker_tip {
+                        warn!(
+                            "[CORE_IMPORT] Core tip {} differs from migration marker {}; \
+                             Core may have re-synced. Re-run `blvm migrate core --verify` to refresh.",
+                            crate::storage::hashing::hash_to_rpc_hex(&core_tip),
+                            marker.tip_hash
+                        );
+                    }
+                }
+            }
+        }
+
+        let Ok(secs) = marker.migrated_at.parse::<u64>() else {
+            return;
+        };
+        let chainstate = core_dir.join("chainstate");
+        let Ok(meta) = std::fs::metadata(&chainstate) else {
+            return;
+        };
+        let Ok(modified) = meta.modified() else {
+            return;
+        };
+        let Some(migrated) =
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+        else {
+            return;
+        };
+        if modified > migrated {
+            warn!(
+                "[CORE_IMPORT] Core chainstate at {:?} is newer than migration marker at {:?}; \
+                 Core may have re-synced. Re-run `blvm migrate core --verify` if tip should match Core.",
+                chainstate,
+                blvm_store
+            );
+        }
+    }
+
+    #[cfg(feature = "rocksdb")]
+    fn open_core_block_reader_for_store(
+        blvm_store: &Path,
+        core_datadir: Option<&Path>,
+        storage_config: Option<&crate::config::StorageConfig>,
+    ) -> Option<Arc<bitcoin_core_blocks::BitcoinCoreBlockReader>> {
+        use bitcoin_core_migrate::read_migration_marker;
+        use std::str::FromStr;
+
+        let marker = read_migration_marker(blvm_store).ok().flatten();
+        let reuse = storage_config
+            .map(|s| s.reuse_core_block_files_effective())
+            .unwrap_or(false)
+            || marker
+                .as_ref()
+                .and_then(|m| m.reuse_core_blocks)
+                .unwrap_or(false);
+        if !reuse {
+            return None;
+        }
+
+        let core_dir = marker
+            .as_ref()
+            .map(|m| m.source.clone())
+            .or_else(|| core_datadir.map(|p| p.to_path_buf()))?;
+        let blocks_dir = core_dir.join("blocks");
+        if !blocks_dir.is_dir() {
+            warn!(
+                "[CORE_IMPORT] reuse_core_blocks enabled but Core blocks dir missing at {:?}",
+                blocks_dir
+            );
+            return None;
+        }
+
+        let network = marker
+            .as_ref()
+            .and_then(|m| CoreDataNetwork::from_str(&m.network).ok())
+            .or_else(|| BitcoinCoreDetection::detect_network(&core_dir))
+            .unwrap_or(CoreDataNetwork::Mainnet);
+
+        match bitcoin_core_blocks::BitcoinCoreBlockReader::new_with_cache(
+            &blocks_dir,
+            network,
+            Some(blvm_store),
+        ) {
+            Ok(reader) => {
+                info!(
+                    "[CORE_IMPORT] Reading Core block files in place from {:?}",
+                    blocks_dir
+                );
+                Some(Arc::new(reader))
+            }
+            Err(e) => {
+                warn!("[CORE_IMPORT] Failed to open Core block file reader: {e}");
+                None
+            }
+        }
+    }
+
+    fn open_blockstore(
+        db: Arc<dyn database::Database>,
+        blvm_store: &Path,
+        core_datadir: Option<&Path>,
+        storage_config: Option<&crate::config::StorageConfig>,
+    ) -> Result<Arc<blockstore::BlockStore>> {
+        #[cfg(feature = "rocksdb")]
+        {
+            let reader =
+                Self::open_core_block_reader_for_store(blvm_store, core_datadir, storage_config);
+            if let Some(reader) = reader {
+                return Ok(Arc::new(
+                    blockstore::BlockStore::new_with_bitcoin_core_reader(db, Some(reader))?,
+                ));
+            }
+        }
+        Ok(Arc::new(blockstore::BlockStore::new(db)?))
+    }
+
     /// Create a new storage instance with specified backend
     pub fn with_backend<P: AsRef<Path>>(data_dir: P, backend: DatabaseBackend) -> Result<Self> {
         Self::with_backend_and_pruning(data_dir, backend, None)
@@ -227,7 +514,7 @@ impl Storage {
         backend: DatabaseBackend,
         pruning_config: Option<PruningConfig>,
     ) -> Result<Self> {
-        Self::with_backend_pruning_and_indexing(data_dir, backend, pruning_config, None, None)
+        Self::with_backend_pruning_and_indexing(data_dir, backend, pruning_config, None, None, None)
     }
 
     /// Create a new storage instance with backend, pruning, and indexing config
@@ -237,6 +524,7 @@ impl Storage {
         pruning_config: Option<PruningConfig>,
         indexing_config: Option<crate::config::IndexingConfig>,
         storage_config: Option<&crate::config::StorageConfig>,
+        core_datadir: Option<&Path>,
     ) -> Result<Self> {
         #[cfg(feature = "compression")]
         {
@@ -247,13 +535,16 @@ impl Storage {
                 indexing_config,
                 None,
                 storage_config,
+                core_datadir,
             )
         }
         #[cfg(not(feature = "compression"))]
         {
             // When compression feature is disabled, use the internal implementation
-            let db = Arc::from(create_database(data_dir, backend, storage_config)?);
-            let blockstore = Arc::new(blockstore::BlockStore::new(Arc::clone(&db))?);
+            let store_path = data_dir.as_ref();
+            let db = Arc::from(create_database(store_path, backend, storage_config)?);
+            let blockstore =
+                Self::open_blockstore(Arc::clone(&db), store_path, core_datadir, storage_config)?;
             let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
             let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
 
@@ -316,8 +607,10 @@ impl Storage {
         indexing_config: Option<crate::config::IndexingConfig>,
         compression_config: Option<crate::config::CompressionConfig>,
         storage_config: Option<&crate::config::StorageConfig>,
+        core_datadir: Option<&Path>,
     ) -> Result<Self> {
-        let db = Arc::from(create_database(data_dir, backend, storage_config)?);
+        let store_path = data_dir.as_ref();
+        let db = Arc::from(create_database(store_path, backend, storage_config)?);
 
         // Configure block store with compression settings
         #[cfg(feature = "compression")]
@@ -337,17 +630,39 @@ impl Storage {
             } else {
                 (false, 3, false, 2) // Defaults: disabled
             };
-            Arc::new(blockstore::BlockStore::new_with_compression(
-                Arc::clone(&db),
-                block_compression_enabled,
-                block_compression_level,
-                witness_compression_enabled,
-                witness_compression_level,
-            )?)
+            #[cfg(feature = "rocksdb")]
+            {
+                let reader = Self::open_core_block_reader_for_store(
+                    store_path,
+                    core_datadir,
+                    storage_config,
+                );
+                Arc::new(
+                    blockstore::BlockStore::new_with_compression_and_bitcoin_core_reader(
+                        Arc::clone(&db),
+                        block_compression_enabled,
+                        block_compression_level,
+                        witness_compression_enabled,
+                        witness_compression_level,
+                        reader,
+                    )?,
+                )
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            {
+                Arc::new(blockstore::BlockStore::new_with_compression(
+                    Arc::clone(&db),
+                    block_compression_enabled,
+                    block_compression_level,
+                    witness_compression_enabled,
+                    witness_compression_level,
+                )?)
+            }
         };
 
         #[cfg(not(feature = "compression"))]
-        let blockstore = Arc::new(blockstore::BlockStore::new(Arc::clone(&db))?);
+        let blockstore =
+            Self::open_blockstore(Arc::clone(&db), store_path, core_datadir, storage_config)?;
         let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
         let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
 

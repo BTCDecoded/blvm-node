@@ -141,6 +141,30 @@ impl BlockStore {
     }
 
     /// Create a new block store with compression settings and optional block file reader
+    #[cfg(feature = "rocksdb")]
+    pub fn new_with_compression_and_bitcoin_core_reader(
+        db: Arc<dyn Database>,
+        #[cfg(feature = "block-compression")] block_compression_enabled: bool,
+        #[cfg(feature = "block-compression")] block_compression_level: u32,
+        #[cfg(feature = "witness-compression")] witness_compression_enabled: bool,
+        #[cfg(feature = "witness-compression")] witness_compression_level: u32,
+        block_reader: Option<Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>>,
+    ) -> Result<Self> {
+        Self::new_with_compression_and_reader(
+            db,
+            #[cfg(feature = "block-compression")]
+            block_compression_enabled,
+            #[cfg(feature = "block-compression")]
+            block_compression_level,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_enabled,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_level,
+            block_reader,
+        )
+    }
+
+    /// Create a new block store with compression settings and optional block file reader
     fn new_with_compression_and_reader(
         db: Arc<dyn Database>,
         #[cfg(feature = "block-compression")] block_compression_enabled: bool,

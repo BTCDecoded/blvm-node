@@ -113,20 +113,14 @@ impl Node {
 
         // Create storage with configuration
         info!("[NODE_INIT] Creating storage...");
-        let (backend, pruning_config, indexing_config) = if let Some(sc) = storage_config {
-            let backend = crate::storage::database::backend_from_config(sc.database_backend)?;
-            (backend, sc.pruning.clone(), sc.indexing.clone())
-        } else {
-            use crate::storage::database::default_backend;
-            (default_backend(), None, None)
-        };
-        info!("[NODE_INIT] Using backend: {:?}", backend);
-        info!("[NODE_INIT] Calling Storage::with_backend_pruning_and_indexing()...");
-        let mut storage = Storage::with_backend_pruning_and_indexing(
+        info!("[NODE_INIT] Calling Storage::open_for_node()...");
+        let mut storage = Storage::open_for_node(
             data_dir,
-            backend,
-            pruning_config,
-            indexing_config,
+            match protocol_version {
+                ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
+                ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
+                ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
+            },
             storage_config,
         )?;
         info!("[NODE_INIT] Storage created successfully");

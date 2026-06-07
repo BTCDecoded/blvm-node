@@ -1,0 +1,8 @@
+{
+  "network": "regtest",
+  "blocks_mined": 101,
+  "height": 101,
+  "tip_hash": "774c675392b0028e36fd7e1cfd2a8613c41330a43dd8ec442f8b626e77fefd9c",
+  "utxo_count": 101,
+  "generated_by": "gen-core-regtest-fixture.sh"
+}

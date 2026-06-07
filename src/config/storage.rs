@@ -338,6 +338,23 @@ pub struct StorageConfig {
     pub indexing: Option<IndexingConfig>,
     #[cfg(feature = "compression")]
     pub compression: Option<CompressionConfig>,
+
+    /// Auto-migrate Bitcoin Core datadir into BLVM native store on startup (default: true).
+    /// Disabled by `--no-auto-migrate` or `BLVM_NO_AUTO_MIGRATE_CORE=1`.
+    #[serde(default = "default_auto_migrate_core")]
+    pub auto_migrate_core: bool,
+
+    /// Override BLVM store path when migrating from Core (default: `<datadir>/blvm/`).
+    #[serde(default)]
+    pub core_migrate_destination: Option<String>,
+
+    /// Keep Core `blocks/` in place during migrate; BLVM reads blk*.dat via fallback reader (saves disk).
+    #[serde(default)]
+    pub reuse_core_block_files: bool,
+}
+
+fn default_auto_migrate_core() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,7 +438,47 @@ impl Default for StorageConfig {
             indexing: None,
             #[cfg(feature = "compression")]
             compression: None,
+            auto_migrate_core: true,
+            core_migrate_destination: None,
+            reuse_core_block_files: false,
         }
+    }
+}
+
+impl StorageConfig {
+    /// Whether startup should auto-migrate a Core datadir (ENV overrides config).
+    pub fn auto_migrate_core_effective(&self) -> bool {
+        if crate::utils::env_bool("BLVM_NO_AUTO_MIGRATE_CORE") {
+            return false;
+        }
+        if std::env::var("BLVM_AUTO_MIGRATE_CORE").is_ok() {
+            return crate::utils::env_bool("BLVM_AUTO_MIGRATE_CORE");
+        }
+        self.auto_migrate_core
+    }
+
+    /// Resolved BLVM store directory when migrating from Core inside `data_dir`.
+    pub fn resolve_core_migrate_destination(
+        &self,
+        data_dir: &std::path::Path,
+    ) -> std::path::PathBuf {
+        std::env::var("BLVM_CORE_MIGRATE_DESTINATION")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                self.core_migrate_destination
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+            })
+            .unwrap_or_else(|| data_dir.join("blvm"))
+    }
+
+    /// Whether migrate should skip copying block bodies and read Core `blocks/` in place.
+    pub fn reuse_core_block_files_effective(&self) -> bool {
+        if std::env::var("BLVM_REUSE_CORE_BLOCK_FILES").is_ok() {
+            return crate::utils::env_bool("BLVM_REUSE_CORE_BLOCK_FILES");
+        }
+        self.reuse_core_block_files
     }
 }
 

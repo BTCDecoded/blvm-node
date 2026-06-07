@@ -1,9 +1,11 @@
 //! Block file reader
 //!
-//! Reads blocks from `blk*.dat` files (standard block file format).
-//! - Magic bytes (4 bytes): 0xF9BEB4D9 for mainnet
-//! - Block size (4 bytes, little-endian)
-//! - Block data (variable length)
+//! Reads blocks from `blk*.dat` files (Bitcoin Core block file format).
+//! - Storage header (8 bytes): network magic (4) + block size (4 LE)
+//! - Block payload (variable length)
+//!
+//! Modern Core obfuscates `*.dat` with the key in `blocks/xor.dat` and stores
+//! `CDiskBlockIndex::nDataPos` at the start of the block payload (after the header).
 
 use crate::storage::bitcoin_detection::CoreDataNetwork;
 use anyhow::{Context, Result};
@@ -17,11 +19,91 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
+/// Core `MessageStart` + `unsigned int` size prefix written before each block.
+pub const STORAGE_HEADER_BYTES: u32 = 8;
+
 /// Magic bytes for block files
 const MAGIC_MAINNET: [u8; 4] = [0xF9, 0xBE, 0xB4, 0xD9];
 const MAGIC_TESTNET: [u8; 4] = [0x0B, 0x11, 0x09, 0x07];
 const MAGIC_REGTEST: [u8; 4] = [0xFA, 0xBF, 0xB5, 0xDA];
 const MAGIC_SIGNET: [u8; 4] = [0x0A, 0x03, 0xCF, 0x40];
+
+const OBFUSCATION_KEY_SIZE: usize = 8;
+
+/// Bitcoin Core `blocks/xor.dat` obfuscation (8-byte repeating XOR by file offset).
+#[derive(Clone, Copy)]
+struct BlockFileObfuscation {
+    key: [u8; OBFUSCATION_KEY_SIZE],
+}
+
+impl BlockFileObfuscation {
+    fn disabled() -> Self {
+        Self {
+            key: [0u8; OBFUSCATION_KEY_SIZE],
+        }
+    }
+
+    fn load(blocks_dir: &Path) -> Self {
+        let path = blocks_dir.join("xor.dat");
+        let Ok(data) = std::fs::read(&path) else {
+            return Self::disabled();
+        };
+        if data.len() != OBFUSCATION_KEY_SIZE {
+            return Self::disabled();
+        }
+        let mut key = [0u8; OBFUSCATION_KEY_SIZE];
+        key.copy_from_slice(&data);
+        Self { key }
+    }
+
+    fn active(&self) -> bool {
+        self.key != [0u8; OBFUSCATION_KEY_SIZE]
+    }
+
+    fn deobfuscate(&self, target: &mut [u8], file_offset: u64) {
+        if !self.active() || target.is_empty() {
+            return;
+        }
+        for (i, byte) in target.iter_mut().enumerate() {
+            *byte ^= self.key[(file_offset as usize + i) % OBFUSCATION_KEY_SIZE];
+        }
+    }
+}
+
+fn network_magic(network: CoreDataNetwork) -> &'static [u8; 4] {
+    match network {
+        CoreDataNetwork::Mainnet => &MAGIC_MAINNET,
+        CoreDataNetwork::Testnet => &MAGIC_TESTNET,
+        CoreDataNetwork::Regtest => &MAGIC_REGTEST,
+        CoreDataNetwork::Signet => &MAGIC_SIGNET,
+    }
+}
+
+fn read_file_bytes(
+    file: &mut File,
+    offset: u64,
+    len: usize,
+    obf: &BlockFileObfuscation,
+) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; len];
+    file.read_exact(&mut buf)
+        .context("Failed to read block file bytes")?;
+    obf.deobfuscate(&mut buf, offset);
+    Ok(buf)
+}
+
+/// `nDataPos` in Core index → file offset of the 8-byte storage header.
+fn storage_header_offset(n_data_pos: u32) -> Result<u64> {
+    n_data_pos
+        .checked_sub(STORAGE_HEADER_BYTES)
+        .map(u64::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Block index nDataPos {n_data_pos} is smaller than storage header ({STORAGE_HEADER_BYTES})"
+            )
+        })
+}
 
 /// Location of a block within a block file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +129,7 @@ struct BlockIndexCache {
 pub struct BitcoinCoreBlockReader {
     blocks_dir: PathBuf,
     network: CoreDataNetwork,
+    obfuscation: BlockFileObfuscation,
     /// Index mapping block hash to file location
     /// Lazy-loaded on first access, optionally persisted to disk
     block_index: Arc<Mutex<Option<HashMap<Hash, BlockLocation>>>>,
@@ -91,6 +174,7 @@ impl BitcoinCoreBlockReader {
         Ok(Self {
             blocks_dir: blocks_dir.to_path_buf(),
             network,
+            obfuscation: BlockFileObfuscation::load(blocks_dir),
             block_index: Arc::new(Mutex::new(None)),
             index_cache_path,
         })
@@ -98,12 +182,7 @@ impl BitcoinCoreBlockReader {
 
     /// Get the magic bytes for the network
     fn get_magic(&self) -> &[u8; 4] {
-        match self.network {
-            CoreDataNetwork::Mainnet => &MAGIC_MAINNET,
-            CoreDataNetwork::Testnet => &MAGIC_TESTNET,
-            CoreDataNetwork::Regtest => &MAGIC_REGTEST,
-            CoreDataNetwork::Signet => &MAGIC_SIGNET,
-        }
+        network_magic(self.network)
     }
 
     /// Build the block index by scanning all `blk*.dat` files
@@ -164,41 +243,41 @@ impl BitcoinCoreBlockReader {
         loop {
             let block_start = offset;
 
-            // Read magic bytes
-            let mut magic_buf = [0u8; 4];
-            match file.read_exact(&mut magic_buf) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // End of file
+            let header = match read_file_bytes(
+                &mut file,
+                offset,
+                STORAGE_HEADER_BYTES as usize,
+                &self.obfuscation,
+            ) {
+                Ok(h) => h,
+                Err(e)
+                    if e.downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::UnexpectedEof) =>
+                {
                     break;
                 }
-                Err(e) => return Err(anyhow::anyhow!("Failed to read magic bytes: {}", e)),
+                Err(e) => return Err(e),
+            };
+
+            if header.len() < STORAGE_HEADER_BYTES as usize {
+                break;
             }
 
-            // Verify magic bytes
+            let mut magic_buf = [0u8; 4];
+            magic_buf.copy_from_slice(&header[0..4]);
             if magic_buf != *magic {
-                // Not a valid block start, try to find next magic sequence
-                // This handles corrupted files or partial writes
                 offset += 1;
-                file.seek(SeekFrom::Start(offset))?;
                 continue;
             }
 
-            offset += 4;
+            let block_size = u32::from_le_bytes(header[4..8].try_into().unwrap());
+            offset += STORAGE_HEADER_BYTES as u64;
 
-            // Read block size
-            let mut size_buf = [0u8; 4];
-            file.read_exact(&mut size_buf)
-                .context("Failed to read block size")?;
-            let block_size = u32::from_le_bytes(size_buf);
-            offset += 4;
-
-            // Validate block size (reasonable limit: 32MB)
             if block_size > 32 * 1024 * 1024 {
                 return Err(anyhow::anyhow!(
                     "Block size too large: {} bytes at offset {}",
                     block_size,
-                    offset - 4
+                    block_start
                 ));
             }
 
@@ -210,19 +289,14 @@ impl BitcoinCoreBlockReader {
                 ));
             }
 
-            // Read block header to compute hash
-            let mut header_buf = [0u8; 80];
-            file.read_exact(&mut header_buf)
-                .context("Failed to read block header")?;
+            let header_buf = read_file_bytes(&mut file, offset, 80, &self.obfuscation)?;
 
-            // Compute block hash (double SHA256 of header)
             use sha2::{Digest, Sha256};
-            let first_hash = Sha256::digest(header_buf);
+            let first_hash = Sha256::digest(&header_buf);
             let second_hash = Sha256::digest(first_hash);
             let mut block_hash = [0u8; 32];
             block_hash.copy_from_slice(&second_hash);
 
-            // Store location (start of magic bytes for this block)
             let location = BlockLocation {
                 file_path: file_path.to_path_buf(),
                 offset: block_start,
@@ -231,12 +305,8 @@ impl BitcoinCoreBlockReader {
 
             index.insert(block_hash, location);
 
-            // Skip rest of block payload (header already consumed)
-            let remaining = (block_size as u64) - 80;
-            file.seek(SeekFrom::Current(remaining as i64))
-                .context("Failed to seek to next block")?;
             offset = block_start
-                .checked_add(8 + block_size as u64)
+                .checked_add(STORAGE_HEADER_BYTES as u64 + block_size as u64)
                 .ok_or_else(|| anyhow::anyhow!("Block file offset overflow"))?;
         }
 
@@ -373,34 +443,23 @@ impl BitcoinCoreBlockReader {
         let mut file = File::open(&location.file_path)
             .with_context(|| format!("Failed to open block file: {:?}", location.file_path))?;
 
-        file.seek(SeekFrom::Start(location.offset))
-            .with_context(|| {
-                format!(
-                    "Failed to seek to block offset {} in file {:?}",
-                    location.offset, location.file_path
-                )
-            })?;
-
-        // Read magic bytes (skip)
-        let mut magic_buf = [0u8; 4];
-        file.read_exact(&mut magic_buf)
-            .context("Failed to read magic bytes")?;
-
-        // Read block size (skip, we already know it)
-        let mut size_buf = [0u8; 4];
-        file.read_exact(&mut size_buf)
-            .context("Failed to read block size")?;
-
-        // Read block data
-        let mut block_data = vec![0u8; location.size as usize];
-        file.read_exact(&mut block_data).with_context(|| {
+        let payload_offset = location
+            .offset
+            .checked_add(STORAGE_HEADER_BYTES as u64)
+            .ok_or_else(|| anyhow::anyhow!("Block file offset overflow"))?;
+        let block_data = read_file_bytes(
+            &mut file,
+            payload_offset,
+            location.size as usize,
+            &self.obfuscation,
+        )
+        .with_context(|| {
             format!(
                 "Failed to read block data (size: {}) from file {:?}",
                 location.size, location.file_path
             )
         })?;
 
-        // Deserialize block
         let (block, _witnesses) = deserialize_block_with_witnesses(&block_data)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
 
@@ -418,6 +477,58 @@ impl BitcoinCoreBlockReader {
         let index = self.get_index()?;
         Ok(index.len())
     }
+}
+
+/// Read a block from Core `blk*.dat` using `CDiskBlockIndex` file/offset fields.
+pub fn read_block_at_file_pos(
+    blocks_dir: &Path,
+    n_file: i32,
+    n_data_pos: u32,
+    network: CoreDataNetwork,
+) -> Result<Option<Block>> {
+    if n_file < 0 {
+        return Ok(None);
+    }
+    let file_path = blocks_dir.join(format!("blk{n_file:05}.dat"));
+    if !file_path.exists() {
+        return Ok(None);
+    }
+
+    let magic = network_magic(network);
+    let obf = BlockFileObfuscation::load(blocks_dir);
+    let header_offset = storage_header_offset(n_data_pos)?;
+
+    let mut file = File::open(&file_path)
+        .with_context(|| format!("Failed to open block file: {file_path:?}"))?;
+
+    let header = read_file_bytes(
+        &mut file,
+        header_offset,
+        STORAGE_HEADER_BYTES as usize,
+        &obf,
+    )?;
+    if header.len() < STORAGE_HEADER_BYTES as usize {
+        return Ok(None);
+    }
+    if header[0..4] != magic[..] {
+        return Err(anyhow::anyhow!(
+            "Magic mismatch at {:?} offset {} (nDataPos={n_data_pos})",
+            file_path,
+            header_offset
+        ));
+    }
+
+    let block_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+    if block_size > 32 * 1024 * 1024 {
+        return Err(anyhow::anyhow!("Block size {block_size} too large"));
+    }
+
+    let payload_offset = header_offset + STORAGE_HEADER_BYTES as u64;
+    let block_data = read_file_bytes(&mut file, payload_offset, block_size, &obf)?;
+
+    let (block, _witnesses) = deserialize_block_with_witnesses(&block_data)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {e}"))?;
+    Ok(Some(block))
 }
 
 #[cfg(test)]

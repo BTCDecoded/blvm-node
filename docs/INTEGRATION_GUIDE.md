@@ -352,7 +352,7 @@ blvm --config blvm.toml --network testnet --rpc-addr 127.0.0.1:18332
 
 ### Important notes
 
-- **Data directories** are **not** converted — set **`[storage].data_dir`** (or **`BLVM_DATA_DIR`**) yourself.
+- **Data directories:** **`blvm config convert-core`** maps Core **`datadir=`** to **`[storage].data_dir`** when present. If that path is a synced Core tree, **`blvm start`** can auto-migrate to **`<datadir>/blvm/`** (see [Storage Backends — Bitcoin Core drop-in](https://github.com/BTCDecoded/blvm-docs/blob/main/src/node/storage-backends.md#bitcoin-core-drop-in-migrate-on-start) in published docs, or `blvm-docs/src/node/storage-backends.md` in the docs repo).
 - **P2P port** on `addnode=` peers must match **their** listening port (e.g. testnet **18333**, not the RPC port).
 - Many Core options have **no** BLVM equivalent; treat converter output as a **starting point**.
 - **`blvm config convert-core`** / the standalone tools may emit a **`[network]`**-style stub for compatibility — **`NodeConfig`** uses **top-level** keys; merge or edit to match [current `NodeConfig` serde](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/mod.rs).

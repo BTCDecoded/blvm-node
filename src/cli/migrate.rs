@@ -30,5 +30,8 @@ pub fn run_migrate_core_cli(
         network,
         verify,
         verbose,
+        dest_backend: None,
+        stop_after: None,
+        reuse_core_block_files: false,
     })
 }

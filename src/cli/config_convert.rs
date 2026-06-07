@@ -32,10 +32,10 @@ pub fn run_config_convert_core(input: &Path, output: &Path, verbose: bool) -> Re
     println!("  Input:  {}", input.display());
     println!("  Output: {}", output.display());
     println!();
-    println!("⚠️  IMPORTANT:");
-    println!("  - Data directories are NOT converted");
-    println!("  - Review the generated config and adjust as needed");
-    println!("  - Some options may need manual configuration");
+    println!("Review the generated config:");
+    println!("  - storage.data_dir is the network-specific Core tree (chainstate/ + blocks/)");
+    println!("  - Remove legacy [network] wrappers if your NodeConfig expects top-level keys");
+    println!("  - Some Core options still need manual mapping");
 
     Ok(())
 }
