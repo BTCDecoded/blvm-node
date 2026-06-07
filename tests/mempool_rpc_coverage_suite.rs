@@ -64,9 +64,16 @@ async fn test_getrawmempool_verbose() {
 
 #[tokio::test]
 async fn test_savemempool_smoke() {
-    let (_dir, _mempool, rpc, _txid) = rpc_with_mempool();
+    let (dir, _mempool, rpc, _txid) = rpc_with_mempool();
+    let prev = std::env::var("DATA_DIR").ok();
+    std::env::set_var("DATA_DIR", dir.path());
     let result = rpc.savemempool(&json!([])).await.unwrap();
+    match prev {
+        Some(v) => std::env::set_var("DATA_DIR", v),
+        None => std::env::remove_var("DATA_DIR"),
+    }
     assert!(result.is_string() || result.is_null());
+    assert!(dir.path().join("mempool.dat").exists());
 }
 
 #[tokio::test]

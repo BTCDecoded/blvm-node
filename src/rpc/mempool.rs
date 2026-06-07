@@ -198,6 +198,14 @@ impl MempoolRpc {
             let data_dir = env_or_default("DATA_DIR", "data");
             let mempool_path = std::path::Path::new(&data_dir).join("mempool.dat");
 
+            if let Some(parent) = mempool_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    crate::rpc::errors::RpcError::internal_error(format!(
+                        "Failed to create mempool directory: {e}"
+                    ))
+                })?;
+            }
+
             // Arc implements Deref, so we can call methods directly
             if let Err(e) = mempool.save_to_disk(&mempool_path) {
                 return Err(crate::rpc::errors::RpcError::internal_error(format!(
