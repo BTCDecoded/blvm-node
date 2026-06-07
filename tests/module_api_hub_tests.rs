@@ -17,7 +17,6 @@ async fn test_module_api_hub_new() {
     let node_api = Arc::new(MockNodeAPI);
     let hub = ModuleApiHub::new(node_api);
     // Hub should be created successfully
-    assert!(true);
 }
 
 #[tokio::test]
@@ -30,7 +29,6 @@ async fn test_module_api_hub_register_permissions() {
 
     hub.register_module_permissions("test-module".to_string(), permissions);
     // Permissions should be registered
-    assert!(true);
 }
 
 #[tokio::test]

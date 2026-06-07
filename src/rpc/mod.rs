@@ -196,6 +196,11 @@ impl RpcManager {
 
     /// Set RPC authentication configuration
     pub async fn with_auth_config(&mut self, auth_config: RpcAuthConfig) {
+        self.auth_manager = Some(Self::build_auth_manager(auth_config).await);
+    }
+
+    /// Build an [`RpcAuthManager`] from TOML / env [`RpcAuthConfig`] (shared by startup and tests).
+    pub async fn build_auth_manager(auth_config: RpcAuthConfig) -> Arc<auth::RpcAuthManager> {
         let auth_manager = Arc::new(auth::RpcAuthManager::with_rate_limits(
             auth_config.required,
             auth_config.rate_limit_burst,
@@ -211,10 +216,8 @@ impl RpcManager {
                         tokens.len()
                     );
                 }
-                // Add tokens to auth manager
                 for token in tokens {
                     if let Err(e) = auth_manager.add_token(token.clone()).await {
-                        // Redact token from error message
                         let redacted_error =
                             auth::redact_tokens_from_log(&format!("{e}"), &[token]);
                         error!("Failed to add RPC auth token: {}", redacted_error);
@@ -223,10 +226,8 @@ impl RpcManager {
             }
             Err(e) => {
                 warn!("Failed to load RPC auth tokens: {}. Using tokens from config file if available.", e);
-                // Fall back to config file tokens
                 for token in auth_config.tokens {
                     if let Err(e) = auth_manager.add_token(token.clone()).await {
-                        // Redact token from error message
                         let redacted_error =
                             auth::redact_tokens_from_log(&format!("{e}"), &[token]);
                         error!("Failed to add RPC auth token: {}", redacted_error);
@@ -235,7 +236,6 @@ impl RpcManager {
             }
         }
 
-        // Add admin tokens to auth manager
         if !auth_config.admin_tokens.is_empty() {
             info!(
                 "Loaded {} RPC admin token(s) with destructive-method access",
@@ -249,14 +249,29 @@ impl RpcManager {
             }
         }
 
-        // Add certificates to auth manager
         for cert in auth_config.certificates {
             if let Err(e) = auth_manager.add_certificate(cert).await {
                 error!("Failed to add RPC auth certificate: {}", e);
             }
         }
 
-        self.auth_manager = Some(auth_manager);
+        if let Some(ref password) = auth_config.password {
+            auth_manager
+                .set_basic_auth(auth_config.username.clone(), password.clone())
+                .await;
+            // ckpool / Bitcoin Core Basic clients need admin methods (getblocktemplate, submitblock).
+            if let Err(e) = auth_manager.add_admin_token(password.clone()).await {
+                let redacted_error =
+                    auth::redact_tokens_from_log(&format!("{e}"), &[password.clone()]);
+                error!(
+                    "Failed to grant admin RPC access for HTTP Basic password: {}",
+                    redacted_error
+                );
+            }
+            info!("HTTP Basic RPC auth configured (Bitcoin Core / ckpool compatible)");
+        }
+
+        auth_manager
     }
 
     /// Allow the RPC server to start on a non-loopback address without an auth manager.

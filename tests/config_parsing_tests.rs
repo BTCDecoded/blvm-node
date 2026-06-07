@@ -370,7 +370,7 @@ fn test_indexing_config_default() {
     assert!(!config.enable_value_index);
     // IndexingStrategy doesn't implement PartialEq, check via match
     match config.strategy {
-        IndexingStrategy::Eager => assert!(true),
+        IndexingStrategy::Eager => {}
         IndexingStrategy::Lazy => assert!(false, "Default should be Eager"),
     }
 }
@@ -406,7 +406,7 @@ fn test_indexing_config_lazy_strategy() {
     assert!(config.enable_address_index);
     assert!(!config.enable_value_index);
     match config.strategy {
-        IndexingStrategy::Lazy => assert!(true),
+        IndexingStrategy::Lazy => {}
         IndexingStrategy::Eager => assert!(false, "Should be Lazy"),
     }
 }
@@ -414,22 +414,34 @@ fn test_indexing_config_lazy_strategy() {
 #[test]
 fn test_rpc_auth_config_default() {
     let config = RpcAuthConfig::default();
-    // Verify defaults are set
-    assert!(true);
+    assert!(config.username.is_none());
+    assert!(config.password.is_none());
+}
+
+#[test]
+fn test_rpc_auth_config_basic_credentials_parse() {
+    let toml_str = r#"
+required = true
+username = "ckpool"
+password = "s3cret"
+tokens = ["bearer-token"]
+"#;
+    let config: RpcAuthConfig = toml::from_str(toml_str).expect("parse rpc_auth");
+    assert_eq!(config.username.as_deref(), Some("ckpool"));
+    assert_eq!(config.password.as_deref(), Some("s3cret"));
+    assert_eq!(config.tokens, vec!["bearer-token"]);
 }
 
 #[test]
 fn test_ban_list_sharing_config_default() {
     let _config = BanListSharingConfig::default();
     // Verify defaults are set
-    assert!(true);
 }
 
 #[test]
 fn test_dos_protection_config_default() {
     let _config = DosProtectionConfig::default();
     // Verify defaults are set
-    assert!(true);
 }
 
 #[test]
@@ -523,7 +535,6 @@ fn test_storage_config_default() {
     let config = StorageConfig::default();
     assert!(!config.data_dir.is_empty());
     // database_backend is not Option, it's a direct field
-    assert!(true);
 }
 
 #[test]

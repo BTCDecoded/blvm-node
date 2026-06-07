@@ -32,7 +32,6 @@ fn test_pruning_manager_creation() {
 
     let _manager = PruningManager::new(config, blockstore);
     // Should create successfully
-    assert!(true);
 }
 
 #[test]

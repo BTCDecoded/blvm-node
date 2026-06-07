@@ -141,14 +141,12 @@ fn test_resource_metrics_creation() {
 fn test_dos_protection_manager_creation() {
     let _manager = DosProtectionManager::new(10, 60, 1000, 50);
     // Manager should be created successfully
-    assert!(true); // Just verify it doesn't panic
 }
 
 #[test]
 fn test_dos_protection_manager_default() {
     let _manager = DosProtectionManager::default();
     // Default manager should be created successfully
-    assert!(true); // Just verify it doesn't panic
 }
 
 #[tokio::test]
@@ -279,7 +277,6 @@ async fn test_dos_protection_manager_violation_reset() {
     // Actually, the violation count should reset on successful connection
     // But we need to wait for the window to expire first
     // For now, just verify the manager handles it
-    assert!(true);
 }
 
 #[tokio::test]

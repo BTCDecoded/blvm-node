@@ -27,7 +27,6 @@ fn test_chain_access_creation() {
     let _chain_access = NodeChainAccess::new(blockstore, txindex, mempool);
 
     // Should create successfully
-    assert!(true);
 }
 
 #[test]

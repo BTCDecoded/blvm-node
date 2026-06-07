@@ -95,11 +95,11 @@ async fn test_sync_state_transitions() {
     // Test that all states can be created
     for state in states {
         match state {
-            sync::SyncState::Initial => assert!(true),
-            sync::SyncState::Headers => assert!(true),
-            sync::SyncState::Blocks => assert!(true),
-            sync::SyncState::Synced => assert!(true),
-            sync::SyncState::Error(_) => assert!(true),
+            sync::SyncState::Initial => {}
+            sync::SyncState::Headers => {}
+            sync::SyncState::Blocks => {}
+            sync::SyncState::Synced => {}
+            sync::SyncState::Error(_) => {}
         }
     }
 }
@@ -224,7 +224,6 @@ async fn test_node_startup_shutdown() {
 
     // Test node shutdown (simplified)
     // Test strategy: avoid calling shutdown/set_state; we only assert we reached this point.
-    assert!(true); // If we get here, startup succeeded
 }
 
 // ===== SYNC COORDINATOR COMPREHENSIVE TESTS =====

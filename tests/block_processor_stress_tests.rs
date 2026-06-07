@@ -148,7 +148,6 @@ async fn test_block_processing_reorganization_scenario() {
 
     // Both chains should be stored (reorganization handling is at higher level)
     // This test verifies storage can handle multiple blocks at same height
-    assert!(true);
 }
 
 #[tokio::test]

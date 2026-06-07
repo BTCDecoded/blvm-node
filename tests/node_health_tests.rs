@@ -9,14 +9,12 @@ use std::time::Duration;
 fn test_health_checker_creation() {
     let _checker = HealthChecker::new();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
 fn test_health_checker_default() {
     let _checker = HealthChecker::default();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
@@ -31,10 +29,10 @@ fn test_health_status_variants() {
 
     for status in statuses {
         match status {
-            HealthStatus::Healthy => assert!(true),
-            HealthStatus::Degraded => assert!(true),
-            HealthStatus::Unhealthy => assert!(true),
-            HealthStatus::Down => assert!(true),
+            HealthStatus::Healthy => {}
+            HealthStatus::Degraded => {}
+            HealthStatus::Unhealthy => {}
+            HealthStatus::Down => {}
         }
     }
 }

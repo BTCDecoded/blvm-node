@@ -40,13 +40,11 @@ fn create_tx_with_input(prevout_hash: [u8; 32], prevout_index: u32) -> Transacti
 #[test]
 fn test_package_relay_creation() {
     let _relay = PackageRelay::new();
-    assert!(true);
 }
 
 #[test]
 fn test_package_relay_default() {
     let _relay = PackageRelay::default();
-    assert!(true);
 }
 
 #[test]
@@ -79,7 +77,7 @@ fn test_transaction_package_empty() {
     let result = TransactionPackage::new(vec![]);
     assert!(result.is_err());
     match result.unwrap_err() {
-        PackageError::EmptyPackage => assert!(true),
+        PackageError::EmptyPackage => {}
         _ => panic!("Expected EmptyPackage error"),
     }
 }
@@ -132,7 +130,7 @@ fn test_transaction_package_ordering_invalid() {
     let result = TransactionPackage::new(vec![child_tx, parent_tx]);
     assert!(result.is_err());
     match result.unwrap_err() {
-        PackageError::InvalidOrder => assert!(true),
+        PackageError::InvalidOrder => {}
         _ => panic!("Expected InvalidOrder error"),
     }
 }
@@ -171,7 +169,7 @@ fn test_package_relay_validate_package_size() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        PackageRejectReason::TooManyTransactions => assert!(true),
+        PackageRejectReason::TooManyTransactions => {}
         _ => panic!("Expected TooManyTransactions"),
     }
 }
@@ -187,7 +185,7 @@ fn test_package_relay_validate_package_duplicates() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        PackageRejectReason::DuplicateTransactions => assert!(true),
+        PackageRejectReason::DuplicateTransactions => {}
         _ => panic!("Expected DuplicateTransactions"),
     }
 }
@@ -307,8 +305,8 @@ fn test_package_status_variants() {
 
     for status in statuses {
         match status {
-            PackageStatus::Pending => assert!(true),
-            PackageStatus::Accepted => assert!(true),
+            PackageStatus::Pending => {}
+            PackageStatus::Accepted => {}
             PackageStatus::Rejected { reason } => {
                 assert_eq!(reason, PackageRejectReason::TooManyTransactions);
             }
@@ -329,12 +327,12 @@ fn test_package_reject_reason_variants() {
 
     for reason in reasons {
         match reason {
-            PackageRejectReason::TooManyTransactions => assert!(true),
-            PackageRejectReason::WeightExceedsLimit => assert!(true),
-            PackageRejectReason::FeeRateTooLow => assert!(true),
-            PackageRejectReason::InvalidOrder => assert!(true),
-            PackageRejectReason::DuplicateTransactions => assert!(true),
-            PackageRejectReason::InvalidStructure => assert!(true),
+            PackageRejectReason::TooManyTransactions => {}
+            PackageRejectReason::WeightExceedsLimit => {}
+            PackageRejectReason::FeeRateTooLow => {}
+            PackageRejectReason::InvalidOrder => {}
+            PackageRejectReason::DuplicateTransactions => {}
+            PackageRejectReason::InvalidStructure => {}
         }
     }
 }

@@ -37,7 +37,6 @@ async fn test_blockchain_api_creation() {
     let (_temp_dir, storage) = create_test_storage();
     let _api = BlockchainApi::new(storage);
     // Should create successfully
-    assert!(true);
 }
 
 #[tokio::test]

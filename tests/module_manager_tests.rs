@@ -29,7 +29,6 @@ async fn test_module_manager_new() {
 
     let manager = ModuleManager::new(&modules_dir, &data_dir, &socket_dir);
     // Manager should be created successfully
-    assert!(true);
 }
 
 #[tokio::test]
@@ -42,7 +41,6 @@ async fn test_module_manager_with_config() {
     let config = blvm_node::config::ModuleResourceLimitsConfig::default();
     let manager = ModuleManager::with_config(&modules_dir, &data_dir, &socket_dir, Some(&config));
     // Manager should be created with config
-    assert!(true);
 }
 
 #[tokio::test]
@@ -82,7 +80,6 @@ async fn test_module_manager_event_manager() {
     let event_manager = manager.event_manager();
 
     // Event manager should be accessible
-    assert!(true);
 }
 
 #[tokio::test]

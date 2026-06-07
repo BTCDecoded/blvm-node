@@ -285,28 +285,47 @@ impl MiningRpc {
 
         // Publish BlockTemplateUpdated for module subscribers
         if let Some(ref ep) = self.event_publisher {
-            let prev_hash = prev_header.prev_block_hash;
-            let tx_count = template.transactions.len();
-            ep.publish_block_template_updated(&prev_hash, template_block_height, tx_count)
-                .await;
+            if let Some(tip_hash) = self
+                .storage
+                .as_ref()
+                .and_then(|s| s.chain().get_tip_hash().ok().flatten())
+            {
+                let tx_count = template.transactions.len();
+                ep.publish_block_template_updated(&tip_hash, template_block_height, tx_count)
+                    .await;
+            }
         }
 
         // 6. Convert to JSON-RPC format (BIP 22/23)
-        self.template_to_json_rpc(&template, &prev_header, template_block_height)
+        let tip_hash = if let Some(ref storage) = self.storage {
+            storage
+                .chain()
+                .get_tip_hash()
+                .map_err(|e| RpcError::internal_error(format!("Failed to get tip hash: {e}")))?
+                .ok_or_else(|| RpcError::internal_error("No chain tip hash".to_string()))?
+        } else {
+            return Err(RpcError::internal_error(
+                "getblocktemplate requires storage".to_string(),
+            ));
+        };
+
+        self.template_to_json_rpc(&template, template_block_height, &tip_hash)
     }
 
     /// Convert BlockTemplate to JSON-RPC format
     fn template_to_json_rpc(
         &self,
         template: &blvm_protocol::mining::BlockTemplate,
-        prev_header: &BlockHeader,
         height: Natural,
+        tip_hash: &blvm_protocol::Hash,
     ) -> RpcResult<Value> {
-        // Convert previous block hash to hex (big-endian)
-        let prev_hash_hex = hex::encode(prev_header.prev_block_hash);
+        // BIP22/ckpool: hash of the block we build on top of (current chain tip).
+        let prev_hash_hex = crate::storage::hashing::hash_to_rpc_hex(tip_hash);
 
-        // Convert target to hex (64 characters, big-endian)
-        let target_hex = format!("{:064x}", template.target);
+        // Bitcoin Core `hashTarget.GetHex()` — full 256-bit target from nBits.
+        let target_hex = blvm_protocol::pow::expand_target(template.header.bits)
+            .map(|t| t.gbt_target_hex())
+            .unwrap_or_else(|_| format!("{:064x}", template.target));
 
         // Convert bits to hex (8 characters)
         let bits_hex = format!("{:08x}", template.header.bits);
@@ -924,13 +943,19 @@ impl MiningRpc {
         // Full attach path: queue for the main run loop (regtest mining + any submitblock user).
         if let Some(ref nm) = self.network_manager {
             if let Some(ref storage) = self.storage {
-                if let Ok(Some(tip)) = storage.chain().get_tip_hash() {
-                    if block.header.prev_block_hash != tip {
-                        return Err(RpcError::invalid_params(
-                            "submitblock: prev_block_hash does not match current chain tip"
-                                .to_string(),
-                        ));
-                    }
+                let tip = storage
+                    .chain()
+                    .get_tip_hash()
+                    .map_err(|e| RpcError::internal_error(format!("Failed to get chain tip: {e}")))?
+                    .ok_or_else(|| {
+                        RpcError::internal_error(
+                            "submitblock: chain not initialized (no tip)".to_string(),
+                        )
+                    })?;
+                if block.header.prev_block_hash != tip {
+                    return Err(RpcError::invalid_params(
+                        "submitblock: prev_block_hash does not match current chain tip".to_string(),
+                    ));
                 }
             }
             let queued_len = block_bytes.len();
@@ -957,7 +982,7 @@ impl MiningRpc {
             network_time,
             median_time_past: 0,
         });
-        let network = blvm_protocol::types::Network::Mainnet;
+        let network = self.consensus_network_from_storage();
 
         match self.consensus.validate_block_with_time_context(
             &block,

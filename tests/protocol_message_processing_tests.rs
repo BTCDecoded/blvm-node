@@ -24,7 +24,6 @@ async fn test_protocol_message_processing_setup() {
 
     // Verify dependencies are set
     // (NetworkManager doesn't expose these, but we can verify it was created)
-    assert!(true); // If we got here, setup worked
 }
 
 #[tokio::test]

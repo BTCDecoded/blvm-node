@@ -26,7 +26,6 @@ async fn test_utxo_commitments_client_creation() {
     let _client = UtxoCommitmentsClient::new(network_manager_arc);
 
     // Should create successfully
-    assert!(true);
 }
 
 #[cfg(feature = "utxo-commitments")]
@@ -78,5 +77,4 @@ async fn test_utxo_commitments_client_get_peer_ids() {
 fn test_utxo_commitments_feature_not_enabled() {
     // When utxo-commitments feature is not enabled, these types should not be available
     // This test verifies the feature gating works correctly
-    assert!(true);
 }

@@ -13,7 +13,6 @@ fn test_event_publisher_creation() {
     let _publisher = EventPublisher::new(event_manager);
 
     // Should create successfully
-    assert!(true);
 }
 
 #[tokio::test]
@@ -89,5 +88,4 @@ fn test_event_publisher_basic_operations() {
     let _publisher = EventPublisher::new(event_manager);
 
     // Basic test - just verify creation works
-    assert!(true);
 }

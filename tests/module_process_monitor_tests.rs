@@ -9,7 +9,6 @@ fn test_monitor_creation() {
     let (crash_tx, _crash_rx) = mpsc::unbounded_channel();
     let _monitor = ModuleProcessMonitor::new(crash_tx);
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
@@ -17,7 +16,6 @@ fn test_monitor_with_interval() {
     let (crash_tx, _crash_rx) = mpsc::unbounded_channel();
     let monitor = ModuleProcessMonitor::new(crash_tx).with_interval(Duration::from_secs(10));
     // Should create successfully with custom interval
-    assert!(true);
 }
 
 #[test]
@@ -31,8 +29,8 @@ fn test_module_health_variants() {
 
     for health in health_variants {
         match health {
-            ModuleHealth::Healthy => assert!(true),
-            ModuleHealth::Unresponsive => assert!(true),
+            ModuleHealth::Healthy => {}
+            ModuleHealth::Unresponsive => {}
             ModuleHealth::Crashed(msg) => assert!(!msg.is_empty()),
         }
     }
@@ -44,7 +42,7 @@ fn test_module_health_clone() {
     let cloned = health.clone();
 
     match (health, cloned) {
-        (ModuleHealth::Healthy, ModuleHealth::Healthy) => assert!(true),
+        (ModuleHealth::Healthy, ModuleHealth::Healthy) => {}
         _ => panic!("Health should clone correctly"),
     }
 }

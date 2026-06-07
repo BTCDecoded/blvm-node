@@ -24,7 +24,6 @@ mod tests {
         let _node_id = transport.node_id();
 
         // Node ID should be a valid endpoint ID
-        assert!(true);
     }
 
     #[tokio::test]
@@ -33,7 +32,6 @@ mod tests {
         let _secret_key = transport.secret_key();
 
         // Secret key should be available
-        assert!(true);
     }
 
     #[tokio::test]

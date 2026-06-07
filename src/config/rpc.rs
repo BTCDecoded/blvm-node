@@ -93,8 +93,7 @@ pub struct RpcAuthConfig {
     pub required: bool,
 
     /// Valid authentication tokens (env RPC_AUTH_TOKENS, token_file, or this field).
-    /// These tokens have read-only access when `admin_tokens` is also set; otherwise
-    /// all tokens are treated as admin for backward compatibility.
+    /// Bearer tokens are read-only unless also listed in `admin_tokens`.
     #[serde(default)]
     pub tokens: Vec<String>,
 
@@ -102,16 +101,24 @@ pub struct RpcAuthConfig {
     #[serde(default)]
     pub token_file: Option<String>,
 
-    /// Tokens with admin privileges (may call destructive methods: stop, loadmodule,
-    /// invalidateblock, pruneblockchain, etc.). When non-empty, tokens listed in
-    /// `tokens` / `token_file` are restricted to read-only methods. When empty,
-    /// all authenticated tokens are treated as admin (backward-compatible default).
+    /// Tokens with admin privileges (mining: getblocktemplate, submitblock, generatetoaddress;
+    /// destructive: stop, loadmodule, invalidateblock, etc.). Bearer tokens in `tokens` /
+    /// `token_file` are read-only unless listed here. `[rpc_auth].password` is always
+    /// registered as admin when HTTP Basic auth is enabled (ckpool / Bitcoin Core compat).
     #[serde(default)]
     pub admin_tokens: Vec<String>,
 
     /// Valid certificate fingerprints (for certificate-based auth)
     #[serde(default)]
     pub certificates: Vec<String>,
+
+    /// Bitcoin Core-compatible RPC username for HTTP Basic auth (e.g. ckpool `auth`).
+    #[serde(default)]
+    pub username: Option<String>,
+
+    /// Bitcoin Core-compatible RPC password for HTTP Basic auth (e.g. ckpool `pass`).
+    #[serde(default)]
+    pub password: Option<String>,
 
     /// Default rate limit (burst, requests per second)
     #[serde(default = "default_rate_limit_burst")]
@@ -138,6 +145,8 @@ impl Default for RpcAuthConfig {
             token_file: None,
             admin_tokens: Vec::new(),
             certificates: Vec::new(),
+            username: None,
+            password: None,
             rate_limit_burst: 100,
             rate_limit_rate: 10,
             rate_limit_when_auth_disabled: true,
@@ -156,6 +165,8 @@ impl RpcAuthConfig {
             token_file: None,
             admin_tokens: Vec::new(),
             certificates: Vec::new(),
+            username: None,
+            password: None,
             rate_limit_burst: burst,
             rate_limit_rate: rate,
             rate_limit_when_auth_disabled: true,

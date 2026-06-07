@@ -13,14 +13,12 @@ fn create_test_hash(byte: u8) -> Hash {
 fn test_relay_manager_creation() {
     let _manager = RelayManager::new();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
 fn test_relay_manager_default() {
     let _manager = RelayManager::default();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
@@ -43,7 +41,6 @@ fn test_relay_manager_with_policies() {
     };
     let _manager = RelayManager::with_policies(policies);
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
@@ -148,7 +145,6 @@ fn test_relay_policies_disable_block_relay() {
     };
     let _manager = RelayManager::with_policies(policies);
     // Just verify manager was created with custom policies
-    assert!(true);
 }
 
 #[test]
@@ -160,7 +156,6 @@ fn test_relay_policies_disable_tx_relay() {
     };
     let _manager = RelayManager::with_policies(policies);
     // Just verify manager was created with custom policies
-    assert!(true);
 }
 
 #[test]

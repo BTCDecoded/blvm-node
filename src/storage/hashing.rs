@@ -77,6 +77,28 @@ pub fn hash160(data: &[u8]) -> [u8; 20] {
     ripemd160(&sha256_hash)
 }
 
+/// Internal block hash (SHA256d digest order) → Bitcoin RPC hex (Core `GetHex()`).
+pub fn hash_to_rpc_hex(hash: &[u8; 32]) -> String {
+    let mut display = *hash;
+    display.reverse();
+    hex::encode(display)
+}
+
+/// Bitcoin RPC hex → internal digest order (inverse of [`hash_to_rpc_hex`]).
+pub fn hash_from_rpc_hex(hex_str: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(hex_str.trim()).map_err(|e| format!("invalid hex: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "hash must be 64 hex characters (32 bytes), got {}",
+            hex_str.len()
+        ));
+    }
+    let mut internal = [0u8; 32];
+    internal.copy_from_slice(&bytes);
+    internal.reverse();
+    Ok(internal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +163,20 @@ mod tests {
         let hash1 = double_sha256(data);
         let hash2 = double_sha256(data);
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_mainnet_genesis_hash_rpc_roundtrip() {
+        let internal = [
+            0x6f, 0xe2, 0x8c, 0x0a, 0xb6, 0xf1, 0xb3, 0x72, 0xc1, 0xa6, 0xa2, 0x46, 0xae, 0x63,
+            0xf7, 0x4f, 0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c, 0x68, 0xd6, 0x19, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let rpc = hash_to_rpc_hex(&internal);
+        assert_eq!(
+            rpc,
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+        );
+        assert_eq!(hash_from_rpc_hex(&rpc).unwrap(), internal);
     }
 }

@@ -17,7 +17,6 @@ fn create_test_sandbox() -> (TempDir, FileSystemSandbox) {
 fn test_filesystem_sandbox_creation() {
     let (_temp_dir, _sandbox) = create_test_sandbox();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]

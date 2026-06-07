@@ -4,6 +4,7 @@ use blvm_node::rpc::*;
 use std::net::SocketAddr;
 use tokio::time::{timeout, Duration};
 mod common;
+use common::{setup_mining_chain, DIFFICULTY_INTERVAL};
 
 #[tokio::test]
 async fn test_rpc_manager_creation() {
@@ -39,9 +40,8 @@ async fn test_blockchain_rpc() {
         assert!(block_result.is_err());
     }
 
-    // Test getblockhash
-    let hash = blockchain.get_block_hash(0).await.unwrap();
-    assert!(hash.is_string());
+    // Test getblockhash (requires storage)
+    assert!(blockchain.get_block_hash(0).await.is_err());
 
     // Test getrawtransaction
     let tx = blockchain
@@ -80,7 +80,6 @@ async fn test_mining_rpc() {
     let result = mining.get_block_template(&params).await;
     // Result may be error (no dependencies) or success (with dependencies)
     // This is tested more thoroughly in mining_rpc_tests.rs
-    assert!(true);
 }
 
 #[tokio::test]
@@ -89,7 +88,6 @@ async fn test_rpc_server_creation() {
     let server = server::RpcServer::new(addr);
 
     // Test that server can be created
-    assert!(true); // If we get here, creation succeeded
 }
 
 #[tokio::test]
@@ -126,10 +124,8 @@ async fn test_rpc_server_initialization() {
     let server = server::RpcServer::new(addr);
 
     // Test server creation
-    assert!(true); // If we get here, creation succeeded
 
     // Test server creation
-    assert!(true); // If we get here, creation succeeded
 }
 
 #[tokio::test]
@@ -251,11 +247,18 @@ async fn test_blockchain_rpc_getblock() {
 async fn test_blockchain_rpc_getblockhash() {
     let blockchain = blockchain::BlockchainRpc::new();
 
-    // Test getblockhash for genesis block
-    let hash = blockchain.get_block_hash(0).await.unwrap();
-    assert!(hash.is_string());
+    // Without storage, getblockhash must error (no stub hash).
+    let result = blockchain.get_block_hash(0).await;
+    assert!(result.is_err());
 
-    // Test getblockhash for non-existent height
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let storage = std::sync::Arc::new(blvm_node::storage::Storage::new(temp_dir.path()).unwrap());
+    let blockchain = blockchain::BlockchainRpc::with_dependencies(storage.clone());
+    common::setup_mining_chain(&storage, 2).unwrap();
+
+    let hash = blockchain.get_block_hash(0).await.unwrap();
+    assert!(hash.as_str().unwrap().len() == 64);
+
     let result = blockchain.get_block_hash(999999).await;
     assert!(result.is_err());
 }
@@ -424,7 +427,6 @@ async fn test_mining_rpc_getmininginfo() {
 #[tokio::test]
 async fn test_mining_rpc_getblocktemplate() {
     use blvm_node::storage::Storage;
-    use blvm_protocol::BlockHeader;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -434,35 +436,13 @@ async fn test_mining_rpc_getblocktemplate() {
     let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let mining = mining::MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    // Set up minimal chain (from mining_rpc_tests helper)
-    // Initialize with genesis block
-    let genesis_header = BlockHeader {
-        version: 1,
-        prev_block_hash: [0u8; 32],
-        merkle_root: [0u8; 32],
-        timestamp: 1231006505,
-        bits: 0x1400ffff,
-        nonce: 2083236893,
-    };
-    storage.chain().initialize(&genesis_header).unwrap();
+    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
 
-    // Test getblocktemplate
-    // Note: May fail with "Target too large" if we have fewer than 2016 headers (expected)
     let params = serde_json::json!([]);
-    let result = mining.get_block_template(&params).await;
-    let template = match result {
-        Ok(t) => t,
-        Err(e) => {
-            // If it fails with "Target too large" or "Insufficient headers", skip the test
-            // This is expected behavior when we have fewer than 2016 headers
-            if e.to_string().contains("Target too large")
-                || e.to_string().contains("Insufficient headers")
-            {
-                return; // Skip test - expected behavior with few headers
-            }
-            panic!("Unexpected error: {e:?}");
-        }
-    };
+    let template = mining
+        .get_block_template(&params)
+        .await
+        .unwrap_or_else(|e| panic!("getblocktemplate failed: {e:?}"));
 
     // Verify block template structure
     assert!(template.get("version").is_some());

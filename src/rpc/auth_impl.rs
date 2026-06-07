@@ -145,6 +145,9 @@ pub struct RpcAuthManager {
     /// When `true`, every authenticated token is treated as admin regardless of `admin_tokens`.
     /// Defaults to `false`. Prefer explicit admin token registration instead.
     all_tokens_are_admin: bool,
+    /// Optional HTTP Basic credentials (Bitcoin Core / ckpool `rpcuser` + `rpcpassword`).
+    basic_auth_user: Arc<Mutex<Option<String>>>,
+    basic_auth_password: Arc<Mutex<Option<String>>>,
 }
 
 impl RpcAuthManager {
@@ -162,6 +165,8 @@ impl RpcAuthManager {
             auth_failure_tracker: AuthFailureTracker::new(),
             admin_tokens: Arc::new(Mutex::new(HashSet::new())),
             all_tokens_are_admin: false,
+            basic_auth_user: Arc::new(Mutex::new(None)),
+            basic_auth_password: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -179,7 +184,15 @@ impl RpcAuthManager {
             auth_failure_tracker: AuthFailureTracker::new(),
             admin_tokens: Arc::new(Mutex::new(HashSet::new())),
             all_tokens_are_admin: false,
+            basic_auth_user: Arc::new(Mutex::new(None)),
+            basic_auth_password: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Configure Bitcoin Core-style HTTP Basic credentials (ckpool, legacy tools).
+    pub async fn set_basic_auth(&self, username: Option<String>, password: String) {
+        *self.basic_auth_user.lock().await = username;
+        *self.basic_auth_password.lock().await = Some(password);
     }
 
     /// Grant every authenticated token admin privileges, regardless of `admin_tokens`.
@@ -308,6 +321,20 @@ impl RpcAuthManager {
         headers: &HeaderMap,
         client_addr: SocketAddr,
     ) -> AuthResult {
+        if self.auth_failure_tracker.is_blocked(client_addr).await {
+            SecurityEvent::RepeatedAuthFailures {
+                client_addr,
+                failure_count: self.auth_failure_tracker.failure_count(client_addr).await,
+                time_window_seconds: self.auth_failure_tracker.time_window_seconds(),
+            }
+            .log();
+            return AuthResult {
+                user_id: None,
+                requires_auth: self.auth_required,
+                error: Some("Too many authentication failures; try again later".to_string()),
+            };
+        }
+
         // Try token-based authentication first
         if let Some(auth_header) = headers.get("authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
@@ -341,21 +368,71 @@ impl RpcAuthManager {
                             error: None,
                         };
                     } else {
-                        // Record authentication failure for brute force detection
                         self.auth_failure_tracker.record_failure(client_addr).await;
-
                         SecurityEvent::AuthFailure {
                             client_addr,
                             reason: "Invalid authentication token".to_string(),
                         }
                         .log();
-
                         return AuthResult {
                             user_id: None,
                             requires_auth: self.auth_required,
                             error: Some("Invalid authentication token".to_string()),
                         };
                     }
+                } else if let Some(b64) = auth_str.strip_prefix("Basic ") {
+                    if let Some((user, pass)) = decode_http_basic_credentials(b64.trim()) {
+                        let expected_user = self.basic_auth_user.lock().await.clone();
+                        let expected_pass = self.basic_auth_password.lock().await.clone();
+                        if let Some(ref expected_password) = expected_pass {
+                            let user_ok = expected_user
+                                .as_ref()
+                                .map(|u| constant_time_eq(u.as_bytes(), user.as_bytes()))
+                                .unwrap_or(true);
+                            if user_ok
+                                && constant_time_eq(expected_password.as_bytes(), pass.as_bytes())
+                            {
+                                let token = AuthToken::new(pass.clone());
+                                let user_id = UserId::Token(token);
+                                debug!("HTTP Basic authentication successful for {}", client_addr);
+                                SecurityEvent::AuthSuccess {
+                                    user_id: format!("{user_id:?}"),
+                                    client_addr,
+                                    auth_method: "basic".to_string(),
+                                }
+                                .log();
+                                return AuthResult {
+                                    user_id: Some(user_id),
+                                    requires_auth: self.auth_required,
+                                    error: None,
+                                };
+                            }
+                        }
+                    }
+
+                    self.auth_failure_tracker.record_failure(client_addr).await;
+                    SecurityEvent::AuthFailure {
+                        client_addr,
+                        reason: "Invalid HTTP Basic credentials".to_string(),
+                    }
+                    .log();
+                    return AuthResult {
+                        user_id: None,
+                        requires_auth: self.auth_required,
+                        error: Some("Invalid authentication credentials".to_string()),
+                    };
+                } else {
+                    self.auth_failure_tracker.record_failure(client_addr).await;
+                    SecurityEvent::AuthFailure {
+                        client_addr,
+                        reason: "Invalid authentication token".to_string(),
+                    }
+                    .log();
+                    return AuthResult {
+                        user_id: None,
+                        requires_auth: self.auth_required,
+                        error: Some("Invalid authentication token".to_string()),
+                    };
                 }
             }
         }
@@ -633,6 +710,59 @@ impl SecurityEvent {
     }
 }
 
+/// Decode `Authorization: Basic <base64>` into `(username, password)`.
+fn decode_http_basic_credentials(b64: &str) -> Option<(String, String)> {
+    let decoded = decode_base64_standard(b64.as_bytes()).ok()?;
+    let creds = std::str::from_utf8(&decoded).ok()?;
+    let (user, pass) = creds.split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
+}
+
+fn decode_base64_standard(input: &[u8]) -> Result<Vec<u8>, ()> {
+    const DECODE: [i8; 128] = {
+        let mut table = [-1i8; 128];
+        let mut i = 0u8;
+        while i < 26 {
+            table[(b'A' + i) as usize] = i as i8;
+            table[(b'a' + i) as usize] = i as i8 + 26;
+            i += 1;
+        }
+        let mut i = 0u8;
+        while i < 10 {
+            table[(b'0' + i) as usize] = i as i8 + 52;
+            i += 1;
+        }
+        table[b'+' as usize] = 62;
+        table[b'/' as usize] = 63;
+        table
+    };
+
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+
+    for &byte in input {
+        if byte == b'=' {
+            break;
+        }
+        if byte >= 128 {
+            return Err(());
+        }
+        let val = DECODE[byte as usize];
+        if val < 0 {
+            continue;
+        }
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
 /// Tracks authentication failures to detect brute force attacks
 struct AuthFailureTracker {
     failures: Arc<Mutex<HashMap<SocketAddr, Vec<u64>>>>, // addr -> timestamps
@@ -647,6 +777,28 @@ impl AuthFailureTracker {
             failure_threshold: 5,
             time_window_seconds: 300, // 5 minutes
         }
+    }
+
+    fn time_window_seconds(&self) -> u64 {
+        self.time_window_seconds
+    }
+
+    async fn failure_count(&self, addr: SocketAddr) -> u32 {
+        let now = current_timestamp();
+        let failures = self.failures.lock().await;
+        failures
+            .get(&addr)
+            .map(|timestamps| {
+                timestamps
+                    .iter()
+                    .filter(|&&t| now.saturating_sub(t) < self.time_window_seconds)
+                    .count() as u32
+            })
+            .unwrap_or(0)
+    }
+
+    async fn is_blocked(&self, addr: SocketAddr) -> bool {
+        self.failure_count(addr).await >= self.failure_threshold
     }
 
     async fn record_failure(&self, addr: SocketAddr) -> bool {

@@ -9,14 +9,12 @@ use blvm_node::node::metrics::{
 fn test_metrics_collector_creation() {
     let collector = MetricsCollector::new();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
 fn test_metrics_collector_default() {
     let _collector = MetricsCollector::default();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]

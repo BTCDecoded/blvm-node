@@ -9,14 +9,12 @@ use std::time::Duration;
 fn test_performance_profiler_creation() {
     let profiler = PerformanceProfiler::new(100);
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
 fn test_performance_profiler_default() {
     let profiler = PerformanceProfiler::default();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]

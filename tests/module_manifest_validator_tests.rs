@@ -27,14 +27,12 @@ fn create_valid_manifest() -> ModuleManifest {
 fn test_manifest_validator_new() {
     let validator = ManifestValidator::new();
     // Validator should be created
-    assert!(true);
 }
 
 #[test]
 fn test_manifest_validator_default() {
     let validator = ManifestValidator::default();
     // Default should work
-    assert!(true);
 }
 
 #[test]

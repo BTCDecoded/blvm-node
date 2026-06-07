@@ -19,7 +19,6 @@ fn create_test_sandbox() -> (TempDir, ProcessSandbox) {
 fn test_process_sandbox_creation() {
     let (_temp_dir, _sandbox) = create_test_sandbox();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]

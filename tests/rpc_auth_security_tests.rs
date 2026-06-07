@@ -50,6 +50,76 @@ async fn test_auth_bypass_attempt_invalid_token() {
 }
 
 #[tokio::test]
+async fn test_auth_lockout_after_repeated_failures() {
+    let manager = RpcAuthManager::new(true);
+    let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer wrong-token".parse().unwrap());
+
+    for _ in 0..5 {
+        let result = manager.authenticate_request(&headers, addr).await;
+        assert!(result.user_id.is_none());
+    }
+
+    let blocked = manager.authenticate_request(&headers, addr).await;
+    assert!(blocked.user_id.is_none());
+    assert!(
+        blocked
+            .error
+            .as_ref()
+            .is_some_and(|e| e.contains("Too many authentication failures")),
+        "expected lockout message, got {:?}",
+        blocked.error
+    );
+}
+
+#[tokio::test]
+async fn test_ckpool_basic_auth_not_admin_without_admin_tokens() {
+    let manager = RpcAuthManager::new(true);
+    manager
+        .set_basic_auth(Some("ckpool".to_string()), "pool-secret".to_string())
+        .await;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        "Basic Y2twb29sOnBvb2wtc2VjcmV0".parse().unwrap(), // ckpool:pool-secret
+    );
+    let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+    let auth = manager.authenticate_request(&headers, addr).await;
+    assert!(auth.user_id.is_some(), "Basic auth should succeed");
+    assert!(
+        !manager.is_user_admin(auth.user_id.as_ref().unwrap()).await,
+        "password-only Basic auth must not be admin when admin_tokens is empty"
+    );
+}
+
+#[tokio::test]
+async fn test_ckpool_basic_auth_admin_when_password_in_admin_tokens() {
+    let manager = RpcAuthManager::new(true);
+    manager
+        .set_basic_auth(Some("ckpool".to_string()), "pool-secret".to_string())
+        .await;
+    manager
+        .add_admin_token("pool-secret".to_string())
+        .await
+        .unwrap();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        "Basic Y2twb29sOnBvb2wtc2VjcmV0".parse().unwrap(),
+    );
+    let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+    let auth = manager.authenticate_request(&headers, addr).await;
+    assert!(auth.user_id.is_some());
+    assert!(
+        manager.is_user_admin(auth.user_id.as_ref().unwrap()).await,
+        "password in admin_tokens must grant admin for Basic auth"
+    );
+}
+
+#[tokio::test]
 async fn test_auth_valid_token_accepted() {
     let manager = RpcAuthManager::new(true);
     let token_str = "valid-token".to_string();

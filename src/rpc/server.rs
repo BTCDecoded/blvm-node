@@ -52,9 +52,10 @@ fn admin_rpc_methods() -> &'static HashSet<&'static str> {
             "setban",
             "clearbanned",
             "setnetworkactive",
-            // Mining (template generation is privileged)
+            // Mining (template generation and regtest block creation are privileged)
             "getblocktemplate",
             "submitblock",
+            "generatetoaddress",
             // Transaction broadcast and mempool management (can affect network propagation)
             "sendrawtransaction",
             "createrawtransaction",
@@ -2033,9 +2034,8 @@ mod tests {
         let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
         let params = json!([0]);
         let result = server.call_method("getblockhash", params).await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.is_string());
+        // Default test server has no storage; real nodes resolve height via blockstore.
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -2364,5 +2364,138 @@ mod tests {
         // Both should succeed
         assert!(responses[0]["result"].is_object());
         assert!(responses[1]["result"].is_number());
+    }
+
+    /// ckpool-style Basic auth authenticates but is not admin unless password ∈ admin_tokens.
+    #[tokio::test]
+    async fn test_dispatch_getblocktemplate_forbidden_for_ckpool_basic_without_admin() {
+        use crate::rpc::auth::RpcAuthManager;
+        use hyper::HeaderMap;
+        use std::sync::Arc;
+
+        let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+        let auth = Arc::new(RpcAuthManager::new(true));
+        auth.set_basic_auth(Some("ckpool".to_string()), "s3cret".to_string())
+            .await;
+
+        let server = Arc::new(RpcServer::with_auth("127.0.0.1:0".parse().unwrap(), auth));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Basic Y2twb29sOnMzY3JldA==".parse().unwrap(), // ckpool:s3cret
+        );
+        let body = r#"{"jsonrpc":"2.0","method":"getblocktemplate","params":[],"id":1}"#;
+
+        let outcome =
+            RpcServer::dispatch_json_rpc_post_body(Arc::clone(&server), &headers, addr, body).await;
+
+        match outcome {
+            DispatchJsonRpcPostOutcome::Error { status, message } => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(message.contains("admin privileges"));
+            }
+            DispatchJsonRpcPostOutcome::Success { .. } => {
+                panic!("expected FORBIDDEN for ckpool Basic without admin_tokens, got Success");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_getblocktemplate_allowed_via_build_auth_manager_config() {
+        use crate::config::RpcAuthConfig;
+        use crate::rpc::RpcManager;
+        use hyper::HeaderMap;
+        use std::sync::Arc;
+
+        let auth = RpcManager::build_auth_manager(RpcAuthConfig {
+            required: true,
+            username: Some("ckpool".to_string()),
+            password: Some("s3cret".to_string()),
+            ..Default::default()
+        })
+        .await;
+
+        let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+        let server = Arc::new(RpcServer::with_auth("127.0.0.1:0".parse().unwrap(), auth));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Basic Y2twb29sOnMzY3JldA==".parse().unwrap(),
+        );
+        let body = r#"{"jsonrpc":"2.0","method":"getblocktemplate","params":[],"id":1}"#;
+
+        let outcome =
+            RpcServer::dispatch_json_rpc_post_body(Arc::clone(&server), &headers, addr, body).await;
+
+        match outcome {
+            DispatchJsonRpcPostOutcome::Success { .. } => {}
+            DispatchJsonRpcPostOutcome::Error { status, message } => {
+                panic!(
+                    "with_auth_config-style password must pass RBAC; got HTTP {status}: {message}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_getblocktemplate_allowed_when_password_is_admin_token() {
+        use crate::rpc::auth::RpcAuthManager;
+        use hyper::HeaderMap;
+        use std::sync::Arc;
+
+        let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+        let auth = Arc::new(RpcAuthManager::new(true));
+        auth.set_basic_auth(Some("ckpool".to_string()), "s3cret".to_string())
+            .await;
+        auth.add_admin_token("s3cret".to_string()).await.unwrap();
+
+        let server = Arc::new(RpcServer::with_auth("127.0.0.1:0".parse().unwrap(), auth));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Basic Y2twb29sOnMzY3JldA==".parse().unwrap(),
+        );
+        let body = r#"{"jsonrpc":"2.0","method":"getblocktemplate","params":[],"id":1}"#;
+
+        let outcome =
+            RpcServer::dispatch_json_rpc_post_body(Arc::clone(&server), &headers, addr, body).await;
+
+        match outcome {
+            DispatchJsonRpcPostOutcome::Success { .. } => {}
+            DispatchJsonRpcPostOutcome::Error { status, message } => {
+                panic!(
+                    "expected Success (handler may error on uninitialized chain), got HTTP {status}: {message}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_generatetoaddress_forbidden_for_read_only_token() {
+        use crate::rpc::auth::RpcAuthManager;
+        use hyper::HeaderMap;
+        use std::sync::Arc;
+
+        let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+        let auth = Arc::new(RpcAuthManager::new(true));
+        auth.add_token("read-only".to_string()).await.unwrap();
+
+        let server = Arc::new(RpcServer::with_auth("127.0.0.1:0".parse().unwrap(), auth));
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer read-only".parse().unwrap());
+        let body = r#"{"jsonrpc":"2.0","method":"generatetoaddress","params":[1,"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"],"id":1}"#;
+
+        let outcome =
+            RpcServer::dispatch_json_rpc_post_body(Arc::clone(&server), &headers, addr, body).await;
+
+        match outcome {
+            DispatchJsonRpcPostOutcome::Error { status, message } => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(message.contains("admin privileges"));
+            }
+            DispatchJsonRpcPostOutcome::Success { .. } => {
+                panic!("generatetoaddress must be admin-gated for read-only Bearer tokens");
+            }
+        }
     }
 }

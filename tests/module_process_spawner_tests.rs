@@ -35,7 +35,6 @@ fn create_test_context() -> ModuleContext {
 fn test_spawner_creation() {
     let (_temp_dir, _spawner) = create_test_spawner();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
@@ -63,7 +62,6 @@ fn test_spawner_with_config() {
     let _spawner =
         ModuleProcessSpawner::with_config(&modules_dir, &data_dir, &socket_dir, Some(&config));
     // Should create successfully with custom config
-    assert!(true);
 }
 
 #[test]
@@ -121,7 +119,6 @@ fn test_spawner_resource_limits_config() {
         ModuleProcessSpawner::with_config(&modules_dir, &data_dir, &socket_dir, Some(&config));
 
     // Verify spawner was created with config
-    assert!(true);
 }
 
 #[test]

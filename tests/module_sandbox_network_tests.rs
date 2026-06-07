@@ -7,14 +7,12 @@ use blvm_node::module::traits::ModuleError;
 fn test_network_sandbox_creation() {
     let sandbox = NetworkSandbox::new();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]
 fn test_network_sandbox_default() {
     let sandbox = NetworkSandbox::default();
     // Should create successfully
-    assert!(true);
 }
 
 #[test]

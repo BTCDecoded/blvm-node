@@ -10,5 +10,4 @@ fn test_profiling_module_exists() {
     // Test that profiling functionality can be accessed if needed
     // Since the module is not exported, we just verify the test compiles
     // Actual profiling tests would need the module to be exported or tested via integration
-    assert!(true);
 }

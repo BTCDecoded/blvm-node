@@ -166,7 +166,6 @@ fn test_protocol_adapter_message_to_command() {
     let version_msg = create_test_version_message();
     let _serialized = ProtocolAdapter::serialize_message(&version_msg, TransportType::Tcp);
     // If serialization succeeds, command mapping works
-    assert!(true);
 }
 
 #[test]

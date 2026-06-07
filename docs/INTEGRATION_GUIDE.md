@@ -129,7 +129,7 @@ See `examples/wallet-integration.rs` for a complete example.
 
 ### Configuration
 
-`blvm.toml` uses **`NodeConfig`** (no `[network]` table). **RPC bind address** is set when starting the **`blvm`** binary (`--rpc-addr` / `BLVM_RPC_ADDR`). **`[rpc_auth]`** carries token / certificate auth and rate limits — not `port`, `bind`, or `username` / `password` (see [`RpcAuthConfig`](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/rpc.rs)).
+`blvm.toml` uses **`NodeConfig`** (no `[network]` table). **RPC bind address** is set when starting the **`blvm`** binary (`--rpc-addr` / `BLVM_RPC_ADDR`). **`[rpc_auth]`** carries Bearer tokens, optional HTTP Basic (`username` / `password` for ckpool), certificates, and rate limits — not `port`, `bind`, or `rpcallowip` (see [`RpcAuthConfig`](https://github.com/BTCDecoded/blvm-node/blob/main/src/config/rpc.rs)).
 
 ```toml
 listen_addr = "0.0.0.0:8333"
@@ -165,29 +165,80 @@ See `docs/HIGH_AVAILABILITY.md` for details.
 
 ### Required Methods
 
-- ✅ `getblocktemplate` - Get block template for mining
+- ✅ `getblocktemplate` - Get block template for mining (BIP22/23, `coinbasevalue` format)
 - ✅ `submitblock` - Submit mined block
 - ✅ `getmininginfo` - Mining statistics
+- ✅ `getbestblockhash` / `getblockcount` / `getblockhash` - Chain tip queries
+- ✅ `validateaddress` - Solo pool payout address checks (ckpool `-B` mode)
 - ✅ `estimatesmartfee` - Fee estimation
 
-### Configuration
+### ckpool (solo mining + Bitaxe / Stratum V1)
 
-Same schema as [Exchange](#configuration): set **`listen_addr` / `protocol_version` / `[rpc_auth]`** in `blvm.toml`. For pool infrastructure exposing JSON-RPC beyond localhost, pass **`--rpc-addr 0.0.0.0:8332`** (or the address your pool uses) to **`blvm`**. Restrict access with **`[rpc_auth]`** tokens and firewall rules. **Bitcoin Core** options such as **`rpcallowip`** / **`rpcwhitelist`** in **`bitcoin.conf`** are not `RpcAuthConfig` fields — use host firewall or reverse-proxy policy (and BLVM token auth).
+**Stack:** synced `blvm` node → ckpool (`-B` solo) → miners on `:3333`.
+
+1. **Node** (mainnet example):
 
 ```toml
 listen_addr = "0.0.0.0:8333"
 protocol_version = "BitcoinV1"
-max_peers = 100
 transport_preference = "tcponly"
 
 [rpc_auth]
 required = true
-tokens = []
+username = "ckpool"
+password = "change-me"
 ```
 
 ```bash
-blvm --config /path/to/blvm.toml --network mainnet --rpc-addr 0.0.0.0:8332
+blvm --config /path/to/blvm.toml --network mainnet --rpc-addr 127.0.0.1:8332
 ```
+
+`[rpc_auth].username` / `password` enable **HTTP Basic** auth (Bitcoin Core / ckpool `auth` + `pass`). The password is automatically granted **admin** RPC access (required for `getblocktemplate` / `submitblock`). Bearer tokens in `tokens = [...]` are read-only unless also listed in `admin_tokens`.
+
+Bind RPC to **loopback** (`--rpc-addr 127.0.0.1:8332`) — Basic auth is cleartext on the wire.
+
+Optional: load **`blvm-zmq`** and set `hashblock = "tcp://127.0.0.1:28332"` for ckpool `zmqblock` (faster template refresh than polling).
+
+2. **ckpool** (`ckpool.conf`):
+
+```json
+{
+  "btcd": [
+    {
+      "url": "127.0.0.1:8332",
+      "auth": "ckpool",
+      "pass": "change-me",
+      "notify": true
+    }
+  ],
+  "mindiff": 1,
+  "startdiff": 42
+}
+```
+
+```bash
+src/ckpool -B -c ckpool.conf
+```
+
+3. **Miners:** pool URL `host:3333`, username = payout address (`bc1…`), password = anything.
+
+**Regtest lab:** use `--network regtest` and RPC port `18332` (BLVM default). `getblocktemplate` works after `generatetoaddress` seeds the chain.
+
+**Smoke test** before starting ckpool:
+
+```bash
+curl -s -u ckpool:change-me -X POST http://127.0.0.1:8332 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"getblocktemplate","params":[{"rules":["segwit"]}],"id":1}'
+```
+
+Or run `examples/ckpool-solo/smoke-rpc.sh` against a live node. In-process regression tests live in `tests/ckpool_integration_tests.rs` (GBT, auth, `validateaddress`, chain-tip RPCs, Core-style block-hash hex, regtest `submitblock`).
+
+Block hashes in RPC responses (`getbestblockhash`, `getblockhash`, GBT `previousblockhash`, `getblockchaininfo.bestblockhash`, etc.) use Bitcoin Core display order (byte-reversed SHA256d digest), matching ckpool’s `hex2bin` + `swap_256` expectations.
+
+### Configuration (generic pools)
+
+Same schema as [Exchange](#configuration): set **`listen_addr` / `protocol_version` / `[rpc_auth]`** in `blvm.toml`. For pool infrastructure exposing JSON-RPC beyond localhost, pass **`--rpc-addr 0.0.0.0:8332`** (or the address your pool uses) to **`blvm`**. Restrict access with **`[rpc_auth]`** tokens and firewall rules. **Bitcoin Core** options such as **`rpcallowip`** / **`rpcwhitelist`** in **`bitcoin.conf`** are not `RpcAuthConfig` fields — use host firewall or reverse-proxy policy (and BLVM token auth).
 
 ### Integration Steps
 
@@ -244,7 +295,7 @@ blvm --config /path/to/blvm.toml --network mainnet --rpc-addr 127.0.0.1:8332
 
 **Scope:** **`bitcoin.conf`** is the **Bitcoin Core** configuration format. **BLVM never loads it natively** — use a converter to draft **`blvm.toml`**, then run **`blvm --config … --rpc-addr …`**.
 
-**RPC auth:** Core’s **`rpcuser`** / **`rpcpassword`** do **not** map 1:1 into BLVM. **`[rpc_auth]`** uses **tokens** (and optional certificate fingerprints), with **`Authorization: Bearer &lt;token&gt;`** on JSON-RPC. Plan a new secret (e.g. `openssl rand -hex 32`) or **`RPC_AUTH_TOKENS`**, not copy-paste of Core’s password alone unless you intentionally reuse that string as a single token.
+**RPC auth:** Core’s **`rpcuser`** / **`rpcpassword`** map to **`[rpc_auth].username`** / **`password`** for **HTTP Basic** (ckpool, `curl -u`, legacy tools). The password is auto-granted **admin** RPC access. Alternatively use **`[rpc_auth].tokens`** with **`Authorization: Bearer &lt;token&gt;`** (read-only unless also in **`admin_tokens`**). Generate a strong secret (`openssl rand -hex 32`) rather than reusing weak defaults.
 
 ### Automatic conversion
 
@@ -262,7 +313,7 @@ blvm config convert-core ~/.bitcoin/bitcoin.conf blvm.toml
 Review the output and **normalize to real `NodeConfig` TOML**:
 
 - Remove any **`[network]`** wrapper — use **top-level** `listen_addr`, `protocol_version`, `max_peers`, etc.
-- **Do not** keep **`username` / `password` / `port` / `bind` / `allowed_ips` under `[rpc_auth]`** — **`RpcAuthConfig`** only supports **`tokens`**, **`token_file`**, **`certificates`**, and rate limits. Map Core **`rpcpassword`** (or a new secret) to **`tokens = ["…"]`** and use **`blvm --rpc-addr`** for bind. Core **`rpcallowip`** is not representable here.
+- Map Core **`rpcuser`** / **`rpcpassword`** to **`[rpc_auth].username`** / **`password`** (HTTP Basic), or to **`tokens`** / **`admin_tokens`** (Bearer). **Do not** keep **`port` / `bind` / `allowed_ips` under `[rpc_auth]`** — use **`blvm --rpc-addr`** for bind. Core **`rpcallowip`** is not representable here; use firewall rules.
 - Replace nested **`[transport_preference]`** with **`transport_preference = "tcponly"`** (or another valid serde variant).
 - Ensure **`[network_timing]`** uses keys **`blvm-node`** accepts (e.g. **`target_peer_count`** for outbound target).
 

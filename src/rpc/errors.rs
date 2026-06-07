@@ -45,6 +45,8 @@ impl std::error::Error for BlockNotFoundError {}
 pub fn rpc_error_from_blockchain_result(e: anyhow::Error) -> RpcError {
     if let Some(b) = e.downcast_ref::<BlockNotFoundError>() {
         RpcError::block_not_found(&b.0)
+    } else if let Some(rpc) = e.downcast_ref::<RpcError>() {
+        rpc.clone()
     } else {
         RpcError::internal_error(e.to_string())
     }

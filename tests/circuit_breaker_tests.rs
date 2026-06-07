@@ -171,9 +171,9 @@ fn test_circuit_breaker_state_variants() {
 
     for state in states {
         match state {
-            CircuitState::Closed => assert!(true),
-            CircuitState::Open => assert!(true),
-            CircuitState::HalfOpen => assert!(true),
+            CircuitState::Closed => {}
+            CircuitState::Open => {}
+            CircuitState::HalfOpen => {}
         }
     }
 }

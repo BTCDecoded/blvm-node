@@ -34,24 +34,14 @@ thread_local! {
         crate::rpc::cache::ThreadLocalKeyedCache::new();
 }
 
-/// Helper function to decode a 32-byte hash from hex string
+/// Decode a Bitcoin RPC / explorer block hash hex string to internal digest order.
 fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
-    let hash_bytes = hex::decode(hex).map_err(|e| {
-        RpcError::invalid_hash_format(hex, Some(32), Some(&format!("Invalid hex encoding: {e}")))
-    })?;
-    if hash_bytes.len() != 32 {
-        return Err(RpcError::invalid_hash_format(
-            hex,
-            Some(32),
-            Some(&format!(
-                "Hash must be 64 hex characters (32 bytes), got {}",
-                hex.len()
-            )),
-        ));
-    }
-    let mut hash_array = [0u8; 32];
-    hash_array.copy_from_slice(&hash_bytes);
-    Ok(hash_array)
+    crate::storage::hashing::hash_from_rpc_hex(hex)
+        .map_err(|e| RpcError::invalid_hash_format(hex, Some(32), Some(&e)))
+}
+
+fn encode_hash32_rpc(hash: &[u8; 32]) -> String {
+    crate::storage::hashing::hash_to_rpc_hex(hash)
 }
 
 /// Blockchain RPC methods
@@ -226,7 +216,7 @@ impl BlockchainRpc {
 
             let best_hash_hex = CACHED_TIP_HASH_HEX.with(|c| {
                 c.get_or_refresh(CACHE_REFRESH_TIP, &(best_hash, height), || {
-                    hex::encode(best_hash)
+                    encode_hash32_rpc(&best_hash)
                 })
             });
 
@@ -320,20 +310,7 @@ impl BlockchainRpc {
     pub async fn get_block(&self, hash: &str) -> Result<Value> {
         debug!("RPC: getblock {}", hash);
 
-        // Decode hash first (before async operations)
-        let hash_bytes = match hex::decode(hash) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return Err(anyhow::anyhow!("Invalid hash: {}", e));
-            }
-        };
-
-        if hash_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Invalid hash length"));
-        }
-
-        let mut hash_array = [0u8; 32];
-        hash_array.copy_from_slice(&hash_bytes);
+        let hash_array = decode_hash32(hash).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // Try to get block from storage with graceful degradation
         if let Some(ref storage) = self.storage {
@@ -343,7 +320,6 @@ impl BlockchainRpc {
                 async {
                     tokio::task::spawn_blocking({
                         let storage = storage.clone();
-                        let hash_array = hash_array;
                         move || storage.blocks().get_block(&hash_array)
                     })
                     .await
@@ -435,7 +411,7 @@ impl BlockchainRpc {
                             .get_hash_by_height(h + 1)
                             .ok()
                             .flatten()
-                            .map(hex::encode)
+                            .map(|h| encode_hash32_rpc(&h))
                     });
 
                     // Get chainwork
@@ -467,7 +443,7 @@ impl BlockchainRpc {
                         "difficulty": difficulty,
                         "chainwork": chainwork,
                         "nTx": block.transactions.len(),
-                        "previousblockhash": hex::encode(block.header.prev_block_hash),
+                        "previousblockhash": encode_hash32_rpc(&block.header.prev_block_hash),
                         "nextblockhash": next_blockhash.unwrap_or_else(|| ZERO_HASH_STR.to_string()),
                     }));
                 }
@@ -502,14 +478,14 @@ impl BlockchainRpc {
     pub async fn get_block_hash(&self, height: u64) -> Result<Value> {
         debug!("RPC: getblockhash {}", height);
 
-        // Simplified implementation - return error for non-existent heights
-        if height > 1000 {
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
+                return Ok(Value::String(encode_hash32_rpc(&hash)));
+            }
             return Err(BlockNotFoundError::new(format!("at height {height}")).into());
         }
 
-        Ok(json!(
-            "0000000000000000000000000000000000000000000000000000000000000000"
-        ))
+        Err(anyhow::anyhow!("Storage not available"))
     }
 
     /// Get raw transaction (deprecated - use rawtx module)
@@ -585,7 +561,7 @@ impl BlockchainRpc {
                             .get_hash_by_height(h + 1)
                             .ok()
                             .flatten()
-                            .map(hex::encode)
+                            .map(|h| encode_hash32_rpc(&h))
                     });
 
                     let chainwork = if let Some(_height) = block_height {
@@ -613,7 +589,7 @@ impl BlockchainRpc {
                         "difficulty": difficulty,
                         "chainwork": chainwork,
                         "nTx": n_tx,
-                        "previousblockhash": hex::encode(header.prev_block_hash),
+                        "previousblockhash": encode_hash32_rpc(&header.prev_block_hash),
                         "nextblockhash": next_blockhash
                     }))
                 } else {
@@ -660,7 +636,7 @@ impl BlockchainRpc {
             if let Ok(Some(hash)) = storage.chain().get_tip_hash() {
                 let hex_str = CACHED_TIP_HASH_HEX.with(|c| {
                     c.get_or_refresh(CACHE_REFRESH_TIP, &(hash, current_height), || {
-                        hex::encode(hash)
+                        encode_hash32_rpc(&hash)
                     })
                 });
                 Ok(Value::String(hex_str))
@@ -731,7 +707,7 @@ impl BlockchainRpc {
             if let Ok(Some(stats)) = storage.chain().get_latest_utxo_stats() {
                 Ok(json!({
                     "height": stats.height,
-                    "bestblock": hex::encode(best_hash),
+                    "bestblock": encode_hash32_rpc(&best_hash),
                     "transactions": stats.transactions,
                     "txouts": stats.txouts,
                     "bogosize": stats.txouts * 180,
@@ -747,7 +723,7 @@ impl BlockchainRpc {
 
                 Ok(json!({
                     "height": height,
-                    "bestblock": hex::encode(best_hash),
+                    "bestblock": encode_hash32_rpc(&best_hash),
                     "transactions": storage.transaction_count().unwrap_or(0),
                     "txouts": txouts,
                     "bogosize": txouts * 180,
@@ -790,7 +766,7 @@ impl BlockchainRpc {
             .map_err(|e| RpcError::internal_error(e.to_string()))?;
 
         Ok(json!({
-            "base_blockhash": hex::encode(metadata.block_hash),
+            "base_blockhash": encode_hash32_rpc(&metadata.block_hash),
             "height": metadata.block_height,
             "txout_count": metadata.utxo_count,
             "utxo_hash": hex::encode(metadata.utxo_hash),
@@ -963,7 +939,7 @@ impl BlockchainRpc {
             if tip_hash != blvm_protocol::Hash::default() {
                 tips.push(json!({
                     "height": tip_height,
-                    "hash": hex::encode(tip_hash),
+                    "hash": encode_hash32_rpc(&tip_hash),
                     "branchlen": 0,
                     "status": "active"
                 }));
@@ -979,7 +955,7 @@ impl BlockchainRpc {
 
                     tips.push(json!({
                         "height": height,
-                        "hash": hex::encode(hash),
+                        "hash": encode_hash32_rpc(&hash),
                         "branchlen": branchlen,
                         "status": status
                     }));
@@ -1202,7 +1178,7 @@ impl BlockchainRpc {
                     "avgfee": if tx_count > 1 { total_fees as f64 / (tx_count - 1) as f64 / 100_000_000.0 } else { 0.0 },
                     "avgfeerate": 0.0, // Would need to calculate from fees and sizes
                     "avgtxsize": if tx_count > 0 { block_size / tx_count } else { 0 },
-                    "blockhash": hex::encode(block_hash),
+                    "blockhash": encode_hash32_rpc(&block_hash),
                     "feerate_percentiles": [0, 0, 0, 0, 0],
                     "height": height,
                     "ins": input_count,
@@ -1451,7 +1427,7 @@ impl BlockchainRpc {
             if let Some(ref tip_hash) = initial_tip {
                 let tip_height = storage.chain().get_height()?.unwrap_or(0);
                 return Ok(json!({
-                    "hash": hex::encode(tip_hash),
+                    "hash": encode_hash32_rpc(tip_hash),
                     "height": tip_height
                 }));
             }
@@ -1468,14 +1444,14 @@ impl BlockchainRpc {
                 (Some(init), Some(cur)) if init != cur => {
                     let tip_height = storage.chain().get_height()?.unwrap_or(0);
                     return Ok(json!({
-                        "hash": hex::encode(cur),
+                        "hash": encode_hash32_rpc(cur),
                         "height": tip_height
                     }));
                 }
                 (None, Some(cur)) => {
                     let tip_height = storage.chain().get_height()?.unwrap_or(0);
                     return Ok(json!({
-                        "hash": hex::encode(cur),
+                        "hash": encode_hash32_rpc(cur),
                         "height": tip_height
                     }));
                 }
@@ -1487,7 +1463,7 @@ impl BlockchainRpc {
         if let Some(ref tip_hash) = initial_tip {
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
             Ok(json!({
-                "hash": hex::encode(tip_hash),
+                "hash": encode_hash32_rpc(tip_hash),
                 "height": tip_height
             }))
         } else {
@@ -1567,7 +1543,7 @@ impl BlockchainRpc {
             if height <= tip_height {
                 if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
                     return Ok(json!({
-                        "hash": hex::encode(hash),
+                        "hash": encode_hash32_rpc(&hash),
                         "height": height
                     }));
                 }
@@ -1589,7 +1565,7 @@ impl BlockchainRpc {
             if height <= tip_height {
                 if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
                     return Ok(json!({
-                        "hash": hex::encode(hash),
+                        "hash": encode_hash32_rpc(&hash),
                         "height": height
                     }));
                 }
@@ -1823,7 +1799,7 @@ impl BlockchainRpc {
                 "chain": self.get_chain_name(),
                 "blocks": height,
                 "headers": height,
-                "bestblockhash": hex::encode(tip_hash),
+                "bestblockhash": encode_hash32_rpc(&tip_hash),
                 "difficulty": difficulty,
                 "mediantime": tip_header.timestamp,
                 "verificationprogress": if height > 0 { 1.0 } else { 0.0 },
@@ -1860,50 +1836,57 @@ impl BlockchainRpc {
     pub async fn validate_address(&self, params: &Value) -> Result<Value> {
         debug!("RPC: validateaddress");
 
-        let address = params
-            .get(0)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::missing_parameter("address", Some("string")))?;
+        let address = crate::rpc::validation::validate_string_param(
+            params,
+            0,
+            "address",
+            Some(crate::rpc::validation::MAX_ADDRESS_STRING_LENGTH),
+        )
+        .map_err(anyhow::Error::new)?;
 
-        // Basic address validation
-        // For now, we'll do simple format checking
-        // In production, this should use a proper address library
-        let is_valid = !address.is_empty() && address.len() <= 100; // Basic sanity check
+        use crate::rpc::rawtx::address_string_to_script_pubkey;
+        use blvm_protocol::address::BitcoinAddress;
 
-        // Try to determine address type from prefix
-        let is_p2pkh = address.starts_with('1') && address.len() >= 26 && address.len() <= 35;
-        let is_p2sh = address.starts_with('3') && address.len() >= 26 && address.len() <= 35;
-        let is_bech32 = address.starts_with("bc1")
-            || address.starts_with("tb1")
-            || address.starts_with("bcrt1");
+        if let Ok(decoded) = BitcoinAddress::decode(&address) {
+            let is_witness = true;
+            let is_script = decoded.witness_version == 0 && decoded.witness_program.len() == 32;
+            let script_type = match (decoded.witness_version, decoded.witness_program.len()) {
+                (0, 20) => "witness_v0_keyhash",
+                (0, 32) => "witness_v0_scripthash",
+                (1, 32) => "witness_v1_taproot",
+                _ => "witness_unknown",
+            };
+            let script_pubkey = address_string_to_script_pubkey(&address).unwrap_or_default();
+            return Ok(json!({
+                "isvalid": true,
+                "address": address,
+                "scriptPubKey": hex::encode(&script_pubkey),
+                "isscript": is_script,
+                "iswitness": is_witness,
+                "witness_version": decoded.witness_version,
+                "witness_program": hex::encode(&decoded.witness_program),
+                "script_type": script_type,
+            }));
+        }
 
-        let script_pubkey_type = if is_p2pkh {
-            "pubkeyhash"
-        } else if is_p2sh {
-            "scripthash"
-        } else if is_bech32 {
-            "witness_v0_keyhash" // Simplified - could be witness_v0_scripthash
-        } else {
-            "nonstandard"
-        };
+        if let Ok(script_pubkey) = address_string_to_script_pubkey(&address) {
+            let is_p2sh = address.starts_with('3') || address.starts_with('2');
+            let script_type = if is_p2sh { "scripthash" } else { "pubkeyhash" };
+            return Ok(json!({
+                "isvalid": true,
+                "address": address,
+                "scriptPubKey": hex::encode(&script_pubkey),
+                "isscript": is_p2sh,
+                "iswitness": false,
+                "witness_version": null,
+                "witness_program": null,
+                "script_type": script_type,
+            }));
+        }
 
         Ok(json!({
-            "isvalid": is_valid && (is_p2pkh || is_p2sh || is_bech32),
+            "isvalid": false,
             "address": address,
-            "scriptPubKey": if is_valid && (is_p2pkh || is_p2sh || is_bech32) {
-                format!("76a914{}88ac", hex::encode(&address.as_bytes()[1..address.len()-1])) // Simplified
-            } else {
-                "".to_string()
-            },
-            "isscript": is_p2sh || is_bech32,
-            "iswitness": is_bech32,
-            "witness_version": if is_bech32 { Some(0) } else { None },
-            "witness_program": if is_bech32 { Some(hex::encode(address.as_bytes())) } else { None },
-            "script_type": if is_valid && (is_p2pkh || is_p2sh || is_bech32) {
-                script_pubkey_type
-            } else {
-                "nonstandard"
-            }
         }))
     }
 

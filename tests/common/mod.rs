@@ -376,6 +376,104 @@ pub fn default_protocol_version() -> ProtocolVersion {
     ProtocolVersion::Regtest
 }
 
+/// Bitcoin difficulty adjustment interval (BIP / Orange Paper).
+pub const DIFFICULTY_INTERVAL: u64 = 2016;
+
+/// Seed a chain with `total_blocks` headers (genesis + `total_blocks - 1` extensions).
+///
+/// Uses 10-minute header spacing and low-difficulty `bits` so `getblocktemplate` can compute
+/// a valid target once at least [`DIFFICULTY_INTERVAL`] blocks are present.
+pub fn setup_mining_chain(
+    storage: &std::sync::Arc<blvm_node::storage::Storage>,
+    total_blocks: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use blvm_protocol::Block;
+    use sha2::{Digest, Sha256};
+
+    assert!(
+        total_blocks >= 2,
+        "mining chain setup needs at least genesis + one block"
+    );
+
+    // Exponent 0x0f keeps targets representable in `mining::expand_target` (u128 path used by
+    // `create_block_template`). Mainnet-style nBits (e.g. 0x1d00ffff) fail with "Target too large".
+    let genesis_header = BlockHeader {
+        version: 1,
+        prev_block_hash: [0u8; 32],
+        merkle_root: [0u8; 32],
+        timestamp: 1_231_006_505,
+        bits: 0x0f00ffff,
+        nonce: 2_083_236_893,
+    };
+    storage.chain().initialize(&genesis_header)?;
+
+    let genesis_block = Block {
+        header: genesis_header.clone(),
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![],
+            lock_time: 0,
+        }]
+        .into_boxed_slice(),
+    };
+
+    let genesis_bytes = bincode::serialize(&genesis_block.header)?;
+    let genesis_hash = Sha256::digest(Sha256::digest(genesis_bytes));
+    let mut genesis_hash_array = [0u8; 32];
+    genesis_hash_array.copy_from_slice(&genesis_hash);
+
+    storage.blocks().store_block(&genesis_block)?;
+    storage.blocks().store_height(0, &genesis_hash_array)?;
+    storage
+        .blocks()
+        .store_recent_header(0, &genesis_block.header)?;
+
+    let mut prev_hash = genesis_hash_array;
+    let mut prev_timestamp = genesis_header.timestamp;
+
+    for height in 1..total_blocks {
+        let block_header = BlockHeader {
+            version: 1,
+            prev_block_hash: prev_hash,
+            merkle_root: [height as u8; 32],
+            timestamp: prev_timestamp + 600,
+            bits: 0x0f00ffff,
+            nonce: 0,
+        };
+
+        let block = Block {
+            header: block_header.clone(),
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![],
+                lock_time: 0,
+            }]
+            .into_boxed_slice(),
+        };
+
+        let block_bytes = bincode::serialize(&block.header)?;
+        let block_hash = Sha256::digest(Sha256::digest(block_bytes));
+        let mut block_hash_array = [0u8; 32];
+        block_hash_array.copy_from_slice(&block_hash);
+
+        storage.blocks().store_block(&block)?;
+        storage.blocks().store_height(height, &block_hash_array)?;
+        storage
+            .blocks()
+            .store_recent_header(height, &block.header)?;
+        storage
+            .chain()
+            .update_tip(&block_hash_array, &block_header, height)?;
+
+        prev_hash = block_hash_array;
+        prev_timestamp = block_header.timestamp;
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECDSA helpers for integration tests (blvm-secp256k1 — no rust-secp256k1 crate).
 // ---------------------------------------------------------------------------

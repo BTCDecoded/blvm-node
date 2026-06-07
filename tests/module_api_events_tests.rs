@@ -10,14 +10,12 @@ use tokio::time::Duration;
 async fn test_event_manager_new() {
     let manager = EventManager::new();
     // Manager should be created successfully
-    assert!(true);
 }
 
 #[tokio::test]
 async fn test_event_manager_default() {
     let manager = EventManager::default();
     // Default should work
-    assert!(true);
 }
 
 #[tokio::test]

@@ -38,7 +38,6 @@ async fn test_event_publisher_creation() {
     let event_manager = Arc::new(EventManager::new());
     let publisher = EventPublisher::new(event_manager);
     // Should create successfully
-    assert!(true);
 }
 
 #[tokio::test]
@@ -53,7 +52,6 @@ async fn test_publish_new_block() {
     publisher
         .publish_new_block(&block, &block_hash, height)
         .await;
-    assert!(true);
 }
 
 #[tokio::test]
@@ -65,7 +63,6 @@ async fn test_publish_new_transaction() {
 
     // Should publish without error
     publisher.publish_new_transaction(&tx, &tx_hash, true).await;
-    assert!(true);
 }
 
 #[tokio::test]
@@ -82,8 +79,6 @@ async fn test_publish_new_transaction_mempool_entry() {
     publisher
         .publish_new_transaction(&tx, &tx_hash, false)
         .await;
-
-    assert!(true);
 }
 
 #[tokio::test]
@@ -101,8 +96,6 @@ async fn test_publish_multiple_blocks() {
             .publish_new_block(&block, &block_hash, height)
             .await;
     }
-
-    assert!(true);
 }
 
 #[tokio::test]
@@ -117,6 +110,4 @@ async fn test_publish_multiple_transactions() {
 
         publisher.publish_new_transaction(&tx, &tx_hash, true).await;
     }
-
-    assert!(true);
 }
