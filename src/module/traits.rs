@@ -414,6 +414,25 @@ pub trait NodeAPI: Send + Sync {
     /// Unregister a module API
     async fn unregister_module_api(&self) -> Result<(), ModuleError>;
 
+    /// Register a subprocess module API descriptor (methods forwarded over IPC).
+    async fn register_subprocess_module_api(
+        &self,
+        module_id: &str,
+        methods: Vec<String>,
+        api_version: u32,
+    ) -> Result<(), ModuleError> {
+        let _ = (module_id, methods, api_version);
+        Err(ModuleError::OperationError(
+            "register_subprocess_module_api not supported".to_string(),
+        ))
+    }
+
+    /// Unregister a subprocess module API when the module disconnects.
+    async fn unregister_subprocess_module_api(&self, module_id: &str) -> Result<(), ModuleError> {
+        let _ = module_id;
+        Ok(())
+    }
+
     // === Network Integration ===
     /// Send mesh packet to a module (for network layer integration)
     /// This allows the network layer to route mesh packets to the mesh module

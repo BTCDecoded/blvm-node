@@ -422,6 +422,12 @@ pub enum InvocationType {
         method: String,
         params: serde_json::Value,
     },
+    /// Module API: forward inter-module call to subprocess handler
+    ModuleApi {
+        method: String,
+        params: Vec<u8>,
+        caller_module_id: String,
+    },
 }
 
 /// Invocation result from module to node
@@ -443,6 +449,8 @@ pub enum InvocationResultPayload {
     },
     /// RPC result: JSON value
     Rpc(serde_json::Value),
+    /// Module API result: opaque bincode/bytes response
+    ModuleApi(Vec<u8>),
 }
 
 /// Response message from node to module
@@ -698,6 +706,9 @@ pub enum EventPayload {
         transport_type: String, // "tcp", "quinn", "iroh", "mesh"
         services: u64,
         version: u32,
+        /// Optional mesh/Bitcoin identity (32 bytes), when known at connect time.
+        #[serde(default)]
+        peer_node_id: Option<Vec<u8>>,
     },
     PeerDisconnected {
         peer_addr: String,

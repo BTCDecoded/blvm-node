@@ -1429,6 +1429,8 @@ impl RpcServer {
             "listmodules" => self.control.listmodules(&params).await,
             "getmoduleclispecs" => self.control.getmoduleclispecs(&params).await,
             "runmodulecli" => self.control.runmodulecli(&params).await,
+            "meshsendpacket" => self.control.meshsendpacket(&params).await,
+            "meshpollreceived" => self.control.meshpollreceived(&params).await,
             // Payment methods (requires bip70-http feature)
             #[cfg(feature = "bip70-http")]
             "createpaymentrequest" => {
@@ -1462,6 +1464,33 @@ impl RpcServer {
                 if let Some(ref payment_rpc) = self.payment {
                     payment_rpc
                         .get_payment_state(&params)
+                        .await
+                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+                } else {
+                    Err(errors::RpcError::internal_error(
+                        "Payment RPC not available".to_string(),
+                    ))
+                }
+            }
+            #[cfg(feature = "bip70-http")]
+            "verifyonchainpayment" => {
+                if let Some(ref payment_rpc) = self.payment {
+                    payment_rpc
+                        .verify_on_chain_payment(&params)
+                        .await
+                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+                } else {
+                    Err(errors::RpcError::internal_error(
+                        "Payment RPC not available".to_string(),
+                    ))
+                }
+            }
+            #[cfg(feature = "bip70-http")]
+            #[cfg(feature = "ctv")]
+            "verifycovenantproof" => {
+                if let Some(ref payment_rpc) = self.payment {
+                    payment_rpc
+                        .verify_covenant_proof(&params)
                         .await
                         .map_err(|e| errors::RpcError::internal_error(e.to_string()))
                 } else {

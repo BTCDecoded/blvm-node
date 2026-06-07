@@ -6,6 +6,8 @@
 //! - Querying payment state
 //! - Settlement monitoring
 
+#[cfg(feature = "ctv")]
+use crate::payment::covenant::CovenantEngine;
 use crate::payment::processor::PaymentError;
 use crate::payment::state_machine::{PaymentState, PaymentStateMachine};
 use crate::rpc::params::{param_bool_default, param_str};
@@ -238,6 +240,210 @@ impl PaymentRpc {
         };
 
         Ok(state_json)
+    }
+
+    /// Verify an on-chain payment against node state (path 3 / mesh adapters).
+    ///
+    /// Params: [payment_request_id, tx_hash_hex]
+    ///
+    /// Returns:
+    /// ```json
+    /// {
+    ///   "verified": bool,
+    ///   "state": "in_mempool" | "settled" | "pending" | "failed" | "not_found",
+    ///   "amount_sats": u64 | null,
+    ///   "tx_hash": "hex" | null,
+    ///   "reason": "string" | null
+    /// }
+    /// ```
+    pub async fn verify_on_chain_payment(&self, params: &Value) -> Result<Value, PaymentError> {
+        debug!("RPC: verifyonchainpayment");
+
+        let state_machine = self.get_state_machine()?;
+
+        let payment_request_id = param_str(params, 0).map(String::from).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'payment_request_id' parameter".to_string())
+        })?;
+        let tx_hash_hex = param_str(params, 1).map(String::from).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'tx_hash' parameter".to_string())
+        })?;
+
+        let tx_hash = decode_tx_hash(&tx_hash_hex)?;
+
+        let amount_sats = state_machine
+            .payment_request_amount_sats(&payment_request_id)
+            .await
+            .ok();
+
+        let state = match state_machine.get_payment_state(&payment_request_id).await {
+            Ok(state) => state,
+            Err(PaymentError::RequestNotFound(_)) => {
+                return Ok(json!({
+                    "verified": false,
+                    "state": "not_found",
+                    "amount_sats": amount_sats,
+                    "tx_hash": null,
+                    "reason": "payment request not found",
+                }));
+            }
+            Err(e) => return Err(e),
+        };
+
+        let response = match state {
+            PaymentState::InMempool {
+                request_id: _,
+                tx_hash: stored,
+            } if stored == tx_hash => json!({
+                "verified": true,
+                "state": "in_mempool",
+                "amount_sats": amount_sats,
+                "tx_hash": tx_hash_hex,
+                "reason": null,
+            }),
+            PaymentState::Settled {
+                request_id: _,
+                tx_hash: stored,
+                ..
+            } if stored == tx_hash => json!({
+                "verified": true,
+                "state": "settled",
+                "amount_sats": amount_sats,
+                "tx_hash": tx_hash_hex,
+                "reason": null,
+            }),
+            PaymentState::InMempool {
+                tx_hash: stored, ..
+            }
+            | PaymentState::Settled {
+                tx_hash: stored, ..
+            } => json!({
+                "verified": false,
+                "state": "tx_mismatch",
+                "amount_sats": amount_sats,
+                "tx_hash": hex::encode(stored),
+                "reason": "transaction hash does not match payment state",
+            }),
+            PaymentState::Failed { reason, .. } => json!({
+                "verified": false,
+                "state": "failed",
+                "amount_sats": amount_sats,
+                "tx_hash": null,
+                "reason": reason,
+            }),
+            PaymentState::ReorgPending {
+                tx_hash: stored,
+                reason,
+                ..
+            } => {
+                if stored == tx_hash {
+                    json!({
+                        "verified": false,
+                        "state": "reorg_pending",
+                        "amount_sats": amount_sats,
+                        "tx_hash": tx_hash_hex,
+                        "reason": reason,
+                    })
+                } else {
+                    json!({
+                        "verified": false,
+                        "state": "tx_mismatch",
+                        "amount_sats": amount_sats,
+                        "tx_hash": hex::encode(stored),
+                        "reason": "transaction hash does not match payment state",
+                    })
+                }
+            }
+            _ => json!({
+                "verified": false,
+                "state": "pending",
+                "amount_sats": amount_sats,
+                "tx_hash": null,
+                "reason": "payment not yet in mempool or settled",
+            }),
+        };
+
+        Ok(response)
+    }
+
+    /// Verify a CTV covenant proof for gate path 2 (BitSov / mesh adapters).
+    ///
+    /// Params: [covenant_proof_hex, output_index, amount_sats]
+    ///
+    /// Returns: `{ "verified": bool, "reason": string | null }`
+    pub async fn verify_covenant_proof(&self, params: &Value) -> Result<Value, PaymentError> {
+        debug!("RPC: verifycovenantproof");
+
+        let proof_hex = param_str(params, 0).map(String::from).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'covenant_proof_hex' parameter".to_string())
+        })?;
+        let output_index = params.get(1).and_then(|v| v.as_u64()).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'output_index' parameter".to_string())
+        })? as u32;
+        let amount_sats = params.get(2).and_then(|v| v.as_u64()).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'amount_sats' parameter".to_string())
+        })?;
+
+        let proof_bytes = hex::decode(proof_hex.trim()).map_err(|e| {
+            PaymentError::ProcessingError(format!("Invalid covenant_proof_hex: {e}"))
+        })?;
+
+        if proof_bytes.is_empty() {
+            return Ok(json!({
+                "verified": false,
+                "reason": "covenant proof is empty",
+            }));
+        }
+
+        #[cfg(not(feature = "ctv"))]
+        {
+            let _ = (output_index, amount_sats, proof_bytes);
+            return Ok(json!({
+                "verified": false,
+                "reason": "CTV feature not enabled on node",
+            }));
+        }
+
+        #[cfg(feature = "ctv")]
+        {
+            use blvm_protocol::payment::CovenantProof;
+
+            let proof: CovenantProof = bincode::deserialize(&proof_bytes)
+                .or_else(|_| {
+                    serde_json::from_slice(&proof_bytes).map_err(|e| {
+                        PaymentError::ProcessingError(format!("covenant proof decode: {e}"))
+                    })
+                })
+                .map_err(|e: PaymentError| e)?;
+
+            let idx = output_index as usize;
+            if idx >= proof.transaction_template.outputs.len() {
+                return Ok(json!({
+                    "verified": false,
+                    "reason": "output_index out of range",
+                }));
+            }
+
+            let template_output = &proof.transaction_template.outputs[idx];
+            if template_output.value != amount_sats {
+                return Ok(json!({
+                    "verified": false,
+                    "reason": "amount_sats mismatch at output_index",
+                }));
+            }
+
+            let expected = vec![PaymentOutput {
+                amount: Some(amount_sats),
+                script: template_output.script_pubkey.clone(),
+            }];
+
+            let engine = CovenantEngine::new();
+            let verified = engine.verify_covenant_proof(&proof, &expected)?;
+
+            Ok(json!({
+                "verified": verified,
+                "reason": if verified { Value::Null } else { json!("template verification failed") },
+            }))
+        }
     }
 
     /// List all payment states
@@ -914,4 +1120,12 @@ impl PaymentRpc {
             "ready_to_broadcast": true,
         }))
     }
+}
+
+fn decode_tx_hash(hex_str: &str) -> Result<crate::Hash, PaymentError> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| PaymentError::ProcessingError(format!("Invalid tx_hash hex: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| PaymentError::ProcessingError("tx_hash must be 32 bytes".to_string()))
 }

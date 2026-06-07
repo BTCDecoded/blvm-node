@@ -5,9 +5,11 @@
 //! validating permissions.
 
 pub mod api;
+pub mod ipc_proxy;
 pub mod registry;
 pub mod router;
 
 pub use api::ModuleAPI;
+pub use ipc_proxy::IpcForwardingModuleAPI;
 pub use registry::ModuleApiRegistry;
 pub use router::ModuleRouter;

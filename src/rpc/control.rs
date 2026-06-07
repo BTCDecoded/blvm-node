@@ -590,6 +590,164 @@ impl ControlRpc {
         Ok(json!({}))
     }
 
+    /// Forward a bincode blvm-mesh `SendPacketRequest` to the mesh module.
+    ///
+    /// Params: `{ "request_hex": "...", "mesh_module_id": "blvm-mesh" }`
+    pub async fn meshsendpacket(&self, params: &Value) -> RpcResult<Value> {
+        debug!("RPC: meshsendpacket");
+
+        let request_hex = params
+            .get("request_hex")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                RpcError::invalid_params(
+                    "meshsendpacket requires request_hex (hex-encoded bincode SendPacketRequest)"
+                        .to_string(),
+                )
+            })?;
+
+        let mesh_module_id = params
+            .get("mesh_module_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("blvm-mesh");
+
+        if mesh_module_id.is_empty()
+            || !mesh_module_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(RpcError::invalid_params(
+                "invalid mesh_module_id".to_string(),
+            ));
+        }
+
+        let request_bytes = hex::decode(request_hex.trim())
+            .map_err(|e| RpcError::invalid_params(format!("request_hex decode failed: {e}")))?;
+
+        if request_bytes.is_empty() {
+            return Err(RpcError::invalid_params("request_hex is empty".to_string()));
+        }
+
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+
+        let hub_arc = {
+            let manager = mgr.lock().await;
+            manager.api_hub_arc().ok_or_else(|| {
+                RpcError::internal_error("Module API hub not available".to_string())
+            })?
+        };
+
+        let response_bytes = {
+            let hub = hub_arc.lock().await;
+            let node_api = hub.node_api();
+            node_api
+                .call_module(Some(mesh_module_id), "send_packet", request_bytes)
+                .await
+                .map_err(|e| RpcError::internal_error(format!("mesh send_packet failed: {e}")))?
+        };
+
+        #[derive(serde::Deserialize)]
+        struct SendPacketResponse {
+            success: bool,
+            packet_id: [u8; 32],
+            route_length: usize,
+            estimated_cost_sats: u64,
+            error: Option<String>,
+        }
+
+        let result: SendPacketResponse = bincode::deserialize(&response_bytes).map_err(|e| {
+            RpcError::internal_error(format!("mesh send_packet response decode failed: {e}"))
+        })?;
+
+        Ok(json!({
+            "success": result.success,
+            "packet_id": hex::encode(result.packet_id),
+            "route_length": result.route_length,
+            "estimated_cost_sats": result.estimated_cost_sats,
+            "error": result.error,
+        }))
+    }
+
+    /// Poll locally delivered mesh app payloads (BitSov UKM ingress bridge).
+    ///
+    /// Params: `{ "protocol_id": "bitsov-ukm-v1", "max_packets": 16, "mesh_module_id": "blvm-mesh" }`
+    pub async fn meshpollreceived(&self, params: &Value) -> RpcResult<Value> {
+        debug!("RPC: meshpollreceived");
+
+        let protocol_id = params.get("protocol_id").and_then(|v| v.as_str());
+        let max_packets = params
+            .get("max_packets")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(16)
+            .clamp(1, 64) as usize;
+        let mesh_module_id = params
+            .get("mesh_module_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("blvm-mesh");
+
+        #[derive(serde::Serialize)]
+        struct PollRequest {
+            protocol_id: Option<String>,
+            max_packets: usize,
+        }
+
+        let request = PollRequest {
+            protocol_id: protocol_id.map(String::from),
+            max_packets,
+        };
+        let request_bytes = bincode::serialize(&request)
+            .map_err(|e| RpcError::internal_error(format!("poll request encode failed: {e}")))?;
+
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+
+        let hub_arc = {
+            let manager = mgr.lock().await;
+            manager.api_hub_arc().ok_or_else(|| {
+                RpcError::internal_error("Module API hub not available".to_string())
+            })?
+        };
+
+        let response_bytes = {
+            let hub = hub_arc.lock().await;
+            let node_api = hub.node_api();
+            node_api
+                .call_module(Some(mesh_module_id), "poll_local_deliveries", request_bytes)
+                .await
+                .map_err(|e| RpcError::internal_error(format!("mesh poll failed: {e}")))?
+        };
+
+        #[derive(serde::Deserialize)]
+        struct LocalDelivery {
+            protocol_id: String,
+            payload: Vec<u8>,
+            source: [u8; 32],
+        }
+
+        let deliveries: Vec<LocalDelivery> =
+            bincode::deserialize(&response_bytes).map_err(|e| {
+                RpcError::internal_error(format!("mesh poll response decode failed: {e}"))
+            })?;
+
+        let packets: Vec<Value> = deliveries
+            .into_iter()
+            .map(|d| {
+                json!({
+                    "protocol_id": d.protocol_id,
+                    "payload_hex": hex::encode(d.payload),
+                    "source_hex": hex::encode(d.source),
+                })
+            })
+            .collect();
+
+        Ok(json!({ "packets": packets }))
+    }
+
     /// List available RPC methods
     ///
     /// Params: ["command"] (optional, specific command to get help for)

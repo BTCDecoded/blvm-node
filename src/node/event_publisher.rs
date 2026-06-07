@@ -206,6 +206,7 @@ impl EventPublisher {
             transport_type: transport_type.to_string(),
             services,
             version,
+            peer_node_id: None,
         };
 
         if let Err(e) = self

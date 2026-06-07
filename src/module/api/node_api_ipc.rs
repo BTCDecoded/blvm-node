@@ -805,12 +805,23 @@ impl NodeAPI for NodeApiIpc {
 
     async fn register_module_api(
         &self,
-        _api: Arc<dyn crate::module::inter_module::api::ModuleAPI>,
+        api: Arc<dyn crate::module::inter_module::api::ModuleAPI>,
     ) -> Result<(), ModuleError> {
-        Err(ModuleError::OperationError(
-            "Module API registration must be done via module-side registration, not IPC"
-                .to_string(),
-        ))
+        let methods = api.list_methods();
+        let api_version = api.api_version();
+        self.request(
+            RequestPayload::RegisterModuleApi {
+                methods,
+                api_version,
+            },
+            |payload| match payload {
+                ResponsePayload::ModuleApiRegistered => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response to RegisterModuleApi".to_string(),
+                )),
+            },
+        )
+        .await
     }
 
     async fn unregister_module_api(&self) -> Result<(), ModuleError> {
@@ -1148,5 +1159,82 @@ impl NodeAPI for NodeApiIpc {
             },
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::ipc::protocol::MessageType;
+
+    #[test]
+    fn payload_to_message_type_maps_core_requests() {
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetBlockHeight),
+            MessageType::GetBlockHeight
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetNetworkPeers),
+            MessageType::GetNetworkPeers
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetBlockTemplate {
+                rules: vec!["segwit".into()],
+                coinbase_script: None,
+                coinbase_address: None,
+            }),
+            MessageType::GetBlockTemplate
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::BanPeer {
+                peer_addr: "127.0.0.1:8333".into(),
+                ban_duration_seconds: None,
+            }),
+            MessageType::BanPeer
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetSyncStatus),
+            MessageType::GetSyncStatus
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::DiscoverModules),
+            MessageType::DiscoverModules
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetBlock { hash: [0xab; 32] }),
+            MessageType::GetBlock
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetMempoolSize),
+            MessageType::GetMempoolSize
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::ReadFile {
+                path: "test.txt".into()
+            }),
+            MessageType::ReadFile
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::QueueReceivedBlock {
+                block_bytes: vec![0x01, 0x02]
+            }),
+            MessageType::QueueReceivedBlock
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::MergeBlockServeDenylist {
+                block_hashes: vec![[0x01; 32]]
+            }),
+            MessageType::MergeBlockServeDenylist
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetBlockServeDenylistSnapshot),
+            MessageType::GetBlockServeDenylistSnapshot
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::SetBlockServeMaintenanceMode {
+                enabled: true
+            }),
+            MessageType::SetBlockServeMaintenanceMode
+        ));
     }
 }

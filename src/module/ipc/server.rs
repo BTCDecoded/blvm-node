@@ -120,7 +120,104 @@ struct ModuleConnection<R: tokio::io::AsyncRead> {
     >,
 }
 
+/// Lock-free handle to IPC server state needed for cross-task invocations.
+///
+/// Holding the full `Arc<Mutex<ModuleIpcServer>>` across an await would deadlock
+/// because `start()` holds that Mutex for its entire lifetime.  This struct carries
+/// only the individually `Arc`-wrapped fields required by `invoke_module_api`, so
+/// callers (e.g. `IpcForwardingModuleAPI`) can operate concurrently without
+/// contending with the server loop.
+#[derive(Clone)]
+pub struct ModuleIpcHandle {
+    pub(crate) outgoing_tx_by_module:
+        Arc<tokio::sync::RwLock<HashMap<String, mpsc::UnboundedSender<bytes::Bytes>>>>,
+    pub(crate) pending_invocations:
+        Arc<tokio::sync::Mutex<HashMap<u64, oneshot::Sender<InvocationResultMessage>>>>,
+    pub(crate) next_invocation_id: Arc<AtomicU64>,
+}
+
+impl ModuleIpcHandle {
+    /// Invoke a subprocess module's registered ModuleAPI method (node → module).
+    pub async fn invoke_module_api(
+        &self,
+        module_id: &str,
+        method: &str,
+        params: &[u8],
+        caller_module_id: &str,
+    ) -> Result<Vec<u8>, ModuleError> {
+        let outgoing_tx = {
+            let by_module = self.outgoing_tx_by_module.read().await;
+            by_module.get(module_id).cloned()
+        };
+        let Some(outgoing_tx) = outgoing_tx else {
+            return Err(ModuleError::OperationError(format!(
+                "Module '{module_id}' is not connected"
+            )));
+        };
+
+        let correlation_id = self.next_invocation_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.pending_invocations.lock().await;
+            pending.insert(correlation_id, tx);
+        }
+
+        let invocation = InvocationMessage {
+            correlation_id,
+            invocation_type: InvocationType::ModuleApi {
+                method: method.to_string(),
+                params: params.to_vec(),
+                caller_module_id: caller_module_id.to_string(),
+            },
+        };
+        let bytes = bincode::serialize(&ModuleMessage::Invocation(invocation))
+            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+
+        outgoing_tx.send(bytes::Bytes::from(bytes)).map_err(|_| {
+            ModuleError::OperationError(module_error_msg::MODULE_CONNECTION_CLOSED.to_string())
+        })?;
+
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(60), rx)
+            .await
+            .map_err(|_| {
+                ModuleError::OperationError(
+                    "Module did not respond to ModuleAPI invocation within 60 seconds".to_string(),
+                )
+            })?
+            .map_err(|_| {
+                ModuleError::OperationError(
+                    module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
+                )
+            })?;
+
+        if !result.success {
+            return Err(ModuleError::OperationError(
+                result.error.unwrap_or_else(|| "Unknown error".to_string()),
+            ));
+        }
+
+        match result.payload {
+            Some(InvocationResultPayload::ModuleApi(data)) => Ok(data),
+            Some(_) => Err(ModuleError::OperationError(
+                "Module returned wrong payload type for ModuleAPI invocation".to_string(),
+            )),
+            None => Err(ModuleError::OperationError(
+                module_error_msg::MODULE_RETURNED_SUCCESS_BUT_NO_PAYLOAD.to_string(),
+            )),
+        }
+    }
+}
+
 impl ModuleIpcServer {
+    /// Return a lock-free handle for cross-task invocations (avoids deadlocking on the server Mutex).
+    pub fn handle(&self) -> ModuleIpcHandle {
+        ModuleIpcHandle {
+            outgoing_tx_by_module: Arc::clone(&self.outgoing_tx_by_module),
+            pending_invocations: Arc::clone(&self.pending_invocations),
+            next_invocation_id: Arc::clone(&self.next_invocation_id),
+        }
+    }
+
     /// Create a new IPC server
     pub fn new<P: AsRef<Path>>(socket_path: P) -> Self {
         Self {
@@ -704,6 +801,8 @@ impl ModuleIpcServer {
 
         info!("Module {} disconnected", module_id);
 
+        let _ = node_api.unregister_subprocess_module_api(&module_id).await;
+
         // Clean up: remove from shared maps
         {
             let mut by_module = self.outgoing_tx_by_module.write().await;
@@ -806,7 +905,8 @@ impl ModuleIpcServer {
                         .handle_request(&connection.module_id, request.clone())
                         .await?
                 } else {
-                    self.process_request(&request, node_api).await?
+                    self.process_request(&request, node_api, &connection.module_id)
+                        .await?
                 };
                 let response_message = ModuleMessage::Response(response);
 
@@ -925,6 +1025,7 @@ impl ModuleIpcServer {
         &self,
         request: &RequestMessage,
         node_api: Arc<A>,
+        module_id: &str,
     ) -> Result<ResponseMessage, ModuleError> {
         use crate::module::ipc::protocol::{RequestPayload, ResponsePayload};
 
@@ -1092,42 +1193,77 @@ impl ModuleIpcServer {
             }
             // Filesystem API
             RequestPayload::ReadFile { path } => {
-                let data = node_api.read_file(path.clone()).await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::FileData(data),
-                ))
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let data = node_api.read_file(path.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                match data {
+                    Ok(data) => Ok(ResponseMessage::success(
+                        request.correlation_id,
+                        ResponsePayload::FileData(data),
+                    )),
+                    Err(e) => Ok(ResponseMessage::error(
+                        request.correlation_id,
+                        e.to_string(),
+                    )),
+                }
             }
             RequestPayload::WriteFile { path, data } => {
-                node_api.write_file(path.clone(), data.clone()).await?;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = node_api.write_file(path.clone(), data.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),
                 ))
             }
             RequestPayload::DeleteFile { path } => {
-                node_api.delete_file(path.clone()).await?;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = node_api.delete_file(path.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),
                 ))
             }
             RequestPayload::ListDirectory { path } => {
-                let entries = node_api.list_directory(path.clone()).await?;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let entries = node_api.list_directory(path.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                let entries = entries?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::DirectoryListing(entries),
                 ))
             }
             RequestPayload::CreateDirectory { path } => {
-                node_api.create_directory(path.clone()).await?;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = node_api.create_directory(path.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),
                 ))
             }
             RequestPayload::GetFileMetadata { path } => {
-                let metadata = node_api.get_file_metadata(path.clone()).await?;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let metadata = node_api.get_file_metadata(path.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                let metadata = metadata?;
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::FileMetadata(metadata),
@@ -1211,6 +1347,13 @@ impl ModuleIpcServer {
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::ModuleMetrics(metrics),
+                ))
+            }
+            RequestPayload::GetAllMetrics => {
+                let metrics = node_api.get_all_metrics().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::AllMetrics(metrics),
                 ))
             }
             // Network Integration
@@ -1360,6 +1503,84 @@ impl ModuleIpcServer {
                 Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::DiscoverModules => {
+                let modules = node_api.discover_modules().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ModuleList(modules),
+                ))
+            }
+            RequestPayload::GetModuleInfo { module_id } => {
+                let info = node_api.get_module_info(module_id).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ModuleInfo(info),
+                ))
+            }
+            RequestPayload::IsModuleAvailable { module_id } => {
+                let available = node_api.is_module_available(module_id).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ModuleAvailable(available),
+                ))
+            }
+            RequestPayload::PublishEvent {
+                event_type,
+                payload,
+            } => {
+                node_api.publish_event(*event_type, payload.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::EventPublished,
+                ))
+            }
+            RequestPayload::CallModule {
+                target_module_id,
+                method,
+                params,
+            } => {
+                let response = node_api
+                    .call_module(target_module_id.as_deref(), method.as_str(), params.clone())
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ModuleApiResponse(response),
+                ))
+            }
+            RequestPayload::RegisterModuleApi { .. } => {
+                // Handled at connection level in hub with module_id context
+                Err(ModuleError::OperationError(
+                    "RegisterModuleApi must be handled via API hub".to_string(),
+                ))
+            }
+            RequestPayload::UnregisterModuleApi => {
+                node_api.unregister_module_api().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ModuleApiUnregistered,
+                ))
+            }
+            RequestPayload::GetModuleHealth { module_id } => {
+                let health = node_api.get_module_health(module_id).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::ModuleHealth(health),
+                ))
+            }
+            RequestPayload::GetAllModuleHealth => {
+                let health = node_api.get_all_module_health().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::AllModuleHealth(health),
+                ))
+            }
+            RequestPayload::ReportModuleHealth { health } => {
+                node_api.report_module_health(health.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::HealthReported,
                 ))
             }
             _ => Ok(ResponseMessage::error(

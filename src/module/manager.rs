@@ -38,6 +38,10 @@ pub struct ModuleManager {
     /// IPC server reference (for getmoduleclispecs, etc.)
     #[cfg(unix)]
     ipc_server: Option<Arc<tokio::sync::Mutex<ModuleIpcServer>>>,
+    /// Lock-free handle to IPC server state — use this for cross-task calls to
+    /// avoid deadlocking with the server's own Mutex (held for its entire lifetime).
+    #[cfg(unix)]
+    ipc_handle: Option<crate::module::ipc::server::ModuleIpcHandle>,
     /// Crash notification receiver (mutable so it can be moved to handler)
     crash_rx: Option<mpsc::UnboundedReceiver<(String, ModuleError)>>,
     /// Crash notification sender
@@ -182,6 +186,8 @@ impl ModuleManager {
             ipc_server_handle: None,
             #[cfg(unix)]
             ipc_server: None,
+            #[cfg(unix)]
+            ipc_handle: None,
             crash_rx: Some(crash_rx),
             crash_tx,
             modules_dir: modules_dir.as_ref().to_path_buf(),
@@ -310,6 +316,12 @@ impl ModuleManager {
         self.ipc_server.clone()
     }
 
+    /// Lock-free handle for cross-task module API invocations.
+    #[cfg(unix)]
+    pub fn ipc_handle(&self) -> Option<crate::module::ipc::server::ModuleIpcHandle> {
+        self.ipc_handle.clone()
+    }
+
     /// Attach the RPC server so `unload_module` can clean up registered endpoints/overrides.
     pub fn with_rpc_server(&mut self, rpc_server: Arc<crate::rpc::server::RpcServer>) {
         self.rpc_server = Some(rpc_server);
@@ -388,8 +400,11 @@ impl ModuleManager {
                 });
                 ipc_server = ipc_server.with_wasm_invoker(invoker);
             }
+            // Capture a lock-free handle before moving the server into Arc<Mutex>.
+            let ipc_handle = ipc_server.handle();
             let ipc_server = Arc::new(tokio::sync::Mutex::new(ipc_server));
             self.ipc_server = Some(Arc::clone(&ipc_server));
+            self.ipc_handle = Some(ipc_handle);
             self.node_socket_path = Some(socket_path.as_ref().to_path_buf());
             let node_api_clone = Arc::clone(&node_api);
             let server_handle =

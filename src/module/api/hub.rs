@@ -421,14 +421,14 @@ impl ModuleApiHub {
                     .await?;
                 ResponsePayload::ModuleApiResponse(response)
             }
-            RequestPayload::RegisterModuleApi { .. } => {
-                // Module API registration is handled differently - modules need to provide
-                // the API implementation, which can't be serialized over IPC.
-                // This will be handled via a different mechanism (module-side registration).
-                // For now, return an error indicating this needs to be done differently.
-                return Err(crate::module::traits::ModuleError::OperationError(
-                    "Module API registration must be done via register_module_api() method, not IPC".to_string(),
-                ));
+            RequestPayload::RegisterModuleApi {
+                methods,
+                api_version,
+            } => {
+                self.node_api
+                    .register_subprocess_module_api(module_id, methods.clone(), *api_version)
+                    .await?;
+                ResponsePayload::ModuleApiRegistered
             }
             RequestPayload::UnregisterModuleApi => {
                 self.node_api.unregister_module_api().await?;

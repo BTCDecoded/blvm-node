@@ -283,6 +283,16 @@ impl NodeApiImpl {
         self.module_id_for_timers = Some(module_id);
     }
 
+    /// Set metrics manager (for late initialization)
+    pub fn set_metrics_manager(
+        &mut self,
+        metrics_manager: Arc<crate::module::metrics::manager::MetricsManager>,
+        module_id: String,
+    ) {
+        self.metrics_manager = Some(metrics_manager);
+        self.module_id_for_metrics = Some(module_id);
+    }
+
     /// Set RPC server (for late initialization)
     pub fn set_rpc_server(&mut self, rpc_server: Arc<crate::rpc::server::RpcServer>) {
         self.rpc_server = Some(rpc_server);
@@ -1593,6 +1603,60 @@ impl NodeAPI for NodeApiImpl {
             .clone();
 
         registry.unregister_api(&module_id).await
+    }
+
+    async fn register_subprocess_module_api(
+        &self,
+        module_id: &str,
+        methods: Vec<String>,
+        api_version: u32,
+    ) -> Result<(), ModuleError> {
+        let registry = self.module_api_registry.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(
+                module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string(),
+            )
+        })?;
+
+        let module_manager = self.module_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError("Module manager not available".to_string())
+        })?;
+
+        let ipc_handle = {
+            #[cfg(unix)]
+            {
+                module_manager
+                    .lock()
+                    .await
+                    .ipc_handle()
+                    .ok_or_else(|| {
+                        ModuleError::OperationError("IPC handle not available".to_string())
+                    })?
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(ModuleError::OperationError(
+                    "Subprocess ModuleAPI is only supported on Unix".to_string(),
+                ));
+            }
+        };
+
+        let proxy = crate::module::inter_module::IpcForwardingModuleAPI::new(
+            module_id.to_string(),
+            ipc_handle,
+            methods,
+            api_version,
+        );
+
+        registry
+            .register_api(module_id.to_string(), Arc::new(proxy))
+            .await
+    }
+
+    async fn unregister_subprocess_module_api(&self, module_id: &str) -> Result<(), ModuleError> {
+        let Some(registry) = self.module_api_registry.as_ref() else {
+            return Ok(());
+        };
+        registry.unregister_api(module_id).await
     }
 
     async fn send_mesh_packet_to_module(

@@ -571,6 +571,23 @@ impl PaymentStateMachine {
         Ok(())
     }
 
+    /// Total output amount (satoshis) for a stored payment request.
+    pub async fn payment_request_amount_sats(
+        &self,
+        payment_request_id: &str,
+    ) -> Result<u64, PaymentError> {
+        let request = self
+            .payment_processor
+            .get_payment_request(payment_request_id)
+            .await?;
+        Ok(request
+            .payment_details
+            .outputs
+            .iter()
+            .filter_map(|o| o.amount)
+            .sum())
+    }
+
     /// Get current payment state
     pub async fn get_payment_state(
         &self,
