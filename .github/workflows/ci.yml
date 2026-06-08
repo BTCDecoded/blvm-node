@@ -25,12 +25,6 @@ permissions:
   contents: read
   actions: write
 
-# Self-hosted runners share /mnt/data; one workflow at a time avoids parallel
-# librocksdb/test linking filling the disk (ENOSPC / lld bus errors).
-concurrency:
-  group: blvm-node-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
@@ -234,11 +228,7 @@ jobs:
       # checkout@v4 defaults to git clean -ffdx, which removes ignored .build/ (including paths
       # created in the emergency step above). Recreate before rustup mktemp under TMPDIR.
       - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -251,12 +241,13 @@ jobs:
           if command -v mold >/dev/null 2>&1 && mold --version >/dev/null 2>&1; then
             RF="-C link-arg=-fuse-ld=mold"
             echo "✅ Using mold linker"
+          elif command -v ld.lld >/dev/null 2>&1 && ld.lld --version >/dev/null 2>&1; then
+            RF="-C link-arg=-fuse-ld=lld"
+            echo "✅ Using lld linker"
           else
-            # Do not fall back to lld: LLVM lld 22.x bus-errors under parallel blvm-node
-            # test linking on self-hosted runners (signal 7). Prefer bfd over lld.
-            echo "⚠️ mold unavailable; using default bfd linker (lld fallback disabled)"
+            echo "⚠️ mold/lld unavailable or broken (e.g. libLLVM.so mismatch); using default bfd linker"
             if command -v pacman >/dev/null 2>&1; then
-              echo "Hint: on Arch runners: sudo pacman -S --needed mold"
+              echo "Hint: on Arch runners: sudo pacman -S --needed lld llvm-libs"
             fi
           fi
           echo "rustflags=$RF" >> "$GITHUB_OUTPUT"
@@ -267,9 +258,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
-      # Cap parallel link jobs: many integration-test binaries + lld/mold stress RAM.
-      # Fewer parallel rustc jobs → fewer concurrent mold links (disk + RAM).
-      CARGO_BUILD_JOBS: 2
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -322,28 +310,24 @@ jobs:
           operation: bind-env
           cache-key: ${{ needs.setup.outputs.cache-key }}
 
-      # Per-run target before restore so cache rsync lands under BLVM_BUILD_TARGET.
-      - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
-
       - name: Restore Cargo cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
 
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
       
       - name: Run tests
-        run: cargo test -j 2
+        run: cargo test
 
       # `stratum-v2` is not in default features; compile and run library tests with Stratum code enabled.
       - name: Run tests (stratum-v2 feature, lib)
-        run: cargo test -j 2 --features stratum-v2 --lib
+        run: cargo test --features stratum-v2 --lib
 
       - name: Dump disk usage on failure
         if: failure()
@@ -390,17 +374,11 @@ jobs:
 
   clippy:
     name: Clippy
-    # Run after Test so only one heavy librocksdb link compiles at a time on /mnt/data.
-    needs: [setup, test]
+    needs: setup
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
-      CARGO_BUILD_JOBS: 2
     if: |
-      always() &&
-      !cancelled() &&
-      needs.setup.result == 'success' &&
-      (needs.test.result == 'success' || needs.test.result == 'failure') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
@@ -450,17 +428,14 @@ jobs:
           cache-key: ${{ needs.setup.outputs.cache-key }}
           include-target: false
 
-      - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
-
       - name: Restore Cargo cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -511,11 +486,7 @@ jobs:
         uses: BTCDecoded/rust-ci/setup-blvm-spec@main
 
       - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -651,11 +622,7 @@ jobs:
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
 
       - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -726,11 +693,7 @@ jobs:
 
       # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
       - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -771,11 +734,7 @@ jobs:
           fi
 
       - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -796,17 +755,12 @@ jobs:
   # need `test` so `[skip_tests]` can still run libFuzzer.
   fuzz:
     name: Fuzz
-    needs: [setup, test, clippy]
+    needs: [setup]
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     timeout-minutes: 30
     if: |
-      always() &&
-      !cancelled() &&
-      needs.setup.result == 'success' &&
-      (needs.test.result == 'success' || needs.test.result == 'failure') &&
-      (needs.clippy.result == 'success' || needs.clippy.result == 'failure') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
@@ -820,20 +774,20 @@ jobs:
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
 
-      - name: Ensure per-run tmp dir on this runner
-        run: mkdir -p "${TMPDIR}"
-
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: bind-env
           cache-key: ${{ needs.setup.outputs.cache-key }}
-          include-target: false
 
       - name: Restore Cargo cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -854,12 +808,10 @@ jobs:
         run: rm -rf fuzz/target
 
       # cargo-fuzz injects its own sancov + ASAN flags; clear the global RUSTFLAGS.
-      # cargo-fuzz builds under fuzz/target — do not inherit workspace CARGO_TARGET_DIR.
       - name: Build fuzz binaries
         working-directory: fuzz
         env:
           RUSTFLAGS: ''
-          CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/target
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo +nightly fuzz build
@@ -868,7 +820,6 @@ jobs:
         working-directory: fuzz
         env:
           ASAN_OPTIONS: detect_odr_violation=0
-          CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/target
         run: |
           # Derive targets from what was actually built, not TARGETS.md.
           # This avoids failures when TARGETS.md lists a target that didn't compile.
@@ -881,9 +832,9 @@ jobs:
           if [ ${#bins[@]} -eq 0 ]; then
             echo "❌ No fuzz binaries found in $BINDIR"; exit 1
           fi
-          JOBS=2
+          JOBS=$(nproc)
           echo "Running ${#bins[@]} fuzz targets across $JOBS cores in parallel"
-          RUNSCRIPT=$(mktemp "${TMPDIR}/fuzz-run-XXXXXX.sh")
+          RUNSCRIPT=$(mktemp /tmp/fuzz-run-XXXXXX.sh)
           cat > "$RUNSCRIPT" << 'SCRIPT'
           #!/usr/bin/env bash
           t=$1
@@ -974,11 +925,7 @@ jobs:
 
       # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
       - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -1038,11 +985,7 @@ jobs:
           fi
 
       - name: Ensure per-run target/tmp dirs on this runner
-        run: |
-          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
-          rm -rf target
-          ln -sfn "${BLVM_BUILD_TARGET}" target
-          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
