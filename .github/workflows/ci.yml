@@ -241,13 +241,12 @@ jobs:
           if command -v mold >/dev/null 2>&1 && mold --version >/dev/null 2>&1; then
             RF="-C link-arg=-fuse-ld=mold"
             echo "✅ Using mold linker"
-          elif command -v ld.lld >/dev/null 2>&1 && ld.lld --version >/dev/null 2>&1; then
-            RF="-C link-arg=-fuse-ld=lld"
-            echo "✅ Using lld linker"
           else
-            echo "⚠️ mold/lld unavailable or broken (e.g. libLLVM.so mismatch); using default bfd linker"
+            # Do not fall back to lld: LLVM lld 22.x bus-errors under parallel blvm-node
+            # test linking on self-hosted runners (signal 7). Prefer bfd over lld.
+            echo "⚠️ mold unavailable; using default bfd linker (lld fallback disabled)"
             if command -v pacman >/dev/null 2>&1; then
-              echo "Hint: on Arch runners: sudo pacman -S --needed lld llvm-libs"
+              echo "Hint: on Arch runners: sudo pacman -S --needed mold"
             fi
           fi
           echo "rustflags=$RF" >> "$GITHUB_OUTPUT"
@@ -258,6 +257,8 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+      # Cap parallel link jobs: many integration-test binaries + lld/mold stress RAM.
+      CARGO_BUILD_JOBS: 4
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
