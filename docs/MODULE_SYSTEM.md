@@ -414,6 +414,32 @@ Security Layer
         └─→ Capability enforcement
 ```
 
+## Block pipeline hooks (IBD persistence)
+
+Modules can participate in **block persistence** without node-specific policy code via a generic pipeline in `src/module/pipeline.rs`.
+
+### Convention
+
+A module registers `ModuleAPI` with method **`filter_block_before_store`** (`register_module_api` capability). The node calls it from the IBD flush path (`ParallelIBD::do_flush_to_storage`) before witness data is written to the blockstore.
+
+### Request / response (bincode)
+
+- **Params:** `{ height, block, witnesses }`
+- **Returns:** `{ block, witnesses, stripped_txids, filtered }`
+
+Any module may implement this method; routing uses the short method name (`filter_block_before_store`). The reference implementation is **blvm-selective-sync**.
+
+### Failure semantics
+
+- **Node:** fail-open — IPC timeout, missing module, or deserialize error → store the unfiltered block.
+- **Module:** may fail-closed on policy errors when configured (e.g. `witness_mode: strict` in selective-sync).
+
+### Wiring
+
+At node startup, `install_block_pipeline(Arc<ModuleRouter>)` is called alongside `ModuleApiRegistry` setup. Modules running in subprocesses register a proxy descriptor over IPC; in-process test doubles register `Arc<dyn ModuleAPI>` directly.
+
+See `tests/block_pipeline_test.rs` for an integration example.
+
 ## Usage
 
 See [modules/README.md](../modules/README.md) for module installation and usage instructions.

@@ -2536,6 +2536,16 @@ impl ParallelIBD {
         // can treat chunk indices as the flush_order directly (no secondary sort needed).
         pending.sort_by_key(|(_, _, h)| *h);
 
+        pending = pending
+            .into_iter()
+            .map(|(block, witnesses, height)| {
+                let (block, witnesses) = crate::module::pipeline::try_filter_block_before_store(
+                    height, block, witnesses,
+                );
+                (block, witnesses, height)
+            })
+            .collect();
+
         // Returns true only if there is actual witness data (non-empty stack items).
         // An all-empty Vec<Vec<Witness>> (pre-SegWit blocks) does NOT count as having witnesses
         // and should not be stored, to avoid blocking re-download of SegWit blocks later.

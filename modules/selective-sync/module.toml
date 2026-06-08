@@ -10,4 +10,8 @@ entry_point = "selective-sync"
 capabilities = [
     "read_blockchain",
     "subscribe_events",
+    "register_module_api",
+    "network_access",
+    "read_network",
+    "publish_events",
 ]

@@ -70,8 +70,8 @@ impl ModuleApiRegistry {
                 // Also allow routing by just method name if unique
                 // (will be overridden if another module uses same method name)
                 routing
-                    .entry(method)
-                    .or_insert_with(|| (module_id.clone(), full_method_name));
+                    .entry(method.clone())
+                    .or_insert_with(|| (module_id.clone(), method.clone()));
             }
         }
 
@@ -142,5 +142,54 @@ impl ModuleApiRegistry {
 impl Default for ModuleApiRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct EchoApi;
+
+    #[async_trait]
+    impl ModuleAPI for EchoApi {
+        async fn handle_request(
+            &self,
+            method: &str,
+            params: &[u8],
+            _caller: &str,
+        ) -> Result<Vec<u8>, ModuleError> {
+            match method {
+                "echo" => Ok(params.to_vec()),
+                _ => Err(ModuleError::OperationError(format!(
+                    "unknown method {method}"
+                ))),
+            }
+        }
+
+        fn list_methods(&self) -> Vec<String> {
+            vec!["echo".to_string()]
+        }
+
+        fn api_version(&self) -> u32 {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn route_method_by_short_name_uses_short_handler_name() {
+        let registry = ModuleApiRegistry::new();
+        registry
+            .register_api("selective-sync_abc".to_string(), Arc::new(EchoApi))
+            .await
+            .unwrap();
+        let (module_id, method) = registry
+            .route_method("echo")
+            .await
+            .expect("short method should route");
+        assert_eq!(module_id, "selective-sync_abc");
+        assert_eq!(method, "echo");
+        assert_ne!(method, "selective-sync_abc::echo");
     }
 }

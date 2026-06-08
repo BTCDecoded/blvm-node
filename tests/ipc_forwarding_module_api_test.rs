@@ -37,35 +37,32 @@ impl ModuleAPI for EchoApi {
 
 #[tokio::test]
 async fn ipc_forwarding_module_api_lists_registered_methods() {
-    let server = ModuleIpcServer::new("/tmp/blvm-mesh-ipc-test.sock");
+    let server = ModuleIpcServer::new("/tmp/blvm-ipc-proxy-test.sock");
     let proxy = IpcForwardingModuleAPI::new(
-        "blvm-mesh_test".to_string(),
+        "example_mod_test".to_string(),
         server.handle(),
-        vec![
-            "send_packet".to_string(),
-            "poll_local_deliveries".to_string(),
-        ],
+        vec!["foo".to_string(), "bar".to_string()],
         1,
     );
-    assert!(proxy.list_methods().contains(&"send_packet".to_string()));
+    assert!(proxy.list_methods().contains(&"foo".to_string()));
     assert_eq!(proxy.api_version(), 1);
 }
 
 #[tokio::test]
 async fn module_api_registry_accepts_ipc_proxy() {
     let registry = ModuleApiRegistry::new();
-    let server = ModuleIpcServer::new("/tmp/blvm-mesh-reg-test.sock");
+    let server = ModuleIpcServer::new("/tmp/blvm-ipc-reg-test.sock");
     let proxy = IpcForwardingModuleAPI::new(
-        "blvm-mesh_abc".to_string(),
+        "example_mod_abc".to_string(),
         server.handle(),
-        vec!["send_packet".to_string()],
+        vec!["foo".to_string()],
         1,
     );
     registry
-        .register_api("blvm-mesh_abc".to_string(), Arc::new(proxy))
+        .register_api("example_mod_abc".to_string(), Arc::new(proxy))
         .await
         .unwrap();
-    assert!(registry.get_api("blvm-mesh_abc").await.is_some());
+    assert!(registry.get_api("example_mod_abc").await.is_some());
 }
 
 #[tokio::test]

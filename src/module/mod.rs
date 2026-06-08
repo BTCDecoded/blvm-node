@@ -22,6 +22,7 @@ pub mod ipc;
 pub mod loader;
 pub mod manager;
 pub mod metrics;
+pub mod pipeline;
 pub mod process;
 pub mod registry;
 pub mod rpc;

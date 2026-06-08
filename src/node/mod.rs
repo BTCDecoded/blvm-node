@@ -1108,6 +1108,7 @@ impl Node {
                 Arc::clone(&module_api_registry),
                 Arc::clone(&module_router),
             );
+            crate::module::pipeline::install_block_pipeline(Arc::clone(&module_router));
 
             // Note: Payment state machine will be set after payment processor initialization
             // We'll update it via Arc::get_mut if possible, or store it separately
