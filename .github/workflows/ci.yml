@@ -25,6 +25,12 @@ permissions:
   contents: read
   actions: write
 
+# Self-hosted runners share /mnt/data; one workflow at a time avoids parallel
+# librocksdb/test linking filling the disk (ENOSPC / lld bus errors).
+concurrency:
+  group: blvm-node-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
@@ -228,7 +234,11 @@ jobs:
       # checkout@v4 defaults to git clean -ffdx, which removes ignored .build/ (including paths
       # created in the emergency step above). Recreate before rustup mktemp under TMPDIR.
       - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -311,14 +321,18 @@ jobs:
           operation: bind-env
           cache-key: ${{ needs.setup.outputs.cache-key }}
 
+      # Per-run target before restore so cache rsync lands under BLVM_BUILD_TARGET.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+
       - name: Restore Cargo cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
-
-      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
-      - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -379,6 +393,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+      CARGO_BUILD_JOBS: 4
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -429,14 +444,17 @@ jobs:
           cache-key: ${{ needs.setup.outputs.cache-key }}
           include-target: false
 
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
+
       - name: Restore Cargo cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: restore
-
-      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
-      - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -487,7 +505,11 @@ jobs:
         uses: BTCDecoded/rust-ci/setup-blvm-spec@main
 
       - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -623,7 +645,11 @@ jobs:
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
 
       - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -694,7 +720,11 @@ jobs:
 
       # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
       - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -735,7 +765,11 @@ jobs:
           fi
 
       - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -788,7 +822,11 @@ jobs:
 
       # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
       - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -926,7 +964,11 @@ jobs:
 
       # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
       - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
@@ -986,7 +1028,11 @@ jobs:
           fi
 
       - name: Ensure per-run target/tmp dirs on this runner
-        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+        run: |
+          mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+          rm -rf target
+          ln -sfn "${BLVM_BUILD_TARGET}" target
+          echo "CARGO_TARGET_DIR=${BLVM_BUILD_TARGET}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: BTCDecoded/rust-ci/install-rust-toolchain@main
