@@ -1431,6 +1431,8 @@ impl RpcServer {
             "runmodulecli" => self.control.runmodulecli(&params).await,
             "meshsendpacket" => self.control.meshsendpacket(&params).await,
             "meshpollreceived" => self.control.meshpollreceived(&params).await,
+            "meshquoteroute" => self.control.meshquoteroute(&params).await,
+            "meshrequesthopinvoice" => self.control.meshrequesthopinvoice(&params).await,
             // Payment methods (requires bip70-http feature)
             #[cfg(feature = "bip70-http")]
             "createpaymentrequest" => {

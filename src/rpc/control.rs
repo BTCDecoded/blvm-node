@@ -748,6 +748,173 @@ impl ControlRpc {
         Ok(json!({ "packets": packets }))
     }
 
+    /// Quote mesh routing fee in satoshis for a destination.
+    ///
+    /// Params: `{ "destination_hex": "...", "base_fee_sats": 1, "mesh_module_id": "blvm-mesh" }`
+    pub async fn meshquoteroute(&self, params: &Value) -> RpcResult<Value> {
+        debug!("RPC: meshquoteroute");
+
+        let destination_hex = params
+            .get("destination_hex")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                RpcError::invalid_params(
+                    "meshquoteroute requires destination_hex (64 hex chars)".to_string(),
+                )
+            })?;
+
+        let destination_bytes = hex::decode(destination_hex.trim())
+            .map_err(|e| RpcError::invalid_params(format!("destination_hex decode failed: {e}")))?;
+        let destination: [u8; 32] = destination_bytes
+            .try_into()
+            .map_err(|_| RpcError::invalid_params("destination_hex must be 32 bytes".to_string()))?;
+
+        let base_fee_sats = params
+            .get("base_fee_sats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+
+        let mesh_module_id = params
+            .get("mesh_module_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("blvm-mesh");
+
+        #[derive(serde::Serialize)]
+        struct QuoteRequest {
+            destination: [u8; 32],
+            base_fee_sats: u64,
+        }
+
+        let request = QuoteRequest {
+            destination,
+            base_fee_sats,
+        };
+        let request_bytes = bincode::serialize(&request)
+            .map_err(|e| RpcError::internal_error(format!("quote request encode failed: {e}")))?;
+
+        let response_bytes = self
+            .call_mesh_module(mesh_module_id, "quote_route_fee", request_bytes)
+            .await?;
+
+        let fee_sats: u64 = bincode::deserialize(&response_bytes).map_err(|e| {
+            RpcError::internal_error(format!("mesh quote response decode failed: {e}"))
+        })?;
+
+        Ok(json!({ "fee_sats": fee_sats }))
+    }
+
+    /// Request a relay-issued Lightning hop invoice from blvm-mesh.
+    ///
+    /// Params: `{ "destination_hex": "...", "amount_msats": 1000, "expiry_seconds": 3600, "mesh_module_id": "blvm-mesh" }`
+    pub async fn meshrequesthopinvoice(&self, params: &Value) -> RpcResult<Value> {
+        debug!("RPC: meshrequesthopinvoice");
+
+        let destination_hex = params
+            .get("destination_hex")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                RpcError::invalid_params(
+                    "meshrequesthopinvoice requires destination_hex (64 hex chars)".to_string(),
+                )
+            })?;
+
+        let destination_bytes = hex::decode(destination_hex.trim())
+            .map_err(|e| RpcError::invalid_params(format!("destination_hex decode failed: {e}")))?;
+        let destination: [u8; 32] = destination_bytes
+            .try_into()
+            .map_err(|_| RpcError::invalid_params("destination_hex must be 32 bytes".to_string()))?;
+
+        let amount_msats = params
+            .get("amount_msats")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                RpcError::invalid_params("meshrequesthopinvoice requires amount_msats".to_string())
+            })?;
+
+        let expiry_seconds = params
+            .get("expiry_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3600);
+
+        let mesh_module_id = params
+            .get("mesh_module_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("blvm-mesh");
+
+        #[derive(serde::Serialize)]
+        struct HopInvoiceRequest {
+            destination: [u8; 32],
+            amount_msats: u64,
+            expiry_seconds: Option<u64>,
+        }
+
+        let request = HopInvoiceRequest {
+            destination,
+            amount_msats,
+            expiry_seconds: Some(expiry_seconds),
+        };
+        let request_bytes = bincode::serialize(&request).map_err(|e| {
+            RpcError::internal_error(format!("hop invoice request encode failed: {e}"))
+        })?;
+
+        let response_bytes = self
+            .call_mesh_module(mesh_module_id, "request_hop_invoice", request_bytes)
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct HopInvoiceResponse {
+            invoice: String,
+            amount_msats: u64,
+            expires_at: u64,
+        }
+
+        let result: HopInvoiceResponse = bincode::deserialize(&response_bytes).map_err(|e| {
+            RpcError::internal_error(format!("hop invoice response decode failed: {e}"))
+        })?;
+
+        Ok(json!({
+            "invoice": result.invoice,
+            "amount_msats": result.amount_msats,
+            "expires_at": result.expires_at,
+        }))
+    }
+
+    async fn call_mesh_module(
+        &self,
+        mesh_module_id: &str,
+        method: &str,
+        request_bytes: Vec<u8>,
+    ) -> RpcResult<Vec<u8>> {
+        if mesh_module_id.is_empty()
+            || !mesh_module_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(RpcError::invalid_params(
+                "invalid mesh_module_id".to_string(),
+            ));
+        }
+
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
+
+        let hub_arc = {
+            let manager = mgr.lock().await;
+            manager.api_hub_arc().ok_or_else(|| {
+                RpcError::internal_error("Module API hub not available".to_string())
+            })?
+        };
+
+        let hub = hub_arc.lock().await;
+        let node_api = hub.node_api();
+        node_api
+            .call_module(Some(mesh_module_id), method, request_bytes)
+            .await
+            .map_err(|e| RpcError::internal_error(format!("mesh {method} failed: {e}")))
+    }
+
     /// List available RPC methods
     ///
     /// Params: ["command"] (optional, specific command to get help for)
