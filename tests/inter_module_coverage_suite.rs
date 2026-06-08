@@ -50,7 +50,7 @@ async fn registry_register_route_and_call() {
     );
     assert_eq!(
         registry.route_method("echo").await,
-        Some(("svc_abc".to_string(), "svc_abc::echo".to_string()))
+        Some(("svc_abc".to_string(), "echo".to_string()))
     );
     assert_eq!(
         registry.resolve_module_id("svc").await,
