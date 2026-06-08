@@ -177,6 +177,77 @@ pub async fn fetch_registry_github_repo(
         })
 }
 
+/// List semver release versions (`tag_name` without leading `v`) from GitHub Releases JSON.
+#[cfg(feature = "governance")]
+pub fn parse_github_release_versions(json: &[u8]) -> Result<Vec<String>, ModuleError> {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct Release {
+        tag_name: String,
+        draft: bool,
+        prerelease: bool,
+    }
+
+    let releases: Vec<Release> = serde_json::from_slice(json)
+        .map_err(|e| ModuleError::op_err("GitHub releases JSON parse failed", e))?;
+
+    let mut versions = Vec::new();
+    for release in releases {
+        if release.draft || release.prerelease {
+            continue;
+        }
+        let version = release.tag_name.trim().trim_start_matches('v').to_string();
+        if crate::module::version_constraint::parse_semver_triple(&version).is_some() {
+            versions.push(version);
+        }
+    }
+    Ok(versions)
+}
+
+/// List semver release versions (`tag_name` without leading `v`) from GitHub Releases.
+#[cfg(feature = "governance")]
+pub async fn fetch_github_release_versions(
+    client: &reqwest::Client,
+    github_repo: &str,
+) -> Result<Vec<String>, ModuleError> {
+    let url = format!("https://api.github.com/repos/{github_repo}/releases?per_page=100");
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| ModuleError::op_err("GET GitHub releases failed", e))?;
+    if !resp.status().is_success() {
+        return Err(ModuleError::OperationError(format!(
+            "GET {url} returned HTTP {}",
+            resp.status()
+        )));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ModuleError::op_err("Reading GitHub releases body", e))?;
+    parse_github_release_versions(&bytes)
+}
+
+/// Resolve the highest GitHub release version matching a constraint (e.g. `0.1.*`).
+#[cfg(feature = "governance")]
+pub async fn resolve_release_version_for_constraint(
+    client: &reqwest::Client,
+    github_repo: &str,
+    constraint: &str,
+) -> Result<String, ModuleError> {
+    let constraint = constraint.trim();
+    if constraint.is_empty() || constraint == "*" {
+        return Err(ModuleError::OperationError(
+            "resolve_release_version_for_constraint requires a pinned constraint".to_string(),
+        ));
+    }
+    let versions = fetch_github_release_versions(client, github_repo).await?;
+    crate::module::version_constraint::select_highest_matching_version(&versions, constraint)
+}
+
 /// Download the release checksums file (`sha256sums.txt` or `SHA256SUMS`) as UTF-8 text.
 #[cfg(feature = "governance")]
 pub async fn fetch_release_checksums_text(
@@ -263,5 +334,34 @@ mod tests {
             default_module_toml_raw_url("Foo/bar", "main"),
             "https://raw.githubusercontent.com/Foo/bar/main/module.toml"
         );
+    }
+
+    #[cfg(feature = "governance")]
+    #[test]
+    fn parse_github_release_versions_skips_draft_prerelease_and_non_semver() {
+        let json = br#"[
+          {"tag_name":"v0.1.0","draft":false,"prerelease":false},
+          {"tag_name":"v0.2.0","draft":true,"prerelease":false},
+          {"tag_name":"v0.3.0-rc1","draft":false,"prerelease":true},
+          {"tag_name":"not-a-version","draft":false,"prerelease":false},
+          {"tag_name":"v0.1.5","draft":false,"prerelease":false}
+        ]"#;
+        let versions = parse_github_release_versions(json).unwrap();
+        assert_eq!(versions, vec!["0.1.0".to_string(), "0.1.5".to_string()]);
+    }
+
+    #[cfg(feature = "governance")]
+    #[test]
+    fn resolve_release_version_for_constraint_picks_highest_patch() {
+        let json = br#"[
+          {"tag_name":"v0.1.0","draft":false,"prerelease":false},
+          {"tag_name":"v0.1.5","draft":false,"prerelease":false},
+          {"tag_name":"v0.2.0","draft":false,"prerelease":false}
+        ]"#;
+        let versions = parse_github_release_versions(json).unwrap();
+        let picked =
+            crate::module::version_constraint::select_highest_matching_version(&versions, "0.1.*")
+                .unwrap();
+        assert_eq!(picked, "0.1.5");
     }
 }

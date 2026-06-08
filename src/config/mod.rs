@@ -87,13 +87,28 @@ fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
 pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str =
     "https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json";
 
-/// Official modules pulled in on first boot when `enabled_modules` / `registry_url` use defaults.
-fn default_bootstrap_enabled_modules() -> Vec<String> {
-    vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string()]
-}
-
 fn default_module_registry_url() -> Option<String> {
     Some(DEFAULT_MODULE_REGISTRY_INDEX_URL.to_string())
+}
+
+fn merge_enabled_modules_value(enabled_modules: &mut HashMap<String, String>, value: toml::Value) {
+    match value {
+        toml::Value::Array(arr) => {
+            for item in arr {
+                if let toml::Value::String(name) = item {
+                    enabled_modules.insert(name, "*".to_string());
+                }
+            }
+        }
+        toml::Value::Table(tbl) => {
+            for (name, constraint) in tbl {
+                if let toml::Value::String(constraint) = constraint {
+                    enabled_modules.insert(name, constraint);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn deserialize_module_config<'de, D>(deserializer: D) -> Result<ModuleConfig, D::Error>
@@ -116,7 +131,7 @@ where
             let mut modules_dir = "modules".to_string();
             let mut data_dir = "data/modules".to_string();
             let mut socket_dir = "data/modules/sockets".to_string();
-            let mut enabled_modules = default_bootstrap_enabled_modules();
+            let mut enabled_modules: HashMap<String, String> = HashMap::new();
             let mut disabled_modules = Vec::new();
             let mut registry_url = default_module_registry_url();
             let mut module_configs = HashMap::new();
@@ -132,7 +147,11 @@ where
                         "modules_dir" => modules_dir = map.next_value().unwrap_or(modules_dir),
                         "data_dir" => data_dir = map.next_value().unwrap_or(data_dir),
                         "socket_dir" => socket_dir = map.next_value().unwrap_or(socket_dir),
-                        "enabled_modules" => enabled_modules = map.next_value().unwrap_or_default(),
+                        "enabled_modules" => {
+                            let value: toml::Value =
+                                map.next_value().unwrap_or(toml::Value::Array(vec![]));
+                            merge_enabled_modules_value(&mut enabled_modules, value);
+                        }
                         "disabled_modules" => {
                             disabled_modules = map.next_value().unwrap_or_default()
                         }
@@ -151,13 +170,23 @@ where
                         }
                     }
                 } else {
-                    // [modules.<name>] - per-module override table (e.g. [modules.selective-sync])
+                    // `[modules.<name>]` table → per-module spawn overrides, or
+                    // `<name> = "0.1.*"` string → enabled module + version constraint.
                     let value: toml::Value = map.next_value()?;
-                    if let toml::Value::Table(_) = &value {
-                        let flat = flatten_toml_to_string_map(&value);
-                        if !flat.is_empty() {
-                            module_configs.insert(key, flat);
+                    match &value {
+                        toml::Value::String(version_constraint) => {
+                            enabled_modules.insert(key, version_constraint.clone());
                         }
+                        toml::Value::Table(_) => {
+                            let mut flat = flatten_toml_to_string_map(&value);
+                            if let Some(version) = flat.remove("version") {
+                                enabled_modules.insert(key.clone(), version);
+                            }
+                            if !flat.is_empty() {
+                                module_configs.insert(key, flat);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -218,9 +247,20 @@ pub struct ModuleConfig {
     #[serde(default = "default_modules_socket_dir")]
     pub socket_dir: String,
 
-    /// List of enabled modules (empty = auto-discover all)
+    /// Enabled modules and optional version constraints (empty = auto-discover all on disk).
+    ///
+    /// In TOML, prefer inline pins at the `[modules]` level:
+    /// ```toml
+    /// [modules]
+    /// blvm-miniscript = "0.1.*"
+    /// ```
+    ///
+    /// When a module also needs spawn overrides (`[modules.blvm-zmq]`), put the pin in that
+    /// table as `version = "0.3.*"` (inline `blvm-zmq = "…"` would conflict with the table).
+    ///
+    /// Legacy array form (`enabled_modules = ["name"]`) is supported with constraint `"*"`.
     #[serde(default)]
-    pub enabled_modules: Vec<String>,
+    pub enabled_modules: HashMap<String, String>,
 
     /// Module names to never auto-load or bootstrap-download (opt-out). Matching is by manifest `name`.
     #[serde(default)]
@@ -295,7 +335,7 @@ impl Default for ModuleConfig {
             modules_dir: "modules".to_string(),
             data_dir: "data/modules".to_string(),
             socket_dir: "data/modules/sockets".to_string(),
-            enabled_modules: default_bootstrap_enabled_modules(),
+            enabled_modules: HashMap::new(),
             disabled_modules: Vec::new(),
             registry_url: default_module_registry_url(),
             module_database_backend: None,

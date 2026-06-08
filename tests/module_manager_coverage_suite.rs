@@ -26,7 +26,7 @@ async fn module_manager_registry_and_filter_setters() {
         Some("https://example.test/modules.json")
     );
 
-    manager.set_enabled_modules(vec!["alpha".into()]);
+    manager.set_enabled_modules([("alpha".into(), "0.1.*".into())].into_iter().collect());
     manager.set_disabled_modules(vec!["beta".into()]);
     manager.set_default_database_backend("rocksdb".into());
     manager.set_module_config_overrides(HashMap::from([(

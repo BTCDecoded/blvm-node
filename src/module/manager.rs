@@ -64,9 +64,10 @@ pub struct ModuleManager {
     wasm_loader: Option<Arc<dyn WasmModuleLoader>>,
     /// RPC server reference — used to clean up module-registered endpoints on unload.
     rpc_server: Option<Arc<crate::rpc::server::RpcServer>>,
-    /// If non-empty, only these module names are auto-loaded (from config `enabled_modules`).
-    /// An empty vec means "load everything discovered".
-    enabled_modules: Vec<String>,
+    /// If non-empty, only these module names are auto-loaded (from config `enabled_modules` keys).
+    /// Values are version constraints (`0.1.*`, exact semver, or `"*"` for unpinned).
+    /// An empty map means "load everything discovered".
+    enabled_modules: HashMap<String, String>,
     /// Never auto-load or bootstrap these manifest names (from config `disabled_modules`).
     disabled_modules: Vec<String>,
     /// HTTP URL for the first-party module registry JSON (e.g. blvm/registry/modules.json on GitHub).
@@ -200,7 +201,7 @@ impl ModuleManager {
             wasm_loader: None,
             node_socket_path: None,
             rpc_server: None,
-            enabled_modules: Vec::new(),
+            enabled_modules: HashMap::new(),
             disabled_modules: Vec::new(),
             registry_url: None,
             node_p2p_listen: std::sync::RwLock::new(None),
@@ -327,10 +328,10 @@ impl ModuleManager {
         self.rpc_server = Some(rpc_server);
     }
 
-    /// Set the list of modules that should be auto-loaded.
-    /// If the list is non-empty, `auto_load_modules` will only load modules whose name appears here.
-    /// An empty list (the default) means load every discovered module.
-    pub fn set_enabled_modules(&mut self, enabled: Vec<String>) {
+    /// Set enabled modules and version constraints from config.
+    /// If the map is non-empty, `auto_load_modules` only loads modules whose name appears here.
+    /// An empty map (the default) means load every discovered module.
+    pub fn set_enabled_modules(&mut self, enabled: HashMap<String, String>) {
         self.enabled_modules = enabled;
     }
 
@@ -1372,6 +1373,72 @@ impl ModuleManager {
         Ok(dependents.is_empty())
     }
 
+    /// Apply `disabled_modules`, `enabled_modules` allowlist, and version constraints.
+    pub(crate) fn filter_discovered_for_auto_load(
+        &self,
+        mut discovered_modules: Vec<crate::module::registry::discovery::DiscoveredModule>,
+    ) -> Vec<crate::module::registry::discovery::DiscoveredModule> {
+        if !self.disabled_modules.is_empty() {
+            let before = discovered_modules.len();
+            discovered_modules.retain(|m| !self.disabled_modules.contains(&m.manifest.name));
+            let after = discovered_modules.len();
+            if before != after {
+                info!(
+                    "disabled_modules filter: kept {}/{} discovered modules ({} skipped)",
+                    after,
+                    before,
+                    before - after
+                );
+            }
+        }
+
+        if !self.enabled_modules.is_empty() {
+            let before = discovered_modules.len();
+            discovered_modules.retain(|m| self.enabled_modules.contains_key(&m.manifest.name));
+            let after = discovered_modules.len();
+            if before != after {
+                info!(
+                    "enabled_modules filter: kept {}/{} discovered modules ({} skipped)",
+                    after,
+                    before,
+                    before - after
+                );
+            }
+        }
+
+        if !self.enabled_modules.is_empty() {
+            let before = discovered_modules.len();
+            discovered_modules.retain(|m| {
+                let Some(constraint) = self.enabled_modules.get(&m.manifest.name) else {
+                    return false;
+                };
+                if crate::module::version_constraint::matches_version_constraint(
+                    &m.manifest.version,
+                    constraint,
+                ) {
+                    true
+                } else {
+                    warn!(
+                        "Module '{}' version {} does not match constraint '{}'; will re-bootstrap",
+                        m.manifest.name, m.manifest.version, constraint
+                    );
+                    false
+                }
+            });
+            let after = discovered_modules.len();
+            if before != after {
+                info!(
+                    "version constraint filter: kept {}/{} discovered modules ({} queued for re-bootstrap)",
+                    after,
+                    before,
+                    before - after
+                );
+            }
+        }
+
+        discovered_modules
+    }
+
     /// Auto-discover and load all modules
     pub async fn auto_load_modules(&mut self) -> Result<(), ModuleError> {
         info!("Auto-discovering and loading modules");
@@ -1382,7 +1449,7 @@ impl ModuleManager {
         if !self.enabled_modules.is_empty() && !self.disabled_modules.is_empty() {
             let disabled_set: std::collections::HashSet<&str> =
                 self.disabled_modules.iter().map(|s| s.as_str()).collect();
-            for name in &self.enabled_modules {
+            for name in self.enabled_modules.keys() {
                 if disabled_set.contains(name.as_str()) {
                     warn!(
                         "Module '{}' is both enabled_modules and disabled_modules; disabled wins (will not load or bootstrap)",
@@ -1400,36 +1467,9 @@ impl ModuleManager {
         }
 
         // Opt-out: drop explicitly disabled modules before allowlist and bootstrap.
-        if !self.disabled_modules.is_empty() {
-            let before = discovered_modules.len();
-            discovered_modules.retain(|m| !self.disabled_modules.contains(&m.manifest.name));
-            let after = discovered_modules.len();
-            if before != after {
-                info!(
-                    "disabled_modules filter: kept {}/{} discovered modules ({} skipped)",
-                    after,
-                    before,
-                    before - after
-                );
-            }
-        }
+        discovered_modules = self.filter_discovered_for_auto_load(discovered_modules);
 
-        // Apply enabled_modules allowlist: if non-empty, skip modules not in the list.
-        if !self.enabled_modules.is_empty() {
-            let before = discovered_modules.len();
-            discovered_modules.retain(|m| self.enabled_modules.contains(&m.manifest.name));
-            let after = discovered_modules.len();
-            if before != after {
-                info!(
-                    "enabled_modules filter: kept {}/{} discovered modules ({} skipped)",
-                    after,
-                    before,
-                    before - after
-                );
-            }
-        }
-
-        // Bootstrap: for any enabled_modules not yet installed locally, attempt a direct
+        // Bootstrap: for any enabled_modules not yet installed locally (or wrong version), attempt a direct
         // HTTP download from the registry before giving up.
         #[cfg(feature = "governance")]
         if !self.enabled_modules.is_empty() {
@@ -1437,23 +1477,24 @@ impl ModuleManager {
                 .iter()
                 .map(|m| m.manifest.name.as_str())
                 .collect();
-            let missing: Vec<String> = self
+            let missing: Vec<(String, String)> = self
                 .enabled_modules
                 .iter()
-                .filter(|n| {
-                    !already_found.contains(n.as_str()) && !self.disabled_modules.contains(n)
+                .filter(|(name, _)| {
+                    !already_found.contains(name.as_str()) && !self.disabled_modules.contains(name)
                 })
-                .cloned()
+                .map(|(name, constraint)| (name.clone(), constraint.clone()))
                 .collect();
 
             if !missing.is_empty() {
                 if let Some(ref url) = self.registry_url.clone() {
                     info!(
                         "Bootstrap: {} enabled module(s) not installed locally, fetching from registry: {:?}",
-                        missing.len(), missing
+                        missing.len(),
+                        missing.iter().map(|(n, c)| format!("{n} ({c})")).collect::<Vec<_>>()
                     );
-                    for name in &missing {
-                        match self.bootstrap_download_module(name, url).await {
+                    for (name, constraint) in &missing {
+                        match self.bootstrap_download_module(name, url, constraint).await {
                             Ok(()) => {
                                 let discovery = ModuleDiscovery::new(&self.spawner.modules_dir);
                                 match discovery.discover_module(name) {
@@ -1473,7 +1514,8 @@ impl ModuleManager {
                 } else {
                     info!(
                         "Bootstrap: {} enabled module(s) not installed and no registry_url configured: {:?}",
-                        missing.len(), missing
+                        missing.len(),
+                        missing.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
                     );
                 }
             }
@@ -1665,6 +1707,7 @@ impl ModuleManager {
         &self,
         name: &str,
         registry_url: &str,
+        version_constraint: &str,
     ) -> Result<(), ModuleError> {
         use crate::module::registry::manifest::ModuleManifest;
         use serde::Deserialize;
@@ -1728,26 +1771,41 @@ impl ModuleManager {
         crate::module::github_release_install::validate_github_repo(&github_repo)?;
 
         use crate::module::github_release_install::{
-            default_module_toml_raw_url, DEFAULT_MODULE_MANIFEST_REF,
+            default_module_toml_raw_url, release_tag, resolve_release_version_for_constraint,
+            DEFAULT_MODULE_MANIFEST_REF,
         };
-        let manifest_ref = entry
-            .manifest_ref
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_MODULE_MANIFEST_REF);
+
+        let constraint = version_constraint.trim();
+        let pinned_version = if constraint.is_empty() || constraint == "*" {
+            None
+        } else {
+            Some(resolve_release_version_for_constraint(&client, &github_repo, constraint).await?)
+        };
+
+        let manifest_ref = if let Some(ref version) = pinned_version {
+            release_tag(version)
+        } else {
+            entry
+                .manifest_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_MODULE_MANIFEST_REF)
+                .to_string()
+        };
+
         let module_toml_url = entry
             .module_toml_url
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| default_module_toml_raw_url(&github_repo, manifest_ref));
+            .unwrap_or_else(|| default_module_toml_raw_url(&github_repo, &manifest_ref));
 
         // ── Step 2: fetch module.toml from the module's own repo ─────────────
         info!(
-            "Bootstrap: fetching manifest for '{}' from {}",
-            name, module_toml_url
+            "Bootstrap: fetching manifest for '{}' from {} (constraint: '{}')",
+            name, module_toml_url, version_constraint
         );
         let toml_bytes = fetch(module_toml_url.clone()).await?;
         let toml_str = std::str::from_utf8(&toml_bytes)
@@ -1755,10 +1813,28 @@ impl ModuleManager {
         let manifest: ModuleManifest = toml::from_str(toml_str)
             .map_err(|e| ModuleError::op_err("Failed to parse module.toml", e))?;
 
+        if let Some(ref version) = pinned_version {
+            if manifest.version != *version {
+                return Err(ModuleError::OperationError(format!(
+                    "Bootstrap: module.toml version {} does not match resolved release {} for constraint '{}'",
+                    manifest.version, version, version_constraint
+                )));
+            }
+            if !crate::module::version_constraint::matches_version_constraint(
+                &manifest.version,
+                constraint,
+            ) {
+                return Err(ModuleError::OperationError(format!(
+                    "Bootstrap: resolved version {} does not satisfy constraint '{}'",
+                    manifest.version, version_constraint
+                )));
+            }
+        }
+
         // ── Step 3: platform + release layout (GitHub Releases + sha256sums.txt) ─
         use crate::module::github_release_install::{
             artifact_name, fetch_release_checksums_text, host_platform_key, release_download_url,
-            release_tag, sha256_from_checksums,
+            sha256_from_checksums,
         };
 
         let platform = host_platform_key()?;
@@ -2064,5 +2140,74 @@ mod tests {
             msg.contains("wasm-modules"),
             "expected error to mention wasm-modules, got: {msg}"
         );
+    }
+
+    fn fake_discovered(
+        name: &str,
+        version: &str,
+    ) -> crate::module::registry::discovery::DiscoveredModule {
+        use crate::module::registry::discovery::DiscoveredModule;
+        use std::path::PathBuf;
+
+        let manifest: crate::module::registry::manifest::ModuleManifest = toml::from_str(&format!(
+            r#"name = "{name}"
+version = "{version}"
+entry_point = "{name}"
+"#
+        ))
+        .unwrap();
+        DiscoveredModule {
+            directory: PathBuf::from("/unused"),
+            manifest,
+            binary_path: PathBuf::from("/unused/bin"),
+        }
+    }
+
+    #[test]
+    fn filter_discovered_allowlist_and_version_constraint() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = ModuleManager::new(temp.path(), temp.path(), temp.path());
+        manager.set_enabled_modules(
+            [
+                ("alpha".into(), "0.1.*".into()),
+                ("beta".into(), "2.0.0".into()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let discovered = vec![
+            fake_discovered("alpha", "0.1.3"),
+            fake_discovered("alpha", "0.2.0"),
+            fake_discovered("beta", "2.0.0"),
+            fake_discovered("gamma", "1.0.0"),
+        ];
+
+        let filtered = manager.filter_discovered_for_auto_load(discovered);
+        let names: Vec<_> = filtered.iter().map(|m| m.manifest.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(filtered[0].manifest.version, "0.1.3");
+        assert_eq!(filtered[1].manifest.version, "2.0.0");
+    }
+
+    #[test]
+    fn filter_discovered_disabled_modules_win() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = ModuleManager::new(temp.path(), temp.path(), temp.path());
+        manager.set_enabled_modules([("alpha".into(), "*".into())].into_iter().collect());
+        manager.set_disabled_modules(vec!["alpha".into()]);
+
+        let filtered =
+            manager.filter_discovered_for_auto_load(vec![fake_discovered("alpha", "0.1.0")]);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_discovered_empty_enabled_passes_all() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ModuleManager::new(temp.path(), temp.path(), temp.path());
+        let discovered = vec![fake_discovered("alpha", "9.9.9")];
+        let filtered = manager.filter_discovered_for_auto_load(discovered);
+        assert_eq!(filtered.len(), 1);
     }
 }

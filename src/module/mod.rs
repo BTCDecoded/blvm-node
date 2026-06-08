@@ -31,6 +31,7 @@ pub mod security;
 pub mod timers;
 pub mod traits;
 pub mod validation;
+pub mod version_constraint;
 #[cfg(feature = "wasm-modules")]
 pub mod wasm;
 #[cfg(feature = "module-watcher")]

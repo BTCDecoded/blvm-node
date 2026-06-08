@@ -295,7 +295,12 @@ fn test_config_roundtrip_complex_scenario() {
 
     // Module settings
     if let Some(ref mut modules) = config.modules {
-        modules.enabled_modules = vec!["module1".to_string(), "module2".to_string()];
+        modules
+            .enabled_modules
+            .insert("module1".into(), "1.0.*".into());
+        modules
+            .enabled_modules
+            .insert("module2".into(), "1.0.*".into());
     }
 
     // Roundtrip through JSON

@@ -15,11 +15,7 @@ fn test_module_config_default() {
     assert_eq!(config.modules_dir, "modules");
     assert_eq!(config.data_dir, "data/modules");
     assert_eq!(config.socket_dir, "data/modules/sockets");
-    assert_eq!(config.enabled_modules.len(), 2);
-    assert_eq!(
-        config.enabled_modules,
-        vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string(),]
-    );
+    assert!(config.enabled_modules.is_empty());
     assert!(config.registry_url.is_some());
     assert!(config.disabled_modules.is_empty());
     assert!(config.module_database_backend.is_none());
@@ -117,11 +113,103 @@ transport_preference = "tcponly"
     let modules = config.modules.as_ref().expect("default modules");
     assert!(modules.enabled);
     assert_eq!(modules.modules_dir, "modules");
-    assert_eq!(
-        modules.enabled_modules,
-        vec!["blvm-miniscript".to_string(), "blvm-zmq".to_string(),]
-    );
+    assert!(modules.enabled_modules.is_empty());
     assert!(modules.registry_url.is_some());
+}
+
+#[test]
+fn test_module_config_inline_version_pins_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+
+[modules]
+blvm-miniscript = "0.1.*"
+blvm-zmq = "0.3.*"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.enabled_modules.len(), 2);
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-miniscript")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules.enabled_modules.get("blvm-zmq").map(String::as_str),
+        Some("0.3.*")
+    );
+}
+
+#[test]
+fn test_module_config_legacy_enabled_modules_array_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"transport_preference = "tcponly"
+
+[modules]
+enabled_modules = ["blvm-miniscript", "blvm-zmq"]
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.enabled_modules.len(), 2);
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-miniscript")
+            .map(String::as_str),
+        Some("*")
+    );
+}
+
+#[test]
+fn test_module_config_version_in_module_table_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"transport_preference = "tcponly"
+
+[modules]
+blvm-miniscript = "0.1.*"
+
+[modules.blvm-zmq]
+version = "0.3.*"
+hashblock = "tcp://127.0.0.1:28332"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.enabled_modules.len(), 2);
+    assert_eq!(
+        modules.enabled_modules.get("blvm-zmq").map(String::as_str),
+        Some("0.3.*")
+    );
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashblock"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28332")
+    );
+    assert!(!modules
+        .module_configs
+        .get("blvm-zmq")
+        .map(|c| c.contains_key("version"))
+        .unwrap_or(false));
 }
 
 #[test]
@@ -448,7 +536,12 @@ fn test_dos_protection_config_default() {
 fn test_node_config_with_custom_modules() {
     let mut config = NodeConfig::default();
     let mut module_config = ModuleConfig::default();
-    module_config.enabled_modules = vec!["module1".to_string(), "module2".to_string()];
+    module_config
+        .enabled_modules
+        .insert("module1".into(), "1.0.*".into());
+    module_config
+        .enabled_modules
+        .insert("module2".into(), "2.0.0".into());
     config.modules = Some(module_config);
 
     assert_eq!(config.modules.as_ref().unwrap().enabled_modules.len(), 2);

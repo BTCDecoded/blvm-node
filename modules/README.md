@@ -65,23 +65,33 @@ config_key = "Description of this configuration option"
 
 ## Auto-install from registry (bootstrap)
 
-Official modules (`blvm-miniscript`, `blvm-zmq`, …) publish **`module.toml`** on GitHub (identity + semver **`version`** only) and attach **`sha256sums.txt`** plus per-platform binaries to each **GitHub Release** tag `v{version}`. The node downloads the checksum file and the binary for your platform (`{name}-x86_64-linux`, etc.), verifies SHA-256, and installs when they are listed in **`enabled_modules`** but not yet present under **`modules_dir`**.
+Official modules (`blvm-miniscript`, `blvm-zmq`, …) publish **`module.toml`** on GitHub (identity + semver **`version`**) and attach **`sha256sums.txt`** plus per-platform binaries to each **GitHub Release** tag `v{version}`. The node downloads the checksum file and the binary for your platform (`{name}-x86_64-linux`, etc.), verifies SHA-256, and installs when a module is **pinned in config** but missing or the wrong version under **`modules_dir`**.
 
 ### Discovery vs allowlist vs opt-out
 
-- **Shipped defaults (`ModuleConfig::default()`, `[modules]` omitted):** `enabled_modules` lists **`blvm-miniscript`** and **`blvm-zmq`**, and **`registry_url`** points at the monorepo **`registry/modules.json`**. Missing modules are **bootstrap-downloaded** on startup (requires the **`blvm` binary built with the `governance` feature**, which is **on by default** for Bitcoin Commons `blvm`). Use **`[modules] enabled_modules = []`** to skip bootstrap and only load modules already on disk under `modules_dir`.
-- **`enabled_modules` empty (explicit):** every module **discovered** under `modules_dir` is a candidate to auto-load; **no** HTTP bootstrap runs (no allowlist of names to pull).
-- **`enabled_modules` non-empty:** those manifest names load from disk, and any still missing may be **bootstrap-downloaded** when `registry_url` is set (non-empty) and the node was built with **`governance`**.
-- **`disabled_modules` (opt-out):** listed manifest names are **never** auto-loaded and are **skipped** for bootstrap. If a name is in both `enabled_modules` and `disabled_modules`, **disabled wins** (with a log warning).
+- **No pins in config (`enabled_modules` empty, `[modules]` omitted or no inline keys):** every module **discovered** under `modules_dir` is a candidate to auto-load; **no** HTTP bootstrap runs.
+- **Non-empty pins:** only listed manifest names load from disk; missing names or versions that **do not match** the constraint may be **bootstrap-downloaded** when `registry_url` is set and the node was built with **`governance`** (on by default for Bitcoin Commons `blvm`).
+- **`disabled_modules` (opt-out):** listed manifest names are **never** auto-loaded and are **skipped** for bootstrap. If a name is in both pins and `disabled_modules`, **disabled wins** (with a log warning).
 
 Explicit **`loadmodule`** RPC still loads a module by name when invoked; `disabled_modules` applies to startup auto-load, watcher-driven `auto_load_modules`, and registry bootstrap.
 
 Requirements for bootstrap (official binaries):
 
-- **`[modules].registry_url`** should point at a **`modules.json`** discovery index (array of `{ "name", "repo" (owner/repo), optional "module_toml_url", optional "manifest_ref" }`). If `module_toml_url` is omitted, the node fetches **`https://raw.githubusercontent.com/{repo}/{ref}/module.toml`** (`ref` defaults to **`main`**). The default registry URL is **`https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json`** (`DEFAULT_MODULE_REGISTRY_INDEX_URL` in `blvm-node` config).
-- **`[modules].enabled_modules`** names each module to install if absent (default: miniscript + zmq).
+- **`[modules].registry_url`** should point at a **`modules.json`** discovery index (array of `{ "name", "repo" (owner/repo), optional "module_toml_url", optional "manifest_ref" }`). Default: **`https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json`**.
+- **Version pins** name each module and optional constraint. Bootstrap selects the **highest GitHub Release** matching the constraint, fetches `module.toml` at tag `v{version}`, and installs the release artifact. Unpinned legacy entries (`enabled_modules = ["name"]` or constraint `"*"`) still fetch manifest from **`main`** (floating).
 
-  Example (explicit; same as defaults):
+  Example (recommended — see `blvm/blvm.toml.example`):
+
+  ```toml
+  [modules]
+  registry_url = "https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json"
+  blvm-miniscript = "0.1.*"
+  [modules.blvm-zmq]
+  version = "0.3.*"
+  hashblock = "tcp://127.0.0.1:28332"
+  ```
+
+  Legacy unpinned allowlist:
 
   ```toml
   [modules]
@@ -89,8 +99,7 @@ Requirements for bootstrap (official binaries):
   registry_url = "https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json"
   ```
 
-  For backward compatibility, the same URL may instead be set as  
-  **`[modules.blvm-marketplace] registry_url`** — the node uses `registry_url` on `[modules]` when set, otherwise that legacy key.
+  For backward compatibility, `registry_url` may instead be set as **`[modules.blvm-marketplace] registry_url`** — the node prefers `[modules].registry_url` when set.
 
 On startup you should see log lines like `Bootstrap: fetching manifest for 'blvm-miniscript'` and `Bootstrap: installed ...`. Then the normal auto-load path runs.
 
