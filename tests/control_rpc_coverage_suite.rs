@@ -84,27 +84,3 @@ async fn test_getmoduleclispecs_without_manager_errors() {
     let rpc = ControlRpc::new();
     assert!(rpc.getmoduleclispecs(&json!([])).await.is_err());
 }
-
-#[tokio::test]
-async fn test_meshsendpacket_without_manager_errors() {
-    let rpc = ControlRpc::new();
-    assert!(rpc
-        .meshsendpacket(&json!({
-            "request_hex": "0102",
-            "mesh_module_id": "blvm-mesh"
-        }))
-        .await
-        .is_err());
-}
-
-#[tokio::test]
-async fn test_meshpollreceived_without_manager_errors() {
-    let rpc = ControlRpc::new();
-    assert!(rpc
-        .meshpollreceived(&json!({
-            "mesh_module_id": "blvm-mesh",
-            "max_packets": 1
-        }))
-        .await
-        .is_err());
-}

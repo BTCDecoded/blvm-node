@@ -96,10 +96,6 @@ pub const CORE_RPC_METHODS: &[&str] = &[
     "listmodules",
     "getmoduleclispecs",
     "runmodulecli",
-    "meshsendpacket",
-    "meshpollreceived",
-    "meshquoteroute",
-    "meshrequesthopinvoice",
     "getdescriptorinfo",
     "analyzepsbt",
 ];
