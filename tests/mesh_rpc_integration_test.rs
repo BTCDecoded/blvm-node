@@ -11,7 +11,7 @@ use blvm_node::module::traits::ModuleError;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-const BITSOV_PROTOCOL: &str = "bitsov-ukm-v1";
+const APP_PROTOCOL: &str = "app-ukm-v1";
 
 /// Bincode-compatible with blvm-mesh `PaymentProof` (without `ctv` feature).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,12 +166,12 @@ async fn mesh_send_packet_poll_local_deliveries_roundtrip() {
 
     let router = ModuleRouter::new(registry);
 
-    let payload = b"hello-bitsov-mesh".to_vec();
+    let payload = b"hello-mesh-app".to_vec();
     let send_req = SendPacketRequest {
         destination: [1u8; 32],
         payload: payload.clone(),
         payment_proof: None,
-        protocol_id: Some(BITSOV_PROTOCOL.into()),
+        protocol_id: Some(APP_PROTOCOL.into()),
         ttl: Some(3600),
     };
     let send_bytes = bincode::serialize(&send_req).unwrap();
@@ -189,7 +189,7 @@ async fn mesh_send_packet_poll_local_deliveries_roundtrip() {
         max_packets: Option<usize>,
     }
     let poll_req = PollRequest {
-        protocol_id: Some(BITSOV_PROTOCOL.into()),
+        protocol_id: Some(APP_PROTOCOL.into()),
         max_packets: Some(8),
     };
     let poll_bytes = bincode::serialize(&poll_req).unwrap();
@@ -213,6 +213,6 @@ async fn mesh_send_packet_poll_local_deliveries_roundtrip() {
     let packets: Vec<PolledPacket> = bincode::deserialize(&poll_resp).unwrap();
     assert_eq!(packets.len(), 1);
     assert_eq!(packets[0].payload, payload);
-    assert_eq!(packets[0].protocol_id, BITSOV_PROTOCOL);
+    assert_eq!(packets[0].protocol_id, APP_PROTOCOL);
     assert_eq!(packets[0].source, [0xAA; 32]);
 }

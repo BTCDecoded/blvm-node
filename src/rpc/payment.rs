@@ -365,7 +365,7 @@ impl PaymentRpc {
         Ok(response)
     }
 
-    /// Verify a CTV covenant proof for gate path 2 (BitSov / mesh adapters).
+    /// Verify a CTV covenant proof for gate path 2 (external app / mesh adapters).
     ///
     /// Params: [covenant_proof_hex, output_index, amount_sats]
     ///
