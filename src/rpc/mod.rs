@@ -75,8 +75,8 @@ pub struct RpcManager {
     /// Payment processor for BIP70 HTTP endpoints
     #[cfg(feature = "bip70-http")]
     payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
-    /// Payment state machine for CTV payment endpoints
-    #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+    /// Payment state machine for BIP70 / path-3 RPC
+    #[cfg(feature = "bip70-http")]
     payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
     /// Event publisher for module event notifications (optional)
     event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
@@ -130,7 +130,7 @@ impl RpcManager {
             node_shutdown: None,
             #[cfg(feature = "bip70-http")]
             payment_processor: None,
-            #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+            #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
             event_publisher: None,
             max_request_size_bytes: 1_048_576,
@@ -368,7 +368,7 @@ impl RpcManager {
     }
 
     /// Set payment state machine for CTV payment endpoints
-    #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+    #[cfg(feature = "bip70-http")]
     pub fn with_payment_state_machine(
         mut self,
         state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
@@ -403,7 +403,7 @@ impl RpcManager {
             node_shutdown: None,
             #[cfg(feature = "bip70-http")]
             payment_processor: None,
-            #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+            #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
             event_publisher: None,
             max_request_size_bytes: 1_048_576,
@@ -594,6 +594,23 @@ impl RpcManager {
             }
         };
 
+        #[cfg(feature = "bip70-http")]
+        let server = {
+            if let Some(ref state_machine) = self.payment_state_machine {
+                let mut payment_rpc =
+                    payment::PaymentRpc::with_state_machine(Arc::clone(state_machine));
+                if let (Some(ref mempool), Some(ref storage)) =
+                    (self.mempool.as_ref(), self.storage.as_ref())
+                {
+                    payment_rpc =
+                        payment_rpc.with_chain_access(Arc::clone(mempool), Arc::clone(storage));
+                }
+                server.with_payment(Arc::new(payment_rpc))
+            } else {
+                server
+            }
+        };
+
         // Wrap in Arc so ModuleManager and NodeApiImpl can reference the same live server.
         let server_arc = Arc::new(server);
         self.server_arc = Some(Arc::clone(&server_arc));
@@ -734,7 +751,7 @@ impl RpcManager {
                 if let Some(ref processor) = self.payment_processor {
                     rest_server = rest_server.with_payment_processor(Arc::clone(processor));
                 }
-                #[cfg(all(feature = "bip70-http", feature = "ctv"))]
+                #[cfg(feature = "bip70-http")]
                 if let Some(ref state_machine) = self.payment_state_machine {
                     rest_server = rest_server.with_payment_state_machine(Arc::clone(state_machine));
                 }

@@ -3,12 +3,19 @@
 #![cfg(feature = "bip70-http")]
 
 use blvm_node::config::PaymentConfig;
+use blvm_node::node::mempool::MempoolManager;
 use blvm_node::payment::processor::PaymentProcessor;
 use blvm_node::payment::state_machine::{PaymentState, PaymentStateMachine};
 use blvm_node::rpc::payment::PaymentRpc;
+use blvm_node::storage::Storage;
+use blvm_protocol::block::calculate_tx_id;
 use blvm_protocol::payment::PaymentOutput;
 use serde_json::json;
 use std::sync::Arc;
+use tempfile::TempDir;
+
+mod common;
+use common::valid_transaction;
 
 fn create_test_outputs() -> Vec<PaymentOutput> {
     vec![
@@ -146,4 +153,110 @@ async fn verify_on_chain_payment_not_found() {
 
     assert_eq!(result["verified"], false);
     assert_eq!(result["state"], "not_found");
+}
+
+fn chain_rpc_fixture() -> (TempDir, PaymentRpc, [u8; 32]) {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let tx = valid_transaction();
+    let tx_hash = calculate_tx_id(&tx);
+    mempool.add_transaction(tx).unwrap();
+
+    let processor =
+        Arc::new(PaymentProcessor::new(PaymentConfig::default()).expect("payment processor"));
+    let state_machine = Arc::new(PaymentStateMachine::new(processor));
+    let rpc = PaymentRpc::with_state_machine(state_machine).with_chain_access(mempool, storage);
+
+    (temp_dir, rpc, tx_hash)
+}
+
+#[tokio::test]
+async fn verify_on_chain_payment_by_tx_chain_only() {
+    let (_dir, rpc, tx_hash) = chain_rpc_fixture();
+    let min_amount = 1u64;
+
+    let result = rpc
+        .verify_on_chain_payment_by_tx(&json!([
+            "foreign-payment-id",
+            hex::encode(tx_hash),
+            min_amount
+        ]))
+        .await
+        .expect("verify_on_chain_payment_by_tx");
+
+    assert_eq!(result["verified"], true);
+    assert_eq!(result["state"], "in_mempool");
+    assert!(result["amount_sats"].as_u64().unwrap() >= min_amount);
+}
+
+#[tokio::test]
+async fn verify_on_chain_payment_by_tx_underpaid() {
+    let (_dir, rpc, tx_hash) = chain_rpc_fixture();
+
+    let result = rpc
+        .verify_on_chain_payment_by_tx(&json!([
+            "foreign-payment-id",
+            hex::encode(tx_hash),
+            u64::MAX
+        ]))
+        .await
+        .expect("verify_on_chain_payment_by_tx");
+
+    assert_eq!(result["verified"], false);
+    assert_eq!(result["state"], "underpaid");
+}
+
+#[tokio::test]
+async fn verify_on_chain_payment_by_tx_local_pr_outputs() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+
+    let processor =
+        Arc::new(PaymentProcessor::new(PaymentConfig::default()).expect("payment processor"));
+    let state_machine = Arc::new(PaymentStateMachine::new(processor.clone()));
+    let (payment_id, _) = state_machine
+        .create_payment_request(create_test_outputs(), None, false)
+        .await
+        .expect("create payment request");
+
+    let tx = valid_transaction();
+    let tx_hash = calculate_tx_id(&tx);
+    mempool.add_transaction(tx).unwrap();
+
+    let rpc = PaymentRpc::with_state_machine(state_machine).with_chain_access(mempool, storage);
+
+    // Local PR exists but state is RequestCreated — chain path uses BIP70 outputs.
+    let result = rpc
+        .verify_on_chain_payment_by_tx(&json!([payment_id, hex::encode(tx_hash), 1u64]))
+        .await
+        .expect("verify_on_chain_payment_by_tx");
+
+    // Fixture tx does not match PR outputs → output_mismatch (not silent pass).
+    assert_eq!(result["verified"], false);
+    assert_eq!(result["state"], "output_mismatch");
+}
+
+#[tokio::test]
+async fn verify_on_chain_payment_by_tx_delegates_when_tracked() {
+    let (rpc, state_machine) = create_rpc();
+    let (payment_id, _) = state_machine
+        .create_payment_request(create_test_outputs(), None, false)
+        .await
+        .expect("create payment request");
+
+    let tx_hash = [0x42u8; 32];
+    state_machine
+        .mark_in_mempool(&payment_id, tx_hash)
+        .await
+        .expect("mark in mempool");
+
+    let result = rpc
+        .verify_on_chain_payment_by_tx(&json!([payment_id, hex::encode(tx_hash), 100_000u64]))
+        .await
+        .expect("verify_on_chain_payment_by_tx");
+
+    assert_eq!(result["verified"], true);
+    assert_eq!(result["state"], "in_mempool");
 }

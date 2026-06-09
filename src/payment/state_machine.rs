@@ -588,6 +588,18 @@ impl PaymentStateMachine {
             .sum())
     }
 
+    /// BIP70 outputs for a stored payment request (None if not on this node).
+    pub async fn payment_request_outputs(
+        &self,
+        payment_request_id: &str,
+    ) -> Result<Vec<PaymentOutput>, PaymentError> {
+        let request = self
+            .payment_processor
+            .get_payment_request(payment_request_id)
+            .await?;
+        Ok(request.payment_details.outputs)
+    }
+
     /// Get current payment state
     pub async fn get_payment_state(
         &self,

@@ -1484,6 +1484,19 @@ impl RpcServer {
                 }
             }
             #[cfg(feature = "bip70-http")]
+            "verifyonchainpaymentbytx" => {
+                if let Some(ref payment_rpc) = self.payment {
+                    payment_rpc
+                        .verify_on_chain_payment_by_tx(&params)
+                        .await
+                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
+                } else {
+                    Err(errors::RpcError::internal_error(
+                        "Payment RPC not available".to_string(),
+                    ))
+                }
+            }
+            #[cfg(feature = "bip70-http")]
             #[cfg(feature = "ctv")]
             "verifycovenantproof" => {
                 if let Some(ref payment_rpc) = self.payment {

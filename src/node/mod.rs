@@ -1247,15 +1247,12 @@ impl Node {
                                     crate::rpc::RpcManager::new("127.0.0.1:0".parse().unwrap()),
                                 );
                                 self.rpc = rpc.with_payment_processor(Arc::clone(&processor_arc));
-                                #[cfg(feature = "ctv")]
-                                {
-                                    let rpc = std::mem::replace(
-                                        &mut self.rpc,
-                                        crate::rpc::RpcManager::new("127.0.0.1:0".parse().unwrap()),
-                                    );
-                                    self.rpc = rpc
-                                        .with_payment_state_machine(Arc::clone(&state_machine_arc));
-                                }
+                                let rpc = std::mem::replace(
+                                    &mut self.rpc,
+                                    crate::rpc::RpcManager::new("127.0.0.1:0".parse().unwrap()),
+                                );
+                                self.rpc =
+                                    rpc.with_payment_state_machine(Arc::clone(&state_machine_arc));
                             }
 
                             // Update node API with payment state machine

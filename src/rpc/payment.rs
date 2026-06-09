@@ -6,12 +6,15 @@
 //! - Querying payment state
 //! - Settlement monitoring
 
+use crate::node::mempool::MempoolManager;
 #[cfg(feature = "ctv")]
 use crate::payment::covenant::CovenantEngine;
 use crate::payment::processor::PaymentError;
 use crate::payment::state_machine::{PaymentState, PaymentStateMachine};
 use crate::rpc::params::{param_bool_default, param_str};
+use crate::storage::Storage;
 use crate::utils::current_timestamp;
+use crate::{Hash, Transaction};
 use blvm_protocol::payment::PaymentOutput;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -24,6 +27,8 @@ pub const DEFAULT_SAFE_DEPTH: u32 = 6;
 #[derive(Clone)]
 pub struct PaymentRpc {
     state_machine: Option<Arc<PaymentStateMachine>>,
+    mempool: Option<Arc<MempoolManager>>,
+    storage: Option<Arc<Storage>>,
 }
 
 impl PaymentRpc {
@@ -31,6 +36,8 @@ impl PaymentRpc {
     pub fn new() -> Self {
         Self {
             state_machine: None,
+            mempool: None,
+            storage: None,
         }
     }
 
@@ -38,7 +45,20 @@ impl PaymentRpc {
     pub fn with_state_machine(state_machine: Arc<PaymentStateMachine>) -> Self {
         Self {
             state_machine: Some(state_machine),
+            mempool: None,
+            storage: None,
         }
+    }
+
+    /// Attach mempool + storage for chain-level path-3 verify (`verifyonchainpaymentbytx`).
+    pub fn with_chain_access(
+        mut self,
+        mempool: Arc<MempoolManager>,
+        storage: Arc<Storage>,
+    ) -> Self {
+        self.mempool = Some(mempool);
+        self.storage = Some(storage);
+        self
     }
 
     /// Get payment state machine (returns error if not available)
@@ -363,6 +383,154 @@ impl PaymentRpc {
         };
 
         Ok(response)
+    }
+
+    /// Chain-level path-3 verify when local payment-request state is absent (two-node topology).
+    ///
+    /// Params: `[payment_request_id, tx_hash_hex, min_amount_sats]`
+    ///
+    /// When the payment request exists locally, outputs from the stored BIP70 request are used.
+    /// Otherwise the tx is resolved from mempool/chain and total output value must meet
+    /// `min_amount_sats` (weaker binding — see ops docs).
+    pub async fn verify_on_chain_payment_by_tx(
+        &self,
+        params: &Value,
+    ) -> Result<Value, PaymentError> {
+        debug!("RPC: verifyonchainpaymentbytx");
+
+        let state_machine = self.get_state_machine()?;
+
+        let payment_request_id = param_str(params, 0).map(String::from).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'payment_request_id' parameter".to_string())
+        })?;
+        let tx_hash_hex = param_str(params, 1).map(String::from).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'tx_hash' parameter".to_string())
+        })?;
+        let min_amount_sats = params.get(2).and_then(|v| v.as_u64()).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'min_amount_sats' parameter".to_string())
+        })?;
+
+        if min_amount_sats == 0 {
+            return Ok(json!({
+                "verified": false,
+                "state": "failed",
+                "amount_sats": null,
+                "tx_hash": null,
+                "reason": "min_amount_sats must be non-zero",
+            }));
+        }
+
+        let tx_hash = decode_tx_hash(&tx_hash_hex)?;
+
+        // Fast path: local state machine tracks mempool/settled for this PR.
+        if let Ok(state) = state_machine.get_payment_state(&payment_request_id).await {
+            let use_local_state = matches!(
+                state,
+                PaymentState::InMempool { .. }
+                    | PaymentState::Settled { .. }
+                    | PaymentState::ReorgPending { .. }
+            );
+            if use_local_state {
+                return self
+                    .verify_on_chain_payment(&json!([payment_request_id, tx_hash_hex]))
+                    .await;
+            }
+        }
+
+        let expected_outputs = state_machine
+            .payment_request_outputs(&payment_request_id)
+            .await
+            .ok();
+
+        let Some((tx, chain_state)) = self.lookup_tx_chain_state(&tx_hash).await? else {
+            return Ok(json!({
+                "verified": false,
+                "state": "not_found",
+                "amount_sats": null,
+                "tx_hash": null,
+                "reason": "transaction not found in mempool or chain",
+            }));
+        };
+
+        let amount_sats = if let Some(ref outputs) = expected_outputs {
+            if !transaction_matches_outputs(&tx, outputs) {
+                return Ok(json!({
+                    "verified": false,
+                    "state": "output_mismatch",
+                    "amount_sats": null,
+                    "tx_hash": tx_hash_hex,
+                    "reason": "transaction outputs do not match payment request",
+                }));
+            }
+            outputs.iter().filter_map(|o| o.amount).sum()
+        } else {
+            tx_output_total_sats(&tx)
+        };
+
+        if amount_sats < min_amount_sats {
+            return Ok(json!({
+                "verified": false,
+                "state": "underpaid",
+                "amount_sats": amount_sats,
+                "tx_hash": tx_hash_hex,
+                "reason": format!(
+                    "output amount {amount_sats} sats below min_amount_sats {min_amount_sats}"
+                ),
+            }));
+        }
+
+        let state = match chain_state {
+            TxChainState::InMempool => "in_mempool",
+            TxChainState::Confirmed { .. } => "confirmed",
+        };
+
+        Ok(json!({
+            "verified": true,
+            "state": state,
+            "amount_sats": amount_sats,
+            "tx_hash": tx_hash_hex,
+            "reason": null,
+        }))
+    }
+
+    async fn lookup_tx_chain_state(
+        &self,
+        tx_hash: &Hash,
+    ) -> Result<Option<(Transaction, TxChainState)>, PaymentError> {
+        if let Some(ref mempool) = self.mempool {
+            if let Some(tx) = mempool.get_transaction(tx_hash) {
+                return Ok(Some((tx, TxChainState::InMempool)));
+            }
+        }
+
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(tx)) = storage.transactions().get_transaction(tx_hash) {
+                let confirmations = storage
+                    .transactions()
+                    .get_metadata(tx_hash)
+                    .ok()
+                    .flatten()
+                    .and_then(|meta| {
+                        let block_height = storage
+                            .blocks()
+                            .get_height_by_hash(&meta.block_hash)
+                            .ok()
+                            .flatten()?;
+                        let tip = storage.chain().get_height().ok().flatten().unwrap_or(0);
+                        Some((tip.saturating_sub(block_height) + 1) as u32)
+                    })
+                    .unwrap_or(1);
+                return Ok(Some((tx, TxChainState::Confirmed { confirmations })));
+            }
+        }
+
+        if self.mempool.is_none() && self.storage.is_none() {
+            return Err(PaymentError::ProcessingError(
+                "chain access not available (mempool/storage not configured)".to_string(),
+            ));
+        }
+
+        Ok(None)
     }
 
     /// Verify a CTV covenant proof for gate path 2 (external app / mesh adapters).
@@ -1122,10 +1290,59 @@ impl PaymentRpc {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TxChainState {
+    InMempool,
+    Confirmed { confirmations: u32 },
+}
+
 fn decode_tx_hash(hex_str: &str) -> Result<crate::Hash, PaymentError> {
     let bytes = hex::decode(hex_str)
         .map_err(|e| PaymentError::ProcessingError(format!("Invalid tx_hash hex: {e}")))?;
     bytes
         .try_into()
         .map_err(|_| PaymentError::ProcessingError("tx_hash must be 32 bytes".to_string()))
+}
+
+fn tx_output_total_sats(tx: &Transaction) -> u64 {
+    tx.outputs
+        .iter()
+        .map(|o| (o.value as i64).max(0) as u64)
+        .sum()
+}
+
+fn transaction_matches_outputs(tx: &Transaction, expected_outputs: &[PaymentOutput]) -> bool {
+    use blvm_protocol::types::{ByteString, Integer, TransactionOutput};
+
+    let expected_tx_outputs: Vec<TransactionOutput> = expected_outputs
+        .iter()
+        .filter_map(|po| {
+            let amount = po.amount?;
+            Some(TransactionOutput {
+                value: Integer::from(amount as i64),
+                script_pubkey: ByteString::from(po.script.clone()),
+            })
+        })
+        .collect();
+
+    if expected_tx_outputs.is_empty() || tx.outputs.len() < expected_tx_outputs.len() {
+        return false;
+    }
+
+    for expected_output in &expected_tx_outputs {
+        let mut found = false;
+        for tx_output in &tx.outputs {
+            if tx_output.value == expected_output.value
+                && tx_output.script_pubkey == expected_output.script_pubkey
+            {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+
+    true
 }
