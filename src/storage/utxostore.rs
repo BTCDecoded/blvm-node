@@ -46,6 +46,7 @@ pub struct UtxoStore {
     db: Arc<dyn Database>,
     utxos: Arc<dyn Tree>,
     spent_outputs: Arc<dyn Tree>,
+    value_codec: crate::storage::utxo_value_codec::ValueCodec,
     #[cfg(feature = "utxo-compression")]
     compression_enabled: bool,
     #[cfg(feature = "utxo-compression")]
@@ -72,16 +73,33 @@ impl UtxoStore {
     ) -> Result<Self> {
         let utxos = Arc::from(db.open_tree("utxos")?);
         let spent_outputs = Arc::from(db.open_tree("spent_outputs")?);
+        let value_codec = crate::storage::utxo_value_codec::ValueCodec::for_database(db.as_ref());
 
         Ok(Self {
             db,
             utxos,
             spent_outputs,
+            value_codec,
             #[cfg(feature = "utxo-compression")]
             compression_enabled,
             #[cfg(feature = "utxo-compression")]
             compression_level,
         })
+    }
+
+    #[inline]
+    fn serialize_utxo(&self, utxo: &UTXO) -> Result<Vec<u8>> {
+        crate::storage::utxo_value_codec::encode_utxo_with_codec(self.value_codec, utxo)
+    }
+
+    #[inline]
+    pub(crate) fn value_codec(&self) -> crate::storage::utxo_value_codec::ValueCodec {
+        self.value_codec
+    }
+
+    #[inline]
+    fn deserialize_utxo_data(&self, bytes: &[u8]) -> Result<UTXO> {
+        crate::storage::utxo_value_codec::decode_utxo_with_codec(self.value_codec, bytes)
     }
 
     /// Store the entire UTXO set
@@ -118,8 +136,7 @@ impl UtxoStore {
                         } else {
                             // Cache miss: must drop read guard before write or we deadlock (RwLock).
                             drop(cached);
-                            let serialized = bincode::serialize(utxo.as_ref())
-                                .map_err(|e| anyhow::anyhow!("Serialization failed: {}", e))?;
+                            let serialized = self.serialize_utxo(utxo.as_ref())?;
 
                             if let Ok(mut w) = cache.write() {
                                 w.put(cache_key, serialized.clone());
@@ -129,8 +146,7 @@ impl UtxoStore {
                         }
                     } else {
                         // Cache lock failed - serialize without caching
-                        bincode::serialize(utxo.as_ref())
-                            .map_err(|e| anyhow::anyhow!("Serialization failed: {}", e))?
+                        self.serialize_utxo(utxo.as_ref())?
                     };
 
                     Ok((key, value))
@@ -173,7 +189,7 @@ impl UtxoStore {
                             serialized.clone() // Clone cached result
                         } else {
                             drop(cached);
-                            let serialized = bincode::serialize(utxo.as_ref())?;
+                            let serialized = self.serialize_utxo(utxo.as_ref())?;
 
                             if let Ok(mut w) = cache.write() {
                                 w.put(cache_key, serialized.clone());
@@ -183,12 +199,12 @@ impl UtxoStore {
                         }
                     } else {
                         // Cache lock failed - serialize without caching
-                        bincode::serialize(utxo.as_ref())?
+                        self.serialize_utxo(utxo.as_ref())?
                     }
                 };
 
                 #[cfg(not(feature = "production"))]
-                let value = bincode::serialize(utxo.as_ref())?;
+                let value = self.serialize_utxo(utxo.as_ref())?;
 
                 // Compress if enabled
                 #[cfg(feature = "utxo-compression")]
@@ -229,7 +245,7 @@ impl UtxoStore {
             #[cfg(not(feature = "utxo-compression"))]
             let utxo_data = value;
 
-            let utxo: UTXO = bincode::deserialize(&utxo_data)?;
+            let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
             utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
         }
 
@@ -254,7 +270,7 @@ impl UtxoStore {
                     serialized.clone() // Clone cached result
                 } else {
                     drop(cached);
-                    let serialized = bincode::serialize(utxo)?;
+                    let serialized = self.serialize_utxo(utxo)?;
 
                     if let Ok(mut w) = cache.write() {
                         w.put(cache_key, serialized.clone());
@@ -264,12 +280,12 @@ impl UtxoStore {
                 }
             } else {
                 // Cache lock failed - serialize without caching
-                bincode::serialize(utxo)?
+                self.serialize_utxo(utxo)?
             }
         };
 
         #[cfg(not(feature = "production"))]
-        let value = bincode::serialize(utxo)?;
+        let value = self.serialize_utxo(utxo)?;
 
         // Compress UTXO data if compression is enabled
         #[cfg(feature = "utxo-compression")]
@@ -297,6 +313,27 @@ impl UtxoStore {
     /// Get a UTXO by outpoint
     pub fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
         let key = self.outpoint_key(outpoint);
+
+        // heed3 zero-copy fast path: open a read txn, read the mmap'd value directly —
+        // skips the Vec<u8> allocation from Tree::get and the full rkyv deserialize pass.
+        // Not compatible with utxo-compression (rkyv + zstd don't co-exist).
+        #[cfg(all(feature = "heed3", not(feature = "utxo-compression")))]
+        if self.value_codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv {
+            if let Some(heed3_tree) = self.utxos.as_heed3_tree() {
+                let rtxn = heed3_tree.env().read_txn()?;
+                let slices = heed3_tree.get_many_heed3(&[key.as_slice()], &rtxn)?;
+                return match slices.into_iter().next().flatten() {
+                    Some(bytes) => {
+                        let archived = crate::storage::rkyv_codec::access_utxo(bytes)?;
+                        Ok(Some(crate::storage::rkyv_codec::utxo_from_archived(
+                            archived,
+                        )))
+                    }
+                    None => Ok(None),
+                };
+            }
+        }
+
         if let Some(data) = self.utxos.get(&key)? {
             // Decompress if data is compressed (auto-detect via zstd magic bytes)
             #[cfg(feature = "utxo-compression")]
@@ -310,7 +347,7 @@ impl UtxoStore {
             #[cfg(not(feature = "utxo-compression"))]
             let utxo_data = data;
 
-            let utxo: UTXO = bincode::deserialize(&utxo_data)?;
+            let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
             Ok(Some(utxo))
         } else {
             Ok(None)
@@ -371,7 +408,7 @@ impl UtxoStore {
             #[cfg(not(feature = "utxo-compression"))]
             let utxo_data = value;
 
-            let utxo: UTXO = bincode::deserialize(&utxo_data)?;
+            let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
             total += utxo.value as u64;
         }
 
@@ -550,8 +587,11 @@ impl CachedUtxoStore {
 
             match utxo_opt {
                 Some(utxo) => {
-                    let value = bincode::serialize(&utxo)
-                        .map_err(|e| anyhow::anyhow!("Failed to serialize UTXO: {}", e))?;
+                    let value = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+                        self.inner.value_codec(),
+                        &utxo,
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize UTXO: {}", e))?;
                     batch.put(&key, &value);
                 }
                 None => {

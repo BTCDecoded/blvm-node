@@ -61,6 +61,16 @@ fn test_module_subprocess_database_backend_preference() {
         module_subprocess_database_backend_preference(DatabaseBackend::TidesDB, None),
         "tidesdb"
     );
+    #[cfg(feature = "heed3")]
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, None),
+        "heed3"
+    );
+    #[cfg(not(feature = "heed3"))]
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, None),
+        "sled"
+    );
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("tidesdb")),
         "tidesdb"

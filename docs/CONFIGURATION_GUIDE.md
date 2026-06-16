@@ -73,11 +73,12 @@ Advertising an **external** reachable address for inbound peers is **not** a sin
 ```toml
 [storage]
 data_dir = "data"
-database_backend = "auto"  # typical `blvm` build: RocksDB; or force "rocksdb" | "redb" | "tidesdb" | "sled"
+database_backend = "auto"  # typical `blvm` build: heed3 (LMDB); or force "heed3" | "rocksdb" | "redb" | "tidesdb" | "sled"
 ```
 
 Database backend options:
-- **auto** (config default): **RocksDB** when the `rocksdb` feature is enabled (standard release builds), else TidesDB, Redb, Sled — see `default_backend()` in `blvm-node`
+- **auto** (config default): **heed3 (LMDB)** when the `heed3` feature is enabled (standard release builds), else RocksDB, TidesDB, Redb, Sled — see `default_backend()` in `blvm-node`
+- **heed3**: LMDB + rkyv UTXO encoding; zero-copy reads (requires `heed3` feature + liblmdb)
 - **rocksdb**: High-performance; common on-disk layout interop
 - **redb**: Pure-Rust embedded ACID database (common in minimal / no-RocksDB builds)
 - **tidesdb**: LSM-tree store; requires TidesDB feature

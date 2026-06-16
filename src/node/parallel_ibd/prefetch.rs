@@ -115,7 +115,9 @@ pub(crate) fn prefetch_build_utxo_map(
     if !to_load.is_empty() && !store.memory_only() {
         let miss_count = to_load.len() as u64;
         let t_disk = std::time::Instant::now();
-        if let Ok((loaded, keys_scanned)) = load_keys_from_disk(store.disk_clone(), to_load) {
+        if let Ok((loaded, keys_scanned)) =
+            load_keys_from_disk(store.disk_clone(), to_load, store.value_codec())
+        {
             let disk_ms = t_disk.elapsed().as_millis() as u64;
             PREFETCH_TOTAL_DISK_MS.fetch_add(disk_ms, Ordering::Relaxed);
             PREFETCH_TOTAL_DISK_READS.fetch_add(miss_count, Ordering::Relaxed);

@@ -59,6 +59,10 @@ impl BitcoinCoreStorage {
         if rocksdb_path.exists() {
             return true;
         }
+        let heed3_path = data_dir.join("heed3");
+        if heed3_path.exists() {
+            return true;
+        }
         false
     }
 

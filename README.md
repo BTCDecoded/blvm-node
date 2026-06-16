@@ -51,17 +51,20 @@ See [Security](#security) for production considerations.
 
 Supports multiple database backends via feature flags:
 
-- **rocksdb** (default): High-performance database; reads common LevelDB/`blk*.dat` layouts; strong IBD performance
+- **heed3** (default `auto` backend): LMDB + rkyv UTXO encoding; zero-copy mmap reads on IBD hot paths (requires `liblmdb`)
+- **rocksdb**: High-performance database; reads common LevelDB/`blk*.dat` layouts; Core datadir migration
 - **redb**: Embedded database with ACID transactions
 - **sled**: Embedded key-value store (fallback)
 - **tidesdb** (optional): LSM-tree key-value store; requires TidesDB C library
 
-**RocksDB** (default backend):
+**heed3 (LMDB)** is the first choice when `database_backend = "auto"` in standard builds (default features include `heed3` and `rocksdb`). Use **`database_backend = "rocksdb"`** for an existing RocksDB datadir or Core LevelDB import.
+
+**RocksDB** (optional; still enabled by default for Core migration):
 - Automatic detection of common Bitcoin-style data directories
 - Direct access to raw block files (`blk*.dat`) where supported
 - Parsers for common on-disk chain formats
 
-Default binary builds enable **RocksDB** (`rocksdb` feature). RocksDB requires a working C++ toolchain; CI installs `libclang` where bindgen is needed.
+Default binary builds enable **heed3** and **rocksdb**. heed3 requires `liblmdb`; RocksDB requires a working C++ toolchain; CI installs both where needed.
 
 To build with **redb** only (pure Rust, no `librocksdb-sys`):
 

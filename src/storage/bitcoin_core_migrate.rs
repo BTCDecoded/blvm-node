@@ -566,12 +566,15 @@ impl Migrator {
             };
 
             let outpoint_key = core_utxo_key_to_outpoint_key(&key)?;
-            let blvm_utxo = bincode::serialize(&UTXO {
-                value: coin.amount as i64,
-                script_pubkey: coin.script.into(),
-                height: coin.height as u64,
-                is_coinbase: coin.is_coinbase,
-            })?;
+            let blvm_utxo = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+                crate::storage::utxo_value_codec::ValueCodec::for_database(self.dest_db.as_ref()),
+                &UTXO {
+                    value: coin.amount as i64,
+                    script_pubkey: coin.script.into(),
+                    height: coin.height as u64,
+                    is_coinbase: coin.is_coinbase,
+                },
+            )?;
 
             batch.push((outpoint_key, blvm_utxo));
 

@@ -1,6 +1,6 @@
 //! Database abstraction layer
 //!
-//! Provides a unified interface for different database backends (tidesdb, redb, sled, rocksdb).
+//! Provides a unified interface for different database backends (tidesdb, redb, sled, rocksdb, heed3).
 //! Allows switching between storage engines via feature flags.
 //!
 //! All backends must support the same set of tree names.
@@ -13,6 +13,11 @@ use std::sync::Arc;
 
 mod known_trees;
 pub use known_trees::KNOWN_TREE_NAMES;
+
+#[cfg(feature = "heed3")]
+mod heed3_impl;
+#[cfg(feature = "heed3")]
+pub use heed3_impl::{Heed3Database, Heed3ModuleDatabase, Heed3Tree};
 
 /// Database abstraction trait
 ///
@@ -88,6 +93,18 @@ pub trait Tree: Send + Sync {
     /// Required before writing a persistence marker when writes used `commit_no_wal`.
     fn flush_to_disk(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Downcast to the concrete `Heed3Tree` for zero-copy mmap reads.
+    ///
+    /// Returns `Some` only when the underlying backend is heed3/LMDB. All other backends
+    /// return `None` and callers fall back to the standard `get_many_no_cache` path.
+    ///
+    /// Used by [`crate::storage::disk_utxo::load_keys_from_disk`] and
+    /// [`crate::storage::utxostore::UtxoStore::get_utxo`] for the IBD zero-copy fast path.
+    #[cfg(feature = "heed3")]
+    fn as_heed3_tree(&self) -> Option<&heed3_impl::Heed3Tree> {
+        None
     }
 
     /// Iterate over all key-value pairs
@@ -184,15 +201,18 @@ pub enum DatabaseBackend {
     Redb,
     RocksDB,
     TidesDB,
+    Heed3,
 }
 
 /// String passed to module subprocesses as `MODULE_CONFIG_DATABASE_BACKEND` / `database_backend` merge key.
 ///
 /// Generic module `ModuleDb` / [`open_module_db`](blvm_sdk::module::database::open_module_db) needs
-/// dynamic `open_tree()` — only **Sled** and **TidesDB** qualify. The node's **RocksDB / Redb** chain
-/// backend must **not** be forwarded as-is (older `blvm-sdk` builds could mis-handle it). Defaults:
-/// **sled** when the chain uses RocksDB or Redb, **tidesdb** when the chain uses TidesDB, **sled**
-/// when the chain uses Sled. Override with [`ModuleConfig::module_database_backend`](crate::config::ModuleConfig::module_database_backend).
+/// dynamic `open_tree()` — **Sled**, **TidesDB**, and **heed3 module env** qualify. The node's
+/// **RocksDB / Redb / heed3 chain** backend must **not** be forwarded as-is for RocksDB/Redb
+/// (older `blvm-sdk` builds could mis-handle it). Defaults: **sled** when the chain uses RocksDB
+/// or Redb, **tidesdb** when the chain uses TidesDB, **heed3** when the chain uses heed3 (requires
+/// `heed3` feature), **sled** when the chain uses Sled. Override with
+/// [`ModuleConfig::module_database_backend`](crate::config::ModuleConfig::module_database_backend).
 pub fn module_subprocess_database_backend_preference(
     chain_backend: DatabaseBackend,
     modules_table_override: Option<&str>,
@@ -214,6 +234,10 @@ fn module_subprocess_kv_backend_default(chain_backend: DatabaseBackend) -> Strin
     match chain_backend {
         DatabaseBackend::TidesDB => "tidesdb".to_string(),
         DatabaseBackend::Sled => "sled".to_string(),
+        #[cfg(feature = "heed3")]
+        DatabaseBackend::Heed3 => "heed3".to_string(),
+        #[cfg(not(feature = "heed3"))]
+        DatabaseBackend::Heed3 => "sled".to_string(),
         DatabaseBackend::RocksDB | DatabaseBackend::Redb => "sled".to_string(),
     }
 }
@@ -255,6 +279,14 @@ pub fn backend_from_config(
             #[cfg(not(feature = "tidesdb"))]
             return Err(anyhow::anyhow!(
                 "TidesDB backend not available (build with --features tidesdb)"
+            ));
+        }
+        DatabaseBackendConfig::Heed3 => {
+            #[cfg(feature = "heed3")]
+            return Ok(DatabaseBackend::Heed3);
+            #[cfg(not(feature = "heed3"))]
+            return Err(anyhow::anyhow!(
+                "heed3/LMDB backend not available (build with --features heed3)"
             ));
         }
         DatabaseBackendConfig::Auto => Ok(default_backend()),
@@ -302,44 +334,99 @@ pub fn create_database<P: AsRef<Path>>(
         DatabaseBackend::TidesDB => Err(anyhow::anyhow!(
             "TidesDB backend not available (build with --features tidesdb)"
         )),
+        #[cfg(feature = "heed3")]
+        DatabaseBackend::Heed3 => Ok(Box::new(heed3_impl::Heed3Database::new(
+            data_dir,
+            storage_config,
+        )?)),
+        #[cfg(not(feature = "heed3"))]
+        DatabaseBackend::Heed3 => Err(anyhow::anyhow!(
+            "heed3/LMDB backend not available (build with --features heed3)"
+        )),
     }
 }
 
 /// Try to open a **module-process** KV store (dynamic `open_tree()` names).
 ///
 /// Attempts backends in order among those **compiled into** this `blvm-node` build:
-/// **Sled** (if `feature = "sled"`), then **TidesDB** (if `feature = "tidesdb"`).
+/// **Sled** (if `feature = "sled"`), then **TidesDB** (if `feature = "tidesdb"`), then
+/// **heed3** (if `feature = "heed3"`, module LMDB env with on-demand named DBs).
 pub fn try_create_module_kv_database<P: AsRef<Path>>(db_path: P) -> Result<Box<dyn Database>> {
+    try_create_module_kv_database_with_preference(db_path, None)
+}
+
+/// Open module KV with an optional preferred backend (must support dynamic `open_tree`).
+pub fn try_create_module_kv_database_with_preference<P: AsRef<Path>>(
+    db_path: P,
+    preferred: Option<DatabaseBackend>,
+) -> Result<Box<dyn Database>> {
     let db_path = db_path.as_ref();
 
-    #[cfg(all(not(feature = "sled"), not(feature = "tidesdb")))]
+    #[cfg(all(
+        not(feature = "sled"),
+        not(feature = "tidesdb"),
+        not(feature = "heed3")
+    ))]
     #[allow(clippy::needless_return)]
-    // Early exit: no trailing `try` impl when both backends are off.
     {
         return Err(anyhow::anyhow!(
-            "No dynamic module KV backend compiled into blvm-node (enable `sled` and/or `tidesdb`)"
+            "No dynamic module KV backend compiled into blvm-node (enable `sled`, `tidesdb`, and/or `heed3`)"
         ));
     }
 
-    #[cfg(any(feature = "sled", feature = "tidesdb"))]
+    #[cfg(any(feature = "sled", feature = "tidesdb", feature = "heed3"))]
     {
-        let mut last_err: Option<anyhow::Error>;
-
-        #[cfg(feature = "sled")]
-        {
-            match create_database(db_path, DatabaseBackend::Sled, None) {
-                Ok(db) => return Ok(db),
-                Err(e) => last_err = Some(e),
+        let mut attempts: Vec<DatabaseBackend> = Vec::new();
+        if let Some(pref) = preferred {
+            attempts.push(pref);
+        }
+        for backend in [
+            DatabaseBackend::Sled,
+            DatabaseBackend::TidesDB,
+            DatabaseBackend::Heed3,
+        ] {
+            if !attempts.contains(&backend) {
+                attempts.push(backend);
             }
         }
-        #[cfg(not(feature = "sled"))]
-        {
-            last_err = None;
-        }
 
-        #[cfg(feature = "tidesdb")]
-        {
-            match create_database(db_path, DatabaseBackend::TidesDB, None) {
+        let mut last_err: Option<anyhow::Error> = None;
+        for backend in attempts {
+            let result: Result<Box<dyn Database>> = match backend {
+                DatabaseBackend::Sled => {
+                    #[cfg(feature = "sled")]
+                    {
+                        create_database(db_path, DatabaseBackend::Sled, None)
+                    }
+                    #[cfg(not(feature = "sled"))]
+                    {
+                        Err(anyhow::anyhow!("sled feature not enabled"))
+                    }
+                }
+                DatabaseBackend::TidesDB => {
+                    #[cfg(feature = "tidesdb")]
+                    {
+                        create_database(db_path, DatabaseBackend::TidesDB, None)
+                    }
+                    #[cfg(not(feature = "tidesdb"))]
+                    {
+                        Err(anyhow::anyhow!("tidesdb feature not enabled"))
+                    }
+                }
+                DatabaseBackend::Heed3 => {
+                    #[cfg(feature = "heed3")]
+                    {
+                        heed3_impl::Heed3ModuleDatabase::new(db_path, None)
+                            .map(|db| Box::new(db) as Box<dyn Database>)
+                    }
+                    #[cfg(not(feature = "heed3"))]
+                    {
+                        Err(anyhow::anyhow!("heed3 feature not enabled"))
+                    }
+                }
+                _ => continue,
+            };
+            match result {
                 Ok(db) => return Ok(db),
                 Err(e) => last_err = Some(e),
             }
@@ -352,15 +439,24 @@ pub fn try_create_module_kv_database<P: AsRef<Path>>(db_path: P) -> Result<Box<d
 
 /// Get default database backend
 ///
-/// When `rocksdb` is enabled, returns RocksDB; otherwise TidesDB if enabled, else Redb, else Sled.
+/// When `heed3` is enabled, returns heed3 (LMDB + rkyv zero-copy UTXO reads). Otherwise RocksDB
+/// when compiled in, then TidesDB, Redb, Sled.
 pub fn default_backend() -> DatabaseBackend {
-    #[cfg(feature = "rocksdb")]
+    #[cfg(feature = "heed3")]
+    return DatabaseBackend::Heed3;
+    #[cfg(all(not(feature = "heed3"), feature = "rocksdb"))]
     return DatabaseBackend::RocksDB;
-    #[cfg(all(not(feature = "rocksdb"), feature = "tidesdb"))]
+    #[cfg(all(not(feature = "heed3"), not(feature = "rocksdb"), feature = "tidesdb"))]
     return DatabaseBackend::TidesDB;
-    #[cfg(all(not(feature = "rocksdb"), not(feature = "tidesdb"), feature = "redb"))]
+    #[cfg(all(
+        not(feature = "heed3"),
+        not(feature = "rocksdb"),
+        not(feature = "tidesdb"),
+        feature = "redb"
+    ))]
     return DatabaseBackend::Redb;
     #[cfg(all(
+        not(feature = "heed3"),
         not(feature = "rocksdb"),
         not(feature = "tidesdb"),
         not(feature = "redb"),
@@ -368,13 +464,14 @@ pub fn default_backend() -> DatabaseBackend {
     ))]
     return DatabaseBackend::Sled;
     #[cfg(all(
+        not(feature = "heed3"),
         not(feature = "rocksdb"),
         not(feature = "tidesdb"),
         not(feature = "redb"),
         not(feature = "sled")
     ))]
     compile_error!(
-        "At least one storage backend must be enabled (rocksdb, redb, sled, or tidesdb)"
+        "At least one storage backend must be enabled (rocksdb, redb, sled, tidesdb, or heed3)"
     );
     #[allow(unreachable_code)]
     DatabaseBackend::Redb // Only for cfg exhaustiveness; one of the above returns always runs
@@ -449,11 +546,43 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
             {
                 Some(DatabaseBackend::Redb)
             }
-            #[cfg(all(not(feature = "tidesdb"), not(feature = "redb"), feature = "sled"))]
+            #[cfg(all(not(feature = "tidesdb"), not(feature = "redb"), feature = "heed3"))]
+            {
+                Some(DatabaseBackend::Heed3)
+            }
+            #[cfg(all(
+                not(feature = "tidesdb"),
+                not(feature = "redb"),
+                not(feature = "heed3"),
+                feature = "sled"
+            ))]
             {
                 Some(DatabaseBackend::Sled)
             }
-            #[cfg(all(not(feature = "tidesdb"), not(feature = "redb"), not(feature = "sled")))]
+            #[cfg(all(
+                not(feature = "tidesdb"),
+                not(feature = "redb"),
+                not(feature = "heed3"),
+                not(feature = "sled")
+            ))]
+            {
+                None
+            }
+        }
+        DatabaseBackend::Heed3 => {
+            #[cfg(feature = "rocksdb")]
+            {
+                Some(DatabaseBackend::RocksDB)
+            }
+            #[cfg(all(not(feature = "rocksdb"), feature = "redb"))]
+            {
+                Some(DatabaseBackend::Redb)
+            }
+            #[cfg(all(not(feature = "rocksdb"), not(feature = "redb"), feature = "sled"))]
+            {
+                Some(DatabaseBackend::Sled)
+            }
+            #[cfg(all(not(feature = "rocksdb"), not(feature = "redb"), not(feature = "sled")))]
             {
                 None
             }

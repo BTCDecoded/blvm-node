@@ -829,6 +829,7 @@ impl ParallelIBD {
                 effective_max_entries,
                 eviction,
                 utxo_disk_baseline,
+                storage.utxo_value_codec(),
             ));
             if start_height <= 1 {
                 store.bootstrap_genesis(&protocol.get_network_params().genesis_block);
@@ -931,6 +932,7 @@ impl ParallelIBD {
                                         tree.as_ref(),
                                         checkpoint_height,
                                         expected_count,
+                                        storage.utxo_value_codec(),
                                     ) {
                                         Ok(n) => {
                                             info!(
@@ -1911,6 +1913,7 @@ impl ParallelIBD {
                                 &engine_clone,
                                 &tree,
                                 ckpt,
+                                storage_ckpt.utxo_value_codec(),
                             ) {
                                 Ok((muhash, count)) => {
                                     let muhash_bytes = muhash.serialize_running_state();
@@ -2088,6 +2091,7 @@ impl ParallelIBD {
                         db,
                         &tree,
                         effective_end_height as i32,
+                        storage.utxo_value_codec(),
                     ) {
                         Ok(muhash) => {
                             let muhash_bytes = muhash.serialize_running_state();
@@ -2776,6 +2780,23 @@ impl ParallelIBD {
             {
                 if !storage_unified
                     && blockstore.try_ibd_flush_tidesdb_unified(
+                        &flush_order,
+                        &chunk_heights,
+                        &block_hashes,
+                        &block_data,
+                        &header_data,
+                        &witness_blobs,
+                        &metadata_blobs,
+                        &recent_entries,
+                    )?
+                {
+                    storage_unified = true;
+                }
+            }
+            #[cfg(feature = "heed3")]
+            {
+                if !storage_unified
+                    && blockstore.try_ibd_flush_heed3_unified(
                         &flush_order,
                         &chunk_heights,
                         &block_hashes,
