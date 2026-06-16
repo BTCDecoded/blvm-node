@@ -541,6 +541,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(feature = "utxo-commitments")]
     #[tokio::test]
     async fn utxo_commitment_messages_smoke() {
         let nm = manager();

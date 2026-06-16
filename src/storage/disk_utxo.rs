@@ -92,6 +92,7 @@ pub fn key_to_outpoint(key: &OutPointKey) -> OutPoint {
 pub(crate) fn load_keys_from_disk(
     disk: Arc<dyn Tree>,
     mut keys: Vec<OutPointKey>,
+    codec: crate::storage::utxo_value_codec::ValueCodec,
 ) -> Result<(FxHashMap<OutPointKey, UTXO>, Vec<OutPointKey>)> {
     if keys.is_empty() {
         return Ok((FxHashMap::default(), Vec::new()));
@@ -101,6 +102,29 @@ pub(crate) fn load_keys_from_disk(
     for k in &keys {
         key_refs.push(k.as_slice());
     }
+
+    // heed3 zero-copy fast path: read mmap'd LMDB pages directly — no Vec<u8> per value.
+    // Guard: only valid when all rows were written with the rkyv codec.
+    #[cfg(feature = "heed3")]
+    if codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv {
+        if let Some(heed3_tree) = disk.as_heed3_tree() {
+            let rtxn = heed3_tree.env().read_txn()?;
+            let slices = heed3_tree.get_many_heed3(&key_refs, &rtxn)?;
+            let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
+            for (key, opt_bytes) in keys.iter().zip(slices) {
+                if let Some(bytes) = opt_bytes {
+                    if let Ok(archived) = crate::storage::rkyv_codec::access_utxo(bytes) {
+                        result.insert(
+                            *key,
+                            crate::storage::rkyv_codec::utxo_from_archived(archived),
+                        );
+                    }
+                }
+            }
+            return Ok((result, keys));
+        }
+    }
+
     let values = disk.get_many_no_cache(&key_refs)?;
     let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
     // Serial deserialize: par_iter here was harmful in the IBD hot path. With N validation
@@ -113,7 +137,8 @@ pub(crate) fn load_keys_from_disk(
     // lets validation workers achieve true N-way parallelism.
     for (key, value) in keys.iter().zip(values.into_iter()) {
         if let Some(data) = value {
-            if let Ok(utxo) = bincode::deserialize::<UTXO>(&data) {
+            if let Ok(utxo) = crate::storage::utxo_value_codec::decode_utxo_with_codec(codec, &data)
+            {
                 result.insert(*key, utxo);
             }
         }
@@ -323,20 +348,21 @@ pub struct SyncBatch {
 pub fn flush_batch_to_disk(
     batch: &[(OutPointKey, PendingValue)],
     disk: &dyn Tree,
+    codec: crate::storage::utxo_value_codec::ValueCodec,
 ) -> Result<usize> {
     if batch.is_empty() {
         return Ok(0);
     }
     let mut total_flushed = 0;
-    let mut ser_buf = Vec::with_capacity(192);
     for chunk in batch.chunks(MAX_BATCH_OPS) {
         let mut b = disk.batch()?;
         for (key, value_opt) in chunk {
             match value_opt {
                 Some(arc) => {
-                    ser_buf.clear();
-                    bincode::serialize_into(&mut ser_buf, arc.as_ref())
-                        .map_err(|e| anyhow::anyhow!("UTXO serialize: {}", e))?;
+                    let ser_buf = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+                        codec,
+                        arc.as_ref(),
+                    )?;
                     b.put(key.as_slice(), ser_buf.as_slice());
                 }
                 None => b.delete(key.as_slice()),
@@ -350,4 +376,59 @@ pub fn flush_batch_to_disk(
         total_flushed
     );
     Ok(total_flushed)
+}
+
+#[cfg(all(test, feature = "heed3"))]
+mod heed3_load_tests {
+    use super::*;
+    use crate::storage::database::{create_database, Database, DatabaseBackend, Tree};
+    use crate::storage::rkyv_codec::{access_utxo, utxo_from_archived};
+    use crate::storage::utxo_value_codec::{encode_utxo_with_codec, ValueCodec};
+    use blvm_protocol::types::{OutPoint, UTXO};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn load_keys_from_disk_heed3_zero_copy_matches_owned_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(temp_dir.path(), DatabaseBackend::Heed3, None).unwrap());
+        let tree: Arc<dyn Tree> = Arc::from(db.open_tree("ibd_utxos").unwrap());
+
+        let mut keys = Vec::new();
+        for i in 0..64u64 {
+            let op = OutPoint {
+                hash: [i as u8; 32],
+                index: 1,
+            };
+            let key = outpoint_to_key(&op);
+            let utxo = UTXO {
+                value: (i as i64) * 500,
+                script_pubkey: vec![0x51, (i & 0xff) as u8].into(),
+                height: i,
+                is_coinbase: false,
+            };
+            tree.insert(
+                &key,
+                &encode_utxo_with_codec(ValueCodec::Rkyv, &utxo).unwrap(),
+            )
+            .unwrap();
+            keys.push(key);
+        }
+
+        let (zc_map, _) =
+            load_keys_from_disk(Arc::clone(&tree), keys.clone(), ValueCodec::Rkyv).unwrap();
+        assert_eq!(zc_map.len(), 64);
+
+        let owned = tree
+            .get_many_no_cache(&keys.iter().map(|k| k.as_slice()).collect::<Vec<_>>())
+            .unwrap();
+        for (key, opt) in keys.iter().zip(owned) {
+            let zc = zc_map.get(key).expect("zero-copy map missing key");
+            let data = opt.expect("owned get missing key");
+            let archived = access_utxo(&data).unwrap();
+            let from_owned = utxo_from_archived(archived);
+            assert_eq!(*zc, from_owned);
+        }
+    }
 }

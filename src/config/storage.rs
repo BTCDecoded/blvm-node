@@ -260,6 +260,7 @@ pub enum DatabaseBackendConfig {
     Redb,
     Rocksdb,
     Tidesdb,
+    Heed3,
     Auto,
 }
 
@@ -303,6 +304,22 @@ fn default_rocksdb_level0_trigger() -> i32 {
     8
 }
 
+/// heed3 / LMDB tuning (config > ENV > defaults).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Heed3Config {
+    /// LMDB map size in megabytes (default: max(65536, dbcache_mb * 128)).
+    #[serde(default)]
+    pub map_size_mb: Option<usize>,
+
+    /// Maximum concurrent read transactions (default: 512).
+    #[serde(default)]
+    pub max_readers: Option<u32>,
+
+    /// Maximum named sub-databases / trees (default: KNOWN_TREE_NAMES + 8).
+    #[serde(default)]
+    pub max_dbs: Option<u32>,
+}
+
 impl Default for RocksDBConfig {
     fn default() -> Self {
         Self {
@@ -332,6 +349,11 @@ pub struct StorageConfig {
     pub rocksdb: Option<RocksDBConfig>,
 
     pub tidesdb: Option<TidesDBConfig>,
+
+    /// heed3 / LMDB options when `database_backend = "heed3"`.
+    #[serde(default)]
+    pub heed3: Option<Heed3Config>,
+
     pub pruning: Option<PruningConfig>,
     pub cache: Option<StorageCacheConfig>,
     #[serde(default)]
@@ -433,6 +455,7 @@ impl Default for StorageConfig {
             dbcache_mb: 450,
             rocksdb: None,
             tidesdb: None,
+            heed3: None,
             pruning: None,
             cache: None,
             indexing: None,

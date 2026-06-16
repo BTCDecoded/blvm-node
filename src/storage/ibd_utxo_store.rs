@@ -14,6 +14,7 @@ use crate::storage::database::Tree;
 use crate::storage::disk_utxo::{
     key_to_outpoint, load_keys_from_disk, outpoint_to_key, SyncBatch, MAX_BATCH_OPS,
 };
+use crate::storage::utxo_value_codec::ValueCodec;
 use anyhow::Result;
 use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
 use blvm_protocol::block::compute_block_tx_ids;
@@ -246,7 +247,7 @@ fn dedupe_to_batch_and_max(
 #[cfg(feature = "production")]
 impl PendingFlushPackage {
     /// Encode UTXO inserts for the flush worker (disk I/O runs on the committer thread only).
-    pub fn prepare_for_disk(&self) -> Result<PreparedFlushPackage> {
+    pub fn prepare_for_disk(&self, codec: ValueCodec) -> Result<PreparedFlushPackage> {
         // Single slab: all serialized UTXO bytes packed contiguously. Rows store (start, len)
         // offsets into the slab. Eliminates one Vec<u8> heap allocation per add operation
         // (previously `ser_buf.clone()` = 250k allocs × ~80 B = ~20 MB per 500k-op flush).
@@ -257,8 +258,11 @@ impl PendingFlushPackage {
             let encoded = match value_opt {
                 Some(arc) => {
                     let start = slab.len() as u32;
-                    bincode::serialize_into(&mut slab, arc.as_ref())
-                        .map_err(|e| anyhow::anyhow!("UTXO serialize: {}", e))?;
+                    let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+                        codec,
+                        arc.as_ref(),
+                    )?;
+                    slab.extend_from_slice(&bytes);
                     let end = slab.len() as u32;
                     Some((start, end - start))
                 }
@@ -365,6 +369,7 @@ pub struct IbdUtxoStore {
     stats_cache_hits: AtomicU64,
     stats_evictions: AtomicU64,
     stats_pending_hits: AtomicU64,
+    value_codec: ValueCodec,
 }
 
 #[cfg(feature = "production")]
@@ -377,6 +382,7 @@ impl IbdUtxoStore {
             usize::MAX,
             EvictionStrategy::from_env(),
             0,
+            ValueCodec::Bincode,
         )
     }
 
@@ -426,6 +432,7 @@ impl IbdUtxoStore {
             usize::MAX,
             EvictionStrategy::from_env(),
             0,
+            ValueCodec::Bincode,
         )
     }
 
@@ -442,6 +449,7 @@ impl IbdUtxoStore {
         max_entries: usize,
         eviction_strategy: EvictionStrategy,
         utxo_disk_commit_through: u64,
+        value_codec: ValueCodec,
     ) -> Self {
         Self {
             cache: DashMap::with_shard_amount(128),
@@ -466,7 +474,35 @@ impl IbdUtxoStore {
             stats_cache_hits: AtomicU64::new(0),
             stats_evictions: AtomicU64::new(0),
             stats_pending_hits: AtomicU64::new(0),
+            value_codec,
         }
+    }
+
+    #[inline]
+    pub fn value_codec(&self) -> ValueCodec {
+        self.value_codec
+    }
+
+    #[inline]
+    fn decode_utxo_bytes(&self, bytes: &[u8]) -> Result<UTXO> {
+        // heed3 / rkyv path: use access_utxo + utxo_from_archived directly — skips
+        // the rkyv::deserialize trait dispatch overhead and the bincode fallback probe.
+        #[cfg(feature = "heed3")]
+        if self.value_codec == ValueCodec::Rkyv {
+            let archived = crate::storage::rkyv_codec::access_utxo(bytes)?;
+            return Ok(crate::storage::rkyv_codec::utxo_from_archived(archived));
+        }
+        crate::storage::utxo_value_codec::decode_utxo_with_codec(self.value_codec, bytes)
+    }
+
+    #[inline]
+    fn encode_utxo_bytes(&self, utxo: &UTXO) -> Result<Vec<u8>> {
+        crate::storage::utxo_value_codec::encode_utxo_with_codec(self.value_codec, utxo)
+    }
+
+    #[inline]
+    fn decode_slab_utxo(&self, slab: &[u8], start: u32, len: u32) -> Result<UTXO> {
+        self.decode_utxo_bytes(&slab[start as usize..][..len as usize])
     }
 
     #[inline]
@@ -1049,7 +1085,8 @@ impl IbdUtxoStore {
             if load_count == 0 {
                 return;
             }
-            if let Ok((loaded, keys_scanned)) = load_keys_from_disk(Arc::clone(&self.disk), to_load)
+            if let Ok((loaded, keys_scanned)) =
+                load_keys_from_disk(Arc::clone(&self.disk), to_load, self.value_codec)
             {
                 self.stats_disk_loads
                     .fetch_add(load_count as u64, Ordering::Relaxed);
@@ -1551,8 +1588,8 @@ impl IbdUtxoStore {
                 match value_opt {
                     Some(arc) => {
                         ser_buf.clear();
-                        bincode::serialize_into(&mut ser_buf, arc.as_ref())
-                            .map_err(|e| anyhow::anyhow!("UTXO serialize: {}", e))?;
+                        let encoded = self.encode_utxo_bytes(arc.as_ref())?;
+                        ser_buf.extend_from_slice(&encoded);
                         b.put(key.as_slice(), ser_buf.as_slice());
                     }
                     None => b.delete(key.as_slice()),
@@ -1614,6 +1651,7 @@ impl IbdUtxoStore {
             return Ok(());
         }
         let slab = pkg.slab.as_slice();
+        let codec = self.value_codec;
         for chunk in pkg.rows.chunks(MAX_BATCH_OPS) {
             if chunk.is_empty() {
                 continue;
@@ -1629,12 +1667,11 @@ impl IbdUtxoStore {
                         |mut acc, (key, value_opt)| -> anyhow::Result<MuHash3072> {
                             match value_opt {
                                 Some((start, len)) => {
-                                    let utxo: UTXO = bincode::deserialize(
-                                        &slab[*start as usize..][..*len as usize],
-                                    )
-                                    .map_err(|e| {
-                                        anyhow::anyhow!("UTXO deserialize for muhash: {}", e)
-                                    })?;
+                                    let utxo: UTXO =
+                                        crate::storage::utxo_value_codec::decode_utxo_with_codec(
+                                            codec,
+                                            &slab[*start as usize..][..*len as usize],
+                                        )?;
                                     let op = key_to_outpoint(key);
                                     let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                                     acc.insert_mut(&pre);
@@ -1644,12 +1681,10 @@ impl IbdUtxoStore {
                                         return Ok(acc);
                                     };
                                     let utxo: UTXO =
-                                        bincode::deserialize(&disk_bytes).map_err(|e| {
-                                            anyhow::anyhow!(
-                                                "disk UTXO deserialize for muhash: {}",
-                                                e
-                                            )
-                                        })?;
+                                        crate::storage::utxo_value_codec::decode_utxo_with_codec(
+                                            codec,
+                                            &disk_bytes,
+                                        )?;
                                     let op = key_to_outpoint(key);
                                     let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                                     acc.remove_mut(&pre);
@@ -1667,11 +1702,7 @@ impl IbdUtxoStore {
                 for (key, value_opt) in chunk {
                     match value_opt {
                         Some((start, len)) => {
-                            let utxo: UTXO =
-                                bincode::deserialize(&slab[*start as usize..][..*len as usize])
-                                    .map_err(|e| {
-                                        anyhow::anyhow!("UTXO deserialize for muhash: {}", e)
-                                    })?;
+                            let utxo: UTXO = self.decode_slab_utxo(slab, *start, *len)?;
                             let op = key_to_outpoint(key);
                             let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                             local_mh.insert_mut(&pre);
@@ -1680,9 +1711,7 @@ impl IbdUtxoStore {
                             let Some(disk_bytes) = self.disk.get(key.as_slice())? else {
                                 continue;
                             };
-                            let utxo: UTXO = bincode::deserialize(&disk_bytes).map_err(|e| {
-                                anyhow::anyhow!("disk UTXO deserialize for muhash: {}", e)
-                            })?;
+                            let utxo: UTXO = self.decode_utxo_bytes(&disk_bytes)?;
                             let op = key_to_outpoint(key);
                             let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                             local_mh.remove_mut(&pre);
@@ -1723,6 +1752,7 @@ impl IbdUtxoStore {
     ) -> Result<usize> {
         let mut total_flushed = 0;
         let slab = pkg.slab.as_slice();
+        let codec = self.value_codec;
         for chunk in pkg.rows.chunks(MAX_BATCH_OPS) {
             if chunk.is_empty() {
                 continue;
@@ -1746,15 +1776,8 @@ impl IbdUtxoStore {
                                 |mut acc, (key, value_opt)| -> anyhow::Result<MuHash3072> {
                                     match value_opt {
                                         Some((start, len)) => {
-                                            let utxo: UTXO = bincode::deserialize(
-                                                &slab[*start as usize..][..*len as usize],
-                                            )
-                                            .map_err(|e| {
-                                                anyhow::anyhow!(
-                                                    "UTXO deserialize for muhash: {}",
-                                                    e
-                                                )
-                                            })?;
+                                            let utxo: UTXO =
+                                                self.decode_slab_utxo(slab, *start, *len)?;
                                             let op = key_to_outpoint(key);
                                             let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                                             acc.insert_mut(&pre);
@@ -1766,13 +1789,7 @@ impl IbdUtxoStore {
                                             let Some(disk_bytes) = disk.get(key.as_slice())? else {
                                                 return Ok(acc);
                                             };
-                                            let utxo: UTXO = bincode::deserialize(&disk_bytes)
-                                                .map_err(|e| {
-                                                    anyhow::anyhow!(
-                                                        "disk UTXO deserialize for muhash: {}",
-                                                        e
-                                                    )
-                                                })?;
+                                            let utxo: UTXO = self.decode_utxo_bytes(&disk_bytes)?;
                                             let op = key_to_outpoint(key);
                                             let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                                             acc.remove_mut(&pre);
@@ -1791,12 +1808,11 @@ impl IbdUtxoStore {
                         for (key, value_opt) in chunk {
                             match value_opt {
                                 Some((start, len)) => {
-                                    let utxo: UTXO = bincode::deserialize(
-                                        &slab[*start as usize..][..*len as usize],
-                                    )
-                                    .map_err(|e| {
-                                        anyhow::anyhow!("UTXO deserialize for muhash: {}", e)
-                                    })?;
+                                    let utxo: UTXO =
+                                        crate::storage::utxo_value_codec::decode_utxo_with_codec(
+                                            codec,
+                                            &slab[*start as usize..][..*len as usize],
+                                        )?;
                                     let op = key_to_outpoint(key);
                                     let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                                     mhref.insert_mut(&pre);
@@ -1810,12 +1826,10 @@ impl IbdUtxoStore {
                                         continue;
                                     };
                                     let utxo: UTXO =
-                                        bincode::deserialize(&disk_bytes).map_err(|e| {
-                                            anyhow::anyhow!(
-                                                "disk UTXO deserialize for muhash: {}",
-                                                e
-                                            )
-                                        })?;
+                                        crate::storage::utxo_value_codec::decode_utxo_with_codec(
+                                            codec,
+                                            &disk_bytes,
+                                        )?;
                                     let op = key_to_outpoint(key);
                                     let pre = utxo_muhash_preimage_ibd(&op, &utxo);
                                     mhref.remove_mut(&pre);

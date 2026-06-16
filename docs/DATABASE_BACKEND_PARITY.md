@@ -1,6 +1,6 @@
 # Database Backend Parity
 
-All storage backends (redb, rocksdb, sled) must behave identically for the Database abstraction.
+All storage backends (redb, rocksdb, sled, tidesdb, heed3) must behave identically for the Database abstraction.
 
 ## Tree Names
 
@@ -10,12 +10,16 @@ All storage backends (redb, rocksdb, sled) must behave identically for the Datab
 
 ## Implementation Summary
 
-| Aspect | redb | RocksDB | Sled |
-|--------|------|---------|------|
-| Known trees | Pre-defined TableDefinitions | Pre-created column families at open | `open_tree` creates on demand |
-| Module trees | Rejected (error) | Rejected (error) | Rejected (error) |
-| Unknown names | Rejected (get_table_def returns None) | Create CF on demand (tests, WAL) | Create tree on demand |
-| Reopen | N/A | list_cf + merge for existing DBs with extra CFs | N/A |
+| Aspect | redb | RocksDB | Sled | TidesDB | heed3 (LMDB) |
+|--------|------|---------|------|---------|--------------|
+| Known trees | Pre-defined TableDefinitions | Pre-created column families at open | `open_tree` creates on demand | Column families at open | Named LMDB DBs pre-created at open |
+| Module trees | Rejected (error) | Rejected (error) | Rejected (error) | Rejected (error) | Rejected (error) |
+| Unknown names | Rejected (get_table_def returns None) | Create CF on demand (tests, WAL) | Create tree on demand | Create CF on demand | Rejected (unknown tree name) |
+| Reopen | N/A | list_cf + merge for existing DBs with extra CFs | N/A | N/A | N/A |
+| Concurrent reads | MVCC (redb) | Snapshot reads | MVCC | Transactions | LMDB MVCC (`WithoutTls` read txns) |
+| Auto (`database_backend = "auto"`) | if no higher-priority backend | if no heed3 | if no higher-priority | if no rocksdb/heed3 | **first choice** when feature enabled (standard builds) |
+| Value codec (UTXO) | bincode | bincode | bincode | bincode | **rkyv** (validated via bytecheck; mmap access via `storage/rkyv_codec.rs`) |
+| Module KV (`open_module_db`) | sled fallback | sled fallback | native | native | **heed3_module** LMDB env (dynamic trees) or sled fallback |
 
 ## Adding a New Backend (e.g. TidesDB)
 

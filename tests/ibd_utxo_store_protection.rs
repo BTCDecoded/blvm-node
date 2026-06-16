@@ -13,6 +13,7 @@ use anyhow::Result;
 use blvm_node::storage::database::{BatchWriter, Tree};
 use blvm_node::storage::disk_utxo::{outpoint_to_key, OutPointKey};
 use blvm_node::storage::ibd_utxo_store::{EvictionStrategy, IbdUtxoStore, PreparedFlushPackage};
+use blvm_node::storage::utxo_value_codec::ValueCodec;
 use blvm_protocol::block::UtxoDelta;
 use blvm_protocol::types::{OutPoint, UtxoSet, UTXO};
 use blvm_protocol::utxo_overlay::UtxoDeletionKey;
@@ -162,6 +163,7 @@ fn height_granular_protection_no_lost_utxos() {
         /*max_entries=*/ 200,
         EvictionStrategy::Lifo,
         /*utxo_disk_commit_through=*/ 0,
+        ValueCodec::Bincode,
     ));
 
     // Track every UTXO ever created and the height at which it was spent (None = unspent).
@@ -225,7 +227,9 @@ fn height_granular_protection_no_lost_utxos() {
         if h % 7 == 0 {
             if let Some(pkg) = store.take_flush_batch_force() {
                 let heights = Arc::clone(&pkg.heights);
-                let prepared = pkg.prepare_for_disk().expect("prepare_for_disk");
+                let prepared = pkg
+                    .prepare_for_disk(ValueCodec::Bincode)
+                    .expect("prepare_for_disk");
                 store
                     .flush_prepared_package(&prepared, None)
                     .expect("flush_prepared_package");
@@ -277,7 +281,9 @@ fn height_granular_protection_no_lost_utxos() {
     // Final flush + verify everything is durable on disk.
     while let Some(pkg) = store.take_flush_batch_force() {
         let heights = Arc::clone(&pkg.heights);
-        let prepared = pkg.prepare_for_disk().expect("prepare_for_disk");
+        let prepared = pkg
+            .prepare_for_disk(ValueCodec::Bincode)
+            .expect("prepare_for_disk");
         store
             .flush_prepared_package(&prepared, None)
             .expect("flush_prepared_package");
@@ -342,6 +348,7 @@ fn flush_height_cap_keeps_higher_block_pending() {
         usize::MAX,
         EvictionStrategy::Fifo,
         0,
+        ValueCodec::Bincode,
     ));
     let mut del_scratch = Vec::new();
     let mut add_scratch = Vec::new();

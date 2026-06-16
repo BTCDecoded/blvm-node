@@ -1,7 +1,7 @@
 //! Storage layer for blvm-node
 //!
 //! This module provides persistent storage for blocks, UTXO set, and chain state.
-//! Supports multiple database backends via feature flags (tidesdb, redb, sled, rocksdb).
+//! Supports multiple database backends via feature flags (tidesdb, redb, sled, rocksdb, heed3).
 
 pub mod assumeutxo;
 pub mod bitcoin_core_blocks;
@@ -28,8 +28,11 @@ pub mod ibd_utxo_muhash;
 #[cfg(feature = "production")]
 pub mod ibd_utxo_store;
 pub mod pruning;
+#[cfg(feature = "heed3")]
+pub mod rkyv_codec;
 pub mod serialization_cache;
 pub mod txindex;
+pub mod utxo_value_codec;
 pub mod utxostore;
 pub mod wal;
 
@@ -816,6 +819,11 @@ impl Storage {
     /// The tree name should be unique and descriptive (e.g., "payment_states", "vaults").
     pub fn open_tree(&self, name: &str) -> Result<Arc<dyn database::Tree>> {
         Ok(Arc::from(self.db.open_tree(name)?))
+    }
+
+    /// UTXO row encoding for this store (rkyv on heed3/LMDB, bincode otherwise).
+    pub fn utxo_value_codec(&self) -> utxo_value_codec::ValueCodec {
+        utxo_value_codec::ValueCodec::for_database(self.db.as_ref())
     }
 
     /// Flush all pending writes to disk

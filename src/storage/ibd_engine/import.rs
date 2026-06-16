@@ -22,6 +22,7 @@ use super::disk_segment::DiskSegment;
 use super::types::{outpoint_to_output_key, OutputHeader, OutputKV, OutputKey};
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::key_to_outpoint;
+use crate::storage::utxo_value_codec::{decode_utxo_with_codec, ValueCodec};
 use anyhow::Result;
 use blvm_protocol::types::UTXO;
 use tracing::{info, warn};
@@ -45,6 +46,7 @@ pub fn seed_from_ibd_utxos(
     tree: &dyn Tree,
     checkpoint_height: i32,
     expected_count: Option<u64>,
+    codec: ValueCodec,
 ) -> Result<usize> {
     use std::sync::mpsc;
     use std::thread;
@@ -86,8 +88,7 @@ pub fn seed_from_ibd_utxos(
         let op = key_to_outpoint(&op_key);
         let out_key = outpoint_to_output_key(&op);
 
-        let utxo: UTXO = bincode::deserialize(&val_bytes)
-            .map_err(|e| anyhow::anyhow!("seed deserialize UTXO: {e}"))?;
+        let utxo: UTXO = decode_utxo_with_codec(codec, &val_bytes)?;
         let header = OutputHeader {
             height: utxo.height.min(i32::MAX as u64) as i32,
             flags: if utxo.is_coinbase { 1 } else { 0 },

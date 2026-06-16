@@ -160,6 +160,82 @@ mod core_drop_in {
         drop(storage);
     }
 
+    /// Same as `core_drop_in_migrate_verify_and_open` but destination is heed3 (default `auto` backend).
+    #[cfg(feature = "heed3")]
+    #[test]
+    fn core_drop_in_migrate_to_heed3() {
+        let Some(fixture) = fixture_dir() else {
+            eprintln!(
+                "SKIP core_drop_in_heed3: no fixture (run blvm-node/scripts/gen-core-regtest-fixture.sh)"
+            );
+            return;
+        };
+
+        let meta = read_fixture_meta(&fixture);
+        let expected_height = meta.as_ref().map(|m| m.height).unwrap_or(100);
+        let expected_tip = meta
+            .as_ref()
+            .and_then(|m| rpc_hash_to_internal(&m.tip_hash))
+            .or_else(|| read_core_best_block(&fixture));
+
+        let core_copy = isolated_fixture_copy(&fixture);
+        let source = core_copy.path().to_path_buf();
+        BitcoinCoreStorage::ensure_not_locked(&source).expect("fixture copy must not be locked");
+
+        let dest_root = TempDir::new().unwrap();
+        let dest = dest_root.path().join("blvm");
+
+        migrate_core_data(MigrateCoreArgs {
+            source: source.clone(),
+            destination: dest.clone(),
+            network: CoreDataNetwork::Regtest,
+            verify: true,
+            verbose: false,
+            dest_backend: Some(DatabaseBackend::Heed3),
+            stop_after: None,
+            reuse_core_block_files: false,
+        })
+        .expect("Core → heed3 migration should succeed on real Core fixture");
+
+        assert!(
+            dest.join("heed3").is_dir(),
+            "migration with Heed3 backend must create blvm/heed3/"
+        );
+        assert!(
+            !dest.join("rocksdb").exists(),
+            "heed3 migration must not create rocksdb/ subtree"
+        );
+
+        let marker = read_migration_marker(&dest)
+            .expect("read marker")
+            .expect("migration marker must exist");
+        assert_eq!(marker.network, "regtest");
+        assert!(marker.height >= expected_height);
+
+        let storage = Storage::with_backend(&dest, DatabaseBackend::Heed3)
+            .expect("open migrated heed3 store");
+        assert_eq!(
+            storage.utxo_value_codec(),
+            blvm_node::storage::utxo_value_codec::ValueCodec::Rkyv
+        );
+
+        let height = storage
+            .chain()
+            .get_height()
+            .expect("get_height")
+            .unwrap_or(0);
+        assert!(
+            height >= expected_height,
+            "chain height {height} expected >={expected_height}"
+        );
+
+        if let Some(tip) = storage.chain().get_tip_hash().expect("tip hash") {
+            if let Some(expected) = expected_tip {
+                assert_eq!(tip, expected, "tip hash must match Core best block");
+            }
+        }
+    }
+
     #[test]
     fn core_drop_in_resumes_from_checkpoint() {
         let Some(fixture) = fixture_dir() else {
@@ -283,6 +359,7 @@ mod core_drop_in {
             blvm_protocol::types::Network::Regtest,
             Some(&blvm_node::config::StorageConfig {
                 reuse_core_block_files: true,
+                database_backend: blvm_node::config::DatabaseBackendConfig::Rocksdb,
                 ..Default::default()
             }),
         )
@@ -315,6 +392,67 @@ mod core_drop_in {
                 "indexed coinbase must have vin or vout"
             );
         }
+    }
+
+    /// Reuse Core block files with heed3 destination (default `auto` backend path).
+    #[cfg(feature = "heed3")]
+    #[test]
+    fn core_drop_in_reuse_core_block_files_heed3() {
+        let Some(fixture) = fixture_dir() else {
+            eprintln!("SKIP core_drop_in_reuse_heed3: no fixture");
+            return;
+        };
+        let meta = read_fixture_meta(&fixture).expect("fixture.json");
+
+        let core_copy = isolated_fixture_copy(&fixture);
+        let source = core_copy.path().to_path_buf();
+        BitcoinCoreStorage::ensure_not_locked(&source).expect("fixture copy must not be locked");
+
+        let dest = source.join("blvm");
+        migrate_core_data(MigrateCoreArgs {
+            source: source.clone(),
+            destination: dest.clone(),
+            network: CoreDataNetwork::Regtest,
+            verify: true,
+            verbose: false,
+            dest_backend: Some(DatabaseBackend::Heed3),
+            stop_after: None,
+            reuse_core_block_files: true,
+        })
+        .expect("heed3 reuse migration should succeed");
+
+        assert!(dest.join("heed3").is_dir());
+        let marker = read_migration_marker(&dest)
+            .expect("read marker")
+            .expect("marker must exist");
+        assert_eq!(marker.reuse_core_blocks, Some(true));
+
+        let storage = Storage::open_for_node(
+            &source,
+            blvm_protocol::types::Network::Regtest,
+            Some(&blvm_node::config::StorageConfig {
+                reuse_core_block_files: true,
+                database_backend: blvm_node::config::DatabaseBackendConfig::Heed3,
+                ..Default::default()
+            }),
+        )
+        .expect("open heed3 store with core block reader");
+
+        let height = storage.chain().get_height().expect("height").unwrap_or(0);
+        assert!(height >= 100, "expected migrated height, got {height}");
+
+        let tip_hash = storage
+            .chain()
+            .get_tip_hash()
+            .expect("tip")
+            .expect("tip hash");
+        let block = storage
+            .blocks()
+            .get_block(&tip_hash)
+            .expect("get_block")
+            .expect("tip block readable via Core blk files");
+        assert!(!block.transactions.is_empty());
+        assert_eq!(marker.tip_hash, meta.tip_hash);
     }
 
     #[test]
@@ -399,6 +537,11 @@ mod core_drop_in {
         assert!(
             blvm_dir.exists(),
             "BLVM store should live under blvm/ subdir"
+        );
+        #[cfg(feature = "heed3")]
+        assert!(
+            blvm_dir.join("heed3").is_dir(),
+            "auto-migrate with heed3 feature should create blvm/heed3/"
         );
 
         drop(storage);

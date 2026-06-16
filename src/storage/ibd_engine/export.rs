@@ -9,7 +9,8 @@
 //! Called once at IBD completion when `BLVM_IBD_ENGINE=1`. The engine's `scan_live()` returns
 //! all Add-without-paired-Delete entries. For each, we:
 //!   1. Fetch the `OutputDetail` from the flat table.
-//!   2. Encode it as `bincode::serialize(&UTXO)` (matching `flush_batch_to_disk` format).
+//!   2. Encode via [`encode_utxo_with_codec`](crate::storage::utxo_value_codec::encode_utxo_with_codec)
+//!      (rkyv on heed3, bincode otherwise — matching `flush_batch_to_disk` format).
 //!   3. Batch-write to the tree via `Tree::batch()`.
 //!   4. Accumulate MuHash3072 in the same pass (no per-op disk reads).
 //!
@@ -23,6 +24,7 @@ use super::database::UtxoDatabase;
 use super::types::{output_key_to_outpoint, IdCodec, OutputId};
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::outpoint_to_key;
+use crate::storage::utxo_value_codec::{encode_utxo_with_codec, ValueCodec};
 use anyhow::Result;
 use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
 use blvm_protocol::types::{SharedByteString, UTXO};
@@ -58,10 +60,15 @@ pub fn ckpt_inactive_slot(active: u8) -> u8 {
 ///
 /// The tree must be the `ibd_utxos` tree (same as used by `IbdUtxoStore`).
 /// The caller is responsible for persisting the returned MuHash to chain_info.
-pub fn watermark_export(db: &UtxoDatabase, tree: &dyn Tree, tip_height: i32) -> Result<MuHash3072> {
+pub fn watermark_export(
+    db: &UtxoDatabase,
+    tree: &dyn Tree,
+    tip_height: i32,
+    codec: ValueCodec,
+) -> Result<MuHash3072> {
     db.wait_for_height(tip_height);
     let live_kvs = db.scan_live();
-    let result = write_live_kvs(db, tree, &live_kvs, tip_height);
+    let result = write_live_kvs(db, tree, &live_kvs, tip_height, codec);
     drop(live_kvs);
     #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
     unsafe {
@@ -80,9 +87,10 @@ pub fn run_watermark_export(
     db: &UtxoDatabase,
     tree: &Arc<dyn Tree>,
     tip_height: i32,
+    codec: ValueCodec,
 ) -> Result<MuHash3072> {
     let t = std::time::Instant::now();
-    let muhash = watermark_export(db, tree.as_ref(), tip_height)?;
+    let muhash = watermark_export(db, tree.as_ref(), tip_height, codec)?;
     info!(
         "IBD engine watermark export finished in {:.1}s (height={})",
         t.elapsed().as_secs_f64(),
@@ -104,6 +112,7 @@ pub fn run_checkpoint_export_replace(
     db: &UtxoDatabase,
     tree: &Arc<dyn Tree>,
     checkpoint_height: i32,
+    codec: ValueCodec,
 ) -> Result<(MuHash3072, usize)> {
     let t = std::time::Instant::now();
 
@@ -112,7 +121,7 @@ pub fn run_checkpoint_export_replace(
 
     tree.clear()?;
     let (muhash, count) =
-        write_live_kvs_streaming(db, tree.as_ref(), &mut stream, checkpoint_height)?;
+        write_live_kvs_streaming(db, tree.as_ref(), &mut stream, checkpoint_height, codec)?;
 
     let elapsed = t.elapsed().as_secs_f64();
 
@@ -142,6 +151,7 @@ fn write_live_kvs_streaming(
     tree: &dyn Tree,
     stream: &mut super::index::CheckpointStream,
     tip_height: i32,
+    codec: ValueCodec,
 ) -> Result<(MuHash3072, usize)> {
     // 500k entries per chunk: ~28 MB (kvs) + ~50 MB (details) + ~60 MB (kv_pairs) ≈ 138 MB peak.
     const CHUNK_SIZE: usize = 500_000;
@@ -207,9 +217,8 @@ fn write_live_kvs_streaming(
             muhash.insert_mut(&preimage);
 
             ser_buf.clear();
-            bincode::serialize_into(&mut ser_buf, &utxo)
-                .map_err(|e| anyhow::anyhow!("UTXO serialize: {e}"))?;
-            kv_pairs.push((rocks_key.to_vec(), ser_buf.clone()));
+            let row = encode_utxo_with_codec(codec, &utxo)?;
+            kv_pairs.push((rocks_key.to_vec(), row));
         }
 
         // Sort by rocks_key (LE vout) within chunk — required by bulk_load_sorted_kv.
@@ -231,6 +240,7 @@ fn write_live_kvs(
     tree: &dyn Tree,
     live_kvs: &[super::types::OutputKV],
     tip_height: i32,
+    codec: ValueCodec,
 ) -> Result<MuHash3072> {
     let total = live_kvs.len();
     info!(
@@ -293,9 +303,8 @@ fn write_live_kvs(
             muhash.insert_mut(&preimage);
 
             ser_buf.clear();
-            bincode::serialize_into(&mut ser_buf, &utxo)
-                .map_err(|e| anyhow::anyhow!("UTXO serialize: {e}"))?;
-            kv_pairs.push((rocks_key.to_vec(), ser_buf.clone()));
+            let row = encode_utxo_with_codec(codec, &utxo)?;
+            kv_pairs.push((rocks_key.to_vec(), row));
         }
 
         // Sort by rocks_key within each chunk. The input is sorted by output_key (BE vout)
@@ -463,7 +472,7 @@ mod tests {
         let block = make_block(vec![make_coinbase(5_000_000_000)]);
         let _pin = db.append(&block, &[txid], 100).unwrap();
 
-        let muhash = watermark_export(&db, tree.as_ref(), 100).unwrap();
+        let muhash = watermark_export(&db, tree.as_ref(), 100, ValueCodec::Bincode).unwrap();
 
         // The coinbase output's key in disk format is [txid || vout_le4 || pad4] = 40 bytes.
         let op = OutPoint {

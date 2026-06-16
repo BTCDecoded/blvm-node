@@ -499,6 +499,37 @@ impl BlockStore {
         Ok(true)
     }
 
+    /// heed3 / LMDB: one write transaction for all blockstore sub-DBs + recent headers.
+    #[cfg(feature = "heed3")]
+    pub(crate) fn try_ibd_flush_heed3_unified(
+        &self,
+        flush_order: &[usize],
+        heights: &[u64],
+        block_hashes: &[Hash],
+        block_data: &[Vec<u8>],
+        header_data: &[Arc<Vec<u8>>],
+        witness_blobs: &[Option<Vec<u8>>],
+        metadata_blobs: &[Vec<u8>],
+        recent_entries: &[(u64, Vec<u8>)],
+    ) -> Result<bool> {
+        use crate::storage::database::Heed3Database;
+
+        let Some(heed) = self.db.as_ref().as_any().downcast_ref::<Heed3Database>() else {
+            return Ok(false);
+        };
+        heed.write_ibd_blockstore_flush_no_wal(
+            flush_order,
+            heights,
+            block_hashes,
+            block_data,
+            header_data,
+            witness_blobs,
+            metadata_blobs,
+            recent_entries,
+        )?;
+        Ok(true)
+    }
+
     /// Get recent headers for median time-past calculation (BIP113)
     /// Returns up to `count` most recent headers, ordered from oldest to newest
     pub fn get_recent_headers(&self, count: usize) -> Result<Vec<BlockHeader>> {

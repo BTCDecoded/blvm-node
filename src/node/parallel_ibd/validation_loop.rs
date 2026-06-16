@@ -442,7 +442,7 @@ fn push_utxo_flush_from_retire(
             }
         }
         drop(q);
-        let prepared = pkg.prepare_for_disk()?;
+        let prepared = pkg.prepare_for_disk(store.value_codec())?;
         // Drop the raw ops Vec immediately after serialization. After prepare_for_disk()
         // the slab holds all UTXO bytes; the ops Arc<Vec<(key, Arc<UTXO>)>> (~18 MB at
         // 320k ops) and its Arc<UTXO> references are no longer needed here — in_flight_insertions
@@ -508,7 +508,7 @@ fn push_utxo_flush_from_retire(
         // threads run concurrently so their disk reads overlap (SSD handles parallel IOPS).
         // Each thread returns a local sub-accumulator; joined into ibd_muhash at flush_limit
         // cap joins and at durability drains (same sub-accumulator contract as before).
-        let prepared = pkg.prepare_for_disk()?;
+        let prepared = pkg.prepare_for_disk(store.value_codec())?;
         drop(pkg);
         let store_clone = Arc::clone(store);
         q.push_back(std::thread::spawn(move || {
@@ -2814,7 +2814,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         shutdown_pkg_height = Some(pkg.max_block_height);
         let heights = Arc::clone(&pkg.heights);
         // Pre-compute muhash in the main thread (full rayon pool) before spawning commit thread.
-        let prepared = pkg.prepare_for_disk()?;
+        let prepared = pkg.prepare_for_disk(ibd_store_v2_for_validation.value_codec())?;
         drop(pkg);
         let mut local_mh = blvm_muhash::MuHash3072::new();
         ibd_store_v2_for_validation.compute_package_muhash(&prepared, &mut local_mh)?;

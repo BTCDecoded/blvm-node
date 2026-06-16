@@ -33,7 +33,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 # Protocol / consensus / spec-lock from crates.io (monorepo: checkout siblings for local iteration).
 blvm-protocol = { version = ">=0.1, <1" }
-blvm-consensus = { version = ">=0.1.26, <1", optional = true }
+blvm-consensus = { version = ">=0.1, <1", optional = true }
 blvm-spec-lock = { version = ">=0.1, <1", optional = true, default-features = false }
 # crates.io releases use 0.1 semver; sibling [patch.crates-io] path for monorepo work.
 # Node requires current MuHash APIs (running-state serde, insert_mut/remove_mut hot path).
@@ -49,6 +49,10 @@ rocksdb = { version = "=0.24.0", optional = true }
 # a git dep on a floating branch. Packagers who disallow git deps should disable the
 # relevant feature (e.g. `--no-default-features` for tidesdb).
 #
+# heed3: LMDB mdb.master3 wrapper (MVCC, concurrent readers). Requires liblmdb at link time.
+heed3 = { version = "=0.22.1", optional = true, default-features = false }
+# rkyv: zero-copy archived values paired with heed3 mmap reads.
+rkyv = { version = "=0.8.16", optional = true, features = ["bytecheck"] }
 # Pinned rev; build.rs builds libtidesdb from source and links lz4/zstd/snappy (CI installs -dev packages).
 tidesdb = { git = "https://github.com/tidesdb/tidesdb-rs.git", rev = "2c128540b02400a538475d992a122d940eb93da3", version = "0.6.7", optional = true }
 
@@ -195,11 +199,11 @@ windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32
 # iroh 0.95 transitive stack: hickory-proto/resolver (DNS) may lag — see `.cargo/audit.toml` comments.
 
 [features]
-# Storage: `database_backend = "auto"` picks RocksDB when the `rocksdb` feature is enabled
-# (see `storage/database/mod.rs::default_backend`). Redb is pure-Rust optional: `--features redb`.
-# No LevelDB (backends: rocksdb, redb, sled, tidesdb).
+# Storage: `database_backend = "auto"` picks heed3 when the `heed3` feature is enabled
+# (see `storage/database/mod.rs::default_backend`), else RocksDB, TidesDB, Redb, Sled.
+# No LevelDB (backends: rocksdb, redb, sled, tidesdb, heed3).
 # Pure Rust/no C++ compile: `cargo build --no-default-features --features "redb,production,..."`.
-default = ["sysinfo", "rocksdb", "nix", "libc", "production", "governance", "utxo-commitments", "protocol-verification"]
+default = ["sysinfo", "heed3", "rocksdb", "nix", "libc", "production", "governance", "utxo-commitments", "protocol-verification"]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
 iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls", "dep:h3", "dep:h3-quinn"]
@@ -215,6 +219,7 @@ redb = ["dep:redb"]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
 rocksdb = ["dep:rocksdb"]
 tidesdb = ["dep:tidesdb"]
+heed3 = ["dep:heed3", "dep:rkyv"]
 # Process sandboxing (Unix)
 nix = ["dep:nix", "dep:libc"]
 libc = ["dep:libc"]
@@ -283,7 +288,7 @@ blvm-muhash = { path = "../blvm-muhash" }
 
 [dev-dependencies]
 blvm-protocol = { version = ">=0.1, <1", features = ["test-utils"] }
-blvm-consensus = { version = ">=0.1.26, <1", features = ["test-utils"] }
+blvm-consensus = { version = ">=0.1, <1", features = ["test-utils"] }
 tempfile = "=3.8.1"
 rand = "0.8"
 # For iroh SecretKey generation in iroh-gated tests (avoids RNG version conflicts)
@@ -347,9 +352,9 @@ name = "wallet-integration"
 path = "examples/wallet-integration.rs"
 
 [[example]]
-name = "verify_tidesdb"
-path = "examples/verify_tidesdb.rs"
-required-features = ["tidesdb"]
+name = "verify_heed3"
+path = "examples/verify_heed3.rs"
+required-features = ["heed3"]
 
 # Tools
 [[bin]]

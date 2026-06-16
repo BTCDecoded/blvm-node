@@ -10,6 +10,8 @@ use tempfile::TempDir;
 #[test]
 fn database_default_and_fallback_backends() {
     let primary = default_backend();
+    #[cfg(feature = "heed3")]
+    assert_eq!(primary, DatabaseBackend::Heed3);
     let _fb = fallback_backend(primary);
     assert!(matches!(
         primary,
@@ -17,6 +19,7 @@ fn database_default_and_fallback_backends() {
             | DatabaseBackend::RocksDB
             | DatabaseBackend::Redb
             | DatabaseBackend::TidesDB
+            | DatabaseBackend::Heed3
     ));
 }
 
