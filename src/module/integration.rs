@@ -4,11 +4,11 @@
 //! Handles connection, handshake, and provides NodeAPI + event receiver.
 
 use crate::module::api::NodeApiIpc;
+use crate::module::ipc::ModuleIpcClient;
 use crate::module::ipc::protocol::{
     CliSpec, InvocationMessage, InvocationResultMessage, MessageType, ModuleMessage,
     RequestMessage, RequestPayload, ResponsePayload,
 };
-use crate::module::ipc::ModuleIpcClient;
 use crate::module::traits::{EventType, ModuleError, NodeAPI};
 use std::path::PathBuf;
 use std::sync::Arc;

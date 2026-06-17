@@ -1,5 +1,5 @@
 use blvm_node::rpc::server::RpcServer;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[tokio::test]
 async fn rpc_invalid_json_returns_parse_error() {

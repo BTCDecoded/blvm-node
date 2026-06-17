@@ -1,8 +1,8 @@
 //! `Node` accessors, config builders, and health report paths.
 
 use blvm_node::config::NodeConfig;
-use blvm_node::node::health::HealthStatus;
 use blvm_node::node::Node;
+use blvm_node::node::health::HealthStatus;
 use blvm_protocol::ProtocolVersion;
 use serial_test::serial;
 use std::net::SocketAddr;

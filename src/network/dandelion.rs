@@ -266,7 +266,7 @@ impl<C: Clock> DandelionRelay<C> {
             }
 
             // Random fluff decision (with fluff_probability)
-            if self.rng.gen::<f64>() < self.fluff_probability {
+            if self.rng.r#gen::<f64>() < self.fluff_probability {
                 debug!("Dandelion random fluff for tx {}", hex::encode(tx_hash));
                 return true;
             }

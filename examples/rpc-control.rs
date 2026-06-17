@@ -20,12 +20,14 @@ fn main() -> anyhow::Result<()> {
     println!("============================================");
     println!();
     println!("These methods manage the node lifecycle and expose operational telemetry.");
-    println!("All methods are Bitcoin Core-compatible (stop, uptime, getmemoryinfo, getrpcinfo, help, logging).");
+    println!(
+        "All methods are Bitcoin Core-compatible (stop, uptime, getmemoryinfo, getrpcinfo, help, logging)."
+    );
     println!("gethealth and getmetrics are blvm-node extensions.");
     println!();
 
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
-                                            // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
+    // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
 
     println!("RPC Endpoint: {rpc_url}");
     println!();
@@ -144,7 +146,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Retrieve uptime and performance counters for monitoring dashboards");
-    println!("   Note: Returns {{uptime_seconds, ...}}; extended metrics require MetricsCollector integration");
+    println!(
+        "   Note: Returns {{uptime_seconds, ...}}; extended metrics require MetricsCollector integration"
+    );
     println!();
 
     println!("Method Summary:");

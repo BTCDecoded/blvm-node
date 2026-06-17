@@ -5,8 +5,8 @@
 
 use crate::module::traits::ModuleError;
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Nonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};

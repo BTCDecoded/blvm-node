@@ -1,7 +1,7 @@
 [package]
 name = "blvm-node"
 version = "0.1.13"
-edition = "2021"
+edition = "2024"
 authors = ["Bitcoin Commons Team"]
 description = "Bitcoin Commons BLVM: Minimal Bitcoin node implementation using blvm-protocol and blvm-consensus"
 license = "MIT"
@@ -10,7 +10,7 @@ homepage = "https://btcdecoded.org"
 documentation = "https://docs.rs/blvm-node"
 keywords = ["bitcoin", "node", "blockchain", "cryptocurrency", "p2p"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
-rust-version = "1.82"
+rust-version = "1.85"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance", "erlay", "rayon", "wasm-modules"))'] }
@@ -81,7 +81,7 @@ hyper-util = { version = "=0.1.18", features = ["server", "http1", "tokio"] }  #
 
 # Serialization - EXACT VERSIONS for security
 serde = { version = "=1.0.228", features = ["derive"] }  # Updated for iroh 0.95 compatibility (requires ^1.0.219)
-serde_json = "=1.0.108"
+serde_json = "=1.0.133"
 serde_bytes = "=0.11.19"  # Updated for iroh 0.95 compatibility (requires ^0.11.17)
 bincode = "=1.3.3"
 bytes = "=1.11.1"  # RUSTSEC-2026-0007: Integer overflow in BytesMut::reserve (was 1.10.1)
@@ -292,11 +292,11 @@ blvm-consensus = { version = ">=0.1, <1", features = ["test-utils"] }
 tempfile = "=3.8.1"
 rand = "0.8"
 # For iroh SecretKey generation in iroh-gated tests (avoids RNG version conflicts)
-getrandom = "=0.2"
+getrandom = "=0.2.17"
 # Module DB / WASM integration tests that used blvm_sdk live under tests/module/ — run them from a
 # monorepo checkout with a path dev-dependency, or from blvm-sdk; not required for CI/crates.io.
-criterion = "=0.5"
-proptest = "=1.4.0"
+criterion = "=0.5.1"
+proptest = "=1.5.0"
 dhat = "=0.3"  # Heap profiling
 serial_test = "=3.0"  # Sequential test execution for database isolation
 

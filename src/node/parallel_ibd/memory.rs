@@ -18,7 +18,7 @@
 use libmimalloc_sys;
 #[cfg(target_os = "linux")]
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -997,12 +997,12 @@ impl MemoryGuard {
             let crit_rss = self.crit_rss_threshold_mb; // default = t*22/100
             let rss_elev = (t * 30 / 100).max(2000); // e.g. 4776 MB on 16 GiB
             let rss_emerg = (t * 50 / 100).max(4000); // e.g. 8192 MB on 16 GiB
-                                                      // Hysteresis on avail thresholds: enter at A_up, require A_up + 512 MB to deactivate
-                                                      // the swap_X flag (and thus permit downward transitions). The 512 MB gap absorbs the
-                                                      // observed sys_avail swing (3015–3555 MB at h=315k = 540 MB swing under steady IBD
-                                                      // load). Without this gap, sys_avail oscillating ±300 MB around the entry boundary
-                                                      // caused 24+ Elevated↔Critical transitions per minute, each one running
-                                                      // `adjust_max_ahead_live` and clobbering the prefetch lookahead.
+            // Hysteresis on avail thresholds: enter at A_up, require A_up + 512 MB to deactivate
+            // the swap_X flag (and thus permit downward transitions). The 512 MB gap absorbs the
+            // observed sys_avail swing (3015–3555 MB at h=315k = 540 MB swing under steady IBD
+            // load). Without this gap, sys_avail oscillating ±300 MB around the entry boundary
+            // caused 24+ Elevated↔Critical transitions per minute, each one running
+            // `adjust_max_ahead_live` and clobbering the prefetch lookahead.
             let swap_elev_up = swap_used >= t * 5 / 100 && a > 0 && a < 4096 && our_swap;
             let swap_crit_up = swap_used >= t * 12 / 100 && a > 0 && a < 3072 && our_swap;
             let swap_emerg_up = swap_used >= t * 20 / 100 && a > 0 && a < 2048 && our_swap;

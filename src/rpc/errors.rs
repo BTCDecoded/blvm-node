@@ -2,7 +2,7 @@
 //!
 //! Standard-compatible JSON-RPC error codes and error handling
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fmt;
 
 /// User-facing message when an RPC or operation requires storage and it is not initialized.
@@ -295,7 +295,9 @@ impl RpcError {
 
         Self::with_data(
             RpcErrorCode::TxRejected,
-            format!("Transaction rejected: insufficient fee (required: {required_fee_rate:.2} sat/vB, provided: {provided_fee_rate:.2} sat/vB)"),
+            format!(
+                "Transaction rejected: insufficient fee (required: {required_fee_rate:.2} sat/vB, provided: {provided_fee_rate:.2} sat/vB)"
+            ),
             data,
         )
     }

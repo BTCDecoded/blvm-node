@@ -374,7 +374,15 @@ impl PeerScorer {
             lan_pct,
             best_peer.as_ref().map(|(addr, _, _)| addr),
             best_peer.as_ref().map(|(_, s, _)| *s).unwrap_or(0.0),
-            if best_peer.as_ref().map(|(_, _, is_lan)| *is_lan).unwrap_or(false) { " LAN" } else { "" }
+            if best_peer
+                .as_ref()
+                .map(|(_, _, is_lan)| *is_lan)
+                .unwrap_or(false)
+            {
+                " LAN"
+            } else {
+                ""
+            }
         )
     }
 }

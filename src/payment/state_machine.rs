@@ -7,8 +7,8 @@
 use crate::payment::covenant::{CovenantEngine, CovenantProof};
 #[cfg(not(feature = "ctv"))]
 type CovenantProof = (); // Stub type when CTV feature is disabled
-use crate::payment::processor::{PaymentError, PaymentProcessor};
 use crate::Hash;
+use crate::payment::processor::{PaymentError, PaymentProcessor};
 use blvm_protocol::payment::PaymentOutput;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -395,8 +395,8 @@ impl PaymentStateMachine {
                 .lock()
                 .expect("payment state machine network_sender mutex poisoned");
             if let Some(ref sender) = *sender_slot {
-                use crate::network::protocol::{ProtocolMessage, ProtocolParser};
                 use crate::network::NetworkMessage;
+                use crate::network::protocol::{ProtocolMessage, ProtocolParser};
 
                 // Create PaymentProof message
                 let payment_proof_msg = crate::network::protocol::PaymentProofMessage {
@@ -423,7 +423,9 @@ impl PaymentStateMachine {
                             // the message or by the caller who has NetworkManager access
                             debug!(
                                 "Payment proof ready to send to {} (payment_id: {}, serialized: {} bytes)",
-                                peer_addr, payment_request_id, serialized.len()
+                                peer_addr,
+                                payment_request_id,
+                                serialized.len()
                             );
                             // Note: Actual sending requires NetworkManager.send_to_peer() which we don't have access to
                             // The state is updated and the message is serialized, ready for the caller to send

@@ -12,8 +12,8 @@ mod common;
 mod tests {
     use super::common;
     use super::ipc_harness;
-    use blvm_node::module::api::events::EventManager;
     use blvm_node::module::api::NodeApiImpl;
+    use blvm_node::module::api::events::EventManager;
     use blvm_node::module::ipc::protocol::{
         MessageType, RequestMessage, RequestPayload, ResponsePayload,
     };

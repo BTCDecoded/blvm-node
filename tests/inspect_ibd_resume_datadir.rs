@@ -9,8 +9,8 @@
 
 #![cfg(all(feature = "production", feature = "rocksdb"))]
 
-use blvm_node::storage::ibd_autorepair::{ibd_utxo_repair_flag_present, repair_marker_path};
 use blvm_node::storage::Storage;
+use blvm_node::storage::ibd_autorepair::{ibd_utxo_repair_flag_present, repair_marker_path};
 use std::path::PathBuf;
 
 #[test]
@@ -63,10 +63,14 @@ fn inspect_ibd_resume_datadir() -> anyhow::Result<()> {
         );
     }
     if wm == Some(0) && chain_tip > 0 {
-        println!("NOTE: watermark explicitly 0 with blocks indexed → typically force_set_ibd_utxo_watermark(0) or never flushed.");
+        println!(
+            "NOTE: watermark explicitly 0 with blocks indexed → typically force_set_ibd_utxo_watermark(0) or never flushed."
+        );
     }
     if ibd_empty && wm.unwrap_or(0) > 0 {
-        println!("NOTE: reconcile_ibd_utxo_watermark_with_disk would reset watermark to 0 on next production startup.");
+        println!(
+            "NOTE: reconcile_ibd_utxo_watermark_with_disk would reset watermark to 0 on next production startup."
+        );
     }
 
     Ok(())

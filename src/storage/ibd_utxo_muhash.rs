@@ -1,10 +1,10 @@
 //! Incremental MuHash3072 over the `ibd_utxos` tree during parallel IBD.
 
+use crate::storage::Storage;
 use crate::storage::chainstate::ChainState;
 use crate::storage::disk_utxo::key_to_outpoint;
-use crate::storage::Storage;
 use anyhow::{Context, Result};
-use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
+use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
 use blvm_protocol::types::UTXO;
 
 pub(crate) fn load_ibd_muhash_from_chain(chain: &ChainState) -> Result<MuHash3072> {
@@ -130,11 +130,11 @@ pub(crate) fn verify_ibd_utxo_muhash_startup(storage: &Storage) -> Result<()> {
 #[cfg(all(test, feature = "heed3"))]
 mod verify_tests {
     use super::*;
+    use crate::storage::Storage;
     use crate::storage::database::DatabaseBackend;
     use crate::storage::disk_utxo::outpoint_to_key;
-    use crate::storage::utxo_value_codec::{encode_utxo_with_codec, ValueCodec};
-    use crate::storage::Storage;
-    use blvm_muhash::{MuHash3072, MUHASH_RUNNING_STATE_BYTES};
+    use crate::storage::utxo_value_codec::{ValueCodec, encode_utxo_with_codec};
+    use blvm_muhash::{MUHASH_RUNNING_STATE_BYTES, MuHash3072};
     use blvm_protocol::types::{OutPoint, UTXO};
     use tempfile::TempDir;
 

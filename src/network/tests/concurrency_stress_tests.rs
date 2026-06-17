@@ -103,7 +103,7 @@ async fn test_concurrent_operations_stress() {
                 let _pm = manager_clone.peer_manager().await;
                 tokio::time::sleep(Duration::from_millis(1)).await;
             } // Lock dropped
-              // Access another lock (simplified - actual stats method may vary)
+            // Access another lock (simplified - actual stats method may vary)
             let _bytes_sent = manager_clone.bytes_sent();
         });
         handles.push(handle);

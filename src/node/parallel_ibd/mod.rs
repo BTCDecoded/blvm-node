@@ -29,7 +29,7 @@ mod validation_loop;
 #[cfg(feature = "production")]
 pub(crate) use validation_loop::IbdRetireWork;
 
-use chunk_assigner::{create_chunks as create_chunks_impl, ChunkAssigner, ChunkGuard};
+use chunk_assigner::{ChunkAssigner, ChunkGuard, create_chunks as create_chunks_impl};
 
 pub use chunk_assigner::BlockChunk;
 use download::download_chunk;
@@ -38,29 +38,29 @@ use memory::{MemoryGuard, TIDESDB_MAX_TXN_OPS};
 #[cfg(feature = "production")]
 use types::PrefetchWorkItemV2;
 use types::{
-    estimate_block_bytes, ChunkWorkItem, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses,
+    ChunkWorkItem, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses, estimate_block_bytes,
 };
 
+use crate::network::NetworkManager;
 use crate::network::peer_scoring::is_lan_peer;
 use crate::network::protocol::{
     GetHeadersMessage, HeadersMessage, ProtocolMessage, ProtocolParser,
 };
-use crate::network::NetworkManager;
 use crate::node::block_processor::validate_block_with_context;
-use crate::storage::blockstore::{block_height_row_key, BlockMetadata, BlockStore};
+use crate::storage::Storage;
+use crate::storage::blockstore::{BlockMetadata, BlockStore, block_height_row_key};
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::{
-    block_input_keys_and_tx_ids_filtered, block_input_keys_batch_into_arc, compute_tx_ids_only,
-    key_to_outpoint, outpoint_to_key, OutPointKey, SyncBatch,
+    OutPointKey, SyncBatch, block_input_keys_and_tx_ids_filtered, block_input_keys_batch_into_arc,
+    compute_tx_ids_only, key_to_outpoint, outpoint_to_key,
 };
 #[cfg(feature = "production")]
 use crate::storage::ibd_utxo_store::IbdUtxoStore;
-use crate::storage::Storage;
 use crate::utils::{IBD_YIELD_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP};
 use anyhow::{Context, Result};
 use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::{
-    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult,
+    BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult, segwit::Witness,
 };
 
 use blvm_protocol::serialization::varint::decode_varint;
@@ -78,14 +78,14 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread;
+use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
 use tokio::sync::oneshot;
-use tokio::sync::Semaphore;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, error, info, warn};
 
 /// Parallel IBD configuration
@@ -427,9 +427,11 @@ impl ParallelIBD {
         // IBD requires storage (IbdUtxoStore needs disk for UTXO persistence). Fail fast with clear error.
         let storage = match storage {
             Some(s) => s,
-            None => return Err(anyhow::anyhow!(
-                "IBD requires storage. Run with a data directory (e.g. --datadir) or ensure storage is initialized."
-            )),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "IBD requires storage. Run with a data directory (e.g. --datadir) or ensure storage is initialized."
+                ));
+            }
         };
 
         #[cfg(not(feature = "production"))]
@@ -958,11 +960,7 @@ impl ParallelIBD {
                                     false
                                 }
                             };
-                            if !seed_ok {
-                                None
-                            } else {
-                                Some(Arc::new(db))
-                            }
+                            if !seed_ok { None } else { Some(Arc::new(db)) }
                         } else {
                             info!(
                                 "IBD engine (Phase 2) enabled; flat-file table at {}",
@@ -1125,7 +1123,10 @@ impl ParallelIBD {
                         let (start, end) = match maybe_work {
                             Some(x) => x,
                             None => {
-                                info!("[IBD] Worker {} exiting: queue empty (chunks_completed={}, blocks_downloaded={})", peer_id, chunks_completed, blocks_downloaded);
+                                info!(
+                                    "[IBD] Worker {} exiting: queue empty (chunks_completed={}, blocks_downloaded={})",
+                                    peer_id, chunks_completed, blocks_downloaded
+                                );
                                 break;
                             }
                         };
@@ -1144,7 +1145,10 @@ impl ParallelIBD {
                         let _permit = match semaphore.acquire().await {
                             Ok(permit) => permit,
                             Err(_) => {
-                                warn!("[IBD] Worker {} semaphore acquire failed — ChunkGuard will re-queue", peer_id);
+                                warn!(
+                                    "[IBD] Worker {} semaphore acquire failed — ChunkGuard will re-queue",
+                                    peer_id
+                                );
                                 break;
                             }
                         };
@@ -1205,7 +1209,10 @@ impl ParallelIBD {
                                 consecutive_failures = 0;
                                 let block_count = chunk.block_count();
                                 if start == 0 {
-                                    info!("IBD: bootstrap chunk 0-{} downloaded, coordinator enables parallel when received", end);
+                                    info!(
+                                        "IBD: bootstrap chunk 0-{} downloaded, coordinator enables parallel when received",
+                                        end
+                                    );
                                 }
                                 #[cfg(feature = "profile")]
                                 if block_count > 0
@@ -1215,9 +1222,13 @@ impl ParallelIBD {
                                 {
                                     let remaining = assigner_clone.remaining_count();
                                     blvm_protocol::profile_log!(
-                                    "[IBD_DOWNLOAD] peer={} chunk={}-{} blocks={} assigner_remaining={}",
-                                    peer_id, start, end, block_count, remaining
-                                );
+                                        "[IBD_DOWNLOAD] peer={} chunk={}-{} blocks={} assigner_remaining={}",
+                                        peer_id,
+                                        start,
+                                        end,
+                                        block_count,
+                                        remaining
+                                    );
                                 }
                                 // Blocks already streamed during download_chunk; no second send
                                 _guard.disarm();
@@ -1225,9 +1236,13 @@ impl ParallelIBD {
                                 {
                                     let ts_ms = crate::utils::time::current_timestamp_millis();
                                     blvm_protocol::profile_log!(
-                                    "[IBD_CHUNK_COMPLETE] chunk_start={} chunk_end={} peer={} blocks={} ts_ms={}",
-                                    start, end, peer_id, block_count, ts_ms
-                                );
+                                        "[IBD_CHUNK_COMPLETE] chunk_start={} chunk_end={} peer={} blocks={} ts_ms={}",
+                                        start,
+                                        end,
+                                        peer_id,
+                                        block_count,
+                                        ts_ms
+                                    );
                                 }
                                 assigner_clone.on_chunk_complete(&peer_id);
                                 chunks_completed += 1;
@@ -1235,12 +1250,22 @@ impl ParallelIBD {
                             }
                             Err(e) => {
                                 consecutive_failures += 1;
-                                warn!("Peer {} failed chunk {}-{} ({}/{}): {} - will retry with different peer", 
-                                peer_id, start, end, consecutive_failures, MAX_CONSECUTIVE_FAILURES, e);
+                                warn!(
+                                    "Peer {} failed chunk {}-{} ({}/{}): {} - will retry with different peer",
+                                    peer_id,
+                                    start,
+                                    end,
+                                    consecutive_failures,
+                                    MAX_CONSECUTIVE_FAILURES,
+                                    e
+                                );
                                 let exclude = if num_peers_clone > 1 {
                                     Some(peer_id.clone())
                                 } else {
-                                    info!("[IBD] Single peer: re-queuing chunk {}-{} without exclude (no fallback)", start, end);
+                                    info!(
+                                        "[IBD] Single peer: re-queuing chunk {}-{} without exclude (no fallback)",
+                                        start, end
+                                    );
                                     None
                                 };
                                 if exclude.is_some() {
@@ -1504,7 +1529,9 @@ impl ParallelIBD {
                         if stuck_secs >= coord_stall_log_secs {
                             warn!(
                                 "Coordinator stall: buffer full ({}) but height {} not in buffer for {}s — requeuing",
-                                reorder_buffer.len(), min_undispatched_needed, stuck_secs
+                                reorder_buffer.len(),
+                                min_undispatched_needed,
+                                stuck_secs
                             );
                             let _ = stall_tx_for_coord.send(min_undispatched_needed);
                             assigner_for_coord
@@ -1536,7 +1563,10 @@ impl ParallelIBD {
                         }
                         if h == bootstrap_end {
                             assigner_for_coord.mark_bootstrap_complete();
-                            info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
+                            info!(
+                                "IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled",
+                                h
+                            );
                         }
                         // In engine mode skip key extraction: keys are unused by the engine
                         // validation path. Only tx_ids are needed for SpendSession::append.
@@ -1589,7 +1619,11 @@ impl ParallelIBD {
                         };
                         warn!(
                             "Coordinator stall: no blocks for {}s, waiting for height {} (total_received={}, next_prefetch={}, stall_requeue={})",
-                            coord_stall_log_secs, next_needed, total_received, next_prefetch_height, stall_height
+                            coord_stall_log_secs,
+                            next_needed,
+                            total_received,
+                            next_prefetch_height,
+                            stall_height
                         );
                         let _ = stall_tx_for_coord.send(stall_height);
                         assigner_for_coord.requeue_chunk_containing_height(stall_height);
@@ -1619,7 +1653,10 @@ impl ParallelIBD {
                         dispatched.insert(h);
                         if h == bootstrap_end {
                             assigner_for_coord.mark_bootstrap_complete();
-                            info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
+                            info!(
+                                "IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled",
+                                h
+                            );
                         }
                         // In engine mode skip key extraction: keys are unused by the engine
                         // validation path. Only tx_ids are needed for SpendSession::append.
@@ -1666,7 +1703,10 @@ impl ParallelIBD {
                         }
                         if h == bootstrap_end {
                             assigner_for_coord.mark_bootstrap_complete();
-                            info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
+                            info!(
+                                "IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled",
+                                h
+                            );
                         }
                         // Single-peer (sequential) path: still go through prefetch so the worker
                         // pool warm-loads UTXOs in parallel with validation. Compute keys here
@@ -1744,7 +1784,10 @@ impl ParallelIBD {
                         }
                         if h == bootstrap_end {
                             assigner_for_coord.mark_bootstrap_complete();
-                            info!("IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled", h);
+                            info!(
+                                "IBD: bootstrap chunk 0-{} received by coordinator, parallel download enabled",
+                                h
+                            );
                         }
                         // In engine mode skip key extraction: keys are unused by the engine
                         // validation path. Only tx_ids are needed for SpendSession::append.
@@ -2232,11 +2275,7 @@ impl ParallelIBD {
             let cur = self
                 .bip54_activation_from_version_bits
                 .load(Ordering::Acquire);
-            if cur == u64::MAX {
-                None
-            } else {
-                Some(cur)
-            }
+            if cur == u64::MAX { None } else { Some(cur) }
         };
 
         let bip54_active = blvm_protocol::bip_validation::is_bip54_active_at(
@@ -2391,7 +2430,9 @@ impl ParallelIBD {
         }
         info!(
             "IBD_FAILURE_DUMP: Block {} validation failed. Test data written to: {} (block.bin, witnesses.bin, utxo_set.bin, info.txt). Run: ./scripts/ibd_failure_to_repro_test.sh {}",
-            height, dir.display(), height
+            height,
+            dir.display(),
+            height
         );
     }
 
@@ -2938,24 +2979,28 @@ mod tests {
         let peers = std::env::var("BLVM_IBD_PEERS").ok();
         let mode = std::env::var("BLVM_IBD_MODE").ok();
         let wan_single = std::env::var("BLVM_IBD_WAN_SINGLE_PEER").ok();
-        std::env::remove_var("BLVM_IBD_PEERS");
-        std::env::remove_var("BLVM_IBD_MODE");
-        std::env::remove_var("BLVM_IBD_WAN_SINGLE_PEER");
-        f();
-        if let Some(v) = peers {
-            std::env::set_var("BLVM_IBD_PEERS", v);
-        } else {
+        unsafe {
             std::env::remove_var("BLVM_IBD_PEERS");
-        }
-        if let Some(v) = mode {
-            std::env::set_var("BLVM_IBD_MODE", v);
-        } else {
             std::env::remove_var("BLVM_IBD_MODE");
-        }
-        if let Some(v) = wan_single {
-            std::env::set_var("BLVM_IBD_WAN_SINGLE_PEER", v);
-        } else {
             std::env::remove_var("BLVM_IBD_WAN_SINGLE_PEER");
+        }
+        f();
+        unsafe {
+            if let Some(v) = peers {
+                std::env::set_var("BLVM_IBD_PEERS", v);
+            } else {
+                std::env::remove_var("BLVM_IBD_PEERS");
+            }
+            if let Some(v) = mode {
+                std::env::set_var("BLVM_IBD_MODE", v);
+            } else {
+                std::env::remove_var("BLVM_IBD_MODE");
+            }
+            if let Some(v) = wan_single {
+                std::env::set_var("BLVM_IBD_WAN_SINGLE_PEER", v);
+            } else {
+                std::env::remove_var("BLVM_IBD_WAN_SINGLE_PEER");
+            }
         }
     }
 
@@ -2975,7 +3020,9 @@ mod tests {
     #[test]
     fn empty_blvm_ibd_peers_env_allows_auto_lan() {
         with_ibd_env_cleared(|| {
-            std::env::set_var("BLVM_IBD_PEERS", "");
+            unsafe {
+                std::env::set_var("BLVM_IBD_PEERS", "");
+            }
             let peers = vec!["192.168.2.100:8333".to_string(), "8.8.8.8:8333".to_string()];
             let config = ParallelIBDConfig::resolve_for_session(None, 0, &peers);
             assert_eq!(config.preferred_peers, vec!["192.168.2.100:8333"]);

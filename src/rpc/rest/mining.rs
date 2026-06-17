@@ -6,7 +6,7 @@
 
 use crate::rpc::mining::MiningRpc;
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Get mining information
 pub async fn get_mining_info(mining: &MiningRpc) -> Result<Value> {

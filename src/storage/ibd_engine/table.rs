@@ -20,8 +20,8 @@ use super::types::{IdCodec, OutputDetail, OutputHeader, OutputId, OutputKV, Outp
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 // Alias for the tail snapshot type.  Readers get an `Arc` clone of the snapshot under a
 // brief read-lock; no data is copied.  Writers replace the inner `Arc<Vec<…>>` atomically.
@@ -118,16 +118,18 @@ impl UtxoTable {
             let mw = table.mutable_window;
             std::thread::Builder::new()
                 .name("utxo-table-flusher".to_string())
-                .spawn(move || loop {
-                    match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                        Ok(FlushMsg::Shutdown)
-                        | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                    }
-                    let Some(t) = weak.upgrade() else { break };
-                    let max_h = t.max_height_seen.load(Ordering::Relaxed);
-                    if max_h > i32::MIN {
-                        let _ = t.flush_before(max_h.saturating_sub(mw));
+                .spawn(move || {
+                    loop {
+                        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                            Ok(FlushMsg::Shutdown)
+                            | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        }
+                        let Some(t) = weak.upgrade() else { break };
+                        let max_h = t.max_height_seen.load(Ordering::Relaxed);
+                        if max_h > i32::MIN {
+                            let _ = t.flush_before(max_h.saturating_sub(mw));
+                        }
                     }
                 })
                 .expect("spawn table flusher");
@@ -468,7 +470,7 @@ fn read_disk_batch(
 
 #[cfg(target_os = "linux")]
 mod uring {
-    use io_uring::{opcode, types, IoUring};
+    use io_uring::{IoUring, opcode, types};
     use std::cell::RefCell;
     use std::os::unix::io::AsRawFd;
 

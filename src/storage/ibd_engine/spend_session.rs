@@ -33,8 +33,8 @@
 use super::database::UtxoDatabase;
 use super::memory_age::Pin;
 use super::types::{
-    outpoint_to_output_key, output_key_to_outpoint, IdCodec, OutputDetail, OutputId, OutputKey,
-    OUTPUT_ID_DELETED,
+    IdCodec, OUTPUT_ID_DELETED, OutputDetail, OutputId, OutputKey, outpoint_to_output_key,
+    output_key_to_outpoint,
 };
 use blvm_protocol::transaction::is_coinbase;
 use blvm_protocol::types::SharedByteString;
@@ -101,8 +101,8 @@ impl PartialSpendSession {
         let mut fetch_order: Vec<(usize, OutputId)> = ids
             .iter()
             .enumerate()
-            .filter(|(_, &id)| id != OutputId::MAX && id != OUTPUT_ID_DELETED)
-            .map(|(i, &id)| (i, id))
+            .filter(|&(_, id)| *id != OutputId::MAX && *id != OUTPUT_ID_DELETED)
+            .map(|(i, id)| (i, *id))
             .collect();
         fetch_order.sort_unstable_by_key(|&(_, id)| IdCodec::decode(id).0);
 
@@ -205,8 +205,8 @@ impl SpendSession {
         let mut fetch_order: Vec<(usize, OutputId)> = ids
             .iter()
             .enumerate()
-            .filter(|(_, &id)| id != OutputId::MAX && id != OUTPUT_ID_DELETED)
-            .map(|(i, &id)| (i, id))
+            .filter(|&(_, id)| *id != OutputId::MAX && *id != OUTPUT_ID_DELETED)
+            .map(|(i, id)| (i, *id))
             .collect();
         fetch_order.sort_unstable_by_key(|&(_, id)| IdCodec::decode(id).0);
 
@@ -267,8 +267,8 @@ fn resolve_intra_block(
     let mut fetch_pairs: Vec<(usize, OutputId)> = ids
         .iter()
         .enumerate()
-        .filter(|(_, &id)| id != OutputId::MAX && id != OUTPUT_ID_DELETED)
-        .map(|(i, &id)| (i, id))
+        .filter(|&(_, id)| *id != OutputId::MAX && *id != OUTPUT_ID_DELETED)
+        .map(|(i, id)| (i, *id))
         .collect();
     fetch_pairs.sort_unstable_by_key(|&(_, id)| IdCodec::decode(id).0);
 

@@ -14,10 +14,12 @@ async fn test_message_id_deduplication_basic() {
     let message_id = "test-message-id-123";
 
     // First check should succeed
-    assert!(protection
-        .check_message_id(message_id, current_timestamp() as i64)
-        .await
-        .is_ok());
+    assert!(
+        protection
+            .check_message_id(message_id, current_timestamp() as i64)
+            .await
+            .is_ok()
+    );
 
     // Second check should fail (duplicate)
     let result = protection
@@ -37,23 +39,29 @@ async fn test_message_id_deduplication_multiple() {
     // Add multiple different message IDs
     for i in 0..10 {
         let msg_id = format!("msg-{i}");
-        assert!(protection
-            .check_message_id(&msg_id, current_timestamp() as i64)
-            .await
-            .is_ok());
+        assert!(
+            protection
+                .check_message_id(&msg_id, current_timestamp() as i64)
+                .await
+                .is_ok()
+        );
     }
 
     // Try to reuse one
-    assert!(protection
-        .check_message_id("msg-5", current_timestamp() as i64)
-        .await
-        .is_err());
+    assert!(
+        protection
+            .check_message_id("msg-5", current_timestamp() as i64)
+            .await
+            .is_err()
+    );
 
     // But new ones should still work
-    assert!(protection
-        .check_message_id("msg-new", current_timestamp() as i64)
-        .await
-        .is_ok());
+    assert!(
+        protection
+            .check_message_id("msg-new", current_timestamp() as i64)
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -301,10 +309,12 @@ async fn test_message_id_expires_after_cleanup() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Should be able to reuse the message ID now
-    assert!(protection
-        .check_message_id(message_id, current_timestamp() as i64)
-        .await
-        .is_ok());
+    assert!(
+        protection
+            .check_message_id(message_id, current_timestamp() as i64)
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]

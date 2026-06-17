@@ -6,11 +6,11 @@
 //! - Recovery paths for key loss scenarios
 //! - Security layers against hot wallet compromises
 
+use crate::Hash;
 use crate::payment::covenant::{CovenantEngine, CovenantProof};
 use crate::payment::processor::PaymentError;
 use crate::rpc::errors::STORAGE_NOT_AVAILABLE_MSG;
 use crate::utils::current_timestamp;
-use crate::Hash;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::sync::Arc;

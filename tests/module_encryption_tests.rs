@@ -4,8 +4,8 @@
 //! including key derivation, encryption/decryption round-trips, and storage.
 
 use blvm_node::module::encryption::{
-    load_encrypted_module, store_decrypted_module, store_encrypted_module, EncryptedModuleMetadata,
-    ModuleEncryption,
+    EncryptedModuleMetadata, ModuleEncryption, load_encrypted_module, store_decrypted_module,
+    store_encrypted_module,
 };
 use blvm_node::module::traits::ModuleError;
 use sha2::{Digest, Sha256};

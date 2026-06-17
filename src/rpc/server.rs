@@ -12,11 +12,11 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info, warn, Span};
+use tracing::{Span, debug, error, info, warn};
 
 #[cfg(feature = "bip70-http")]
 use super::payment;
@@ -2005,10 +2005,12 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
-        assert!(response["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Method not found"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Method not found")
+        );
         assert_eq!(response["id"], 1);
     }
 
@@ -2190,10 +2192,12 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
-        assert!(response["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Method not found"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Method not found")
+        );
         assert!(response["error"]["data"].is_string() || response["error"]["data"].is_null());
         assert_eq!(response["id"], 42);
     }
@@ -2217,10 +2221,12 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["error"]["code"], -32601);
-        assert!(response["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Method not found"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Method not found")
+        );
         assert_eq!(response["id"], 1);
     }
 

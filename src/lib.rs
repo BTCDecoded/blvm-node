@@ -29,12 +29,12 @@
 #![allow(clippy::field_reassign_with_default)] // Many config structs; init would be verbose
 #![allow(clippy::collapsible_match)] // Readability preference for nested matches
 #![allow(unused_doc_comments, unused_imports, unused_variables, unused_mut)] // Feature-gated modules, optional deps, and cfg-heavy paths
-                                                                             // Memory allocator: mimalloc when enabled (see #[cfg] below).
-                                                                             // Note: only in blvm-node, not blvm-consensus.
-                                                                             // Disabled on Windows (MinGW mimalloc link issues).
-                                                                             // `cargo test` uses the default allocator: mimalloc arenas can retain RSS during heavy
-                                                                             // IBD, and some integration tests have faulted under mimalloc while passing with the
-                                                                             // system allocator and in `blvm-protocol` tests.
+// Memory allocator: mimalloc when enabled (see #[cfg] below).
+// Note: only in blvm-node, not blvm-consensus.
+// Disabled on Windows (MinGW mimalloc link issues).
+// `cargo test` uses the default allocator: mimalloc arenas can retain RSS during heavy
+// IBD, and some integration tests have faulted under mimalloc while passing with the
+// system allocator and in `blvm-protocol` tests.
 #[cfg(all(not(target_os = "windows"), feature = "mimalloc", not(test)))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -60,9 +60,9 @@ pub use config::*;
 // This allows depending only on blvm-protocol (which transitively provides blvm-consensus)
 pub use blvm_protocol::mempool::Mempool;
 pub use blvm_protocol::{
-    tx_inputs, tx_outputs, Block, BlockHeader, ByteString, ConsensusError, Hash, Integer, Natural,
-    OutPoint, Result, Transaction, TransactionInput, TransactionOutput, UtxoSet, ValidationResult,
-    UTXO,
+    Block, BlockHeader, ByteString, ConsensusError, Hash, Integer, Natural, OutPoint, Result,
+    Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet, ValidationResult, tx_inputs,
+    tx_outputs,
 };
 
 // Re-export blvm-protocol types

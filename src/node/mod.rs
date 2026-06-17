@@ -24,15 +24,15 @@ use std::net::SocketAddr;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{NodeConfig, RpcAuthConfig};
-use crate::module::api::events::EventManager;
 use crate::module::ModuleManager;
+use crate::module::api::events::EventManager;
 use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::PerformanceProfiler;
 use crate::rpc::RpcManager;
 use crate::storage::Storage;
-use crate::utils::{log_error_async, HANDSHAKE_POLL_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP};
+use crate::utils::{HANDSHAKE_POLL_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP, log_error_async};
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -618,7 +618,7 @@ impl Node {
         if current_height == 0 {
             if let Some(block_hash) = self.config_sub(|c| c.assumeutxo_blockhash.as_ref()) {
                 use crate::storage::assumeutxo::{
-                    height_for_blockhash, write_base_blockhash_marker, AssumeUtxoManager,
+                    AssumeUtxoManager, height_for_blockhash, write_base_blockhash_marker,
                 };
                 let network = self
                     .config
@@ -633,7 +633,10 @@ impl Node {
                             .storage
                             .load_assumeutxo_snapshot(&utxo_set, &metadata, None)
                         {
-                            warn!("AssumeUTXO: failed to load snapshot into storage: {}. Falling back to full IBD.", e);
+                            warn!(
+                                "AssumeUTXO: failed to load snapshot into storage: {}. Falling back to full IBD.",
+                                e
+                            );
                         } else {
                             current_height = metadata.block_height;
                             initial_utxo_set = utxo_set;
@@ -645,13 +648,21 @@ impl Node {
                                     e
                                 );
                             }
-                            info!("AssumeUTXO: loaded snapshot at height {}, continuing sync from tip", current_height);
+                            info!(
+                                "AssumeUTXO: loaded snapshot at height {}, continuing sync from tip",
+                                current_height
+                            );
                         }
                     } else {
-                        warn!("AssumeUTXO: snapshot file not found for height {}. Falling back to full IBD.", snapshot_height);
+                        warn!(
+                            "AssumeUTXO: snapshot file not found for height {}. Falling back to full IBD.",
+                            snapshot_height
+                        );
                     }
                 } else {
-                    warn!("AssumeUTXO: block hash not in chainparams. Add to MAINNET_ASSUMEUTXO_DATA or REGTEST_ASSUMEUTXO_DATA. Falling back to full IBD.");
+                    warn!(
+                        "AssumeUTXO: block hash not in chainparams. Add to MAINNET_ASSUMEUTXO_DATA or REGTEST_ASSUMEUTXO_DATA. Falling back to full IBD."
+                    );
                 }
             }
         }
@@ -740,9 +751,9 @@ impl Node {
                         Ok(w) => w,
                         Err(e) => {
                             warn!(
-                            "[START_COMPONENTS] reconcile_ibd_utxo_watermark_with_disk failed ({}); using disk watermark as read",
-                            e
-                        );
+                                "[START_COMPONENTS] reconcile_ibd_utxo_watermark_with_disk failed ({}); using disk watermark as read",
+                                e
+                            );
                             watermark_val
                         }
                     };
@@ -840,11 +851,7 @@ impl Node {
         }
         info!(
             "[IBD_RESUME] chain_tip={:?} ibd_utxo_watermark={:?} engine_export_height={:?} effective_validated_tip={} next_block_height={}",
-            chain_tip_for_log,
-            wm_for_log,
-            export_for_log,
-            synced_tip,
-            ibd_first_block_height
+            chain_tip_for_log, wm_for_log, export_for_log, synced_tip, ibd_first_block_height
         );
         if chain_tip_for_log.is_some_and(|h| h > 0) && synced_tip == 0 {
             warn!(
@@ -866,7 +873,10 @@ impl Node {
         );
 
         if is_ibd {
-            info!("[START_COMPONENTS] Need to sync (synced_tip {} < target {}), checking for parallel IBD support...", synced_tip, target_height);
+            info!(
+                "[START_COMPONENTS] Need to sync (synced_tip {} < target {}), checking for parallel IBD support...",
+                synced_tip, target_height
+            );
 
             info!(
                 "[START_COMPONENTS] IBD: Found {} peer addresses: {:?}",
@@ -930,8 +940,10 @@ impl Node {
                                 warn!(
                                     "Failed to clear IBD UTXO autorepair marker: {} (safe to delete {} manually)",
                                     e,
-                                    crate::storage::ibd_autorepair::repair_marker_path(self.data_dir.as_path())
-                                        .display()
+                                    crate::storage::ibd_autorepair::repair_marker_path(
+                                        self.data_dir.as_path()
+                                    )
+                                    .display()
                                 );
                             }
                             // Update current height after parallel IBD
@@ -942,20 +954,31 @@ impl Node {
                             );
                         }
                         Ok(false) => {
-                            warn!("[START_COMPONENTS] Parallel IBD not available (not enough peers or already synced)");
+                            warn!(
+                                "[START_COMPONENTS] Parallel IBD not available (not enough peers or already synced)"
+                            );
                         }
                         Err(e) => {
-                            error!("[START_COMPONENTS] Parallel IBD failed: {}. Sequential sync is not supported.", e);
+                            error!(
+                                "[START_COMPONENTS] Parallel IBD failed: {}. Sequential sync is not supported.",
+                                e
+                            );
                             return Err(e);
                         }
                     }
                 } else {
-                    info!("[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need {}), waiting for more peers...", peer_addresses.len(), min_peers);
+                    info!(
+                        "[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need {}), waiting for more peers...",
+                        peer_addresses.len(),
+                        min_peers
+                    );
                 }
             }
             #[cfg(not(feature = "production"))]
             {
-                info!("[START_COMPONENTS] Parallel IBD not available without production feature; skipping.");
+                info!(
+                    "[START_COMPONENTS] Parallel IBD not available without production feature; skipping."
+                );
                 let _ = initial_utxo_set;
             }
         } else {
@@ -1019,8 +1042,10 @@ impl Node {
                                 is_ibd,
                             ) {
                                 Ok(stats) => {
-                                    info!("Startup pruning completed: {} blocks pruned, {} blocks kept", 
-                                          stats.blocks_pruned, stats.blocks_kept);
+                                    info!(
+                                        "Startup pruning completed: {} blocks pruned, {} blocks kept",
+                                        stats.blocks_pruned, stats.blocks_kept
+                                    );
                                     // Flush storage to persist pruning changes
                                     use crate::utils::log_error;
                                     log_error(
@@ -1265,7 +1290,9 @@ impl Node {
                                 // If we can't get mutable access (multiple references exist),
                                 // the payment state machine will be None until node_api is recreated
                                 // This is acceptable as payment features will work once modules reconnect
-                                warn!("Could not set payment state machine on NodeApiImpl (multiple references exist)");
+                                warn!(
+                                    "Could not set payment state machine on NodeApiImpl (multiple references exist)"
+                                );
                             }
 
                             // Create SettlementMonitor and PaymentTxCache for reorg resilience
@@ -1305,7 +1332,9 @@ impl Node {
                 }
             }
             if module_registry_arc.is_none() {
-                warn!("Failed to initialize module registry - modules will only load from local directory");
+                warn!(
+                    "Failed to initialize module registry - modules will only load from local directory"
+                );
             }
 
             // Wire RpcServer into ModuleManager so unload_module can clean up endpoints/overrides.
@@ -1729,11 +1758,11 @@ impl Node {
                                 {
                                     Ok(Ok(stats)) => {
                                         info!(
-                                        "Automatic pruning completed: {} blocks pruned, {} blocks kept, {} bytes freed",
-                                        stats.blocks_pruned,
-                                        stats.blocks_kept,
-                                        stats.storage_freed
-                                    );
+                                            "Automatic pruning completed: {} blocks pruned, {} blocks kept, {} bytes freed",
+                                            stats.blocks_pruned,
+                                            stats.blocks_kept,
+                                            stats.storage_freed
+                                        );
 
                                         // Flush storage to persist pruning changes
                                         use crate::utils::log_error;
@@ -1751,8 +1780,10 @@ impl Node {
                                 }
                             }
                         } else {
-                            warn!("Storage bounds exceeded but auto-pruning not yet due (last prune: {:?}, current: {})", 
-                                  last_prune_height, current_height);
+                            warn!(
+                                "Storage bounds exceeded but auto-pruning not yet due (last prune: {:?}, current: {})",
+                                last_prune_height, current_height
+                            );
                         }
                     } else {
                         warn!("Storage bounds exceeded but chain info not available");

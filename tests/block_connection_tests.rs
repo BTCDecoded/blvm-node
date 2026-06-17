@@ -7,8 +7,8 @@
 
 use anyhow::Result;
 use blvm_node::network::{
-    protocol::{NetworkAddress, ProtocolMessage, ProtocolParser, VersionMessage},
     NetworkManager,
+    protocol::{NetworkAddress, ProtocolMessage, ProtocolParser, VersionMessage},
 };
 use blvm_protocol::genesis;
 use blvm_protocol::serialization::serialize_block_with_witnesses;

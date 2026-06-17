@@ -8,8 +8,8 @@
 use super::memory_run::{MemoryRun, QueryResult};
 use super::types::{OutputId, OutputKV};
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 /// RAII guard that pins a height in a `MemoryAge`, preventing the compacter from merging it away.
 pub struct Pin {

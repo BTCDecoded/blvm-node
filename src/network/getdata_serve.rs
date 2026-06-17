@@ -14,8 +14,8 @@ use crate::network::protocol::{
     ProtocolParser, TxMessage,
 };
 use anyhow::Result;
-use blvm_protocol::features::FeatureRegistry;
 use blvm_protocol::ProtocolVersion;
+use blvm_protocol::features::FeatureRegistry;
 use std::net::SocketAddr;
 use tracing::warn;
 
@@ -173,8 +173,8 @@ fn build_tx_wire(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::inventory::{MSG_BLOCK, MSG_TX};
     use crate::network::NetworkManager;
+    use crate::network::inventory::{MSG_BLOCK, MSG_TX};
     use crate::node::mempool::MempoolManager;
     use crate::storage::Storage;
     use blvm_protocol::block::calculate_tx_id;

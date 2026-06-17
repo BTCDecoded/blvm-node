@@ -22,7 +22,7 @@
 //! init_module_logging("my_module", None); // Module gets its own filter
 //! ```
 
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Initialize logging for the main node
 ///

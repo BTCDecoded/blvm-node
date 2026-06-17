@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
-use common::{setup_mining_chain, DIFFICULTY_INTERVAL};
+use common::{DIFFICULTY_INTERVAL, setup_mining_chain};
 
 /// ckpool `gbt_req` from mempool/ckpool `src/bitcoin.c`.
 fn ckpool_gbt_params() -> serde_json::Value {

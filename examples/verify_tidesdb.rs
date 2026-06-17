@@ -5,7 +5,7 @@
 
 #[cfg(feature = "tidesdb")]
 fn main() -> anyhow::Result<()> {
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     use std::sync::Arc;
 
     type Db = Arc<dyn Database>;

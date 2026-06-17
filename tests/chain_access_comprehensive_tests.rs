@@ -5,8 +5,8 @@
 use blvm_node::network::chain_access::NodeChainAccess;
 use blvm_node::node::mempool::MempoolManager;
 use blvm_node::storage::Storage;
-use blvm_protocol::network::ChainStateAccess;
 use blvm_protocol::Hash;
+use blvm_protocol::network::ChainStateAccess;
 use std::sync::Arc;
 
 fn create_test_storage() -> Arc<Storage> {

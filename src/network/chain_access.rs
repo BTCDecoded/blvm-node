@@ -120,7 +120,7 @@ pub fn process_protocol_message(
     utxo_set: Option<&blvm_protocol::UtxoSet>,
     height: Option<u64>,
 ) -> Result<blvm_protocol::network::NetworkResponse> {
-    use blvm_protocol::network::{process_network_message, ChainStateAccess};
+    use blvm_protocol::network::{ChainStateAccess, process_network_message};
 
     process_network_message(
         engine,

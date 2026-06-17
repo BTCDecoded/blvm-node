@@ -257,7 +257,7 @@ pub fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &Path) -> St
         if let Some(ref bind) = config.rpc_bind {
             toml.push_str(&format!("bind = \"{bind}\"\n"));
         }
-        if let (Some(ref user), Some(ref password)) = (&config.rpc_user, &config.rpc_password) {
+        if let (Some(user), Some(password)) = (&config.rpc_user, &config.rpc_password) {
             toml.push_str("# Basic auth (user/password)\n");
             toml.push_str(&format!("username = \"{user}\"\n"));
             toml.push_str(&format!("password = \"{password}\"\n"));

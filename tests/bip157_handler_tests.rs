@@ -32,10 +32,12 @@ fn test_handle_getcfilters_invalid_filter_type() {
 
     let result = handle_getcfilters(&request, &filter_service, Some(&storage));
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Unsupported filter type"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported filter type")
+    );
 }
 
 #[test]
@@ -84,10 +86,12 @@ fn test_handle_getcfheaders_invalid_filter_type() {
 
     let result = handle_getcfheaders(&request, &filter_service);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Unsupported filter type"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported filter type")
+    );
 }
 
 #[test]
@@ -118,10 +122,12 @@ fn test_handle_getcfcheckpt_invalid_filter_type() {
 
     let result = handle_getcfcheckpt(&request, &filter_service);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Unsupported filter type"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported filter type")
+    );
 }
 
 #[test]
@@ -147,10 +153,12 @@ fn test_generate_cfilter_response_invalid_filter_type() {
 
     let result = generate_cfilter_response(block_hash, 1, &filter_service);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Unsupported filter type"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported filter type")
+    );
 }
 
 #[test]

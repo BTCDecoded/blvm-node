@@ -6,7 +6,7 @@ use blvm_node::node::block_processor::{
 };
 use blvm_node::storage::Storage;
 use blvm_node::{Block, BlockHeader, UtxoSet};
-use blvm_protocol::{segwit::Witness, BitcoinProtocolEngine, ProtocolVersion};
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, segwit::Witness};
 use std::sync::Arc;
 use tempfile::TempDir;
 

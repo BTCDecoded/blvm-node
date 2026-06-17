@@ -15,18 +15,18 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::SystemTime;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 
+use super::NetworkMessage;
 use super::lan_discovery;
 use super::peer;
 use super::peer_manager::{PeerByteRateLimiter, PeerManager, PeerRateLimiter};
 use super::transport;
-use super::NetworkMessage;
 use hex;
 /// Get wire command string for ProtocolMessage (for MessageReceived event)
 fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
@@ -722,7 +722,8 @@ impl NetworkManager {
             Ok(false) => {
                 warn!(
                     "Transaction relay bandwidth limit exceeded for IP {} (peer {}), dropping transaction",
-                    peer_addr.ip(), peer_addr
+                    peer_addr.ip(),
+                    peer_addr
                 );
                 return true;
             }

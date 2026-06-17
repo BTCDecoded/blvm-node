@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
-use common::{setup_mining_chain, valid_transaction, DIFFICULTY_INTERVAL};
+use common::{DIFFICULTY_INTERVAL, setup_mining_chain, valid_transaction};
 
 async fn expect_block_template(
     mining: &MiningRpc,

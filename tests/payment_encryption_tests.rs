@@ -5,7 +5,7 @@
 mod common;
 
 use blvm_node::config::PaymentConfig;
-use blvm_node::module::encryption::{load_encrypted_module, ModuleEncryption};
+use blvm_node::module::encryption::{ModuleEncryption, load_encrypted_module};
 use blvm_node::module::registry::client::ModuleRegistry;
 use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
 use blvm_node::payment::processor::PaymentProcessor;

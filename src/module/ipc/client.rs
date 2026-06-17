@@ -159,7 +159,7 @@ impl ModuleIpcClient {
     /// Receive an event message (non-blocking)
     pub async fn receive_event(&mut self) -> Result<Option<ModuleMessage>, ModuleError> {
         // Use tokio::select with a timeout to make this non-blocking
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{Duration, sleep};
 
         // Try to read with a very short timeout (10ms)
         tokio::select! {

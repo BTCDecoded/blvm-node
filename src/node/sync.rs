@@ -9,8 +9,8 @@ use crate::node::block_processor::{
 };
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
-use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
+use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use blvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult};
 use std::collections::HashMap;
@@ -230,7 +230,8 @@ impl SyncCoordinator {
         if peer_addresses.len() < min_peers {
             debug!(
                 "Not enough peers for parallel IBD (have {}, need {}). Sequential sync is not supported.",
-                peer_addresses.len(), min_peers
+                peer_addresses.len(),
+                min_peers
             );
             return Ok(false);
         }
@@ -298,7 +299,10 @@ impl SyncCoordinator {
                         }
                     }
                 }
-                error!("Parallel IBD failed: {}. Sequential sync is not supported - IBD must succeed in parallel mode.", e);
+                error!(
+                    "Parallel IBD failed: {}. Sequential sync is not supported - IBD must succeed in parallel mode.",
+                    e
+                );
                 Err(e)
             }
         }

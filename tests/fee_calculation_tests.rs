@@ -1,7 +1,7 @@
 //! Tests for fee calculation functionality
 
 use blvm_node::node::mempool::MempoolManager;
-use blvm_protocol::{OutPoint, Transaction, UtxoSet, UTXO};
+use blvm_protocol::{OutPoint, Transaction, UTXO, UtxoSet};
 
 #[test]
 fn test_calculate_transaction_fee() {

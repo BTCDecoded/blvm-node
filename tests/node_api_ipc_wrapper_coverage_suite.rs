@@ -12,9 +12,9 @@ mod common;
 mod tests {
     use super::common;
     use super::ipc_harness;
+    use blvm_node::module::api::NodeApiImpl;
     use blvm_node::module::api::events::EventManager;
     use blvm_node::module::api::node_api_ipc::NodeApiIpc;
-    use blvm_node::module::api::NodeApiImpl;
     use blvm_node::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
     use blvm_node::module::metrics::manager::{Metric, MetricValue, MetricsManager};
     use blvm_node::module::traits::NodeAPI;
@@ -144,35 +144,39 @@ mod tests {
         assert!(sync.progress > 0.0);
         assert!(h.api.has_transaction(&h.mempool_tx_hash).await.unwrap());
         assert!(h.api.get_utxo(&h.outpoint).await.unwrap().is_some());
-        assert!(h
-            .api
-            .check_transaction_in_mempool(&h.mempool_tx_hash)
-            .await
-            .unwrap());
-        assert!(h
-            .api
-            .get_transaction(&h.mempool_tx_hash)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            h.api
+                .check_transaction_in_mempool(&h.mempool_tx_hash)
+                .await
+                .unwrap()
+        );
+        assert!(
+            h.api
+                .get_transaction(&h.mempool_tx_hash)
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(h.api.get_block_by_height(15).await.unwrap().is_some());
-        assert!(h
-            .api
-            .get_mempool_transaction(&h.mempool_tx_hash)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            h.api
+                .get_mempool_transaction(&h.mempool_tx_hash)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let fee = h.api.get_fee_estimate(6).await.unwrap();
         assert!(fee <= 1_000_000);
         let txs = h.api.get_mempool_transactions().await.unwrap();
         assert!(txs.contains(&h.mempool_tx_hash));
         assert!(h.api.get_block(&h.wire_hash).await.unwrap().is_some());
-        assert!(h
-            .api
-            .get_block_header(&h.wire_hash)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            h.api
+                .get_block_header(&h.wire_hash)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

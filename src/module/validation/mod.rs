@@ -5,4 +5,4 @@
 
 pub mod manifest_validator;
 
-pub use manifest_validator::{validate_module_signature, ManifestValidator, ValidationResult};
+pub use manifest_validator::{ManifestValidator, ValidationResult, validate_module_signature};

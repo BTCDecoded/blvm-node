@@ -32,11 +32,7 @@ pub fn ensure_fmt<F>(condition: bool, message: F) -> Result<(), String>
 where
     F: FnOnce() -> String,
 {
-    if condition {
-        Ok(())
-    } else {
-        Err(message())
-    }
+    if condition { Ok(()) } else { Err(message()) }
 }
 
 /// Validate a value is within a range

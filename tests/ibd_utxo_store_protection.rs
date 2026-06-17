@@ -11,11 +11,11 @@
 
 use anyhow::Result;
 use blvm_node::storage::database::{BatchWriter, Tree};
-use blvm_node::storage::disk_utxo::{outpoint_to_key, OutPointKey};
+use blvm_node::storage::disk_utxo::{OutPointKey, outpoint_to_key};
 use blvm_node::storage::ibd_utxo_store::{EvictionStrategy, IbdUtxoStore, PreparedFlushPackage};
 use blvm_node::storage::utxo_value_codec::ValueCodec;
 use blvm_protocol::block::UtxoDelta;
-use blvm_protocol::types::{OutPoint, UtxoSet, UTXO};
+use blvm_protocol::types::{OutPoint, UTXO, UtxoSet};
 use blvm_protocol::utxo_overlay::UtxoDeletionKey;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;

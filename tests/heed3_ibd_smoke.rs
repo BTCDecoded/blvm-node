@@ -8,8 +8,8 @@ mod common;
 #[cfg(feature = "heed3")]
 mod heed3_ibd_smoke {
     use super::common::setup_mining_chain;
-    use blvm_node::storage::database::{default_backend, DatabaseBackend};
     use blvm_node::storage::Storage;
+    use blvm_node::storage::database::{DatabaseBackend, default_backend};
     use blvm_node::{OutPoint, UTXO};
     use std::sync::Arc;
     use tempfile::TempDir;

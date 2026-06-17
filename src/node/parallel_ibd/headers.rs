@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use blvm_protocol::BlockHeader;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
+use crate::network::NetworkManager;
 use crate::network::peer_scoring::PeerScorer;
 use crate::network::protocol::{GetHeadersMessage, ProtocolMessage, ProtocolParser};
-use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::storage::blockstore::BlockStore;
 use crate::storage::hashing::double_sha256;
@@ -652,7 +652,9 @@ pub(crate) async fn download_headers(
                     };
                     info!(
                         "Header sync COMPLETE: {} headers in {:.1}s ({:.0} h/s) - chain tip reached",
-                        total, elapsed.as_secs_f64(), rate
+                        total,
+                        elapsed.as_secs_f64(),
+                        rate
                     );
                     return Ok(current_height.saturating_sub(1));
                 }

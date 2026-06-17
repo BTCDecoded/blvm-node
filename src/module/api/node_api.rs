@@ -18,11 +18,11 @@ use crate::module::ipc::protocol::EventPayload;
 use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::metrics::manager::{Metric, MetricsManager};
 use crate::module::traits::{
-    module_error_msg, BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize,
-    ModuleError, ModuleInfo, ModuleState, NetworkStats, NodeAPI, PaymentState, PeerInfo,
-    SubmitBlockResult, SyncStatus, TxServeDenylistSnapshot,
+    BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError,
+    ModuleInfo, ModuleState, NetworkStats, NodeAPI, PaymentState, PeerInfo, SubmitBlockResult,
+    SyncStatus, TxServeDenylistSnapshot, module_error_msg,
 };
-use crate::network::{transport::TransportAddr, NetworkManager};
+use crate::network::{NetworkManager, transport::TransportAddr};
 use crate::node::mempool::MempoolManager;
 use crate::storage::Storage;
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};

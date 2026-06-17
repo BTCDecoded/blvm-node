@@ -6,11 +6,11 @@
 
 #![cfg(all(feature = "heed3", feature = "production"))]
 
-use blvm_node::storage::database::{create_database, Database, DatabaseBackend, Tree};
-use blvm_node::storage::disk_utxo::{outpoint_to_key, OutPointKey};
-use blvm_node::storage::ibd_utxo_store::{EvictionStrategy, IbdUtxoStore};
-use blvm_node::storage::utxo_value_codec::{encode_utxo_with_codec, ValueCodec};
 use blvm_node::storage::Storage;
+use blvm_node::storage::database::{Database, DatabaseBackend, Tree, create_database};
+use blvm_node::storage::disk_utxo::{OutPointKey, outpoint_to_key};
+use blvm_node::storage::ibd_utxo_store::{EvictionStrategy, IbdUtxoStore};
+use blvm_node::storage::utxo_value_codec::{ValueCodec, encode_utxo_with_codec};
 use blvm_node::{OutPoint, UTXO};
 use blvm_protocol::block::UtxoDelta;
 use blvm_protocol::types::UtxoSet;
@@ -195,7 +195,9 @@ fn ibd_flush_delete_with_muhash_decodes_heed3_disk() {
     use blvm_muhash::MuHash3072;
 
     // Must be set before the first `ibd_per_op_muhash_enabled()` call in this process.
-    std::env::set_var("BLVM_IBD_ENABLE_PER_OP_MUHASH", "1");
+    unsafe {
+        std::env::set_var("BLVM_IBD_ENABLE_PER_OP_MUHASH", "1");
+    }
 
     let (_dir, disk, _keys, outpoints) = seed_heed3_disk_tree(1);
     let op = outpoints[0];

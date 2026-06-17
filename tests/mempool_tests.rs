@@ -2,7 +2,7 @@
 
 use blvm_node::config::MempoolPolicyConfig;
 use blvm_node::node::mempool::MempoolManager;
-use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
 
 #[tokio::test]
 async fn test_mempool_stores_full_transactions() {

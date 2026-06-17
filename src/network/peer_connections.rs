@@ -2,10 +2,10 @@
 //!
 //! Extracted from network_manager.rs to reduce file size.
 
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::peer;
 use crate::network::transport::{Transport, TransportAddr, TransportType};
-use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -355,7 +355,10 @@ impl NetworkManager {
 
         if !self.check_eclipse_prevention(ip) {
             let prefix = self.get_ip_prefix(ip);
-            warn!("Eclipse attack prevention: too many connections from IP range {:?}, rejecting connection from {}", prefix, ip);
+            warn!(
+                "Eclipse attack prevention: too many connections from IP range {:?}, rejecting connection from {}",
+                prefix, ip
+            );
             return Err(anyhow::anyhow!(
                 "Eclipse attack prevention: too many connections from IP range"
             ));

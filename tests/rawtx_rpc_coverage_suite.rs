@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    p2pkh_script, random_hash20, setup_mining_chain, valid_transaction, TestBlockBuilder,
+    TestBlockBuilder, p2pkh_script, random_hash20, setup_mining_chain, valid_transaction,
 };
 
 fn rpc_with_mempool() -> (TempDir, RawTxRpc, String) {
@@ -195,10 +195,11 @@ async fn test_gettxoutproof_missing_params_and_bad_blockhash() {
     let rpc = RawTxRpc::with_dependencies(storage, Arc::new(MempoolManager::new()), None, None);
 
     assert!(rpc.gettxoutproof(&json!([])).await.is_err());
-    assert!(rpc
-        .gettxoutproof(&json!([["aa".repeat(32)], "abcd"]))
-        .await
-        .is_err());
+    assert!(
+        rpc.gettxoutproof(&json!([["aa".repeat(32)], "abcd"]))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -209,14 +210,16 @@ async fn test_verifytxoutproof_invalid_proof_errors() {
     let rpc = RawTxRpc::with_dependencies(storage, Arc::new(MempoolManager::new()), None, None);
 
     assert!(rpc.verifytxoutproof(&json!([])).await.is_err());
-    assert!(rpc
-        .verifytxoutproof(&json!(["", "aa".repeat(64)]))
-        .await
-        .is_err());
-    assert!(rpc
-        .verifytxoutproof(&json!(["00", "aa".repeat(64)]))
-        .await
-        .is_err());
+    assert!(
+        rpc.verifytxoutproof(&json!(["", "aa".repeat(64)]))
+            .await
+            .is_err()
+    );
+    assert!(
+        rpc.verifytxoutproof(&json!(["00", "aa".repeat(64)]))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

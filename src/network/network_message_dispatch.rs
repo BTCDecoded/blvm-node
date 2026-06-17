@@ -5,10 +5,10 @@
 
 use crate::module::ipc::protocol::EventPayload;
 use crate::module::traits::EventType;
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{NetworkAddress, ProtocolMessage, ProtocolParser};
 use crate::network::transport::TransportAddr;
-use crate::network::NetworkMessage;
 use crate::utils::{current_timestamp, ignore_error};
 use anyhow::Result;
 use std::net::SocketAddr;

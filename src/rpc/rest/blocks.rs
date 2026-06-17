@@ -11,7 +11,7 @@
 
 use crate::rpc::blockchain::BlockchainRpc;
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Get block by hash
 pub async fn get_block_by_hash(blockchain: &BlockchainRpc, hash: &str) -> Result<Value> {

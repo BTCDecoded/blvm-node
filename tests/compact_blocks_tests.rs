@@ -1,6 +1,6 @@
 //! Tests for Compact Block Relay (BIP152)
 
-use blvm_node::network::compact_blocks::{calculate_short_tx_id, calculate_tx_hash, CompactBlock};
+use blvm_node::network::compact_blocks::{CompactBlock, calculate_short_tx_id, calculate_tx_hash};
 use blvm_node::network::transport::TransportType;
 use blvm_node::{Block, BlockHeader, Transaction};
 use blvm_protocol::tx_inputs;

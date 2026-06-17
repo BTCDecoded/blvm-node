@@ -1,8 +1,8 @@
 //! Tests for async request-response routing enhancements
 
-use blvm_node::network::{transport::TransportPreference, NetworkManager};
+use blvm_node::network::{NetworkManager, transport::TransportPreference};
 use std::net::SocketAddr;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_request_id_matching() {

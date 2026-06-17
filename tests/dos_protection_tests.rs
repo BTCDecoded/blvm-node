@@ -4,7 +4,7 @@ use blvm_node::network::dos_protection::{
     ConnectionRateLimiter, DosProtectionManager, ResourceMetrics,
 };
 use std::net::{IpAddr, Ipv4Addr};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 fn create_test_ip(octet: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 168, 1, octet))

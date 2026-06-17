@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::types::ChunkWorkItem;
 use super::ParallelIBDConfig;
+use super::types::ChunkWorkItem;
 
 /// Chunk of blocks to download, assigned to a specific peer.
 #[derive(Debug, Clone)]

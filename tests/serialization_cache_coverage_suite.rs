@@ -1,9 +1,9 @@
 //! Block/tx serialization LRU caches and IBD bypass guard.
 
 use blvm_node::storage::serialization_cache::{
-    cache_serialized_header, cache_serialized_tx, clear_all_caches, get_cached_serialized_header,
-    get_cached_serialized_tx, ibd_header_serialize_cache_bypassed,
-    IbdHeaderSerializeCacheBypassGuard,
+    IbdHeaderSerializeCacheBypassGuard, cache_serialized_header, cache_serialized_tx,
+    clear_all_caches, get_cached_serialized_header, get_cached_serialized_tx,
+    ibd_header_serialize_cache_bypassed,
 };
 use serial_test::serial;
 

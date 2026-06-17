@@ -1,12 +1,12 @@
 //! ChainState metadata, caches, and recovery paths.
 
-use blvm_node::storage::chainstate::{ChainInfo, ChainParams, UTXOStats};
 use blvm_node::BlockHeader;
+use blvm_node::storage::chainstate::{ChainInfo, ChainParams, UTXOStats};
 use blvm_protocol::test_utils::create_test_header;
 use std::sync::Arc;
 
 mod common;
-use common::{setup_mining_chain_on, DIFFICULTY_INTERVAL};
+use common::{DIFFICULTY_INTERVAL, setup_mining_chain_on};
 
 fn seeded_storage(blocks: u64) -> (tempfile::TempDir, Arc<blvm_node::storage::Storage>) {
     let temp_dir = tempfile::TempDir::new().unwrap();

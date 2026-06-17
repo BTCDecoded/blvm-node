@@ -20,8 +20,8 @@ use super::memory_run::MemoryRun;
 use super::types::{OutputId, OutputKV};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Merge oldest segments when this many have accumulated.
 ///

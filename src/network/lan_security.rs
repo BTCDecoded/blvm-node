@@ -291,9 +291,12 @@ impl LanSecurityPolicy {
 
         // Check 25% LAN cap
         if current_lan_peers >= max_lan {
-            return (false, format!(
-                "LAN cap reached: {current_lan_peers}/{target_peers} (max {MAX_LAN_PEER_PERCENTAGE}%)"
-            ));
+            return (
+                false,
+                format!(
+                    "LAN cap reached: {current_lan_peers}/{target_peers} (max {MAX_LAN_PEER_PERCENTAGE}%)"
+                ),
+            );
         }
 
         // Check 75% internet minimum would still be met
@@ -302,18 +305,24 @@ impl LanSecurityPolicy {
         let internet_percentage = (would_have_internet * 100) / would_have_total;
 
         if internet_percentage < MIN_INTERNET_PEER_PERCENTAGE as usize {
-            return (false, format!(
-                "Would violate {MIN_INTERNET_PEER_PERCENTAGE}% internet minimum: would have {internet_percentage}%"
-            ));
+            return (
+                false,
+                format!(
+                    "Would violate {MIN_INTERNET_PEER_PERCENTAGE}% internet minimum: would have {internet_percentage}%"
+                ),
+            );
         }
 
         // Check discovered LAN peer limit (whitelisted are separate)
         if !is_whitelisted {
             let discovered_count = self.count_discovered_lan_peers();
             if discovered_count >= MAX_DISCOVERED_LAN_PEERS {
-                return (false, format!(
-                    "Discovered LAN peer limit reached: {discovered_count}/{MAX_DISCOVERED_LAN_PEERS}"
-                ));
+                return (
+                    false,
+                    format!(
+                        "Discovered LAN peer limit reached: {discovered_count}/{MAX_DISCOVERED_LAN_PEERS}"
+                    ),
+                );
             }
         }
 
@@ -334,9 +343,12 @@ impl LanSecurityPolicy {
     /// Check if we have enough internet peers to sync
     pub fn can_sync(&self, internet_peer_count: usize) -> (bool, String) {
         if internet_peer_count < MIN_INTERNET_PEERS_FOR_SYNC {
-            return (false, format!(
-                "Need at least {MIN_INTERNET_PEERS_FOR_SYNC} internet peers for checkpoint validation, have {internet_peer_count}"
-            ));
+            return (
+                false,
+                format!(
+                    "Need at least {MIN_INTERNET_PEERS_FOR_SYNC} internet peers for checkpoint validation, have {internet_peer_count}"
+                ),
+            );
         }
         (true, "OK".to_string())
     }
@@ -778,8 +790,14 @@ impl std::fmt::Display for CheckpointValidationError {
                 got,
                 lan_peer,
             } => {
-                write!(f, "Checkpoint failure at height {}: LAN peer {} provided wrong hash. Expected: {}, got: {}",
-                    height, lan_peer, hex::encode(expected), hex::encode(got))
+                write!(
+                    f,
+                    "Checkpoint failure at height {}: LAN peer {} provided wrong hash. Expected: {}, got: {}",
+                    height,
+                    lan_peer,
+                    hex::encode(expected),
+                    hex::encode(got)
+                )
             }
             Self::InsufficientPeers { have, need } => {
                 write!(
@@ -942,7 +960,10 @@ impl DiscoveryVerifier {
             None => {
                 // No internet tip yet - can't verify chain
                 // This is OK during early startup
-                info!("LAN peer {} passed protocol check (chain verification deferred - no internet tip yet)", addr);
+                info!(
+                    "LAN peer {} passed protocol check (chain verification deferred - no internet tip yet)",
+                    addr
+                );
                 return (true, "Protocol verified, chain check deferred".to_string());
             }
         };
@@ -1020,15 +1041,15 @@ impl DiscoveryVerifier {
         &self,
         peers: Vec<SocketAddr>,
         do_handshake: impl Fn(
-                SocketAddr,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Option<(u32, String, u64)>> + Send>,
-            > + Clone,
+            SocketAddr,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<(u32, String, u64)>> + Send>,
+        > + Clone,
         get_peer_tip: impl Fn(
-                SocketAddr,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Option<(u64, [u8; 32])>> + Send>,
-            > + Clone,
+            SocketAddr,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<(u64, [u8; 32])>> + Send>,
+        > + Clone,
         timeouts: Option<(Duration, Duration)>,
     ) -> Vec<(SocketAddr, bool, String)> {
         let mut results = Vec::with_capacity(peers.len());

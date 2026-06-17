@@ -3,9 +3,9 @@
 //! Generates, caches, and serves compact block filters for light client support.
 //! Maintains filter header chain for efficient verification.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use blvm_protocol::bip157;
-use blvm_protocol::bip158::{build_block_filter, CompactBlockFilter};
+use blvm_protocol::bip158::{CompactBlockFilter, build_block_filter};
 use blvm_protocol::{Block, BlockHeader, Hash};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -360,11 +360,13 @@ mod tests {
         service.generate_and_cache_filter(&block, &[], 5).unwrap();
         let hash = service.get_cached_filter_hashes()[0];
 
-        assert!(service
-            .get_filter_headers_range(10, hash)
-            .unwrap_err()
-            .to_string()
-            .contains("Start height > stop height"));
+        assert!(
+            service
+                .get_filter_headers_range(10, hash)
+                .unwrap_err()
+                .to_string()
+                .contains("Start height > stop height")
+        );
         assert!(service.get_filter_checkpoints([0xee; 32]).is_err());
     }
 }

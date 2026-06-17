@@ -6,10 +6,10 @@
 //! once validation completes.
 
 use crate::node::parallel_ibd::{ParallelIBD, ParallelIBDConfig};
-use crate::storage::assumeutxo::{
-    assumeutxo_data_for_blockhash, write_background_validated_marker, AssumeUtxoManager,
-};
 use crate::storage::Storage;
+use crate::storage::assumeutxo::{
+    AssumeUtxoManager, assumeutxo_data_for_blockhash, write_background_validated_marker,
+};
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;

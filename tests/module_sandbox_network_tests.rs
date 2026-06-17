@@ -121,17 +121,23 @@ fn test_validate_endpoint_multiple_allowed() {
     let sandbox = NetworkSandbox::with_allowed_endpoints(endpoints);
 
     // Both endpoints should be allowed
-    assert!(sandbox
-        .validate_endpoint("https://api1.example.com")
-        .is_ok());
-    assert!(sandbox
-        .validate_endpoint("https://api2.example.com")
-        .is_ok());
+    assert!(
+        sandbox
+            .validate_endpoint("https://api1.example.com")
+            .is_ok()
+    );
+    assert!(
+        sandbox
+            .validate_endpoint("https://api2.example.com")
+            .is_ok()
+    );
 
     // Other endpoint should be denied
-    assert!(sandbox
-        .validate_endpoint("https://api3.example.com")
-        .is_err());
+    assert!(
+        sandbox
+            .validate_endpoint("https://api3.example.com")
+            .is_err()
+    );
 }
 
 #[test]
@@ -140,7 +146,9 @@ fn test_validate_endpoint_empty_allowed_list() {
 
     // Even with empty list, network should be denied
     assert!(!sandbox.is_network_allowed());
-    assert!(sandbox
-        .validate_endpoint("https://api.example.com")
-        .is_err());
+    assert!(
+        sandbox
+            .validate_endpoint("https://api.example.com")
+            .is_err()
+    );
 }

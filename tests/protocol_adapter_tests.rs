@@ -2,11 +2,11 @@
 
 use blvm_node::network::protocol_adapter::ProtocolAdapter;
 use blvm_node::network::transport::TransportType;
+use blvm_protocol::GetBanListMessage;
 use blvm_protocol::network::{
     AddrV2Message, AddressType, NetworkAddress, NetworkAddressV2, NetworkMessage, PingMessage,
     PongMessage, VersionMessage,
 };
-use blvm_protocol::GetBanListMessage;
 
 fn create_test_version_message() -> NetworkMessage {
     NetworkMessage::Version(VersionMessage {

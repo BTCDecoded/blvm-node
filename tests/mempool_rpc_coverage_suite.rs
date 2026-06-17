@@ -66,11 +66,13 @@ async fn test_getrawmempool_verbose() {
 async fn test_savemempool_smoke() {
     let (dir, _mempool, rpc, _txid) = rpc_with_mempool();
     let prev = std::env::var("DATA_DIR").ok();
-    std::env::set_var("DATA_DIR", dir.path());
+    unsafe { std::env::set_var("DATA_DIR", dir.path()) };
     let result = rpc.savemempool(&json!([])).await.unwrap();
-    match prev {
-        Some(v) => std::env::set_var("DATA_DIR", v),
-        None => std::env::remove_var("DATA_DIR"),
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("DATA_DIR", v),
+            None => std::env::remove_var("DATA_DIR"),
+        }
     }
     assert!(result.is_string() || result.is_null());
     assert!(dir.path().join("mempool.dat").exists());
@@ -104,10 +106,11 @@ async fn test_getmempoolentry_missing_tx_errors() {
 async fn test_getrawmempool_without_mempool_verbose_fallback() {
     let rpc = MempoolRpc::new();
     let map = rpc.getrawmempool(&json!([true])).await.unwrap();
-    assert!(map
-        .as_object()
-        .unwrap()
-        .contains_key("0000000000000000000000000000000000000000000000000000000000000000"));
+    assert!(
+        map.as_object()
+            .unwrap()
+            .contains_key("0000000000000000000000000000000000000000000000000000000000000000")
+    );
 }
 
 #[tokio::test]

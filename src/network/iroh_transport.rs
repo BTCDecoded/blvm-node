@@ -106,7 +106,7 @@ impl Transport for IrohTransport {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Iroh transport can only connect to Iroh addresses"
-                ))
+                ));
             }
         };
 

@@ -2,7 +2,7 @@
 //!
 //! Verifies -assumevalid CLI, config wiring, and per-network defaults.
 
-use blvm_node::config::{default_assume_valid_height_for_network, BlockValidationNodeConfig};
+use blvm_node::config::{BlockValidationNodeConfig, default_assume_valid_height_for_network};
 
 #[test]
 fn test_default_assume_valid_height_per_network() {

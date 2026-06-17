@@ -3,14 +3,14 @@
 //! Handles parsing blocks from wire format, storing witnesses, and validating
 //! blocks with proper witness data and median time-past.
 
-use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
+use crate::storage::blockstore::BlockStore;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use blvm_protocol::serialization::deserialize_block_with_witnesses;
 use blvm_protocol::validation::ProtocolValidationContext;
 use blvm_protocol::{
-    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult,
+    BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult, segwit::Witness,
 };
 use std::sync::Arc;
 

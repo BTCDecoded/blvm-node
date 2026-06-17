@@ -36,7 +36,7 @@ mod ipc {
     use blvm_node::storage::Storage;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::time::{sleep, Duration, Instant};
+    use tokio::time::{Duration, Instant, sleep};
 
     async fn wait_for_socket(path: &std::path::Path) {
         let deadline = Instant::now() + Duration::from_secs(10);

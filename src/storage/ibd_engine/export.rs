@@ -21,12 +21,12 @@
 //! for high-throughput bulk loads at large UTXO counts.
 
 use super::database::UtxoDatabase;
-use super::types::{output_key_to_outpoint, IdCodec, OutputId};
+use super::types::{IdCodec, OutputId, output_key_to_outpoint};
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::outpoint_to_key;
-use crate::storage::utxo_value_codec::{encode_utxo_with_codec, ValueCodec};
+use crate::storage::utxo_value_codec::{ValueCodec, encode_utxo_with_codec};
 use anyhow::Result;
-use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
+use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
 use blvm_protocol::types::{SharedByteString, UTXO};
 #[cfg(target_os = "linux")]
 use libc;

@@ -10,9 +10,9 @@
 //! `query` is parallelized with rayon (8 sub-ranges when `rayon` feature is enabled).
 //! When rayon is absent the loop runs single-threaded — correctness unaffected.
 
-use super::types::{OutputId, OutputKV, OUTPUT_ID_DELETED};
-use std::sync::atomic::{AtomicI32, Ordering};
+use super::types::{OUTPUT_ID_DELETED, OutputId, OutputKV};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// GC fence for cross-checkpoint Add+Delete pair cancellation.
 ///

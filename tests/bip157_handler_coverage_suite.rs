@@ -1,5 +1,7 @@
 //! BIP157 handler helpers (`handle_getcfilters`, headers, checkpoints).
 
+use blvm_node::BlockHeader;
+use blvm_node::Hash;
 use blvm_node::network::bip157_handler::{
     generate_cfilter_response, handle_getcfcheckpt, handle_getcfheaders, handle_getcfilters,
 };
@@ -8,8 +10,6 @@ use blvm_node::network::protocol::{
     GetCfcheckptMessage, GetCfheadersMessage, GetCfiltersMessage, ProtocolMessage,
 };
 use blvm_node::storage::Storage;
-use blvm_node::BlockHeader;
-use blvm_node::Hash;
 use std::sync::Arc;
 use tempfile::TempDir;
 

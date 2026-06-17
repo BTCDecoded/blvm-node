@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
-use common::{setup_mining_chain, DIFFICULTY_INTERVAL};
+use common::{DIFFICULTY_INTERVAL, setup_mining_chain};
 
 /// Block hash as stored in `BlockStore` (80-byte wire header), not bincode.
 fn wire_block_hash(header: &blvm_node::BlockHeader) -> blvm_node::Hash {
@@ -343,10 +343,11 @@ async fn test_prune_blockchain_when_enabled() {
 #[tokio::test]
 async fn test_prune_blockchain_without_pruning_errors() {
     let (_dir, _storage, rpc) = rpc_with_chain();
-    assert!(rpc
-        .prune_blockchain(&serde_json::json!([10]))
-        .await
-        .is_err());
+    assert!(
+        rpc.prune_blockchain(&serde_json::json!([10]))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

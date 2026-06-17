@@ -13,7 +13,7 @@ use crate::storage::blockstore::BlockStore;
 use crate::storage::commitment_store::CommitmentStore;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::utxostore::UtxoStore;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 #[cfg(feature = "utxo-commitments")]
 use blvm_protocol::Hash;
 #[cfg(feature = "utxo-commitments")]
@@ -396,7 +396,11 @@ impl PruningManager {
 
         debug!(
             "Normal pruning: prune_to={}, keep_from={}, min_recent={}, effective_keep={}, actual_prune={}",
-            prune_to_height, keep_from_height, min_recent_blocks, effective_keep_height, actual_prune_height
+            prune_to_height,
+            keep_from_height,
+            min_recent_blocks,
+            effective_keep_height,
+            actual_prune_height
         );
 
         // Prune blocks up to actual_prune_height
@@ -438,7 +442,11 @@ impl PruningManager {
 
         debug!(
             "Aggressive pruning: prune_to={}, keep_from={}, min_blocks={}, effective_keep={}, actual_prune={}",
-            prune_to_height, keep_from_height, min_blocks, effective_keep_height, actual_prune_height
+            prune_to_height,
+            keep_from_height,
+            min_blocks,
+            effective_keep_height,
+            actual_prune_height
         );
 
         // Generate UTXO commitments before pruning if enabled
@@ -725,8 +733,8 @@ impl PruningManager {
         target_height: u64,
         utxostore: &UtxoStore,
     ) -> Result<blvm_protocol::UtxoSet> {
-        use blvm_protocol::block::connect_block;
         use blvm_protocol::UtxoSet;
+        use blvm_protocol::block::connect_block;
 
         // Start with empty UTXO set (genesis)
         let mut utxo_set = UtxoSet::default();
@@ -770,13 +778,19 @@ impl PruningManager {
                     utxo_set = new_utxo_set;
                 } else {
                     // Block not found - this shouldn't happen if chain is intact
-                    warn!("Block at height {} not found during UTXO reconstruction, using current UTXO set as fallback", height);
+                    warn!(
+                        "Block at height {} not found during UTXO reconstruction, using current UTXO set as fallback",
+                        height
+                    );
                     // Use current UTXO set as fallback
                     return utxostore.get_all_utxos();
                 }
             } else {
                 // Height not found - use current UTXO set as fallback
-                warn!("Height {} not found in chain during UTXO reconstruction, using current UTXO set", height);
+                warn!(
+                    "Height {} not found in chain during UTXO reconstruction, using current UTXO set",
+                    height
+                );
                 return utxostore.get_all_utxos();
             }
         }

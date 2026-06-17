@@ -10,12 +10,12 @@ mod stub_node_api;
 
 #[cfg(unix)]
 mod tests {
+    use blvm_node::Hash;
     use blvm_node::module::ipc::client::ModuleIpcClient;
     use blvm_node::module::ipc::protocol::RequestMessage;
     use blvm_node::module::traits::ModuleError;
-    use blvm_node::Hash;
     use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     use super::ipc_harness;
     use super::stub_node_api::MockNodeAPI;

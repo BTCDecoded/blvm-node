@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use blvm_node::network::protocol::NetworkAddress;
-    use blvm_node::network::protocol::VersionMessage;
     #[cfg(feature = "utxo-commitments")]
     use blvm_node::network::protocol::NODE_UTXO_COMMITMENTS;
+    use blvm_node::network::protocol::NetworkAddress;
+    use blvm_node::network::protocol::VersionMessage;
     use blvm_node::network::protocol::{NODE_BAN_LIST_SHARING, NODE_FIBRE, NODE_PACKAGE_RELAY};
     use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
 

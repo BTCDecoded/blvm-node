@@ -200,12 +200,14 @@ fn test_config_with_module_overrides() {
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: NodeConfig = serde_json::from_str(&json).unwrap();
 
-    assert!(deserialized
-        .modules
-        .as_ref()
-        .unwrap()
-        .module_configs
-        .contains_key("test-module"));
+    assert!(
+        deserialized
+            .modules
+            .as_ref()
+            .unwrap()
+            .module_configs
+            .contains_key("test-module")
+    );
     let module_config = deserialized
         .modules
         .as_ref()

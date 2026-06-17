@@ -55,9 +55,10 @@ fn validate_security_warns_rest_non_loopback_when_auth_not_required() {
 #[test]
 fn validate_security_no_warnings_loopback_rpc_only() {
     let cfg = NodeConfig::default();
-    assert!(cfg
-        .validate_security(addr("127.0.0.1:8332"), None)
-        .is_empty());
+    assert!(
+        cfg.validate_security(addr("127.0.0.1:8332"), None)
+            .is_empty()
+    );
 }
 
 #[test]

@@ -17,7 +17,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -30,7 +30,7 @@ use super::fees;
 use super::mempool as rest_mempool;
 use super::network as rest_network;
 use super::transactions;
-use super::types::{rest_error_failed, rest_error_invalid, ApiError, ApiResponse};
+use super::types::{ApiError, ApiResponse, rest_error_failed, rest_error_invalid};
 use super::validation as rest_validation;
 use crate::rpc::errors::HEIGHT_PARAM_REQUIRED_MSG;
 

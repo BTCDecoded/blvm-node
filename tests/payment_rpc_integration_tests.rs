@@ -12,7 +12,7 @@ use blvm_node::payment::processor::PaymentProcessor;
 use blvm_node::payment::state_machine::PaymentStateMachine;
 use blvm_node::rpc::payment::PaymentRpc;
 use blvm_node::storage::Storage;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::TempDir;
 

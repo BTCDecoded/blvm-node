@@ -9,7 +9,7 @@ use crate::network::protocol::{
     GetCfheadersMessage, GetCfiltersMessage, ProtocolMessage,
 };
 use crate::storage::Storage;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use blvm_protocol::Hash;
 use std::sync::Arc;
 

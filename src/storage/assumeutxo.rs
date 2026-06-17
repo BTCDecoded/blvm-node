@@ -25,7 +25,7 @@
 //! The file is compressed for efficient storage and transfer.
 
 use anyhow::{Context, Result};
-use blvm_protocol::{Hash, OutPoint, UtxoSet, UTXO};
+use blvm_protocol::{Hash, OutPoint, UTXO, UtxoSet};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -302,7 +302,7 @@ impl AssumeUtxoManager {
     /// Matches Bitcoin Core gettxoutsetinfo muhash / hash_serialized. Enables
     /// cross-compatibility with Core snapshots and AssumeUTXO validation.
     pub fn calculate_utxo_hash(utxo_set: &UtxoSet) -> Result<Hash> {
-        use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
+        use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
 
         let mut entries: Vec<_> = utxo_set.iter().collect();
         entries.sort_by(|a, b| {

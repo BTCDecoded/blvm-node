@@ -8,7 +8,7 @@ use blvm_node::module::traits::ModuleContext;
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[tokio::test]
 async fn test_monitor_creation() {

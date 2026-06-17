@@ -148,7 +148,7 @@ impl Transport for QuinnTransport {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Quinn transport can only connect to Quinn addresses"
-                ))
+                ));
             }
         };
 

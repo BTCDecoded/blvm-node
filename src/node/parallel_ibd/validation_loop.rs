@@ -7,29 +7,29 @@
 
 use super::feeder::FeederState;
 use super::memory::{self, MemoryGuard, PressureLevel};
+use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
 use crate::storage::disk_utxo::{
-    block_input_keys_batch_into_arc, block_input_keys_into_filtered,
-    block_input_keys_into_filtered_with_tx_ids, key_to_outpoint, outpoint_to_key, OutPointKey,
+    OutPointKey, block_input_keys_batch_into_arc, block_input_keys_into_filtered,
+    block_input_keys_into_filtered_with_tx_ids, key_to_outpoint, outpoint_to_key,
 };
 use crate::storage::ibd_engine::{
-    session_fill_utxo_set, session_to_utxo_set, PartialSpendSession, SpendSession, UtxoDatabase,
+    PartialSpendSession, SpendSession, UtxoDatabase, session_fill_utxo_set, session_to_utxo_set,
 };
 use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
-use crate::storage::Storage;
 use crate::utils::time::current_timestamp;
 use anyhow::Result;
 use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::{
-    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, UTXO,
+    BitcoinProtocolEngine, Block, BlockHeader, Hash, UTXO, UtxoSet, segwit::Witness,
 };
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
@@ -100,8 +100,8 @@ fn ibd_maybe_heap_trim() {
     }
 }
 
-use super::ibd_staging::empty_utxo_delta;
 use super::ParallelIBD;
+use super::ibd_staging::empty_utxo_delta;
 
 use blvm_protocol::block::UtxoDelta;
 
@@ -830,7 +830,7 @@ fn run_validation_worker_shared(
         // Protection invariant preserved at every instant: a key is in `worker_preinserted`
         // (until apply removes it), then in `pending.key_set` (until take_for_flush), then in
         // `in_flight_insertions` (until disk flush completes). `maybe_evict` checks all three.
-        if let Ok(Some(ref delta)) = &result {
+        if let Ok(Some(delta)) = &result {
             if job.engine_mode {
                 // Engine path: the age-tiered store is the authoritative UTXO source during IBD.
                 // Skip all IbdUtxoStore writes — the engine's in-memory state tracks the live
@@ -1145,7 +1145,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
         let on = sample > 0 || disk;
         if on {
-            info!("IBD profiling ENABLED (BLVM_IBD_DEBUG): sample_interval={}, slow_threshold_ms={}, disk_io={}, blocked_log={}", sample, slow, disk, blocked_log);
+            info!(
+                "IBD profiling ENABLED (BLVM_IBD_DEBUG): sample_interval={}, slow_threshold_ms={}, disk_io={}, blocked_log={}",
+                sample, slow, disk, blocked_log
+            );
         }
         if blocked_log {
             info!("IBD_BLOCKED_LOG ENABLED: every validation-blocking stall will be logged");
@@ -1181,9 +1184,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     info!(
         "Validation loop starting (deferred storage: flush every ~{} blocks [pressure-scaled], extra flush under Critical/Emergency when pending bytes exceed budget cap, initial buffer limit: {}, utxo_prefetch_lookahead_nominal: {})...",
-        storage_flush_interval,
-        initial_buffer_limit,
-        nominal_prefetch_lookahead,
+        storage_flush_interval, initial_buffer_limit, nominal_prefetch_lookahead,
     );
 
     let mut next_validation_height = start_height;
@@ -1615,7 +1616,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     }
     drop(valjob_rx); // workers hold all live Receiver clones; dropping the prototype lets shutdown propagate
     drop(valres_tx); // workers hold all live Sender clones
-                     // ────────────────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────────────────
 
     // ────────────────────────────────────────────────────────────────────────
     // Watchdog: log full pipeline state if validation_height stops advancing.
@@ -1753,7 +1754,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // Get next block: blocking if no in-flight work, non-blocking otherwise.
             let block_tuple_opt = if is_first {
                 const FEEDER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-                let next_block = loop {
+                loop {
                     let mut guard = feeder_state.0.lock();
                     if let Some((arc_b, w, input_keys, u, tx_ids, spec_adds, est_bytes)) =
                         guard.0.remove(next_validation_height)
@@ -1785,7 +1786,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             let ts_ms = crate::utils::time::current_timestamp_millis();
                             blvm_protocol::profile_log!(
                                 "[IBD_STALL_WAIT] next_height={} duration_ms={} buffer_after={} ts_ms={}",
-                                next_validation_height, wait_ms, buffer_len_after, ts_ms
+                                next_validation_height,
+                                wait_ms,
+                                buffer_len_after,
+                                ts_ms
                             );
                         }
                     }
@@ -1809,12 +1813,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         let cur_min = guard.0.min_buffered_height();
                         warn!(
                             "[IBD_STALL] Validation waiting for block {} (buffer has {} blocks, min_height={:?}) — coordinator/feeder may be blocked",
-                            next_validation_height, guard.0.len(), cur_min
+                            next_validation_height,
+                            guard.0.len(),
+                            cur_min
                         );
                         let _ = stall_tx.send(next_validation_height);
                     }
-                };
-                next_block
+                }
             } else {
                 // Non-blocking: grab lookahead block only if already in feeder.
                 let next_h = next_validation_height;
@@ -1981,7 +1986,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 ) {
                     Ok(p) => Some(p),
                     Err(e) => {
-                        warn!("[IBD_ENGINE] SpendSession::append failed at h={h}: {e:#}, falling back to legacy path");
+                        warn!(
+                            "[IBD_ENGINE] SpendSession::append failed at h={h}: {e:#}, falling back to legacy path"
+                        );
                         None
                     }
                 }
@@ -2281,13 +2288,15 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             if apply_pending_ms > 2 {
                 blvm_protocol::profile_log!(
                     "[IBD_BLOCKED] phase=apply_pending height={} duration_ms={} (pending_writes/flushing scan for cache hits)",
-                    next_height, apply_pending_ms
+                    next_height,
+                    apply_pending_ms
                 );
             }
             if sync_ms > 5 {
                 blvm_protocol::profile_log!(
                     "[IBD_BLOCKED] phase=sync_await height={} duration_ms={} (validation waited for previous block sync+evict)",
-                    next_height, sync_ms
+                    next_height,
+                    sync_ms
                 );
             }
         }

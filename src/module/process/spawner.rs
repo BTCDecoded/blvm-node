@@ -5,14 +5,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
-use crate::utils::retry::{retry_async_with_backoff, RetryConfig};
+use crate::utils::retry::{RetryConfig, retry_async_with_backoff};
 
+use crate::module::ipc::ModuleIpcClient;
 #[cfg(unix)]
 use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
-use crate::module::ipc::ModuleIpcClient;
 use crate::module::sandbox::{FileSystemSandbox, NetworkSandbox, ProcessSandbox, SandboxConfig};
 use crate::module::traits::{ModuleContext, ModuleError};
 

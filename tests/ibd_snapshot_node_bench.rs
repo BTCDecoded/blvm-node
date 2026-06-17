@@ -12,14 +12,14 @@
 //!   cargo test -p blvm-node --test ibd_snapshot_node_bench --features production --release -- --ignored bench_node_hot_path --nocapture
 
 use blvm_node::storage::disk_utxo::{
-    block_input_keys_into, key_to_outpoint, outpoint_to_key, OutPointKey,
+    OutPointKey, block_input_keys_into, key_to_outpoint, outpoint_to_key,
 };
 use blvm_node::storage::ibd_utxo_store::IbdUtxoStore;
+use blvm_protocol::ValidationResult;
 use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::block::{compute_block_tx_ids, connect_block_ibd};
 use blvm_protocol::segwit::Witness;
-use blvm_protocol::types::{Block, Network, OutPoint, UtxoSet, UTXO};
-use blvm_protocol::ValidationResult;
+use blvm_protocol::types::{Block, Network, OutPoint, UTXO, UtxoSet};
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

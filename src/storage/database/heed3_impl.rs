@@ -4,7 +4,7 @@
 //! and a single writer at a time. `WithoutTls` read transactions are `Send` so IBD
 //! validation workers can load UTXOs in parallel.
 
-use super::{BatchWriter, Database, Tree, KNOWN_TREE_NAMES};
+use super::{BatchWriter, Database, KNOWN_TREE_NAMES, Tree};
 use anyhow::{Context, Result};
 use heed3::types::Bytes;
 use heed3::{Database as HeedDatabase, Env, EnvOpenOptions, WithoutTls};

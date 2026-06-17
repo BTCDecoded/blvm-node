@@ -38,15 +38,16 @@ pub use logging::init_json_logging;
 pub use logging::{init_logging, init_logging_from_config, init_module_logging};
 pub use option::{map_or_default, option_to_result, or_else, unwrap_or_default_with};
 pub use request_id::new_request_id;
-pub use retry::{retry_async_with_backoff, retry_with_backoff, RetryConfig};
+pub use retry::{RetryConfig, retry_async_with_backoff, retry_with_backoff};
 pub use signal::{create_shutdown_receiver, wait_for_shutdown_signal};
 pub use time::{
     current_timestamp, current_timestamp_duration, current_timestamp_millis,
     current_timestamp_nanos,
 };
 pub use timeout::{
+    DEFAULT_NETWORK_TIMEOUT, DEFAULT_RPC_TIMEOUT, DEFAULT_STORAGE_TIMEOUT,
     network_timeout_from_config, rpc_timeout_from_config, storage_timeout_from_config,
     with_custom_timeout, with_network_timeout, with_rpc_timeout, with_storage_timeout,
-    with_timeout, DEFAULT_NETWORK_TIMEOUT, DEFAULT_RPC_TIMEOUT, DEFAULT_STORAGE_TIMEOUT,
+    with_timeout,
 };
 pub use validation::{ensure, ensure_fmt, ensure_not_empty, ensure_range, ensure_some};

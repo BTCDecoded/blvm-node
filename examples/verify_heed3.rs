@@ -1,7 +1,7 @@
 //! Quick heed3 smoke test: `cargo run --example verify_heed3 --features heed3`
 
 fn main() -> anyhow::Result<()> {
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     use std::sync::Arc;
 
     let temp = tempfile::tempdir()?;

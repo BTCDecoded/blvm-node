@@ -6,7 +6,7 @@ use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use crate::utils::MEMPOOL_LOOP_SLEEP;
 use anyhow::Result;
-use blvm_protocol::mempool::{has_conflict_with_tx, replacement_checks, signals_rbf, Mempool};
+use blvm_protocol::mempool::{Mempool, has_conflict_with_tx, replacement_checks, signals_rbf};
 use blvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};

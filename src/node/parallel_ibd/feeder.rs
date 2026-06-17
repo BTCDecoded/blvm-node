@@ -15,7 +15,7 @@ use crossbeam_channel::Receiver;
 
 // Static buffer limits passed at startup; no dynamic recalculation needed.
 use super::types::{
-    estimate_block_bytes, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses,
+    FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses, estimate_block_bytes,
 };
 
 /// Height-partitioned pending blocks. With one shard this matches a single `BTreeMap`.
@@ -126,7 +126,8 @@ pub(crate) fn run_feeder_thread(
                 let ts_ms = crate::utils::time::current_timestamp_millis();
                 blvm_protocol::profile_log!(
                     "[IBD_FEEDER_DELIVER] height={} ts_ms={} (buffer was empty, unblocking validation)",
-                    h, ts_ms
+                    h,
+                    ts_ms
                 );
             }
             feeder_state.1.notify_one();
@@ -191,10 +192,16 @@ mod tests {
 
     #[test]
     fn feeder_shard_count_defaults_and_clamps() {
-        std::env::remove_var("BLVM_IBD_FEEDER_SHARDS");
+        unsafe {
+            std::env::remove_var("BLVM_IBD_FEEDER_SHARDS");
+        }
         assert_eq!(feeder_shard_count(), 1);
-        std::env::set_var("BLVM_IBD_FEEDER_SHARDS", "999");
+        unsafe {
+            std::env::set_var("BLVM_IBD_FEEDER_SHARDS", "999");
+        }
         assert_eq!(feeder_shard_count(), 64);
-        std::env::remove_var("BLVM_IBD_FEEDER_SHARDS");
+        unsafe {
+            std::env::remove_var("BLVM_IBD_FEEDER_SHARDS");
+        }
     }
 }

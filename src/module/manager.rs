@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -25,7 +25,7 @@ use crate::module::security::permissions::PermissionSet;
 use crate::module::traits::{ModuleContext, ModuleError, ModuleMetadata, ModuleState};
 #[cfg(feature = "wasm-modules")]
 use crate::module::wasm::{WasmModuleInstance, WasmModuleLoader};
-use crate::utils::{new_request_id, MODULE_RELOAD_CLEANUP_DELAY};
+use crate::utils::{MODULE_RELOAD_CLEANUP_DELAY, new_request_id};
 
 /// Module manager coordinates all loaded modules
 pub struct ModuleManager {
@@ -1491,7 +1491,10 @@ impl ModuleManager {
                     info!(
                         "Bootstrap: {} enabled module(s) not installed locally, fetching from registry: {:?}",
                         missing.len(),
-                        missing.iter().map(|(n, c)| format!("{n} ({c})")).collect::<Vec<_>>()
+                        missing
+                            .iter()
+                            .map(|(n, c)| format!("{n} ({c})"))
+                            .collect::<Vec<_>>()
                     );
                     for (name, constraint) in &missing {
                         match self.bootstrap_download_module(name, url, constraint).await {
@@ -1522,7 +1525,9 @@ impl ModuleManager {
         }
 
         if discovered_modules.is_empty() {
-            info!("No modules to load (0 discovered or all filtered by disabled_modules / enabled_modules)");
+            info!(
+                "No modules to load (0 discovered or all filtered by disabled_modules / enabled_modules)"
+            );
             return Ok(());
         }
 
@@ -1771,8 +1776,8 @@ impl ModuleManager {
         crate::module::github_release_install::validate_github_repo(&github_repo)?;
 
         use crate::module::github_release_install::{
-            default_module_toml_raw_url, release_tag, resolve_release_version_for_constraint,
-            DEFAULT_MODULE_MANIFEST_REF,
+            DEFAULT_MODULE_MANIFEST_REF, default_module_toml_raw_url, release_tag,
+            resolve_release_version_for_constraint,
         };
 
         let constraint = version_constraint.trim();

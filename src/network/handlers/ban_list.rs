@@ -183,9 +183,9 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::NetworkManager;
     use crate::network::ban_list_merging::calculate_ban_list_hash;
     use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
-    use crate::network::NetworkManager;
     use crate::utils::current_timestamp;
     use std::net::SocketAddr;
 
@@ -239,10 +239,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(nm
-            .ban_list()
-            .read()
-            .await
-            .contains_key(&"203.0.113.1:8333".parse::<SocketAddr>().unwrap()));
+        assert!(
+            nm.ban_list()
+                .read()
+                .await
+                .contains_key(&"203.0.113.1:8333".parse::<SocketAddr>().unwrap())
+        );
     }
 }

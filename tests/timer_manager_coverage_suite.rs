@@ -2,9 +2,9 @@
 
 use async_trait::async_trait;
 use blvm_node::module::timers::manager::{TaskCallback, TimerCallback, TimerManager};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::time::{Duration, sleep};
 
 struct Inc(Arc<AtomicU32>);
 

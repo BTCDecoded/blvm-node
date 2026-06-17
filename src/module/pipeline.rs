@@ -1,7 +1,7 @@
 //! Generic block pipeline hooks via registered ModuleAPI methods.
 
-use blvm_protocol::segwit::Witness;
 use blvm_protocol::Block;
+use blvm_protocol::segwit::Witness;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 use tracing::{debug, warn};

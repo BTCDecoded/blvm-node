@@ -4,8 +4,8 @@
 
 use blvm_node::network::protocol::{FilterPreferences, GetFilteredBlockMessage, GetUTXOSetMessage};
 use blvm_node::network::protocol_extensions::{handle_get_filtered_block, handle_get_utxo_set};
-use blvm_node::storage::hashing::double_sha256;
 use blvm_node::storage::Storage;
+use blvm_node::storage::hashing::double_sha256;
 use blvm_node::{Block, BlockHeader, Transaction};
 use std::sync::Arc;
 
@@ -56,10 +56,12 @@ async fn test_handle_get_utxo_set_no_storage() {
     let result = handle_get_utxo_set(message, None).await;
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Storage not available"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Storage not available")
+    );
 }
 
 #[tokio::test]
@@ -113,10 +115,12 @@ async fn test_handle_get_filtered_block_no_storage() {
     let result = handle_get_filtered_block(message, None, None).await;
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Storage not available"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Storage not available")
+    );
 }
 
 #[tokio::test]

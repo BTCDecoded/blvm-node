@@ -105,10 +105,10 @@ impl ProcessSandbox {
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
         #[allow(unused_imports)]
         use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, JOBOBJECT_BASIC_LIMIT_INFORMATION,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOBOBJECT_BASIC_LIMIT_INFORMATION,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
         };
         #[allow(unused_imports)]
         use windows_sys::Win32::System::Threading::{
@@ -230,7 +230,7 @@ impl ProcessSandbox {
                 // Use prlimit (Linux-specific) to set limits on another process
                 #[cfg(all(feature = "libc", target_os = "linux"))]
                 {
-                    use libc::{prlimit64, rlimit64, RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_NPROC};
+                    use libc::{RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_NPROC, prlimit64, rlimit64};
 
                     // Apply memory limit using prlimit
                     if let Some(max_memory) = limits.max_memory_bytes {
@@ -267,7 +267,11 @@ impl ProcessSandbox {
                                 std::ptr::null_mut(),
                             ) != 0
                             {
-                                warn!("Failed to set file descriptor limit for PID {} using prlimit: {}", pid, std::io::Error::last_os_error());
+                                warn!(
+                                    "Failed to set file descriptor limit for PID {} using prlimit: {}",
+                                    pid,
+                                    std::io::Error::last_os_error()
+                                );
                             } else {
                                 debug!("Set file descriptor limit for PID {}: {}", pid, max_fds);
                             }
@@ -317,12 +321,15 @@ impl ProcessSandbox {
                 // For non-Linux systems or when libc feature is disabled, we can't set limits on another process
                 #[cfg(not(all(feature = "libc", target_os = "linux")))]
                 {
-                    warn!("prlimit not available (requires Linux with libc feature). Limits should be set before spawning process with PID {}", pid);
+                    warn!(
+                        "prlimit not available (requires Linux with libc feature). Limits should be set before spawning process with PID {}",
+                        pid
+                    );
 
                     // Apply memory limit (RLIMIT_AS = address space limit) - fallback for non-libc systems
                     #[cfg(feature = "nix")]
                     if let Some(max_memory) = limits.max_memory_bytes {
-                        use nix::sys::resource::{setrlimit, Resource};
+                        use nix::sys::resource::{Resource, setrlimit};
                         let soft_limit = max_memory as u64;
                         let hard_limit = max_memory as u64;
                         setrlimit(Resource::RLIMIT_AS, soft_limit, hard_limit)
@@ -336,7 +343,7 @@ impl ProcessSandbox {
                         let hard_limit = max_fds as u64;
                         #[cfg(feature = "nix")]
                         {
-                            use nix::sys::resource::{setrlimit, Resource};
+                            use nix::sys::resource::{Resource, setrlimit};
                             setrlimit(Resource::RLIMIT_NOFILE, soft_limit, hard_limit).map_err(
                                 |e| ModuleError::op_err("Failed to set file descriptor limit", e),
                             )?;
@@ -353,7 +360,7 @@ impl ProcessSandbox {
                         // Get current process count and add max_children as limit
                         #[cfg(feature = "nix")]
                         {
-                            use nix::sys::resource::{setrlimit, Resource};
+                            use nix::sys::resource::{Resource, setrlimit};
                             let soft_limit = max_children as u64;
                             let hard_limit = max_children as u64;
                             setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit).map_err(

@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::transport::{TransportAddr, TransportConnection};
 use super::NetworkMessage;
+use super::transport::{TransportAddr, TransportConnection};
 use crate::network::protocol::cmd;
 use crate::utils::current_timestamp;
 

@@ -2,7 +2,7 @@
 
 use crate::module::traits::{MempoolSize, ModuleHooks};
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Hook manager that calls module hooks with timeouts
 pub struct HookManager {

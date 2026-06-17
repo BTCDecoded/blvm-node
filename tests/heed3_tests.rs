@@ -4,8 +4,8 @@
 
 #[cfg(feature = "heed3")]
 mod heed3_tests {
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
-    use blvm_node::storage::rkyv_codec::{access_utxo, encode_utxo, ValueCodec};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
+    use blvm_node::storage::rkyv_codec::{ValueCodec, access_utxo, encode_utxo};
     use blvm_protocol::types::UTXO;
     use std::sync::Arc;
     use tempfile::TempDir;

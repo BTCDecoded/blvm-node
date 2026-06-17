@@ -1,8 +1,8 @@
 //! Pruning manager policy and error paths.
 
 use blvm_node::config::{PruningConfig, PruningMode};
-use blvm_node::storage::pruning::PruningManager;
 use blvm_node::storage::Storage;
+use blvm_node::storage::pruning::PruningManager;
 use std::sync::Arc;
 use tempfile::TempDir;
 

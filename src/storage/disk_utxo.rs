@@ -381,9 +381,9 @@ pub fn flush_batch_to_disk(
 #[cfg(all(test, feature = "heed3"))]
 mod heed3_load_tests {
     use super::*;
-    use crate::storage::database::{create_database, Database, DatabaseBackend, Tree};
+    use crate::storage::database::{Database, DatabaseBackend, Tree, create_database};
     use crate::storage::rkyv_codec::{access_utxo, utxo_from_archived};
-    use crate::storage::utxo_value_codec::{encode_utxo_with_codec, ValueCodec};
+    use crate::storage::utxo_value_codec::{ValueCodec, encode_utxo_with_codec};
     use blvm_protocol::types::{OutPoint, UTXO};
     use std::sync::Arc;
     use tempfile::TempDir;

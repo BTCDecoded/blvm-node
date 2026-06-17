@@ -3,10 +3,10 @@
 //! Handles Quinn/Iroh transport init, TCP/Quinn/Iroh listener setup,
 //! and connection accept loops with DoS protection.
 
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::peer;
 use crate::network::transport::{Transport, TransportAddr, TransportListener};
-use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;

@@ -5,10 +5,10 @@
 #[cfg(feature = "protocol-verification")]
 use blvm_spec_lock::spec_locked;
 
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{HeadersMessage, ProtocolMessage, ProtocolParser, VersionMessage};
 use crate::network::transport::TransportAddr;
-use crate::network::NetworkMessage;
 use anyhow::Result;
 use blvm_protocol::ProtocolVersion;
 use std::net::SocketAddr;

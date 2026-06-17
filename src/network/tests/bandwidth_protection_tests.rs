@@ -13,7 +13,7 @@ use crate::network::bandwidth_protection::{BandwidthProtectionManager, ServiceTy
 use crate::network::ibd_protection::IbdProtectionManager;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 /// Create a test bandwidth protection manager
 fn create_test_manager() -> Arc<BandwidthProtectionManager> {

@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-use crate::module::traits::{module_error_msg, ModuleError};
+use crate::module::traits::{ModuleError, module_error_msg};
 use crate::storage::chainstate::{ChainInfo, ChainParams};
-use crate::storage::{blockstore::BlockMetadata, Storage};
+use crate::storage::{Storage, blockstore::BlockMetadata};
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 
 /// Blockchain API for modules

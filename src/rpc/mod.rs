@@ -225,7 +225,10 @@ impl RpcManager {
                 }
             }
             Err(e) => {
-                warn!("Failed to load RPC auth tokens: {}. Using tokens from config file if available.", e);
+                warn!(
+                    "Failed to load RPC auth tokens: {}. Using tokens from config file if available.",
+                    e
+                );
                 for token in auth_config.tokens {
                     if let Err(e) = auth_manager.add_token(token.clone()).await {
                         let redacted_error =

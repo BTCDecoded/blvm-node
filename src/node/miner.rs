@@ -593,8 +593,13 @@ impl MiningCoordinator {
             transactions: all_transactions.into_boxed_slice(),
         };
 
-        debug!("Generated block template: height={}, prev_hash={:?}, {} transactions, merkle_root={:?}",
-               height + 1, prev_block_hash, template.transactions.len(), merkle_root);
+        debug!(
+            "Generated block template: height={}, prev_hash={:?}, {} transactions, merkle_root={:?}",
+            height + 1,
+            prev_block_hash,
+            template.transactions.len(),
+            merkle_root
+        );
 
         Ok(template)
     }
@@ -1112,9 +1117,11 @@ mod tests {
         assert_eq!(mempool.get_mempool_size(), 0);
         assert!(mempool.get_transactions().is_empty());
         let empty_utxo_set = blvm_protocol::UtxoSet::default();
-        assert!(mempool
-            .get_prioritized_transactions(10, &empty_utxo_set)
-            .is_empty());
+        assert!(
+            mempool
+                .get_prioritized_transactions(10, &empty_utxo_set)
+                .is_empty()
+        );
     }
 
     #[test]

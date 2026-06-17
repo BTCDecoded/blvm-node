@@ -260,12 +260,12 @@ mod ibd_autorepair_tests {
     impl AggressiveRepairEnvGuard {
         fn set() -> std::sync::MutexGuard<'static, ()> {
             let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            std::env::set_var("BLVM_IBD_AGGRESSIVE_REPAIR", "1");
+            unsafe { std::env::set_var("BLVM_IBD_AGGRESSIVE_REPAIR", "1") };
             g
         }
         fn cleared() -> std::sync::MutexGuard<'static, ()> {
             let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
+            unsafe { std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR") };
             g
         }
     }

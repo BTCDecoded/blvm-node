@@ -1,7 +1,7 @@
 //! Tests for Iroh peer tracking with TransportAddr
 
-use blvm_node::network::transport::TransportAddr;
 use blvm_node::network::PeerManager;
+use blvm_node::network::transport::TransportAddr;
 use std::net::SocketAddr;
 
 #[test]

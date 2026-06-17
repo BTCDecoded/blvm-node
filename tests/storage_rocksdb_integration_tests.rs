@@ -4,7 +4,7 @@
 
 #[cfg(feature = "rocksdb")]
 mod rocksdb_integration_tests {
-    use blvm_node::storage::database::{create_database, DatabaseBackend};
+    use blvm_node::storage::database::{DatabaseBackend, create_database};
     use blvm_node::storage::*;
     use blvm_protocol::*;
     use std::sync::Arc;
@@ -177,8 +177,8 @@ mod rocksdb_integration_tests {
 mod rocksdb_integration_tests {
     #[test]
     fn test_rocksdb_not_available() {
-        use blvm_node::storage::database::DatabaseBackend;
         use blvm_node::storage::Storage;
+        use blvm_node::storage::database::DatabaseBackend;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();

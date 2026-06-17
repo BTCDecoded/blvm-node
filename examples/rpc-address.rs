@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
-                                            // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
+    // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
 
     println!("RPC Endpoint: {rpc_url}");
     println!();
@@ -44,7 +44,9 @@ fn main() -> anyhow::Result<()> {
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
     println!("   Use: Get the compact block filter for lightweight wallet scanning");
-    println!("   Note: filtertype 'basic' is the standard BIP158 filter; requires compact block filter index");
+    println!(
+        "   Note: filtertype 'basic' is the standard BIP158 filter; requires compact block filter index"
+    );
     println!();
 
     // Example 2: Get index info

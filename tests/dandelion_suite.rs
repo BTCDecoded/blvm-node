@@ -1,6 +1,6 @@
 #![cfg(feature = "dandelion")]
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use std::time::{Duration, Instant};
 
 use blvm_node::network::dandelion::{Clock, DandelionPhase, DandelionRelay};

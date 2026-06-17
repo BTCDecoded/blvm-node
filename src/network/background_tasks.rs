@@ -3,10 +3,10 @@
 //! Periodic tasks: request cleanup, DoS protection, ban cleanup, chain sync timeout,
 //! peer eviction, ping, ping timeout, peer reconnection.
 
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::transport::TransportAddr;
-use crate::network::NetworkMessage;
-use crate::utils::{current_timestamp, BACKGROUND_TASK_BACKOFF_SLEEP};
+use crate::utils::{BACKGROUND_TASK_BACKOFF_SLEEP, current_timestamp};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -115,8 +115,8 @@ impl NetworkManager {
                 let mut ban_list_guard = ban_list.write().await;
                 let expired: Vec<std::net::SocketAddr> = ban_list_guard
                     .iter()
-                    .filter(|(_, &unban_timestamp)| {
-                        unban_timestamp != u64::MAX && now >= unban_timestamp
+                    .filter(|&(_, unban_timestamp)| {
+                        *unban_timestamp != u64::MAX && now >= *unban_timestamp
                     })
                     .map(|(addr, _)| *addr)
                     .collect();
@@ -183,14 +183,18 @@ impl NetworkManager {
                                 if peer_chainwork < our_chainwork {
                                     warn!(
                                         "Outbound peer {:?} has insufficient chainwork after {} minutes (peer: {}, ours: {}), disconnecting",
-                                        addr, connection_age / 60, peer_chainwork, our_chainwork
+                                        addr,
+                                        connection_age / 60,
+                                        peer_chainwork,
+                                        our_chainwork
                                     );
                                     peers_to_disconnect.push(addr.clone());
                                 }
                             } else {
                                 warn!(
                                     "Outbound peer {:?} has no chainwork after {} minutes, disconnecting",
-                                    addr, connection_age / 60
+                                    addr,
+                                    connection_age / 60
                                 );
                                 peers_to_disconnect.push(addr.clone());
                             }
@@ -447,7 +451,7 @@ impl NetworkManager {
                         continue;
                     }
                     if *attempts >= 10 && persistent_set.contains(addr) {
-                        if let Some((ref mut att, _, _)) = queue.get_mut(addr) {
+                        if let Some((att, _, _)) = queue.get_mut(addr) {
                             *att = 0;
                         }
                     }
@@ -465,9 +469,7 @@ impl NetworkManager {
                         quality
                     );
 
-                    if let Some((ref mut attempts_ref, ref mut last_attempt_ref, _)) =
-                        queue.get_mut(addr)
-                    {
+                    if let Some((attempts_ref, last_attempt_ref, _)) = queue.get_mut(addr) {
                         *attempts_ref += 1;
                         *last_attempt_ref = now;
                     }

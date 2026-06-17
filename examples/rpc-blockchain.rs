@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
-                                            // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
+    // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
 
     println!("RPC Endpoint: {rpc_url}");
     println!();
@@ -183,8 +183,12 @@ fn main() -> anyhow::Result<()> {
         "id": 12
     });
     println!("   Request: {}", serde_json::to_string_pretty(&request)?);
-    println!("   Use: Get tx rate and total tx count over the last N blocks (default: one difficulty period)");
-    println!("   Note: Omit params for default window; pass blockhash as second param to anchor the window");
+    println!(
+        "   Use: Get tx rate and total tx count over the last N blocks (default: one difficulty period)"
+    );
+    println!(
+        "   Note: Omit params for default window; pass blockhash as second param to anchor the window"
+    );
     println!();
 
     // Example 13: Get block stats

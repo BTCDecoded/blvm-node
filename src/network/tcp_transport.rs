@@ -67,8 +67,7 @@ impl Transport for TcpTransport {
 
     async fn connect(&self, addr: TransportAddr) -> Result<Self::Connection> {
         #[allow(irrefutable_let_patterns)]
-        let TransportAddr::Tcp(socket_addr) = addr
-        else {
+        let TransportAddr::Tcp(socket_addr) = addr else {
             return Err(anyhow::anyhow!(
                 "TCP transport can only connect to TCP addresses"
             ));
@@ -100,7 +99,7 @@ impl TcpTransport {
         addr: SocketAddr,
         timeout_secs: u64,
     ) -> Result<TcpStream> {
-        use tokio::time::{timeout, Duration};
+        use tokio::time::{Duration, timeout};
 
         info!("Connecting to peer at {} (timeout {}s)", addr, timeout_secs);
 

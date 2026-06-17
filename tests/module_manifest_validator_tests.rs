@@ -83,9 +83,11 @@ fn test_manifest_validator_empty_entry_point() {
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
-            assert!(errors
-                .iter()
-                .any(|e| e.contains("Entry point cannot be empty")));
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("Entry point cannot be empty"))
+            );
         }
         ValidationResult::Valid => panic!("Should be invalid"),
     }
@@ -245,9 +247,11 @@ fn test_manifest_validator_invalid_dependency_version() {
     let result = validator.validate(&manifest);
     match result {
         ValidationResult::Invalid(errors) => {
-            assert!(errors
-                .iter()
-                .any(|e| e.contains("Invalid dependency version format")));
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("Invalid dependency version format"))
+            );
         }
         ValidationResult::Valid => panic!("Should be invalid"),
     }

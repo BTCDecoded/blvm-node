@@ -5,7 +5,7 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use crate::storage::bitcoin_core_migrate::{run_migrate_core, MigrateCoreArgs};
+use crate::storage::bitcoin_core_migrate::{MigrateCoreArgs, run_migrate_core};
 use crate::storage::bitcoin_detection::{BitcoinCoreDetection, CoreDataNetwork};
 
 /// Run migrate core: migrate Bitcoin Core data directory to BLVM format.

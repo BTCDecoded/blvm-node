@@ -5,7 +5,7 @@
 
 #[cfg(feature = "tidesdb")]
 mod tidesdb_tests {
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -158,7 +158,7 @@ mod tidesdb_tests {
     #[test]
     fn test_tidesdb_not_available() {
         // TidesDB backend is not available when feature is disabled
-        use blvm_node::storage::database::{create_database, DatabaseBackend};
+        use blvm_node::storage::database::{DatabaseBackend, create_database};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();

@@ -20,7 +20,7 @@ use crate::rpc::params::{
 use crate::storage::Storage;
 use crate::utils::{storage_timeout_from_config, with_custom_timeout};
 use hex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::result::Result;
 use std::sync::Arc;
@@ -103,7 +103,7 @@ pub(crate) fn address_string_to_script_pubkey(address: &str) -> Result<Vec<u8>, 
                     address,
                     Some("Invalid address: not Bech32/Bech32m and not valid Base58Check"),
                     None,
-                ))
+                ));
             }
         };
         if decoded.len() != 21 {
@@ -1071,7 +1071,9 @@ impl RawTxRpc {
                 "hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"
             }))
         } else {
-            Ok(json!("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"))
+            Ok(json!(
+                "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"
+            ))
         }
     }
 

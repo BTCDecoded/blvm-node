@@ -604,7 +604,7 @@ fn test_transaction_index_metadata() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_chainstate_work_accumulation() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, default_backend, Database};
+    use blvm_node::storage::database::{Database, create_database, default_backend};
     let db_arc: std::sync::Arc<dyn Database> =
         std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
     let chainstate = ChainState::new(db_arc).unwrap();
@@ -681,7 +681,7 @@ async fn test_chainstate_persistence() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_utxostore_concurrent_operations() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, default_backend, Database};
+    use blvm_node::storage::database::{Database, create_database, default_backend};
     let db_arc: std::sync::Arc<dyn Database> =
         std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
     let utxostore = UtxoStore::new(db_arc).unwrap();
@@ -736,7 +736,7 @@ async fn test_utxostore_concurrent_operations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_txindex_lookup_paths() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, default_backend, Database};
+    use blvm_node::storage::database::{Database, create_database, default_backend};
     let db_arc: std::sync::Arc<dyn Database> =
         std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
     let txindex = TxIndex::new(db_arc).unwrap();
@@ -784,7 +784,7 @@ async fn test_txindex_lookup_paths() {
 #[test]
 fn test_redb_tree_clear() {
     // Test redb clear() implementation
-    use blvm_node::storage::database::{create_database, default_backend, Database, Tree};
+    use blvm_node::storage::database::{Database, Tree, create_database, default_backend};
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
@@ -830,7 +830,7 @@ fn test_redb_tree_clear() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_storage_integration_workflow() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, default_backend, Database};
+    use blvm_node::storage::database::{Database, create_database, default_backend};
     let db_arc: std::sync::Arc<dyn Database> =
         std::sync::Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
 
@@ -966,7 +966,7 @@ fn test_block_compression_roundtrip() {
 #[test]
 fn test_module_tree_isolation_redb() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
@@ -992,7 +992,7 @@ fn test_module_tree_isolation_redb() {
 #[test]
 fn test_module_tree_operations_redb() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
@@ -1026,7 +1026,7 @@ fn test_module_tree_operations_redb() {
 #[test]
 fn test_module_tree_iter_redb() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
@@ -1051,7 +1051,7 @@ fn test_module_tree_iter_redb() {
 #[test]
 fn test_module_tree_multiple_trees_same_module_redb() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Redb, None).unwrap());
 
@@ -1083,7 +1083,7 @@ fn test_module_tree_multiple_trees_same_module_redb() {
 #[test]
 fn test_module_tree_isolation_sled() {
     let temp_dir = TempDir::new().unwrap();
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     let db: Arc<dyn Database> =
         Arc::from(create_database(temp_dir.path(), DatabaseBackend::Sled, None).unwrap());
 
@@ -1111,7 +1111,7 @@ fn test_module_tree_backend_compatibility() {
     let temp_dir1 = TempDir::new().unwrap();
     let temp_dir2 = TempDir::new().unwrap();
 
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
 
     // Test with redb
     let db_redb: Arc<dyn Database> =

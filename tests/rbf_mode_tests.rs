@@ -8,7 +8,7 @@
 
 use blvm_node::config::{RbfConfig, RbfMode};
 use blvm_node::node::mempool::MempoolManager;
-use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
 use std::sync::Arc;
 
 /// Create a test transaction with RBF signaling

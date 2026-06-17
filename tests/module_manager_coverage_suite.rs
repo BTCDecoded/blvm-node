@@ -58,14 +58,18 @@ async fn module_manager_dependency_helpers_without_modules() {
         .unwrap_err();
     assert!(matches!(dep_err, ModuleError::OperationError(_)));
 
-    assert!(manager
-        .validate_optional_dependencies("missing-module")
-        .await
-        .is_empty());
-    assert!(manager
-        .get_dependent_modules("missing-module")
-        .await
-        .is_empty());
+    assert!(
+        manager
+            .validate_optional_dependencies("missing-module")
+            .await
+            .is_empty()
+    );
+    assert!(
+        manager
+            .get_dependent_modules("missing-module")
+            .await
+            .is_empty()
+    );
     assert!(manager.can_unload_module("missing-module").await.unwrap());
 }
 

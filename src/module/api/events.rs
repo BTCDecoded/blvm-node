@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::module::ipc::protocol::{EventMessage, EventPayload, ModuleMessage};
@@ -120,7 +120,10 @@ impl EventManager {
                 });
                 // Send to module (non-blocking, best-effort)
                 if sender.try_send(event_msg).is_err() {
-                    warn!("Failed to send ModuleLoaded event for {} to newly subscribing module {} (channel full)", module_name, module_id);
+                    warn!(
+                        "Failed to send ModuleLoaded event for {} to newly subscribing module {} (channel full)",
+                        module_name, module_id
+                    );
                 }
             }
 

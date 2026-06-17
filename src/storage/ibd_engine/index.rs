@@ -17,8 +17,8 @@ use super::memory_age::{MemoryAge, Pin};
 use super::memory_run::MemoryRun;
 use super::types::{OutputId, OutputKV};
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 #[cfg(test)]
 extern crate tempfile;
@@ -300,7 +300,9 @@ impl UtxoIndex {
             if target < prev {
                 tracing::warn!(
                     "UTXO engine: memory pressure level {} — eviction age {} → {} (spilling index to disk)",
-                    level_u8, prev, target
+                    level_u8,
+                    prev,
+                    target
                 );
             } else if level_u8 == 0 {
                 tracing::info!(
@@ -333,8 +335,8 @@ impl UtxoIndex {
     pub fn new_for_test() -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let idx = Self::open(tmp.path(), 8 * 1024).expect("UtxoIndex::open"); // avail_mb hint (age chosen by proc_mem_total_mb)
-                                                                              // The TempDir would be dropped here, deleting the directory. To prevent that while
-                                                                              // keeping the test simple, we deliberately leak it — it's a test-only temp dir.
+        // The TempDir would be dropped here, deleting the directory. To prevent that while
+        // keeping the test simple, we deliberately leak it — it's a test-only temp dir.
         std::mem::forget(tmp);
         idx
     }

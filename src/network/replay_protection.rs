@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::{interval, Instant};
+use tokio::time::{Instant, interval};
 use tracing::{debug, warn};
 
 /// Replay protection errors
@@ -238,16 +238,20 @@ mod tests {
         let message_id = "test-message-id-123";
 
         // First check should succeed
-        assert!(protection
-            .check_message_id(message_id, current_timestamp() as i64)
-            .await
-            .is_ok());
+        assert!(
+            protection
+                .check_message_id(message_id, current_timestamp() as i64)
+                .await
+                .is_ok()
+        );
 
         // Second check should fail (duplicate)
-        assert!(protection
-            .check_message_id(message_id, current_timestamp() as i64)
-            .await
-            .is_err());
+        assert!(
+            protection
+                .check_message_id(message_id, current_timestamp() as i64)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

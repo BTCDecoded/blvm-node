@@ -832,8 +832,12 @@ pub(crate) mod redb_impl {
 
                 // Check if database is locked by another process
                 // redb uses file locking, so if another process has it open, open() will fail immediately
-                tracing::info!("[REDB] Attempting to open database (this may take time for large databases)...");
-                tracing::info!("[REDB] Note: redb validates checksums on open, which can be slow for large databases");
+                tracing::info!(
+                    "[REDB] Attempting to open database (this may take time for large databases)..."
+                );
+                tracing::info!(
+                    "[REDB] Note: redb validates checksums on open, which can be slow for large databases"
+                );
                 tracing::info!(
                     "[REDB] If this hangs, redb may be performing crash recovery validation"
                 );
@@ -1361,12 +1365,12 @@ pub mod rocksdb_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use rocksdb::{
-        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, IngestExternalFileOptions,
-        Options, ReadOptions, SstFileWriter, WriteOptions, DB,
+        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DB,
+        IngestExternalFileOptions, Options, ReadOptions, SstFileWriter, WriteOptions,
     };
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     pub struct RocksDBDatabase {
         cache: std::sync::Mutex<Option<Cache>>,
@@ -1667,8 +1671,15 @@ pub mod rocksdb_impl {
                 .unwrap_or(default_write_buffer);
             opts.set_db_write_buffer_size(db_write_buffer_mb * 1024 * 1024);
 
-            tracing::info!("[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={} write_buffer={}MB (ram={}GB)",
-                parallelism, max_compactions, max_flushes, level0_trigger, db_write_buffer_mb, total_ram_gb);
+            tracing::info!(
+                "[ROCKSDB] parallelism={} max_compactions={} max_flushes={} level0_trigger={} write_buffer={}MB (ram={}GB)",
+                parallelism,
+                max_compactions,
+                max_flushes,
+                level0_trigger,
+                db_write_buffer_mb,
+                total_ram_gb
+            );
 
             // Block cache: ENV > config (capped to RAM-tier) > RAM-tiered default.
             let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
@@ -1949,7 +1960,9 @@ pub mod rocksdb_impl {
                     _ => Options::default(),
                 }
             };
-            tracing::info!("[ROCKSDB] per-CF: ibd_utxos=no-compression+large-memtables (temp), utxos=zstd-L2+, blocks/headers/witnesses=zstd, WAL disabled for IBD");
+            tracing::info!(
+                "[ROCKSDB] per-CF: ibd_utxos=no-compression+large-memtables (temp), utxos=zstd-L2+, blocks/headers/witnesses=zstd, WAL disabled for IBD"
+            );
 
             let mut cfs = vec![ColumnFamilyDescriptor::new("default", Options::default())];
             cfs.extend(

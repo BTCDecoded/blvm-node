@@ -57,14 +57,18 @@ async fn rpc_server_module_endpoint_register_and_unregister() {
         .unregister_module_endpoint("covmod_ping")
         .await
         .unwrap();
-    assert!(server
-        .unregister_module_endpoint("missing_method")
-        .await
-        .is_err());
-    assert!(server
-        .register_module_endpoint("getblock".into(), "bad".into(), Arc::new(EchoHandler),)
-        .await
-        .is_err());
+    assert!(
+        server
+            .unregister_module_endpoint("missing_method")
+            .await
+            .is_err()
+    );
+    assert!(
+        server
+            .register_module_endpoint("getblock".into(), "bad".into(), Arc::new(EchoHandler),)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -85,8 +89,10 @@ async fn rpc_server_core_override_register_and_cleanup() {
         .await
         .unwrap();
     server.unregister_all_for_module("covmod").await;
-    assert!(server
-        .register_core_rpc_override("getblock".into(), "covmod".into(), Arc::new(EchoHandler))
-        .await
-        .is_err());
+    assert!(
+        server
+            .register_core_rpc_override("getblock".into(), "covmod".into(), Arc::new(EchoHandler))
+            .await
+            .is_err()
+    );
 }

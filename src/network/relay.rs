@@ -275,7 +275,7 @@ impl RelayManager {
         let old_blocks: Vec<Hash> = self
             .recently_relayed_blocks
             .iter()
-            .filter(|(_, &timestamp)| now - timestamp > self.policies.max_relay_age)
+            .filter(|&(_, timestamp)| now - timestamp > self.policies.max_relay_age)
             .map(|(hash, _)| *hash)
             .collect();
 
@@ -287,7 +287,7 @@ impl RelayManager {
         let old_txs: Vec<Hash> = self
             .recently_relayed_txs
             .iter()
-            .filter(|(_, &timestamp)| now - timestamp > self.policies.max_relay_age)
+            .filter(|&(_, timestamp)| now - timestamp > self.policies.max_relay_age)
             .map(|(hash, _)| *hash)
             .collect();
 
@@ -301,7 +301,7 @@ impl RelayManager {
             let oldest_blocks: Vec<Hash> = self
                 .recently_relayed_blocks
                 .iter()
-                .min_by_key(|(_, &timestamp)| timestamp)
+                .min_by_key(|&(_, timestamp)| timestamp)
                 .map(|(hash, _)| *hash)
                 .into_iter()
                 .take(excess)
@@ -317,7 +317,7 @@ impl RelayManager {
             let oldest_txs: Vec<Hash> = self
                 .recently_relayed_txs
                 .iter()
-                .min_by_key(|(_, &timestamp)| timestamp)
+                .min_by_key(|&(_, timestamp)| timestamp)
                 .map(|(hash, _)| *hash)
                 .into_iter()
                 .take(excess)

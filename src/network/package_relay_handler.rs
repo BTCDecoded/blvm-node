@@ -36,7 +36,7 @@ pub fn handle_pkgtxn(
                     package_id: msg.package_id.clone(),
                     reason: PackageRejectReason::InvalidStructure as u8,
                     reason_text: Some("failed to deserialize transaction".to_string()),
-                }))
+                }));
             }
         }
     }
@@ -49,7 +49,7 @@ pub fn handle_pkgtxn(
                 package_id: msg.package_id.clone(),
                 reason: PackageRejectReason::InvalidStructure as u8,
                 reason_text: Some("invalid package structure".to_string()),
-            }))
+            }));
         }
     };
 

@@ -38,7 +38,7 @@ pub mod wal;
 
 use crate::config::PruningConfig;
 use anyhow::Result;
-use database::{create_database, default_backend, fallback_backend, Database, DatabaseBackend};
+use database::{Database, DatabaseBackend, create_database, default_backend, fallback_backend};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -162,7 +162,9 @@ impl Storage {
                                 Some(data_dir.as_ref()),
                             ) {
                                 Ok(reader) => {
-                                    info!("Block files detected, enabling block file reader with index cache");
+                                    info!(
+                                        "Block files detected, enabling block file reader with index cache"
+                                    );
                                     Some(Arc::new(reader))
                                 }
                                 Err(e) => {
@@ -306,7 +308,7 @@ impl Storage {
         storage_config: Option<&crate::config::StorageConfig>,
     ) -> Result<PathBuf> {
         use bitcoin_core_migrate::{
-            has_migration_marker, migrate_core_data, read_migration_marker, MigrateCoreArgs,
+            MigrateCoreArgs, has_migration_marker, migrate_core_data, read_migration_marker,
         };
 
         let auto_migrate = storage_config
@@ -422,8 +424,7 @@ impl Storage {
             warn!(
                 "[CORE_IMPORT] Core chainstate at {:?} is newer than migration marker at {:?}; \
                  Core may have re-synced. Re-run `blvm migrate core --verify` if tip should match Core.",
-                chainstate,
-                blvm_store
+                chainstate, blvm_store
             );
         }
     }

@@ -11,7 +11,7 @@ use crate::rpc::errors::{RpcError, RpcResult, TIP_BLOCK_NOT_FOUND_MSG};
 use crate::rpc::params::{param_str_required, param_u64_default, param_u64_required};
 use crate::rpc::rawtx::address_string_to_script_pubkey;
 use crate::storage::Storage;
-use crate::utils::{current_timestamp, CACHE_REFRESH_TIP};
+use crate::utils::{CACHE_REFRESH_TIP, current_timestamp};
 use blvm_protocol::mining::BlockTemplate;
 use blvm_protocol::mining::MiningResult;
 use blvm_protocol::opcodes::{
@@ -23,17 +23,17 @@ use blvm_protocol::serialization::serialize_block_with_witnesses;
 use blvm_protocol::serialization::serialize_transaction;
 use blvm_protocol::types::Network as ConsensusNetwork;
 use blvm_protocol::{
-    types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
-    ConsensusProof, ValidationResult,
-};
-use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
-use blvm_protocol::{
     BIP112_CSV_ACTIVATION_MAINNET, BIP112_CSV_ACTIVATION_REGTEST, BIP112_CSV_ACTIVATION_TESTNET,
     SEGWIT_ACTIVATION_MAINNET, SEGWIT_ACTIVATION_TESTNET, TAPROOT_ACTIVATION_MAINNET,
     TAPROOT_ACTIVATION_TESTNET,
 };
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+use blvm_protocol::{
+    ConsensusProof, ValidationResult,
+    types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
+};
 use hex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -1052,7 +1052,7 @@ impl MiningRpc {
             _ => {
                 return Err(RpcError::invalid_params(format!(
                     "Invalid estimate_mode: {estimate_mode}. Must be 'unset', 'economical', or 'conservative'"
-                )))
+                )));
             }
         }
 

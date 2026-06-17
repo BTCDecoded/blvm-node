@@ -5,7 +5,7 @@
 
 #[cfg(feature = "rocksdb")]
 mod rocksdb_tests {
-    use blvm_node::storage::database::{create_database, Database, DatabaseBackend};
+    use blvm_node::storage::database::{Database, DatabaseBackend, create_database};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -158,7 +158,7 @@ mod rocksdb_tests {
     #[test]
     fn test_rocksdb_not_available() {
         // Test that RocksDB backend is not available when feature is disabled
-        use blvm_node::storage::database::{create_database, DatabaseBackend};
+        use blvm_node::storage::database::{DatabaseBackend, create_database};
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();

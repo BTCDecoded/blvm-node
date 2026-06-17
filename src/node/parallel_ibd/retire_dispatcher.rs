@@ -45,9 +45,9 @@
 
 use anyhow::Result;
 use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use super::IbdRetireWork;
@@ -279,21 +279,31 @@ mod tests {
         // happen inside this lock too, since cargo runs tests in parallel by default.
         let _guard = ENV_LOCK.lock();
 
-        std::env::remove_var("BLVM_IBD_RETIRE_SHARDS");
+        unsafe {
+            std::env::remove_var("BLVM_IBD_RETIRE_SHARDS");
+        }
         assert_eq!(configured_retire_shards(), 1, "default must be 1");
 
-        std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "0");
+        unsafe {
+            std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "0");
+        }
         assert_eq!(configured_retire_shards(), 1, "0 must clamp to 1");
 
-        std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "1");
+        unsafe {
+            std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "1");
+        }
         assert_eq!(configured_retire_shards(), 1);
 
-        std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "garbage");
+        unsafe {
+            std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "garbage");
+        }
         assert_eq!(configured_retire_shards(), 1, "unparseable must clamp to 1");
 
         // For values >=2, exact clamp depends on host's available_parallelism, but the
         // result must always be in [1, available_parallelism / 2] and >= 1.
-        std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "999");
+        unsafe {
+            std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "999");
+        }
         let n = configured_retire_shards();
         assert!(n >= 1);
         let cap = std::thread::available_parallelism()
@@ -301,7 +311,9 @@ mod tests {
             .unwrap_or(1);
         assert_eq!(n, cap, "999 must clamp to available_parallelism / 2");
 
-        std::env::remove_var("BLVM_IBD_RETIRE_SHARDS");
+        unsafe {
+            std::env::remove_var("BLVM_IBD_RETIRE_SHARDS");
+        }
     }
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());

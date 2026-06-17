@@ -9,13 +9,13 @@
 
 #[cfg(feature = "utxo-commitments")]
 use crate::network::{
+    NetworkManager,
     protocol::{GetFilteredBlockMessage, GetUTXOProofMessage, GetUTXOSetMessage},
     protocol_extensions::{
         deserialize_utxo_proof, serialize_get_filtered_block, serialize_get_utxo_proof,
         serialize_get_utxo_set,
     },
     transport::TransportType,
-    NetworkManager,
 };
 #[cfg(feature = "utxo-commitments")]
 use blvm_protocol::types::{BlockHeader, Hash, Natural};

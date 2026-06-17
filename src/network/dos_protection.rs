@@ -281,7 +281,7 @@ impl DosProtectionManager {
         let violations = self.connection_violations.lock().await;
         violations
             .iter()
-            .filter(|(_, &count)| count >= self.auto_ban_connection_violations)
+            .filter(|&(_, count)| *count >= self.auto_ban_connection_violations)
             .map(|(ip, _)| *ip)
             .collect()
     }

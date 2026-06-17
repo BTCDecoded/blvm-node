@@ -15,7 +15,7 @@ use crate::rpc::cache::ThreadLocalTimedCache;
 use crate::rpc::errors::{RpcError, RpcResult};
 use crate::rpc::params::param_str;
 use crate::utils::{CACHE_REFRESH_MEMORY, CACHE_REFRESH_UPTIME};
-use serde_json::{json, Number, Value};
+use serde_json::{Number, Value, json};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -599,19 +599,47 @@ impl ControlRpc {
         // If specific command requested, return detailed help
         if let Some(command) = param_str(params, 0) {
             let help_text = match command {
-                "stop" => "Stop Bitcoin node.\n\nResult:\n\"Bitcoin node stopping\" (string)\n\nExamples:\n> bitcoin-cli stop",
-                "uptime" => "Returns the total uptime of the server.\n\nResult:\nuptime (numeric) The number of seconds that the server has been running\n\nExamples:\n> bitcoin-cli uptime",
-                "getmemoryinfo" => "Returns an object containing information about memory usage.\n\nArguments:\n1. mode (string, optional, default=\"stats\") determines what kind of information is returned.\n   - \"stats\" returns general statistics about memory usage in the daemon.\n   - \"mallocinfo\" is accepted for Bitcoin Core compatibility; in BLVM it returns an empty string (glibc mallocinfo XML is not implemented). Use \"stats\" for usable memory figures.\n\nResult (mode \"stats\"):\n{\n  \"locked\": {               (json object) Information about locked memory manager\n    \"used\": xxxxx,          (numeric) Number of bytes used\n    \"free\": xxxxx,          (numeric) Number of bytes available in current arenas\n    \"total\": xxxxx,         (numeric) Total number of bytes managed\n    \"locked\": xxxxx,        (numeric) Amount of bytes that succeeded locking. If this number is smaller than total, locking pages failed at some point and key data could be swapped to disk.\n    \"chunks_used\": xxxxx,   (numeric) Number allocated chunks\n    \"chunks_free\": xxxxx,   (numeric) Number unused chunks\n  }\n}\n\nExamples:\n> bitcoin-cli getmemoryinfo",
-                "getrpcinfo" => "Returns details about the RPC server.\n\nResult:\n{\n  \"active_commands\" (array) All active commands\n  \"logpath\" (string) The complete file path to the debug log\n}\n\nExamples:\n> bitcoin-cli getrpcinfo",
-                "help" => "List all commands, or get help for a specified command.\n\nArguments:\n1. \"command\"     (string, optional) The command to get help on\n\nResult:\n\"text\"     (string) The help text\n\nExamples:\n> bitcoin-cli help\n> bitcoin-cli help getblock",
-                "logging" => "Gets and sets the logging configuration.\n\nArguments:\n1. \"include\" (array of strings, optional) A list of categories to add debug logging\n2. \"exclude\" (array of strings, optional) A list of categories to remove debug logging\n\nResult:\n{ (json object)\n  \"active\" (boolean) Whether debug logging is active\n}\n\nExamples:\n> bitcoin-cli logging [\"all\"]\n> bitcoin-cli logging [\"http\"] [\"net\"]",
-                "loadmodule" => "Load a module at runtime (hot load).\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module loaded\" (string)\n\nExamples:\n> bitcoin-cli loadmodule \"simple-module\"",
-                "unloadmodule" => "Unload a module at runtime (hot unload).\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module unloaded\" (string)\n\nExamples:\n> bitcoin-cli unloadmodule \"simple-module\"",
-                "reloadmodule" => "Reload a module at runtime (hot reload). Picks up new binary/config.\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module reloaded\" (string)\n\nExamples:\n> bitcoin-cli reloadmodule \"simple-module\"",
-                "listmodules" => "List loaded modules.\n\nResult:\n[\"module1\", \"module2\", ...] (array of strings)\n\nExamples:\n> bitcoin-cli listmodules",
-                "getmoduleclispecs" => "Get CLI specs from all loaded modules for dynamic CLI building.\n\nResult:\n{ \"sync-policy\": {...}, \"hello\": {...} } (object mapping CLI name to spec)\n\nExamples:\n> bitcoin-cli getmoduleclispecs",
-                "runmodulecli" => "Run a module CLI subcommand.\n\nArguments:\n1. module_name (string, required) CLI name from getmoduleclispecs\n2. subcommand (string, required) Subcommand name\n3. ...args (strings, optional) Arguments for the subcommand\n\nResult:\n{ \"stdout\": \"...\", \"stderr\": \"...\", \"exit_code\": 0 }\n\nExamples:\n> bitcoin-cli runmodulecli \"sync-policy\" \"list\"",
-                _ => return Err(RpcError::invalid_params(format!("Unknown command: {command}"))),
+                "stop" => {
+                    "Stop Bitcoin node.\n\nResult:\n\"Bitcoin node stopping\" (string)\n\nExamples:\n> bitcoin-cli stop"
+                }
+                "uptime" => {
+                    "Returns the total uptime of the server.\n\nResult:\nuptime (numeric) The number of seconds that the server has been running\n\nExamples:\n> bitcoin-cli uptime"
+                }
+                "getmemoryinfo" => {
+                    "Returns an object containing information about memory usage.\n\nArguments:\n1. mode (string, optional, default=\"stats\") determines what kind of information is returned.\n   - \"stats\" returns general statistics about memory usage in the daemon.\n   - \"mallocinfo\" is accepted for Bitcoin Core compatibility; in BLVM it returns an empty string (glibc mallocinfo XML is not implemented). Use \"stats\" for usable memory figures.\n\nResult (mode \"stats\"):\n{\n  \"locked\": {               (json object) Information about locked memory manager\n    \"used\": xxxxx,          (numeric) Number of bytes used\n    \"free\": xxxxx,          (numeric) Number of bytes available in current arenas\n    \"total\": xxxxx,         (numeric) Total number of bytes managed\n    \"locked\": xxxxx,        (numeric) Amount of bytes that succeeded locking. If this number is smaller than total, locking pages failed at some point and key data could be swapped to disk.\n    \"chunks_used\": xxxxx,   (numeric) Number allocated chunks\n    \"chunks_free\": xxxxx,   (numeric) Number unused chunks\n  }\n}\n\nExamples:\n> bitcoin-cli getmemoryinfo"
+                }
+                "getrpcinfo" => {
+                    "Returns details about the RPC server.\n\nResult:\n{\n  \"active_commands\" (array) All active commands\n  \"logpath\" (string) The complete file path to the debug log\n}\n\nExamples:\n> bitcoin-cli getrpcinfo"
+                }
+                "help" => {
+                    "List all commands, or get help for a specified command.\n\nArguments:\n1. \"command\"     (string, optional) The command to get help on\n\nResult:\n\"text\"     (string) The help text\n\nExamples:\n> bitcoin-cli help\n> bitcoin-cli help getblock"
+                }
+                "logging" => {
+                    "Gets and sets the logging configuration.\n\nArguments:\n1. \"include\" (array of strings, optional) A list of categories to add debug logging\n2. \"exclude\" (array of strings, optional) A list of categories to remove debug logging\n\nResult:\n{ (json object)\n  \"active\" (boolean) Whether debug logging is active\n}\n\nExamples:\n> bitcoin-cli logging [\"all\"]\n> bitcoin-cli logging [\"http\"] [\"net\"]"
+                }
+                "loadmodule" => {
+                    "Load a module at runtime (hot load).\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module loaded\" (string)\n\nExamples:\n> bitcoin-cli loadmodule \"simple-module\""
+                }
+                "unloadmodule" => {
+                    "Unload a module at runtime (hot unload).\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module unloaded\" (string)\n\nExamples:\n> bitcoin-cli unloadmodule \"simple-module\""
+                }
+                "reloadmodule" => {
+                    "Reload a module at runtime (hot reload). Picks up new binary/config.\n\nArguments:\n1. \"name\" (string, required) Module name\n\nResult:\n\"Module reloaded\" (string)\n\nExamples:\n> bitcoin-cli reloadmodule \"simple-module\""
+                }
+                "listmodules" => {
+                    "List loaded modules.\n\nResult:\n[\"module1\", \"module2\", ...] (array of strings)\n\nExamples:\n> bitcoin-cli listmodules"
+                }
+                "getmoduleclispecs" => {
+                    "Get CLI specs from all loaded modules for dynamic CLI building.\n\nResult:\n{ \"sync-policy\": {...}, \"hello\": {...} } (object mapping CLI name to spec)\n\nExamples:\n> bitcoin-cli getmoduleclispecs"
+                }
+                "runmodulecli" => {
+                    "Run a module CLI subcommand.\n\nArguments:\n1. module_name (string, required) CLI name from getmoduleclispecs\n2. subcommand (string, required) Subcommand name\n3. ...args (strings, optional) Arguments for the subcommand\n\nResult:\n{ \"stdout\": \"...\", \"stderr\": \"...\", \"exit_code\": 0 }\n\nExamples:\n> bitcoin-cli runmodulecli \"sync-policy\" \"list\""
+                }
+                _ => {
+                    return Err(RpcError::invalid_params(format!(
+                        "Unknown command: {command}"
+                    )));
+                }
             };
             Ok(json!(help_text.to_string()))
         } else {

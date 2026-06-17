@@ -19,10 +19,10 @@ use super::index::UtxoIndex;
 use super::memory_age::Pin;
 use super::table::UtxoTable;
 use super::types::{
-    outpoint_to_output_key, to_output_key, IdCodec, OutputDetail, OutputHeader, OutputId, OutputKV,
-    OutputKey,
+    IdCodec, OutputDetail, OutputHeader, OutputId, OutputKV, OutputKey, outpoint_to_output_key,
+    to_output_key,
 };
-use blvm_protocol::{transaction::is_coinbase, Block};
+use blvm_protocol::{Block, transaction::is_coinbase};
 use std::path::Path;
 use std::sync::Arc;
 

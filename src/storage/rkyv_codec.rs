@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use blvm_protocol::types::UTXO;
 use rkyv::rancor::Error;
-use rkyv::{access, deserialize, to_bytes, Archive, Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize, access, deserialize, to_bytes};
 
 /// rkyv mirror of [`UTXO`] for on-disk / LMDB storage.
 #[derive(Archive, Serialize, Deserialize, Debug, PartialEq, Eq)]

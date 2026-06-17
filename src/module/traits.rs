@@ -81,7 +81,7 @@ pub trait ModuleHooks: Send + Sync {
     /// Return Some(u64) to use cached value, None to calculate normally
     /// Timeout: 100ms (fail fast if module unresponsive)
     async fn get_fee_estimate_cached(&self, target_blocks: u32)
-        -> Result<Option<u64>, ModuleError>;
+    -> Result<Option<u64>, ModuleError>;
 
     /// Hook called when getting mempool stats
     /// Return Some(MempoolStats) to use cached value, None to calculate normally
@@ -982,12 +982,10 @@ pub mod module_error_msg {
     pub const MODULE_RETURNED_WRONG_PAYLOAD_TYPE_RPC: &str =
         "Module returned wrong payload type for RPC";
     pub const NO_MODULE_WITH_CLI_NAME_LOADED: &str = "No module with CLI name '{}' is loaded";
-    pub const TASK_SCHEDULING_REQUIRES_CALLBACK_IPC: &str =
-        "Task scheduling requires callback which cannot be serialized over IPC. Use module-side task management.";
+    pub const TASK_SCHEDULING_REQUIRES_CALLBACK_IPC: &str = "Task scheduling requires callback which cannot be serialized over IPC. Use module-side task management.";
     pub const TIMER_CANCELLATION_NOT_SUPPORTED_IPC: &str =
         "Timer cancellation not supported over IPC. Use module-side timer management.";
-    pub const TIMER_REGISTRATION_REQUIRES_CALLBACK_IPC: &str =
-        "Timer registration requires callback which cannot be serialized over IPC. Use module-side timer management.";
+    pub const TIMER_REGISTRATION_REQUIRES_CALLBACK_IPC: &str = "Timer registration requires callback which cannot be serialized over IPC. Use module-side timer management.";
 
     // Registry / module fetch
     pub const BINARY_HASH_MUST_BE_32_BYTES: &str = "Binary hash must be 32 bytes";

@@ -2,10 +2,10 @@
 
 use blvm_node::module::api::blockchain::BlockchainApi;
 use blvm_node::storage::Storage;
-use blvm_protocol::{tx_inputs, tx_outputs};
 use blvm_protocol::{
     Block, BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO,
 };
+use blvm_protocol::{tx_inputs, tx_outputs};
 use std::sync::Arc;
 use tempfile::TempDir;
 

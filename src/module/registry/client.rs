@@ -13,7 +13,7 @@ use crate::module::registry::cache::{CachedModule, LocalCache};
 use crate::module::registry::cas::{ContentAddressableStorage, ModuleHash};
 use crate::module::registry::manifest::ModuleManifest;
 use crate::module::security::signing::ModuleSigner;
-use crate::module::traits::{module_error_msg, ModuleError};
+use crate::module::traits::{ModuleError, module_error_msg};
 
 /// Registry peer configuration (P2P-based)
 #[derive(Debug, Clone)]
@@ -231,7 +231,7 @@ impl ModuleRegistry {
             _ => {
                 return Err(ModuleError::OperationError(
                     module_error_msg::EXPECTED_MODULE_MESSAGE.to_string(),
-                ))
+                ));
             }
         };
 

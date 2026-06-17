@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
-                                            // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
+    // let rpc_url = "http://127.0.0.1:8332"; // Mainnet
 
     println!("RPC Endpoint: {rpc_url}");
     println!();
@@ -166,7 +166,9 @@ fn main() -> anyhow::Result<()> {
     println!(
         "  getdescriptorinfo   - Parse and validate an output descriptor (requires blvm-miniscript module)"
     );
-    println!("  analyzepsbt         - Inspect PSBT signing status and fee (requires blvm-miniscript module)");
+    println!(
+        "  analyzepsbt         - Inspect PSBT signing status and fee (requires blvm-miniscript module)"
+    );
     println!();
     println!("Typical batching workflow:");
     println!("  1. getcongestion           → check current fee environment");

@@ -4,21 +4,21 @@
 //! Core-style: max 16 blocks in flight per peer across all workers.
 
 use super::types::{SharedBlock, SharedWitnesses};
+use crate::network::NetworkManager;
 use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
 use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage, ProtocolParser};
-use crate::network::NetworkManager;
 use crate::storage::blockstore::BlockStore;
 use anyhow::{Context, Result};
 use blvm_protocol::features::FeatureRegistry;
-use blvm_protocol::{segwit::Witness, Block, Hash, ProtocolVersion};
+use blvm_protocol::{Block, Hash, ProtocolVersion, segwit::Witness};
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tokio::sync::Semaphore;
-use tokio::time::{timeout, Duration};
+use tokio::sync::broadcast;
+use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 use super::ParallelIBDConfig;

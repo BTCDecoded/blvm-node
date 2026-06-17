@@ -242,7 +242,7 @@ impl RpcAuthManager {
             return true;
         }
         let admins = self.admin_tokens.lock().await;
-        if let UserId::Token(ref tok) = user_id {
+        if let UserId::Token(tok) = user_id {
             admins.contains(tok.as_str())
         } else {
             false

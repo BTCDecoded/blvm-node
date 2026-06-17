@@ -603,7 +603,7 @@ impl ModuleApiHub {
             other => {
                 return Err(crate::module::traits::ModuleError::OperationError(format!(
                     "Unimplemented request payload: {other:?}"
-                )))
+                )));
             }
         };
 

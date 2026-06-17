@@ -50,15 +50,15 @@ pub mod types;
 
 pub use database::UtxoDatabase;
 pub use export::{
-    ckpt_inactive_slot, ckpt_tree_for_slot, run_checkpoint_export_replace, run_watermark_export,
-    CKPT_TREE_A, CKPT_TREE_B,
+    CKPT_TREE_A, CKPT_TREE_B, ckpt_inactive_slot, ckpt_tree_for_slot,
+    run_checkpoint_export_replace, run_watermark_export,
 };
 pub use import::seed_from_ibd_utxos;
 pub use memory_run::set_gc_fence;
 pub use spend_session::{
-    session_fill_utxo_set, session_to_utxo_set, PartialSpendSession, SpendSession,
+    PartialSpendSession, SpendSession, session_fill_utxo_set, session_to_utxo_set,
 };
 pub use types::{
-    outpoint_to_output_key, output_key_to_outpoint, to_output_key, IdCodec, OutputDetail,
-    OutputHeader, OutputId, OutputKV, OutputKey, OUTPUT_ID_DELETED,
+    IdCodec, OUTPUT_ID_DELETED, OutputDetail, OutputHeader, OutputId, OutputKV, OutputKey,
+    outpoint_to_output_key, output_key_to_outpoint, to_output_key,
 };

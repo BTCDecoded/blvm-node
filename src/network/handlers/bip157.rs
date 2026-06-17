@@ -1,5 +1,6 @@
 //! BIP157/158 block filter handlers (GetCfilters, GetCfheaders, GetCfcheckpt).
 
+use crate::network::NetworkMessage;
 use crate::network::bandwidth_protection::ServiceType;
 use crate::network::bip157_handler::{
     handle_getcfcheckpt, handle_getcfheaders, handle_getcfilters,
@@ -7,7 +8,6 @@ use crate::network::bip157_handler::{
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{ProtocolMessage, ProtocolParser};
 use crate::network::transport::TransportAddr;
-use crate::network::NetworkMessage;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -154,14 +154,16 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:18477".parse().unwrap();
         let nm = NetworkManager::new(listen);
         let bad = vec![0xff, 0xfe];
-        assert!(nm
-            .handle_getcfilters_request(bad.clone(), peer)
-            .await
-            .is_err());
-        assert!(nm
-            .handle_getcfheaders_request(bad.clone(), peer)
-            .await
-            .is_err());
+        assert!(
+            nm.handle_getcfilters_request(bad.clone(), peer)
+                .await
+                .is_err()
+        );
+        assert!(
+            nm.handle_getcfheaders_request(bad.clone(), peer)
+                .await
+                .is_err()
+        );
         assert!(nm.handle_getcfcheckpt_request(bad, peer).await.is_err());
     }
 }

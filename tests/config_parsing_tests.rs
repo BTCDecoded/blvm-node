@@ -43,7 +43,7 @@ module_database_backend = "tidesdb"
 #[test]
 fn test_module_subprocess_database_backend_preference() {
     use blvm_node::storage::database::{
-        module_subprocess_database_backend_preference, DatabaseBackend,
+        DatabaseBackend, module_subprocess_database_backend_preference,
     };
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, None),
@@ -215,11 +215,13 @@ hashblock = "tcp://127.0.0.1:28332"
             .map(String::as_str),
         Some("tcp://127.0.0.1:28332")
     );
-    assert!(!modules
-        .module_configs
-        .get("blvm-zmq")
-        .map(|c| c.contains_key("version"))
-        .unwrap_or(false));
+    assert!(
+        !modules
+            .module_configs
+            .get("blvm-zmq")
+            .map(|c| c.contains_key("version"))
+            .unwrap_or(false)
+    );
 }
 
 #[test]
@@ -374,10 +376,12 @@ fn test_pruning_config_validate_normal_mode_invalid() {
 
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("min_recent_blocks"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("min_recent_blocks")
+    );
 }
 
 #[test]
@@ -392,10 +396,12 @@ fn test_pruning_config_validate_min_blocks_to_keep_zero() {
 
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("min_blocks_to_keep"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("min_blocks_to_keep")
+    );
 }
 
 #[test]
@@ -410,10 +416,12 @@ fn test_pruning_config_validate_auto_prune_interval_zero() {
 
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("auto_prune_interval"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("auto_prune_interval")
+    );
 }
 
 #[test]

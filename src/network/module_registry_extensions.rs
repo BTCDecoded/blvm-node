@@ -345,7 +345,7 @@ pub async fn handle_get_module_list(
             .iter()
             .filter_map(|name| {
                 // Apply name prefix filter if specified
-                if let Some(ref prefix) = &name_prefix {
+                if let Some(prefix) = &name_prefix {
                     if !name.starts_with(prefix) {
                         return None;
                     }
@@ -420,9 +420,11 @@ mod tests {
             version: None,
             payment_id: None,
         };
-        assert!(handle_get_module(msg, None, None, None, None, None, None)
-            .await
-            .is_err());
+        assert!(
+            handle_get_module(msg, None, None, None, None, None, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

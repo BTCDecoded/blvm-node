@@ -7,8 +7,8 @@
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -23,7 +23,7 @@ use crate::module::ipc::protocol::{
     CliSpec, InvocationMessage, InvocationResultMessage, InvocationResultPayload, InvocationType,
     ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
-use crate::module::traits::{module_error_msg, EventType, ModuleError, NodeAPI};
+use crate::module::traits::{EventType, ModuleError, NodeAPI, module_error_msg};
 use tokio::sync::oneshot;
 
 /// Async invoker for in-process WASM modules. Used when a module has no IPC connection.

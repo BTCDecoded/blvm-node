@@ -2,9 +2,9 @@
 
 use blvm_node::rpc::*;
 use std::net::SocketAddr;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 mod common;
-use common::{setup_mining_chain, DIFFICULTY_INTERVAL};
+use common::{DIFFICULTY_INTERVAL, setup_mining_chain};
 
 #[tokio::test]
 async fn test_rpc_manager_creation() {

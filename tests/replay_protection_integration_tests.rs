@@ -13,16 +13,20 @@ async fn test_custom_message_id_replay_protection() {
     let message_id = "custom-msg-123";
     let timestamp = current_timestamp() as i64;
 
-    assert!(protection
-        .check_message_id(message_id, timestamp)
-        .await
-        .is_ok());
+    assert!(
+        protection
+            .check_message_id(message_id, timestamp)
+            .await
+            .is_ok()
+    );
     assert!(ReplayProtection::validate_timestamp(timestamp, 3600).is_ok());
 
-    assert!(protection
-        .check_message_id(message_id, timestamp)
-        .await
-        .is_err());
+    assert!(
+        protection
+            .check_message_id(message_id, timestamp)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -90,10 +94,12 @@ async fn test_custom_messages_different_ids() {
         assert!(protection.check_message_id(&message_id, now).await.is_ok());
     }
 
-    assert!(protection
-        .check_message_id("custom-msg-5", now)
-        .await
-        .is_err());
+    assert!(
+        protection
+            .check_message_id("custom-msg-5", now)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -127,9 +133,11 @@ async fn test_replay_protection_cleanup_allows_reuse() {
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    assert!(protection
-        .check_message_id(message_id, current_timestamp() as i64)
-        .await
-        .is_ok());
+    assert!(
+        protection
+            .check_message_id(message_id, current_timestamp() as i64)
+            .await
+            .is_ok()
+    );
     assert!(protection.check_request_id(request_id).await.is_ok());
 }

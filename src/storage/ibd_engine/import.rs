@@ -19,10 +19,10 @@
 
 use super::database::UtxoDatabase;
 use super::disk_segment::DiskSegment;
-use super::types::{outpoint_to_output_key, OutputHeader, OutputKV, OutputKey};
+use super::types::{OutputHeader, OutputKV, OutputKey, outpoint_to_output_key};
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::key_to_outpoint;
-use crate::storage::utxo_value_codec::{decode_utxo_with_codec, ValueCodec};
+use crate::storage::utxo_value_codec::{ValueCodec, decode_utxo_with_codec};
 use anyhow::Result;
 use blvm_protocol::types::UTXO;
 use tracing::{info, warn};

@@ -1,11 +1,11 @@
 //! Address relay handlers (GetAddr, Addr).
 
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     AddrMessage, AddrV2Message, NetworkAddress, ProtocolMessage, ProtocolParser,
 };
 use crate::network::transport::TransportAddr;
-use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -207,8 +207,8 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::protocol::{AddrMessage, NetworkAddress};
     use crate::network::NetworkManager;
+    use crate::network::protocol::{AddrMessage, NetworkAddress};
     use std::net::SocketAddr;
 
     fn legacy_addr(port: u16) -> NetworkAddress {

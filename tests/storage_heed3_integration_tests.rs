@@ -2,7 +2,7 @@
 
 #[cfg(feature = "heed3")]
 mod heed3_integration_tests {
-    use blvm_node::storage::database::{create_database, DatabaseBackend};
+    use blvm_node::storage::database::{DatabaseBackend, create_database};
     use blvm_node::storage::utxo_value_codec::ValueCodec;
     use blvm_node::storage::*;
     use blvm_protocol::*;

@@ -12,14 +12,14 @@
 
 use crate::storage::database::Tree;
 use crate::storage::disk_utxo::{
-    key_to_outpoint, load_keys_from_disk, outpoint_to_key, SyncBatch, MAX_BATCH_OPS,
+    MAX_BATCH_OPS, SyncBatch, key_to_outpoint, load_keys_from_disk, outpoint_to_key,
 };
 use crate::storage::utxo_value_codec::ValueCodec;
 use anyhow::Result;
-use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
+use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
 use blvm_protocol::block::compute_block_tx_ids;
 use blvm_protocol::transaction::is_coinbase;
-use blvm_protocol::types::{OutPoint, UtxoSet, UTXO};
+use blvm_protocol::types::{OutPoint, UTXO, UtxoSet};
 use dashmap::{DashMap, DashSet};
 use hex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -585,11 +585,11 @@ impl IbdUtxoStore {
 
     #[inline]
     fn cache_put(&self, key: OutPointKey, utxo: Arc<UTXO>, block_height: u32) {
-        let gen = self.next_cache_generation();
+        let cache_gen = self.next_cache_generation();
         self.cache.insert(
             key,
             UtxoCacheSlot {
-                generation: gen,
+                generation: cache_gen,
                 utxo,
                 block_height,
             },

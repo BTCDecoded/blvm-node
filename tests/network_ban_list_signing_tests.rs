@@ -3,7 +3,7 @@
 mod common;
 
 use blvm_node::network::ban_list_signing::{
-    sign_ban_list, verify_ban_list_signature, SignedBanListMessage,
+    SignedBanListMessage, sign_ban_list, verify_ban_list_signature,
 };
 use blvm_node::network::protocol::BanListMessage;
 use common::{

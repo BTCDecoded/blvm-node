@@ -14,7 +14,7 @@
 
 use crate::rpc::blockchain::BlockchainRpc;
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Get chain tip hash
 pub async fn get_chain_tip(blockchain: &BlockchainRpc) -> Result<Value> {

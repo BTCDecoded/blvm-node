@@ -12,7 +12,7 @@
 //! RPC handlers receive config via `with_request_timeouts()` and use these helpers.
 
 use std::time::Duration;
-use tokio::time::{timeout, Timeout};
+use tokio::time::{Timeout, timeout};
 
 /// Apply timeout to a future
 pub fn with_timeout<F>(future: F, duration: Duration) -> Timeout<F>

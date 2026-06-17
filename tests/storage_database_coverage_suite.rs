@@ -2,8 +2,8 @@
 
 use blvm_node::config::DatabaseBackendConfig;
 use blvm_node::storage::database::{
-    backend_from_config, create_database, default_backend, fallback_backend,
-    module_subprocess_database_backend_preference, DatabaseBackend,
+    DatabaseBackend, backend_from_config, create_database, default_backend, fallback_backend,
+    module_subprocess_database_backend_preference,
 };
 use tempfile::TempDir;
 

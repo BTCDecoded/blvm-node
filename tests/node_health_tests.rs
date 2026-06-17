@@ -148,11 +148,13 @@ fn test_comprehensive_health_check_with_network_metrics() {
         .unwrap();
     assert_eq!(network_component.status, HealthStatus::Healthy);
     assert!(network_component.message.is_some());
-    assert!(network_component
-        .message
-        .as_ref()
-        .unwrap()
-        .contains("Peers: 10"));
+    assert!(
+        network_component
+            .message
+            .as_ref()
+            .unwrap()
+            .contains("Peers: 10")
+    );
 }
 
 #[test]
@@ -177,11 +179,13 @@ fn test_comprehensive_health_check_with_storage_metrics_healthy() {
         .unwrap();
     assert_eq!(storage_component.status, HealthStatus::Healthy);
     assert!(storage_component.message.is_some());
-    assert!(storage_component
-        .message
-        .as_ref()
-        .unwrap()
-        .contains("Blocks: 1000"));
+    assert!(
+        storage_component
+            .message
+            .as_ref()
+            .unwrap()
+            .contains("Blocks: 1000")
+    );
 }
 
 #[test]

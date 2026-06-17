@@ -22,7 +22,7 @@
 
 use super::file_io;
 use super::memory_run::{BloomFilter, Directory};
-use super::types::{OutputId, OutputKV, OUTPUT_ID_DELETED};
+use super::types::{OUTPUT_ID_DELETED, OutputId, OutputKV};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
@@ -67,7 +67,7 @@ impl DiskSegment {
             f.write_all(&run.height_range.0.to_le_bytes())?;
             f.write_all(&run.height_range.1.to_le_bytes())?;
             f.write_all(&0u32.to_le_bytes())?; // padding
-                                               // Safety: OutputKV is repr(C) with no padding bits. Writing raw bytes is correct.
+            // Safety: OutputKV is repr(C) with no padding bits. Writing raw bytes is correct.
             let entry_bytes = unsafe {
                 std::slice::from_raw_parts(
                     run.entries.as_ptr() as *const u8,

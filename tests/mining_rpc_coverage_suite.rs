@@ -93,10 +93,11 @@ async fn test_generatetoaddress_regtest_smoke() {
 async fn test_prioritise_transaction_without_mempool_errors() {
     let (_dir, rpc) = rpc_with_chain();
     let missing = "00".repeat(32);
-    assert!(rpc
-        .prioritise_transaction(&json!([missing, 0.0, 0]))
-        .await
-        .is_err());
+    assert!(
+        rpc.prioritise_transaction(&json!([missing, 0.0, 0]))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

@@ -4,9 +4,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use blvm_node::module::inter_module::ModuleApiRegistry;
 use blvm_node::module::inter_module::api::ModuleAPI;
 use blvm_node::module::inter_module::router::ModuleRouter;
-use blvm_node::module::inter_module::ModuleApiRegistry;
 use blvm_node::module::traits::ModuleError;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;

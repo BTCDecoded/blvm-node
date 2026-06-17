@@ -5,7 +5,7 @@
 #![cfg(feature = "rocksdb")]
 
 use anyhow::Result;
-use blvm_node::storage::bitcoin_core_migrate::{run_migrate_core, MigrateCoreArgs};
+use blvm_node::storage::bitcoin_core_migrate::{MigrateCoreArgs, run_migrate_core};
 use blvm_node::storage::bitcoin_detection::CoreDataNetwork;
 use clap::Parser;
 use std::path::PathBuf;

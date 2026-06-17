@@ -28,7 +28,7 @@ use crossbeam_channel::{Receiver, Sender};
 use rustc_hash::FxHashMap;
 
 #[cfg(feature = "production")]
-use crate::storage::disk_utxo::{load_keys_from_disk, OutPointKey};
+use crate::storage::disk_utxo::{OutPointKey, load_keys_from_disk};
 #[cfg(feature = "production")]
 use crate::storage::ibd_utxo_store::IbdUtxoStore;
 
@@ -235,7 +235,12 @@ pub(crate) fn run_prefetch_worker(
             };
             tracing::info!(
                 "[PREFETCH_PERF] h={} total_blocks={} disk_reads={} disk_ms={} avg_ms_per_read={:.3} reads_per_block={:.1}",
-                h, total_blocks, total_reads, total_ms, avg_ms_per_read, reads_per_block
+                h,
+                total_blocks,
+                total_reads,
+                total_ms,
+                avg_ms_per_read,
+                reads_per_block
             );
         }
     }

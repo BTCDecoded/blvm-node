@@ -11,7 +11,7 @@ mod bitcoin_core_tests {
     };
     use blvm_node::storage::bitcoin_core_storage::BitcoinCoreStorage;
     use blvm_node::storage::bitcoin_detection::{BitcoinCoreDetection, CoreDataNetwork};
-    use std::fs::{create_dir_all, File};
+    use std::fs::{File, create_dir_all};
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -232,13 +232,21 @@ mod bitcoin_core_tests {
             auto_migrate_core: true,
             ..Default::default()
         };
-        std::env::set_var("BLVM_NO_AUTO_MIGRATE_CORE", "1");
+        unsafe {
+            std::env::set_var("BLVM_NO_AUTO_MIGRATE_CORE", "1");
+        }
         assert!(!cfg.auto_migrate_core_effective());
-        std::env::remove_var("BLVM_NO_AUTO_MIGRATE_CORE");
+        unsafe {
+            std::env::remove_var("BLVM_NO_AUTO_MIGRATE_CORE");
+        }
 
-        std::env::set_var("BLVM_AUTO_MIGRATE_CORE", "0");
+        unsafe {
+            std::env::set_var("BLVM_AUTO_MIGRATE_CORE", "0");
+        }
         assert!(!cfg.auto_migrate_core_effective());
-        std::env::remove_var("BLVM_AUTO_MIGRATE_CORE");
+        unsafe {
+            std::env::remove_var("BLVM_AUTO_MIGRATE_CORE");
+        }
     }
 
     #[test]
@@ -247,9 +255,13 @@ mod bitcoin_core_tests {
             reuse_core_block_files: false,
             ..Default::default()
         };
-        std::env::set_var("BLVM_REUSE_CORE_BLOCK_FILES", "1");
+        unsafe {
+            std::env::set_var("BLVM_REUSE_CORE_BLOCK_FILES", "1");
+        }
         assert!(cfg.reuse_core_block_files_effective());
-        std::env::remove_var("BLVM_REUSE_CORE_BLOCK_FILES");
+        unsafe {
+            std::env::remove_var("BLVM_REUSE_CORE_BLOCK_FILES");
+        }
     }
 
     #[test]

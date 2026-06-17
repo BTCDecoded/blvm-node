@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::utils::{log_error, with_custom_timeout, HANDSHAKE_POLL_SLEEP};
+use crate::utils::{HANDSHAKE_POLL_SLEEP, log_error, with_custom_timeout};
 
 /// Main node run loop. Called from `Node::start()` after components are started.
 pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
@@ -217,7 +217,10 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                                         );
                                     }
                                 } else {
-                                    warn!("Could not find block hash for height {} to generate commitment", current_height);
+                                    warn!(
+                                        "Could not find block hash for height {} to generate commitment",
+                                        current_height
+                                    );
                                 }
                             }
                         }
@@ -302,8 +305,10 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                                         false,
                                     ) {
                                         Ok(prune_stats) => {
-                                            info!("Automatic pruning completed: {} blocks pruned, {} blocks kept", 
-                                                      prune_stats.blocks_pruned, prune_stats.blocks_kept);
+                                            info!(
+                                                "Automatic pruning completed: {} blocks pruned, {} blocks kept",
+                                                prune_stats.blocks_pruned, prune_stats.blocks_kept
+                                            );
                                             // Flush storage to persist pruning changes
                                             use crate::utils::log_error;
                                             log_error(

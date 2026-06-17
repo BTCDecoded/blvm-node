@@ -944,7 +944,9 @@ impl NodeConfig {
                             "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
                              Consider setting permissions to 600 for security. \
                              Run: chmod 600 {:?}",
-                            path, mode, path
+                            path,
+                            mode,
+                            path
                         );
                     }
                 }
@@ -1026,14 +1028,24 @@ impl NodeConfig {
 
                     match client.get(&health_url).send().await {
                         Ok(response) if response.status().is_success() => {
-                            info!("Governance server detected and responding at {}, auto-enabling governance", commons_url);
+                            info!(
+                                "Governance server detected and responding at {}, auto-enabling governance",
+                                commons_url
+                            );
                             gov_config.enabled = true;
                         }
                         Ok(response) => {
-                            debug!("Governance server at {} responded with status {}, keeping governance disabled", commons_url, response.status());
+                            debug!(
+                                "Governance server at {} responded with status {}, keeping governance disabled",
+                                commons_url,
+                                response.status()
+                            );
                         }
                         Err(e) => {
-                            debug!("Governance server at {} not reachable: {}, keeping governance disabled", commons_url, e);
+                            debug!(
+                                "Governance server at {} not reachable: {}, keeping governance disabled",
+                                commons_url, e
+                            );
                         }
                     }
                 }

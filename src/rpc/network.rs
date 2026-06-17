@@ -8,7 +8,7 @@ use crate::rpc::params::{
     param_bool, param_bool_default, param_str, param_str_required, param_u64_default,
 };
 use crate::utils::current_timestamp;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::debug;

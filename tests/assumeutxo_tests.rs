@@ -6,9 +6,9 @@
 use blvm_node::config::NodeConfig;
 use blvm_node::rpc::blockchain::BlockchainRpc;
 use blvm_node::storage::assumeutxo::{
-    assumeutxo_data_for_blockhash, chainstate_snapshot_dir, clear_assumeutxo_marker,
-    height_for_blockhash, is_background_validated, read_base_blockhash_marker,
-    write_background_validated_marker, write_base_blockhash_marker, AssumeUtxoManager,
+    AssumeUtxoManager, assumeutxo_data_for_blockhash, chainstate_snapshot_dir,
+    clear_assumeutxo_marker, height_for_blockhash, is_background_validated,
+    read_base_blockhash_marker, write_background_validated_marker, write_base_blockhash_marker,
 };
 use serde_json::json;
 use std::path::Path;
@@ -158,10 +158,12 @@ fn test_load_snapshot_from_path_nonexistent() {
     let manager = AssumeUtxoManager::new(Path::new("."));
     let result = manager.load_snapshot_from_path(Path::new("/nonexistent/utxo_snapshot_999.dat"));
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Snapshot file not found"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Snapshot file not found")
+    );
 }
 
 #[tokio::test]

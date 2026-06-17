@@ -82,8 +82,9 @@ async fn test_addnode_and_disconnect_smoke() {
 #[tokio::test]
 async fn test_addnode_invalid_address_errors() {
     let rpc = rpc_with_network();
-    assert!(rpc
-        .add_node(&json!(["not-an-address", "add"]))
-        .await
-        .is_err());
+    assert!(
+        rpc.add_node(&json!(["not-an-address", "add"]))
+            .await
+            .is_err()
+    );
 }

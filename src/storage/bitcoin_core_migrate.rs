@@ -3,26 +3,26 @@
 //! Used by `blvm migrate core` and the standalone migrate-bitcoin-core binary.
 
 use super::assumeutxo::AssumeUtxoManager;
-use super::bitcoin_core_blocks::{read_block_at_file_pos, BitcoinCoreBlockReader};
+use super::bitcoin_core_blocks::{BitcoinCoreBlockReader, read_block_at_file_pos};
 use super::bitcoin_core_format::{
-    core_utxo_key_to_outpoint_key, get_key_prefix, parse_best_block_value, parse_block_index_key,
-    parse_coin, parse_core_coin, parse_disk_block_index, read_core_varint, BLOCK_HAVE_DATA,
+    BLOCK_HAVE_DATA, core_utxo_key_to_outpoint_key, get_key_prefix, parse_best_block_value,
+    parse_block_index_key, parse_coin, parse_core_coin, parse_disk_block_index, read_core_varint,
 };
 use super::bitcoin_core_obfuscation::CoreDbObfuscation;
 use super::bitcoin_core_storage::BitcoinCoreStorage;
 use super::bitcoin_detection::{BitcoinCoreDetection, CoreDataNetwork};
 use super::blockstore::BlockStore;
 use super::chainstate::{ChainInfo, ChainParams, ChainState};
-use super::database::{create_database, default_backend, DatabaseBackend};
+use super::database::{DatabaseBackend, create_database, default_backend};
 use super::txindex::TxIndex;
 use super::utxostore::UtxoStore;
 use anyhow::{Context, Result};
-use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
+use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
 use blvm_protocol::{Hash, UTXO};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::{info, warn};
 
@@ -1480,8 +1480,8 @@ pub fn assess_core_block_coverage(
 #[cfg(test)]
 mod tests {
     use super::{
-        core_migrate_block_workers_effective, prepare_block_import_jobs, sample_verify_heights,
-        BlockImportJob, CoreBlockCoverage,
+        BlockImportJob, CoreBlockCoverage, core_migrate_block_workers_effective,
+        prepare_block_import_jobs, sample_verify_heights,
     };
 
     #[test]
@@ -1513,9 +1513,13 @@ mod tests {
 
     #[test]
     fn core_migrate_block_workers_respects_env() {
-        std::env::set_var("BLVM_CORE_MIGRATE_BLOCK_WORKERS", "2");
+        unsafe {
+            std::env::set_var("BLVM_CORE_MIGRATE_BLOCK_WORKERS", "2");
+        }
         assert_eq!(core_migrate_block_workers_effective(), 2);
-        std::env::remove_var("BLVM_CORE_MIGRATE_BLOCK_WORKERS");
+        unsafe {
+            std::env::remove_var("BLVM_CORE_MIGRATE_BLOCK_WORKERS");
+        }
     }
 
     #[test]
