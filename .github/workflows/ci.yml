@@ -816,7 +816,12 @@ jobs:
         run: |
           rustup toolchain install nightly
           export PATH="$HOME/.cargo/bin:$PATH"
-          cargo install cargo-fuzz
+          # cargo-fuzz is a nightly-only tool; install it with nightly cargo so its
+          # build-time MSRV check runs against nightly rather than the stable toolchain
+          # pinned for the project. cargo install (stable) would fail whenever a
+          # cargo-fuzz transitive dep raises its MSRV above our stable pin.
+          # Skip install if a cached binary is already present on the self-hosted runner.
+          command -v cargo-fuzz >/dev/null 2>&1 || cargo +nightly install cargo-fuzz
 
       - name: Initialize corpus dirs
         working-directory: fuzz
