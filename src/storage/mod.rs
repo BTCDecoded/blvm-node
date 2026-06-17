@@ -7,6 +7,8 @@ pub mod assumeutxo;
 pub mod bitcoin_core_blocks;
 pub mod bitcoin_core_format;
 #[cfg(feature = "rocksdb")]
+pub mod bitcoin_core_leveldb;
+#[cfg(feature = "rocksdb")]
 pub mod bitcoin_core_migrate;
 #[cfg(feature = "rocksdb")]
 pub mod bitcoin_core_obfuscation;
@@ -365,7 +367,9 @@ impl Storage {
                 stop_after: None,
                 reuse_core_block_files: storage_config
                     .map(|s| s.reuse_core_block_files_effective())
-                    .unwrap_or(false),
+                    .unwrap_or_else(|| {
+                        crate::config::StorageConfig::default().reuse_core_block_files_effective()
+                    }),
             })?;
 
             return Ok(dest);

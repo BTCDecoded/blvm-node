@@ -43,6 +43,9 @@ blvm-muhash = { version = ">=0.1, <1" }
 sled = { version = "=0.34.7", optional = true }
 redb = { version = "=1.4", optional = true }
 rocksdb = { version = "=0.24.0", optional = true }
+# Pure-Rust LevelDB reader: used when Bitcoin Core chainstate has .ldb (true LevelDB) files
+# that RocksDB cannot open. Gated behind the rocksdb feature (migration requires rocksdb dest).
+rusty-leveldb = { version = "4", optional = true }
 # Git-pinned deps: used only where upstream has not cut a crates.io release containing
 # the API we need. All are pinned to an exact rev or tag to guarantee reproducibility.
 # Policy: upgrade to crates.io as soon as a compatible release ships; never leave
@@ -217,7 +220,7 @@ sysinfo = ["dep:sysinfo"]
 sled = ["dep:sled"]
 redb = ["dep:redb"]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
-rocksdb = ["dep:rocksdb"]
+rocksdb = ["dep:rocksdb", "dep:rusty-leveldb"]
 tidesdb = ["dep:tidesdb"]
 heed3 = ["dep:heed3", "dep:rkyv"]
 # Process sandboxing (Unix)

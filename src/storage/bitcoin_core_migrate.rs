@@ -272,6 +272,16 @@ pub fn migrate_core_data(args: MigrateCoreArgs) -> Result<()> {
     info!("[CORE_IMPORT] Source: {:?}", args.source);
     info!("[CORE_IMPORT] Destination: {:?}", args.destination);
     info!("[CORE_IMPORT] Network: {:?}", args.network);
+    if args.reuse_core_block_files {
+        info!(
+            "[CORE_IMPORT] reuse_core_block_files=true — UTXO/index migrate only; \
+             block bodies stay in Core blocks/ (no ~700 GB copy)"
+        );
+    } else {
+        info!(
+            "[CORE_IMPORT] reuse_core_block_files=false — block bodies will be copied into the BLVM store"
+        );
+    }
 
     if !args.source.exists() {
         anyhow::bail!("Source directory does not exist: {:?}", args.source);
@@ -1383,6 +1393,28 @@ impl CoreBlockCoverage {
 
 /// Assess whether Core block files cover the indexed chain (detect pruned datadirs).
 #[cfg(feature = "rocksdb")]
+/// Return `true` if `blocks_dir` contains at least one `blk*.dat` file larger than 1 MB.
+///
+/// Used as a fallback when the block index cannot be opened (e.g. mixed LevelDB/RocksDB
+/// format): if large block files are present, blocks are very likely available on disk.
+fn blocks_dir_has_block_files(blocks_dir: &Path) -> bool {
+    let Ok(rd) = blocks_dir.read_dir() else {
+        return false;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let n = name.to_string_lossy();
+        if n.starts_with("blk") && n.ends_with(".dat") {
+            if let Ok(meta) = entry.metadata() {
+                if meta.len() > 1_000_000 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn assess_core_block_coverage(
     source_dir: &Path,
     network: CoreDataNetwork,
@@ -1393,15 +1425,28 @@ pub fn assess_core_block_coverage(
     let blocks_dir = source_dir.join("blocks");
     let block_index_db = match BitcoinCoreStorage::open_bitcoin_core_block_index(source_dir) {
         Ok(db) => Arc::from(db),
-        Err(_) => {
+        Err(e) => {
+            // Block index unavailable (e.g. mixed LevelDB/RocksDB format).
+            // Fall back to a heuristic: count blk*.dat files in the blocks/ directory.
+            // If at least one non-trivially-sized blk file exists, we assume blocks are
+            // present on disk and set tip_readable=true so callers can proceed.
+            warn!("[CORE_IMPORT] blocks/index unavailable for coverage assessment: {e}");
+            let tip_readable = blocks_dir_has_block_files(&blocks_dir);
+            if tip_readable {
+                warn!(
+                    "[CORE_IMPORT] Falling back to blk*.dat presence check — \
+                     block index could not be read.  Tip height is unknown; \
+                     BLVM will rely on the block files being intact at runtime."
+                );
+            }
             return Ok(CoreBlockCoverage {
                 max_index_height: 0,
                 block_indexes: 0,
-                blocks_with_data: 0,
+                blocks_with_data: if tip_readable { 1 } else { 0 },
                 tip_height: 0,
-                tip_has_data: false,
-                tip_readable: false,
-                lowest_height_with_data: None,
+                tip_has_data: tip_readable,
+                tip_readable,
+                lowest_height_with_data: if tip_readable { Some(0) } else { None },
             });
         }
     };

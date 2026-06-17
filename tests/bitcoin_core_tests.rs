@@ -250,6 +250,13 @@ mod bitcoin_core_tests {
     }
 
     #[test]
+    fn test_storage_config_reuse_core_block_files_default() {
+        let cfg = StorageConfig::default();
+        assert!(cfg.reuse_core_block_files);
+        assert!(cfg.reuse_core_block_files_effective());
+    }
+
+    #[test]
     fn test_storage_config_reuse_core_block_files_env() {
         let cfg = StorageConfig {
             reuse_core_block_files: false,

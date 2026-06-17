@@ -66,27 +66,54 @@ impl BitcoinCoreStorage {
         false
     }
 
-    /// Open Core chainstate LevelDB at `core_dir/chainstate`.
+    /// Open Core chainstate at `core_dir/chainstate`.
+    ///
+    /// Automatically selects the correct reader:
+    /// - `.ldb` files → `rusty-leveldb` (true LevelDB format, produced by all standard Bitcoin
+    ///   Core releases).  RocksDB segfaults when trying to open these.
+    /// - `.sst` files → RocksDB reader (produced by patched builds or regtest fixtures
+    ///   generated with a RocksDB-linked Core).
     #[cfg(feature = "rocksdb")]
     pub fn open_bitcoin_core_database(
         core_dir: &Path,
         _network: CoreDataNetwork,
     ) -> Result<Box<dyn crate::storage::database::Database>> {
+        use crate::storage::bitcoin_core_leveldb::{LevelDbDatabase, dir_is_leveldb};
         use crate::storage::database::rocksdb_impl::RocksDBDatabase;
 
         BitcoinCoreDetection::verify_database(core_dir).with_context(|| {
             format!("Bitcoin Core chainstate not found or invalid under {core_dir:?}")
         })?;
 
+        let chainstate_path = core_dir.join("chainstate");
+        if dir_is_leveldb(&chainstate_path) {
+            tracing::debug!("[CORE_IMPORT] chainstate has .ldb files — using rusty-leveldb reader");
+            let db = LevelDbDatabase::open(&chainstate_path)?;
+            return Ok(Box::new(db));
+        }
+
+        tracing::debug!("[CORE_IMPORT] chainstate has .sst files — using RocksDB reader");
         let db = RocksDBDatabase::open_bitcoin_core(core_dir)?;
         Ok(Box::new(db))
     }
 
-    /// Open Core `blocks/index` LevelDB at `core_dir/blocks/index`.
+    /// Open Core `blocks/index` at `core_dir/blocks/index`.
+    ///
+    /// Same format detection as [`open_bitcoin_core_database`].
+    ///
+    /// Returns `Err` (without crashing) when the database contains both LevelDB `.ldb` files
+    /// and RocksDB `.sst` files.  This mixed state arises when a standard bitcoind datadir is
+    /// opened by a RocksDB-linked node (or BLVM tooling) which compacts _some_ SSTs to `.sst`
+    /// format but leaves the original `.ldb` files referenced by the MANIFEST.  RocksDB 10.x
+    /// segfaults when it encounters the `.ldb` SSTs; rusty-leveldb misses all `.sst` entries.
+    /// The caller should treat `Err` as "block index unavailable" and fall back gracefully.
     #[cfg(feature = "rocksdb")]
     pub fn open_bitcoin_core_block_index(
         core_dir: &Path,
     ) -> Result<Box<dyn crate::storage::database::Database>> {
+        use crate::storage::bitcoin_core_leveldb::{
+            LevelDbDatabase, dir_has_mixed_sst_formats, dir_is_leveldb,
+        };
         use crate::storage::database::rocksdb_impl::RocksDBDatabase;
 
         let index_path = core_dir.join("blocks").join("index");
@@ -95,6 +122,28 @@ impl BitcoinCoreStorage {
         }
         BitcoinCoreDetection::detect_db_format(&index_path)
             .with_context(|| format!("Invalid LevelDB format for block index at {index_path:?}"))?;
+
+        // Guard against the mixed-format state before handing off to either reader.
+        if dir_has_mixed_sst_formats(&index_path) {
+            anyhow::bail!(
+                "blocks/index at {:?} contains both LevelDB (.ldb) and RocksDB (.sst) SSTable \
+                 files.  This mixed state cannot be safely read by either reader.  \
+                 Run `bitcoin-cli -datadir=<dir> -chain=<net> stop` then restart bitcoind \
+                 briefly (it will compact on startup) to resolve the mixed state, \
+                 or pass BLVM_SKIP_BLOCK_INDEX=1 to migrate chainstate only.",
+                index_path
+            );
+        }
+
+        if dir_is_leveldb(&index_path) {
+            tracing::debug!(
+                "[CORE_IMPORT] blocks/index has .ldb files — using rusty-leveldb reader"
+            );
+            let db = LevelDbDatabase::open(&index_path)?;
+            return Ok(Box::new(db));
+        }
+
+        tracing::debug!("[CORE_IMPORT] blocks/index has .sst files — using RocksDB reader");
         let db = RocksDBDatabase::open_bitcoin_core_block_index(core_dir)?;
         Ok(Box::new(db))
     }

@@ -57,6 +57,7 @@ fn main() -> Result<()> {
         verbose: args.verbose,
         dest_backend: None,
         stop_after: None,
-        reuse_core_block_files: false,
+        reuse_core_block_files: blvm_node::config::StorageConfig::default()
+            .reuse_core_block_files_effective(),
     })
 }

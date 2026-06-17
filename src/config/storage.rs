@@ -371,11 +371,17 @@ pub struct StorageConfig {
     pub core_migrate_destination: Option<String>,
 
     /// Keep Core `blocks/` in place during migrate; BLVM reads blk*.dat via fallback reader (saves disk).
-    #[serde(default)]
+    /// Default **true**: migrating from a full Core datadir does not copy ~700 GB of block files.
+    /// Set **`false`** or **`BLVM_REUSE_CORE_BLOCK_FILES=0`** to copy block bodies into the BLVM store.
+    #[serde(default = "default_reuse_core_block_files")]
     pub reuse_core_block_files: bool,
 }
 
 fn default_auto_migrate_core() -> bool {
+    true
+}
+
+fn default_reuse_core_block_files() -> bool {
     true
 }
 
@@ -463,7 +469,7 @@ impl Default for StorageConfig {
             compression: None,
             auto_migrate_core: true,
             core_migrate_destination: None,
-            reuse_core_block_files: false,
+            reuse_core_block_files: true,
         }
     }
 }
