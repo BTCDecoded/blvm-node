@@ -102,6 +102,8 @@ zeroize = { version = "=1.8.2", features = ["zeroize_derive"] }  # ^1.8 required
 
 # Network utilities — local IP detection is stdlib-only (UDP socket trick in lan_discovery.rs)
 constant_time_eq = "=0.3"  # Constant-time comparison for token authentication
+# RUSTSEC-2026-0009: iroh/rcgen transitive; force >=0.3.47 (crates.io ships 0.3.47+).
+time = { version = ">=0.3.47", default-features = false }
 aes-gcm = "=0.10.3"  # Module encryption
 hkdf = "=0.12.4"  # Key derivation for module encryption
 
@@ -276,11 +278,9 @@ compression = ["block-compression", "utxo-compression", "witness-compression"]
 # Security: patch transitive deps via git (crates-io ↔ crates-io patch not allowed).
 # Exit criteria (reconcile with `.cargo/audit.toml` + `docs/AUDIT_SUPPRESSIONS.md`):
 # - quinn-proto: drop when crates.io ships fixes merged at tag `quinn-proto-0.11.14` (RUSTSEC-2026-0037).
-# - time: drop when crates.io `time` ≥ patched release matching tag `v0.3.47` (RUSTSEC-2026-0009).
 # After bump: run plain `cargo audit`, `cargo tree -i quinn-proto`, `cargo tree -i time`, then remove obsolete ignores.
 [patch.crates-io]
 quinn-proto = { git = "https://github.com/quinn-rs/quinn", tag = "quinn-proto-0.11.14" }
-time = { git = "https://github.com/time-rs/time", tag = "v0.3.47" }
 # Local monorepo: sibling paths override the blvm-* version pins above.
 blvm-protocol = { path = "../blvm-protocol" }
 blvm-consensus = { path = "../blvm-consensus" }

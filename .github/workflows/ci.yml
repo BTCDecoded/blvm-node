@@ -816,7 +816,9 @@ jobs:
         run: |
           rustup toolchain install nightly
           export PATH="$HOME/.cargo/bin:$PATH"
-          cargo install cargo-fuzz
+          # cargo-fuzz 0.13+ MSRV is rustc 1.91; project stable is 1.88. Install the
+          # subcommand with nightly (libFuzzer builds already use +nightly).
+          command -v cargo-fuzz >/dev/null 2>&1 || cargo +nightly install cargo-fuzz --locked
 
       - name: Initialize corpus dirs
         working-directory: fuzz
