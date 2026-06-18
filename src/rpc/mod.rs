@@ -101,6 +101,8 @@ pub struct RpcManager {
     /// Defaults to `false` — startup fails if a public bind is attempted without auth.
     /// Set to `true` only in controlled environments (e.g. isolated test networks).
     allow_unauthenticated_rpc: bool,
+    /// When true, `loadmodule` may call blvm-marketplace to fetch missing modules before local discovery retry.
+    marketplace_fetch_enabled: bool,
 }
 
 impl RpcManager {
@@ -127,6 +129,7 @@ impl RpcManager {
             rest_api_shutdown_tx: None,
             auth_manager: None,
             allow_unauthenticated_rpc: false,
+            marketplace_fetch_enabled: false,
             node_shutdown: None,
             #[cfg(feature = "bip70-http")]
             payment_processor: None,
@@ -284,6 +287,11 @@ impl RpcManager {
         self
     }
 
+    /// Enable marketplace auto-fetch for `loadmodule` (requires blvm-marketplace loaded).
+    pub fn set_marketplace_fetch(&mut self, enabled: bool) {
+        self.marketplace_fetch_enabled = enabled;
+    }
+
     /// Set storage and mempool dependencies for RPC handlers
     pub fn with_dependencies(
         mut self,
@@ -403,6 +411,7 @@ impl RpcManager {
             quinn_shutdown_tx: None,
             auth_manager: None,
             allow_unauthenticated_rpc: false,
+            marketplace_fetch_enabled: false,
             node_shutdown: None,
             #[cfg(feature = "bip70-http")]
             payment_processor: None,
@@ -477,6 +486,9 @@ impl RpcManager {
             control::ControlRpc::with_shutdown(shutdown_tx.clone(), self.node_shutdown.clone());
         if let Some(ref mgr) = self.module_manager {
             control_rpc = control_rpc.with_module_manager(Arc::clone(mgr));
+        }
+        if self.marketplace_fetch_enabled {
+            control_rpc = control_rpc.with_marketplace_fetch(true);
         }
         let control_rpc = Arc::new(control_rpc);
 
@@ -748,6 +760,7 @@ impl RpcManager {
                     )
                 };
                 rest_server = rest_server.with_connection_limiter(Arc::clone(&connection_limiter));
+                rest_server = rest_server.with_control(Arc::clone(&control_rpc));
 
                 // Set payment processor if available
                 #[cfg(feature = "bip70-http")]

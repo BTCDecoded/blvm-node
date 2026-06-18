@@ -2,6 +2,7 @@
 //!
 //! Stores chain metadata including tip, height, and chain parameters.
 
+use crate::storage::block_index::{BlockIndex, BlockIndexStatus};
 use crate::storage::database::{Database, Tree};
 use anyhow::Result;
 use blvm_muhash::MUHASH_RUNNING_STATE_BYTES;
@@ -61,6 +62,7 @@ pub struct ChainState {
     network_hashrate_cache: Arc<dyn Tree>, // Network hashrate cache (for fast getmininginfo)
     invalid_blocks: Arc<dyn Tree>,
     chain_tips: Arc<dyn Tree>,
+    block_index: BlockIndex,
 }
 
 impl ChainState {
@@ -73,6 +75,7 @@ impl ChainState {
         let network_hashrate_cache = Arc::from(db.open_tree("network_hashrate_cache")?);
         let invalid_blocks = Arc::from(db.open_tree("invalid_blocks")?);
         let chain_tips = Arc::from(db.open_tree("chain_tips")?);
+        let block_index = BlockIndex::new(Arc::clone(&db))?;
 
         Ok(Self {
             db,
@@ -83,6 +86,7 @@ impl ChainState {
             network_hashrate_cache,
             invalid_blocks,
             chain_tips,
+            block_index,
         })
     }
 
@@ -107,6 +111,14 @@ impl ChainState {
         };
 
         self.store_chain_info(&chain_info)?;
+
+        let genesis_hash = chain_info.tip_hash;
+        self.block_index.insert(
+            &genesis_hash,
+            0,
+            &genesis_header.prev_block_hash,
+            BlockIndexStatus::Valid,
+        )?;
         Ok(())
     }
 
@@ -196,6 +208,15 @@ impl ChainState {
     /// Update chain tip and calculate incremental chainwork
     /// This should be called when a new block is connected to the chain
     pub fn update_tip(&self, tip_hash: &Hash, tip_header: &BlockHeader, height: u64) -> Result<()> {
+        self.block_index.insert(
+            tip_hash,
+            height,
+            &tip_header.prev_block_hash,
+            BlockIndexStatus::Valid,
+        )?;
+
+        self.cache_block_chainwork(tip_hash, tip_header, height)?;
+
         let mut info = match self.load_chain_info()? {
             Some(i) => i,
             None => {
@@ -211,31 +232,39 @@ impl ChainState {
             }
         };
 
-        // Calculate work for this block
-        let block_work = Self::calculate_work_from_bits(tip_header.bits);
-        self.store_work(tip_hash, block_work)?;
-
-        // Calculate cumulative chainwork: chainwork[new] = chainwork[prev] + work[new]
-        let prev_chainwork = if height > 0 {
-            // Get previous block hash
-            if let Ok(Some(prev_hash)) = self.get_prev_block_hash(tip_header) {
-                self.get_chainwork(&prev_hash)?.unwrap_or(0)
-            } else {
-                0
-            }
-        } else {
-            // Genesis block: chainwork = work
-            0
-        };
-
-        let new_chainwork = prev_chainwork + block_work as u128;
-        self.store_chainwork(tip_hash, new_chainwork)?;
-
         info.tip_hash = *tip_hash;
         info.tip_header = tip_header.clone();
         info.height = height;
         self.store_chain_info(&info)?;
         Ok(())
+    }
+
+    /// Cache per-block and cumulative chainwork without changing the active tip.
+    pub fn cache_block_chainwork(
+        &self,
+        block_hash: &Hash,
+        header: &BlockHeader,
+        height: u64,
+    ) -> Result<()> {
+        let block_work = Self::calculate_work_from_bits(header.bits);
+        self.store_work(block_hash, block_work)?;
+        let chainwork = self.chainwork_for_header(header, height)?;
+        self.store_chainwork(block_hash, chainwork)?;
+        Ok(())
+    }
+
+    fn chainwork_for_header(&self, header: &BlockHeader, height: u64) -> Result<u128> {
+        let block_work = Self::calculate_work_from_bits(header.bits);
+        let prev_chainwork = if height > 0 {
+            if let Ok(Some(prev_hash)) = self.get_prev_block_hash(header) {
+                self.get_chainwork(&prev_hash)?.unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        Ok(prev_chainwork + block_work as u128)
     }
 
     /// Get previous block hash from header
@@ -669,6 +698,34 @@ impl ChainState {
         self.network_hashrate_cache.clear()?;
         self.invalid_blocks.clear()?;
         self.chain_tips.clear()?;
+        self.block_index.reset()?;
+        Ok(())
+    }
+
+    /// Per-hash block tree index (parent links, tip enumeration).
+    pub fn block_index(&self) -> &BlockIndex {
+        &self.block_index
+    }
+
+    /// Record a connected block in the tree index (side chains included).
+    pub fn record_connected_block(&self, hash: &Hash, height: u64, prev_hash: &Hash) -> Result<()> {
+        let status = if self.is_invalid(hash)? {
+            BlockIndexStatus::Invalid
+        } else {
+            BlockIndexStatus::Valid
+        };
+        self.block_index.insert(hash, height, prev_hash, status)
+    }
+
+    /// Index block tree metadata and cumulative chainwork without changing the active tip.
+    pub fn index_connected_block(
+        &self,
+        hash: &Hash,
+        header: &BlockHeader,
+        height: u64,
+    ) -> Result<()> {
+        self.record_connected_block(hash, height, &header.prev_block_hash)?;
+        self.cache_block_chainwork(hash, header, height)?;
         Ok(())
     }
 
@@ -686,6 +743,7 @@ impl ChainState {
             .as_secs();
         let value = timestamp.to_be_bytes();
         self.invalid_blocks.insert(hash.as_slice(), &value)?;
+        self.block_index.mark_invalid(hash)?;
         Ok(())
     }
 

@@ -90,10 +90,10 @@ Database backend options:
 [storage.indexing]
 enable_address_index = false
 enable_value_index = false
-strategy = "eager"  # or "lazy"
-max_indexed_addresses = 1000000
-enable_compression = false
-background_indexing = false
+strategy = "eager"  # or "lazy" (defer until query / background_indexing thread)
+max_indexed_addresses = 0  # 0 = unlimited
+enable_compression = false  # zstd index blobs; requires compression (blvm default features)
+background_indexing = false  # lazy only: txindex-bg thread after block connect
 ```
 
 ## Module Configuration

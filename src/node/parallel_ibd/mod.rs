@@ -2245,6 +2245,7 @@ impl ParallelIBD {
     ) -> Result<(
         std::borrow::Cow<'a, [Hash]>,
         Option<blvm_protocol::block::UtxoDelta>,
+        blvm_consensus::reorganization::BlockUndoLog,
     )> {
         // BIP54 activation from version bits when miners signal (no fixed height required).
         // Merge candidates with `min` so an earlier period’s lock-in is not overwritten by a
@@ -2328,22 +2329,23 @@ impl ParallelIBD {
         // value satisfies the gate. During IBD the header chain is already PoW-validated before
         // block download begins, so skipping scripts below assume_valid_height is safe.
         let best_header_chainwork = Some(0u128);
-        let (result, new_utxo_set, tx_ids, utxo_delta) = blvm_protocol::block::connect_block_ibd(
-            block,
-            witnesses,
-            owned_utxo,
-            height,
-            &context,
-            bip30_index,
-            precomputed_tx_ids,
-            block_arc,
-            witnesses_arc,
-            best_header_chainwork,
-        )?;
+        let (result, new_utxo_set, tx_ids, utxo_delta, undo_log) =
+            blvm_consensus::block::connect_block_ibd_with_undo(
+                block,
+                witnesses,
+                owned_utxo,
+                height,
+                &context,
+                bip30_index,
+                precomputed_tx_ids,
+                block_arc,
+                witnesses_arc,
+                best_header_chainwork,
+            )?;
 
         *utxo_set = new_utxo_set;
         match result {
-            ValidationResult::Valid => Ok((tx_ids, utxo_delta)),
+            ValidationResult::Valid => Ok((tx_ids, utxo_delta, undo_log)),
             ValidationResult::Invalid(reason) => Err(anyhow::anyhow!(
                 "Block validation failed at height {}: {}",
                 height,
@@ -2545,7 +2547,12 @@ impl ParallelIBD {
         &self,
         blockstore: &BlockStore,
         _storage: Option<&Arc<Storage>>,
-        pending: &mut Vec<(Arc<Block>, Arc<Vec<Vec<Witness>>>, u64)>,
+        pending: &mut Vec<(
+            Arc<Block>,
+            Arc<Vec<Vec<Witness>>>,
+            u64,
+            blvm_consensus::reorganization::BlockUndoLog,
+        )>,
     ) -> Result<()> {
         let to_flush = std::mem::take(pending);
         Self::do_flush_to_storage(blockstore, _storage, to_flush)
@@ -2556,7 +2563,12 @@ impl ParallelIBD {
     pub(crate) fn do_flush_to_storage(
         blockstore: &BlockStore,
         _storage: Option<&Arc<Storage>>,
-        pending: Vec<(Arc<Block>, Arc<Vec<Vec<Witness>>>, u64)>,
+        pending: Vec<(
+            Arc<Block>,
+            Arc<Vec<Vec<Witness>>>,
+            u64,
+            blvm_consensus::reorganization::BlockUndoLog,
+        )>,
     ) -> Result<()> {
         if pending.is_empty() {
             return Ok(());
@@ -2567,27 +2579,32 @@ impl ParallelIBD {
 
         // Unwrap Arcs to get owned Block (sync has completed; refcount should be 1 when validation
         // holds the only Arc after dequeue). Witness Arc is cloned only when try_unwrap fails.
-        let mut pending: Vec<(Block, Arc<Vec<Vec<Witness>>>, u64)> = pending
+        let mut pending: Vec<(
+            Block,
+            Arc<Vec<Vec<Witness>>>,
+            u64,
+            blvm_consensus::reorganization::BlockUndoLog,
+        )> = pending
             .into_iter()
-            .map(|(arc_block, w, h)| {
+            .map(|(arc_block, w, h, undo)| {
                 let block = Arc::try_unwrap(arc_block).unwrap_or_else(|a| (*a).clone());
-                (block, w, h)
+                (block, w, h, undo)
             })
             .collect();
 
-        let flush_max_height = pending.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
+        let flush_max_height = pending.iter().map(|(_, _, h, _)| *h).max().unwrap_or(0);
 
         // Sort by height once so each chunk is already in LSM-friendly order and we
         // can treat chunk indices as the flush_order directly (no secondary sort needed).
-        pending.sort_by_key(|(_, _, h)| *h);
+        pending.sort_by_key(|(_, _, h, _)| *h);
 
         pending = pending
             .into_iter()
-            .map(|(block, witnesses, height)| {
+            .map(|(block, witnesses, height, undo)| {
                 let (block, witnesses) = crate::module::pipeline::try_filter_block_before_store(
                     height, block, witnesses,
                 );
-                (block, witnesses, height)
+                (block, witnesses, height, undo)
             })
             .collect();
 
@@ -2631,12 +2648,12 @@ impl ParallelIBD {
                     use blvm_protocol::rayon::prelude::*;
                     let block_hashes: Vec<Hash> = chunk
                         .par_iter()
-                        .map(|(block, _, _)| blockstore.get_block_hash(block))
+                        .map(|(block, _, _, _)| blockstore.get_block_hash(block))
                         .collect();
 
                     let block_data: Vec<Vec<u8>> = chunk
                         .par_iter()
-                        .map(|(block, _, _)| {
+                        .map(|(block, _, _, _)| {
                             bincode::serialize(block)
                                 .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
                         })
@@ -2648,7 +2665,7 @@ impl ParallelIBD {
                     let header_data: Vec<Arc<Vec<u8>>> = chunk
                         .par_iter()
                         .zip(block_hashes.par_iter())
-                        .map(|((block, _, _), block_hash)| {
+                        .map(|((block, _, _, _), block_hash)| {
                             if let Some(cached) = get_cached_serialized_header(block_hash) {
                                 return Ok(cached);
                             }
@@ -2669,12 +2686,12 @@ impl ParallelIBD {
                     };
                     let block_hashes: Vec<Hash> = chunk
                         .iter()
-                        .map(|(block, _, _)| blockstore.get_block_hash(block))
+                        .map(|(block, _, _, _)| blockstore.get_block_hash(block))
                         .collect();
 
                     let block_data: Vec<Vec<u8>> = chunk
                         .iter()
-                        .map(|(block, _, _)| {
+                        .map(|(block, _, _, _)| {
                             bincode::serialize(block)
                                 .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
                         })
@@ -2683,7 +2700,7 @@ impl ParallelIBD {
                     let header_data: Vec<Arc<Vec<u8>>> = chunk
                         .iter()
                         .zip(block_hashes.iter())
-                        .map(|((block, _, _), block_hash)| {
+                        .map(|((block, _, _, _), block_hash)| {
                             if let Some(cached) = get_cached_serialized_header(block_hash) {
                                 return Ok(cached);
                             }
@@ -2699,7 +2716,7 @@ impl ParallelIBD {
             };
 
             let witness_blobs: Vec<Option<Vec<u8>>> =
-                if chunk.iter().any(|(_, w, _)| block_has_witness_data(w)) {
+                if chunk.iter().any(|(_, w, _, _)| block_has_witness_data(w)) {
                     #[cfg(feature = "rayon")]
                     {
                         use blvm_protocol::rayon::iter::IntoParallelRefIterator;
@@ -2707,7 +2724,7 @@ impl ParallelIBD {
                         let witness_data_vec: Vec<(usize, Vec<u8>)> = chunk
                             .par_iter()
                             .enumerate()
-                            .filter_map(|(i, (_, witnesses, _))| {
+                            .filter_map(|(i, (_, witnesses, _, _))| {
                                 if block_has_witness_data(witnesses) {
                                     match bincode::serialize(witnesses.as_ref()) {
                                         Ok(data) => Some((i, data)),
@@ -2757,7 +2774,7 @@ impl ParallelIBD {
             // flush_order is 0..chunk.len() — pending was sorted by height above, so each
             // chunk is already in ascending height order; no secondary sort needed.
             let flush_order: Vec<usize> = (0..chunk.len()).collect();
-            let chunk_heights: Vec<u64> = chunk.iter().map(|(_, _, h)| *h).collect();
+            let chunk_heights: Vec<u64> = chunk.iter().map(|(_, _, h, _)| *h).collect();
 
             // RECENT_HEADERS_TABLE is a sliding window of the last ~11 blocks. Only the
             // final chunk's entries matter for the end state; passing empty for earlier
@@ -2923,11 +2940,20 @@ impl ParallelIBD {
                         .iter()
                         .rev()
                         .take(11)
-                        .map(|(block, _, height)| (*height, &block.header))
+                        .map(|(block, _, height, _)| (*height, &block.header))
                         .collect();
                     blockstore.store_recent_headers_ibd_batch(&recent_batch)?;
                 }
             }
+
+            if let Some(storage) = _storage {
+                blocks::index_ibd_flushed_blocks(storage, &block_hashes, chunk, &chunk_heights)?;
+            }
+
+            for i in 0..block_hashes.len() {
+                blockstore.store_undo_log(&block_hashes[i], &chunk[i].3)?;
+            }
+
             // block_data, header_data, witness_blobs, metadata_blobs are dropped here,
             // releasing the serialised bytes before the next chunk is allocated.
         }
@@ -2947,7 +2973,7 @@ impl ParallelIBD {
         // pending is sorted by height; last entry is the tip.
         if let Some(storage) = _storage {
             if let Some(tip_hash) = tip_hash_for_update {
-                if let Some((block, _, tip_height)) = pending.last() {
+                if let Some((block, _, tip_height, _)) = pending.last() {
                     storage
                         .chain()
                         .update_tip(&tip_hash, &block.header, *tip_height)?;

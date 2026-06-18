@@ -780,6 +780,9 @@ impl MiningRpc {
         let max_tries = param_u64_default(params, 2, 2_000_000);
 
         let mut coord = SyncCoordinator::new();
+        if let Some(ref ep) = self.event_publisher {
+            coord.set_event_publisher(Some(Arc::clone(ep)));
+        }
         let mut utxo = storage
             .utxos()
             .get_all_utxos()
@@ -788,11 +791,11 @@ impl MiningRpc {
         let mut out_hashes: Vec<Value> = Vec::with_capacity(nblocks as usize);
 
         for _ in 0..nblocks {
-            let connect_height = storage
-                .blocks()
-                .block_count()
-                .map_err(|e| RpcError::internal_error(format!("Failed to count blocks: {e}")))?
-                as u64;
+            let (_, tip_height) = storage
+                .chain()
+                .get_tip_hash_and_height()
+                .map_err(|e| RpcError::internal_error(format!("Failed to get tip height: {e}")))?;
+            let connect_height = tip_height + 1;
 
             let prev_header = storage
                 .chain()
@@ -840,18 +843,16 @@ impl MiningRpc {
                 .iter()
                 .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
                 .collect();
-            let wire = serialize_block_with_witnesses(&mined, &witnesses, true);
 
             let accepted = coord
-                .process_block(
+                .connect_mined_block(
                     storage.blocks().as_ref(),
                     protocol.as_ref(),
-                    Some(storage),
-                    &wire,
+                    storage,
+                    &mined,
+                    &witnesses,
                     connect_height,
                     &mut utxo,
-                    None,
-                    None,
                 )
                 .map_err(|e| RpcError::internal_error(format!("generatetoaddress: {e}")))?;
             if !accepted {
@@ -861,16 +862,6 @@ impl MiningRpc {
             }
 
             let block_hash = storage.blocks().as_ref().get_block_hash(&mined);
-            storage
-                .chain()
-                .update_tip(&block_hash, &mined.header, connect_height)
-                .map_err(|e| {
-                    RpcError::internal_error(format!("Failed to update chain tip: {e}"))
-                })?;
-            storage
-                .utxos()
-                .store_utxo_set(&utxo)
-                .map_err(|e| RpcError::internal_error(format!("Failed to store UTXO set: {e}")))?;
 
             out_hashes.push(Value::String(hex::encode(block_hash)));
 

@@ -7,8 +7,15 @@ use crate::node::block_processor::{
     parse_block_from_wire, prepare_block_validation_context, store_block_with_context_and_index,
     validate_block_with_context,
 };
+#[cfg(feature = "production")]
+use crate::node::block_processor::{
+    validate_block_protocol_only, validate_block_with_context_and_undo,
+};
+use crate::node::event_publisher::EventPublisher;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
+#[cfg(feature = "production")]
+use crate::node::reorg_executor::try_activate_heavier_fork;
 use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
@@ -156,6 +163,7 @@ impl SyncState {
 pub struct SyncCoordinator {
     state_machine: SyncStateMachine,
     block_provider: InMemoryBlockProvider,
+    event_publisher: Option<Arc<EventPublisher>>,
 }
 
 impl Default for SyncCoordinator {
@@ -176,7 +184,13 @@ impl SyncCoordinator {
         Self {
             state_machine: SyncStateMachine::new(),
             block_provider: InMemoryBlockProvider::new(),
+            event_publisher: None,
         }
+    }
+
+    /// Attach an event publisher for fork-choice reorg notifications.
+    pub fn set_event_publisher(&mut self, publisher: Option<Arc<EventPublisher>>) {
+        self.event_publisher = publisher;
     }
 
     /// Start sync process
@@ -389,6 +403,21 @@ impl SyncCoordinator {
         }
 
         // Validate block with witness data and headers using protocol validation
+        #[cfg(feature = "production")]
+        if let Some(storage) = storage.as_ref() {
+            return self.process_block_with_fork_choice(
+                blockstore,
+                protocol,
+                storage,
+                &block,
+                witnesses_to_use,
+                current_height,
+                utxo_set,
+                metrics,
+                start_time,
+            );
+        }
+
         let validation_result = validate_block_with_context(
             blockstore,
             protocol,
@@ -437,6 +466,185 @@ impl SyncCoordinator {
             error!("Block validation failed at height {}", current_height);
             Ok(false)
         }
+    }
+
+    #[cfg(feature = "production")]
+    fn process_block_with_fork_choice(
+        &self,
+        blockstore: &BlockStore,
+        protocol: &BitcoinProtocolEngine,
+        storage: &Arc<Storage>,
+        block: &Block,
+        witnesses: &[Vec<blvm_protocol::segwit::Witness>],
+        current_height: u64,
+        utxo_set: &mut UtxoSet,
+        metrics: Option<Arc<MetricsCollector>>,
+        start_time: Instant,
+    ) -> Result<bool> {
+        let parent_hash = block.header.prev_block_hash;
+        let (active_tip, _) = storage.chain().get_tip_hash_and_height()?;
+
+        let connect_height = if parent_hash == active_tip {
+            current_height
+        } else if let Some(entry) = storage.chain().block_index().get(&parent_hash)? {
+            entry.height + 1
+        } else {
+            warn!(
+                "Rejecting block: parent {:?} not in block index",
+                parent_hash
+            );
+            return Ok(false);
+        };
+
+        let extends_active = parent_hash == active_tip;
+
+        let processing_time;
+        let block_hash;
+
+        if extends_active {
+            let mut utxo_for_connect = std::mem::take(utxo_set);
+            let (validation_result, connected_utxo, undo_log) =
+                validate_block_with_context_and_undo(
+                    blockstore,
+                    protocol,
+                    block,
+                    witnesses,
+                    &mut utxo_for_connect,
+                    connect_height,
+                )?;
+
+            processing_time = start_time.elapsed();
+            if !matches!(validation_result, ValidationResult::Valid) {
+                *utxo_set = utxo_for_connect;
+                error!("Block validation failed at height {}", connect_height);
+                return Ok(false);
+            }
+
+            store_block_with_context_and_index(
+                blockstore,
+                Some(storage),
+                block,
+                witnesses,
+                connect_height,
+            )?;
+
+            block_hash = blockstore.get_block_hash(block);
+            blockstore.store_undo_log(&block_hash, &undo_log)?;
+            storage
+                .chain()
+                .cache_block_chainwork(&block_hash, &block.header, connect_height)?;
+
+            *utxo_set = connected_utxo;
+            storage
+                .chain()
+                .update_tip(&block_hash, &block.header, connect_height)?;
+            storage.utxos().store_utxo_set(utxo_set)?;
+        } else {
+            let validation_result = validate_block_protocol_only(
+                blockstore,
+                protocol,
+                block,
+                witnesses,
+                connect_height,
+                utxo_set,
+            )?;
+
+            processing_time = start_time.elapsed();
+            if !matches!(validation_result, ValidationResult::Valid) {
+                error!("Block validation failed at height {}", connect_height);
+                return Ok(false);
+            }
+
+            store_block_with_context_and_index(
+                blockstore,
+                Some(storage),
+                block,
+                witnesses,
+                connect_height,
+            )?;
+
+            block_hash = blockstore.get_block_hash(block);
+            storage
+                .chain()
+                .cache_block_chainwork(&block_hash, &block.header, connect_height)?;
+
+            if !try_activate_heavier_fork(
+                storage,
+                blockstore,
+                protocol,
+                &block_hash,
+                utxo_set,
+                self.event_publisher.as_ref(),
+            )? {
+                // Side-chain block stored; active tip unchanged.
+            }
+        }
+
+        if let Some(ref metrics) = metrics {
+            metrics.update_storage(|m| {
+                m.block_count += 1;
+                m.transaction_count += block.transactions.len();
+            });
+            metrics.update_performance(|m| {
+                let time_ms = processing_time.as_secs_f64() * 1000.0;
+                m.avg_block_processing_time_ms =
+                    (m.avg_block_processing_time_ms * 0.9) + (time_ms * 0.1);
+                if processing_time.as_secs_f64() > 0.0 {
+                    m.blocks_per_second = 1.0 / processing_time.as_secs_f64();
+                }
+            });
+        }
+
+        info!(
+            "Block validated and stored at height {} (took {:?})",
+            connect_height, processing_time
+        );
+        Ok(true)
+    }
+
+    /// Connect a block from wire bytes (P2P run loop, regtest mining RPC, integration tests).
+    pub fn connect_block_wire(
+        &mut self,
+        blockstore: &BlockStore,
+        protocol: &BitcoinProtocolEngine,
+        storage: &Arc<Storage>,
+        wire: &[u8],
+        connect_height: u64,
+        utxo_set: &mut UtxoSet,
+    ) -> Result<bool> {
+        self.process_block(
+            blockstore,
+            protocol,
+            Some(storage),
+            wire,
+            connect_height,
+            utxo_set,
+            None,
+            None,
+        )
+    }
+
+    /// Serialize a mined block with witnesses and connect via [`Self::connect_block_wire`].
+    pub fn connect_mined_block(
+        &mut self,
+        blockstore: &BlockStore,
+        protocol: &BitcoinProtocolEngine,
+        storage: &Arc<Storage>,
+        block: &Block,
+        witnesses: &[Vec<blvm_protocol::segwit::Witness>],
+        connect_height: u64,
+        utxo_set: &mut UtxoSet,
+    ) -> Result<bool> {
+        let wire =
+            blvm_protocol::serialization::serialize_block_with_witnesses(block, witnesses, true);
+        self.connect_block_wire(
+            blockstore,
+            protocol,
+            storage,
+            &wire,
+            connect_height,
+            utxo_set,
+        )
     }
 }
 

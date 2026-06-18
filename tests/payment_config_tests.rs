@@ -4,6 +4,7 @@
 
 use blvm_node::config::{PaymentConfig, RestApiConfig};
 use blvm_node::payment::processor::{PaymentError, PaymentProcessor};
+use std::net::SocketAddr;
 
 #[test]
 fn test_payment_config_defaults() {
@@ -212,6 +213,7 @@ fn test_rest_api_config_enabled() {
     let config = RestApiConfig {
         enabled: true,
         payment_endpoints_enabled: false,
+        ..Default::default()
     };
     assert!(config.enabled, "REST API should be enabled");
     assert!(
@@ -226,6 +228,7 @@ fn test_rest_api_config_payment_endpoints_enabled() {
     let config = RestApiConfig {
         enabled: true,
         payment_endpoints_enabled: true,
+        ..Default::default()
     };
     assert!(config.enabled, "REST API should be enabled");
     assert!(
@@ -273,6 +276,7 @@ fn test_rest_api_config_serialization() {
     let config = RestApiConfig {
         enabled: true,
         payment_endpoints_enabled: true,
+        ..Default::default()
     };
 
     let serialized = serde_json::to_string(&config).expect("Should serialize");
@@ -331,6 +335,33 @@ fn test_payment_config_toml_with_defaults() {
         config.network,
         Some("mainnet".to_string()),
         "Should use default network (mainnet) for missing field"
+    );
+}
+
+#[test]
+fn test_rest_api_config_resolve_bind_addr() {
+    let cfg = RestApiConfig {
+        enabled: true,
+        payment_endpoints_enabled: false,
+        ..Default::default()
+    };
+    let mainnet_rpc: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+    assert_eq!(
+        cfg.resolve_bind_addr(mainnet_rpc),
+        "127.0.0.1:8080".parse::<SocketAddr>().unwrap()
+    );
+    let regtest_rpc: SocketAddr = "127.0.0.1:18332".parse().unwrap();
+    assert_eq!(
+        cfg.resolve_bind_addr(regtest_rpc),
+        "127.0.0.1:18080".parse::<SocketAddr>().unwrap()
+    );
+    let custom = RestApiConfig {
+        listen_addr: Some("0.0.0.0:9090".parse().unwrap()),
+        ..cfg
+    };
+    assert_eq!(
+        custom.resolve_bind_addr(mainnet_rpc),
+        "0.0.0.0:9090".parse::<SocketAddr>().unwrap()
     );
 }
 

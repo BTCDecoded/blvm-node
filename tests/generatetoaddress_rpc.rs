@@ -34,7 +34,10 @@ async fn generatetoaddress_regtest_extends_chain() -> anyhow::Result<()> {
     }
 
     let height = storage.chain().get_height()?.expect("height");
-    assert_eq!(height, 2, "genesis at 0 plus 3 blocks => tip height 2");
+    assert_eq!(
+        height, 3,
+        "genesis at height 0 plus 3 mined blocks => tip height 3"
+    );
 
     Ok(())
 }

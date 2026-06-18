@@ -139,6 +139,7 @@ where
             let mut watch_auto_load = false;
             let mut watch_auto_unload = false;
             let mut module_database_backend: Option<String> = None;
+            let mut marketplace_fetch_enabled = false;
 
             while let Some(key) = map.next_key::<String>()? {
                 if MODULE_CONFIG_KNOWN_KEYS.contains(&key.as_str()) {
@@ -164,6 +165,9 @@ where
                         }
                         "module_database_backend" => {
                             module_database_backend = map.next_value().unwrap_or_default()
+                        }
+                        "marketplace_fetch_enabled" => {
+                            marketplace_fetch_enabled = map.next_value().unwrap_or(false)
                         }
                         _ => {
                             let _: toml::Value = map.next_value()?;
@@ -206,6 +210,7 @@ where
                 watch_enabled,
                 watch_auto_load,
                 watch_auto_unload,
+                marketplace_fetch_enabled,
             })
         }
     }
@@ -226,6 +231,7 @@ const MODULE_CONFIG_KNOWN_KEYS: &[&str] = &[
     "watch_auto_load",
     "watch_auto_unload",
     "module_database_backend",
+    "marketplace_fetch_enabled",
 ];
 
 /// Module system configuration
@@ -297,6 +303,10 @@ pub struct ModuleConfig {
     /// When a module directory is removed, auto-unload it
     #[serde(default)]
     pub watch_auto_unload: bool,
+
+    /// When `loadmodule` cannot find a module locally, call **`blvm-marketplace`** via inter-module IPC to fetch it first (default: **false**).
+    #[serde(default = "default_false")]
+    pub marketplace_fetch_enabled: bool,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -343,6 +353,7 @@ impl Default for ModuleConfig {
             watch_enabled: true,
             watch_auto_load: false,
             watch_auto_unload: false,
+            marketplace_fetch_enabled: false,
         }
     }
 }
@@ -1293,9 +1304,33 @@ pub struct RestApiConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
 
+    /// REST bind address. When unset, defaults to loopback port **8080** (mainnet RPC 8332) or **18080** (18332 testnet/regtest).
+    #[serde(default)]
+    pub listen_addr: Option<SocketAddr>,
+
     /// Enable payment endpoints (default: false, requires bip70-http feature)
     #[serde(default = "default_false")]
     pub payment_endpoints_enabled: bool,
+}
+
+impl RestApiConfig {
+    /// Resolve REST bind address from config, using RPC address for host/port defaults.
+    pub fn resolve_bind_addr(&self, rpc_addr: SocketAddr) -> SocketAddr {
+        if let Some(addr) = self.listen_addr {
+            return addr;
+        }
+        let port = match rpc_addr.port() {
+            8332 => 8080,
+            18332 => 18080,
+            p => p.saturating_add(10_000),
+        };
+        let ip = if rpc_addr.ip().is_unspecified() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        } else {
+            rpc_addr.ip()
+        };
+        SocketAddr::new(ip, port)
+    }
 }
 
 /// Logging configuration

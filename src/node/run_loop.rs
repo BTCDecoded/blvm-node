@@ -15,7 +15,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
 
     // Get initial state for block processing
     let mut current_height = node.storage.chain().get_height()?.unwrap_or(0);
-    let mut utxo_set = blvm_protocol::UtxoSet::default();
+    let mut utxo_set = node.storage.utxos().get_all_utxos().unwrap_or_default();
 
     // Main node loop - coordinates between all components and handles shutdown signals
     loop {
@@ -51,6 +51,15 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
             }
 
             let validation_start_time = std::time::Instant::now();
+            let prev_tip_header_bits = node
+                .storage
+                .chain()
+                .get_tip_header()
+                .ok()
+                .flatten()
+                .map(|h| h.bits)
+                .unwrap_or(0);
+            let prev_tip = node.storage.chain().get_tip_hash_and_height().ok();
             match node.sync_coordinator.process_block(
                 &blocks_arc,
                 &node.protocol,
@@ -65,6 +74,15 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                     info!("Block accepted at height {}", current_height);
 
                     let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
+                    let tip_changed = node
+                        .storage
+                        .chain()
+                        .get_tip_hash_and_height()
+                        .ok()
+                        .zip(prev_tip.as_ref())
+                        .is_some_and(|((new_tip, new_h), (old_tip, old_h))| {
+                            new_tip != *old_tip || new_h != *old_h
+                        });
 
                     // Publish block validation completed event (success)
                     if let Some(event_publisher) = node
@@ -83,151 +101,105 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                             .await;
                     }
 
-                    // Parse block for governance webhook (need block object, not just block_data)
-                    // We'll get it from storage after it's stored
-                    let blocks_arc = node.storage.blocks();
-                    let block_hash =
-                        if let Ok(Some(hash)) = blocks_arc.get_hash_by_height(current_height) {
-                            hash
-                        } else {
-                            warn!("Failed to get block hash for height {}", current_height);
-                            [0u8; 32]
-                        };
-
-                    // Update chain tip (for chainwork, etc.)
-                    if let Ok(Some(block)) = blocks_arc.get_block(&block_hash) {
-                        // Capture old tip bits before update (for MiningDifficultyChanged)
-                        let old_bits = node
+                    if tip_changed {
+                        let blocks_arc = node.storage.blocks();
+                        let (block_hash, tip_height) = node
                             .storage
                             .chain()
-                            .get_tip_header()
-                            .ok()
-                            .flatten()
-                            .map(|h| h.bits)
-                            .unwrap_or(0);
+                            .get_tip_hash_and_height()
+                            .unwrap_or(([0u8; 32], current_height));
 
-                        log_error(
-                            || {
-                                node.storage.chain().update_tip(
-                                    &block_hash,
-                                    &block.header,
-                                    current_height,
-                                )
-                            },
-                            "Failed to update chain tip",
-                        );
+                        if let Ok(Some(block)) = blocks_arc.get_block(&block_hash) {
+                            if block.header.bits != prev_tip_header_bits {
+                                if let Some(ep) = node
+                                    .module_subsystem
+                                    .as_ref()
+                                    .and_then(|s| s.event_publisher.as_ref())
+                                {
+                                    ep.publish_mining_difficulty_changed(
+                                        prev_tip_header_bits as u32,
+                                        block.header.bits as u32,
+                                        tip_height,
+                                    )
+                                    .await;
+                                }
+                            }
 
-                        // Publish MiningDifficultyChanged when bits (difficulty target) changes
-                        if block.header.bits != old_bits {
-                            if let Some(ep) = node
+                            let transaction_count =
+                                node.storage.transaction_count().unwrap_or(0) as u64;
+                            log_error(
+                                || {
+                                    node.storage.chain().update_utxo_stats_cache(
+                                        &block_hash,
+                                        tip_height,
+                                        &utxo_set,
+                                        transaction_count,
+                                    )
+                                },
+                                "Failed to update UTXO stats cache",
+                            );
+
+                            log_error(
+                                || {
+                                    node.storage.chain().calculate_and_cache_network_hashrate(
+                                        tip_height,
+                                        &blocks_arc,
+                                    )
+                                },
+                                "Failed to update network hashrate cache",
+                            );
+
+                            if let Some(event_publisher) = node
                                 .module_subsystem
                                 .as_ref()
                                 .and_then(|s| s.event_publisher.as_ref())
                             {
-                                ep.publish_mining_difficulty_changed(
-                                    old_bits as u32,
-                                    block.header.bits as u32,
-                                    current_height,
-                                )
-                                .await;
+                                event_publisher
+                                    .publish_new_block(&block, &block_hash, tip_height)
+                                    .await;
                             }
-                        }
 
-                        // Update UTXO stats cache (for fast gettxoutsetinfo RPC)
-                        let transaction_count =
-                            node.storage.transaction_count().unwrap_or(0) as u64;
-                        log_error(
-                            || {
-                                node.storage.chain().update_utxo_stats_cache(
-                                    &block_hash,
-                                    current_height,
-                                    &utxo_set,
-                                    transaction_count,
-                                )
-                            },
-                            "Failed to update UTXO stats cache",
-                        );
+                            if let Err(e) = node.storage.utxos().store_utxo_set(&utxo_set) {
+                                warn!(
+                                    "Failed to persist UTXO set after block {}: {}",
+                                    tip_height, e
+                                );
+                            }
 
-                        // Update network hashrate cache (for fast getmininginfo RPC)
-                        log_error(
-                            || {
-                                node.storage.chain().calculate_and_cache_network_hashrate(
-                                    current_height,
-                                    &blocks_arc,
-                                )
-                            },
-                            "Failed to update network hashrate cache",
-                        );
-
-                        // Publish NewBlock event to modules
-                        if let Some(event_publisher) = node
-                            .module_subsystem
-                            .as_ref()
-                            .and_then(|s| s.event_publisher.as_ref())
-                        {
-                            event_publisher
-                                .publish_new_block(&block, &block_hash, current_height)
-                                .await;
-                        }
-
-                        // Governance module subscribes to NewBlock events and handles notifications
-                        // No direct webhook call needed - handled via event system
-                    }
-
-                    // Persist UTXO set to storage after block validation
-                    // This is critical for commitment generation and incremental pruning
-                    if let Err(e) = node.storage.utxos().store_utxo_set(&utxo_set) {
-                        warn!(
-                            "Failed to persist UTXO set after block {}: {}",
-                            current_height, e
-                        );
-                    }
-
-                    // Generate UTXO commitment from current state (if enabled)
-                    // Use current_height (the block that was just validated) before incrementing
-                    #[cfg(feature = "utxo-commitments")]
-                    {
-                        if let Some(pruning_manager) = node.storage.pruning() {
-                            if let (Some(commitment_store), Some(_utxostore)) = (
-                                pruning_manager.commitment_store(),
-                                pruning_manager.utxostore(),
-                            ) {
-                                // Get block hash from storage (block was just stored at current_height)
-                                let blocks_arc = node.storage.blocks();
-                                if let Ok(Some(block_hash)) =
-                                    blocks_arc.get_hash_by_height(current_height)
-                                {
-                                    // Generate commitment from current UTXO set state
-                                    if let Err(e) = pruning_manager
-                                        .generate_commitment_from_current_state(
-                                            &block_hash,
-                                            current_height,
-                                            &utxo_set,
-                                            &commitment_store,
-                                        )
-                                    {
-                                        warn!(
-                                            "Failed to generate commitment for block {}: {}",
-                                            current_height, e
-                                        );
-                                    } else {
-                                        debug!(
-                                            "Generated UTXO commitment for block {}",
-                                            current_height
-                                        );
+                            #[cfg(feature = "utxo-commitments")]
+                            {
+                                if let Some(pruning_manager) = node.storage.pruning() {
+                                    if let (Some(commitment_store), Some(_utxostore)) = (
+                                        pruning_manager.commitment_store(),
+                                        pruning_manager.utxostore(),
+                                    ) {
+                                        if let Err(e) = pruning_manager
+                                            .generate_commitment_from_current_state(
+                                                &block_hash,
+                                                tip_height,
+                                                &utxo_set,
+                                                &commitment_store,
+                                            )
+                                        {
+                                            warn!(
+                                                "Failed to generate commitment for block {}: {}",
+                                                tip_height, e
+                                            );
+                                        } else {
+                                            debug!(
+                                                "Generated UTXO commitment for block {}",
+                                                tip_height
+                                            );
+                                        }
                                     }
-                                } else {
-                                    warn!(
-                                        "Could not find block hash for height {} to generate commitment",
-                                        current_height
-                                    );
                                 }
                             }
+
+                            current_height = tip_height + 1;
+                        } else {
+                            warn!("Failed to load block at active tip height {tip_height}");
                         }
                     }
-
-                    // Increment height after processing
-                    current_height += 1;
 
                     // Check for incremental pruning during IBD
                     // Consider IBD if we're still syncing (height < tip or no recent blocks)

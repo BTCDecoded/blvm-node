@@ -43,6 +43,7 @@ pub struct BlockStore {
     witnesses: Arc<dyn Tree>,
     recent_headers: Arc<dyn Tree>, // For median time-past: stores last 11+ headers by height
     block_metadata: Arc<dyn Tree>, // hash → BlockMetadata (for fast TX count lookup)
+    block_undo: Arc<dyn Tree>,
     #[cfg(feature = "block-compression")]
     block_compression_enabled: bool,
     #[cfg(feature = "block-compression")]
@@ -67,6 +68,7 @@ impl Clone for BlockStore {
             witnesses: Arc::clone(&self.witnesses),
             recent_headers: Arc::clone(&self.recent_headers),
             block_metadata: Arc::clone(&self.block_metadata),
+            block_undo: Arc::clone(&self.block_undo),
             #[cfg(feature = "block-compression")]
             block_compression_enabled: self.block_compression_enabled,
             #[cfg(feature = "block-compression")]
@@ -182,6 +184,7 @@ impl BlockStore {
         let witnesses = Arc::from(db.open_tree("witnesses")?);
         let recent_headers = Arc::from(db.open_tree("recent_headers")?);
         let block_metadata = Arc::from(db.open_tree("block_metadata")?);
+        let block_undo = Arc::from(db.open_tree("block_undo")?);
 
         Ok(Self {
             db,
@@ -192,6 +195,7 @@ impl BlockStore {
             witnesses,
             recent_headers,
             block_metadata,
+            block_undo,
             #[cfg(feature = "block-compression")]
             block_compression_enabled,
             #[cfg(feature = "block-compression")]
@@ -955,5 +959,29 @@ impl BlockStore {
     /// Get reference to block metadata tree for batch operations
     pub fn metadata_tree(&self) -> Result<Arc<dyn Tree>> {
         Ok(Arc::clone(&self.block_metadata))
+    }
+
+    /// Persist connect undo for a block hash (required for disconnect on reorg).
+    #[cfg(feature = "production")]
+    pub fn store_undo_log(
+        &self,
+        hash: &Hash,
+        undo: &blvm_consensus::reorganization::BlockUndoLog,
+    ) -> Result<()> {
+        let data = bincode::serialize(undo)?;
+        self.block_undo.insert(hash.as_slice(), &data)?;
+        Ok(())
+    }
+
+    /// Load connect undo for a block hash.
+    #[cfg(feature = "production")]
+    pub fn get_undo_log(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<blvm_consensus::reorganization::BlockUndoLog>> {
+        match self.block_undo.get(hash.as_slice())? {
+            Some(data) => Ok(Some(bincode::deserialize(&data)?)),
+            None => Ok(None),
+        }
     }
 }

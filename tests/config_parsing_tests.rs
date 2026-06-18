@@ -19,6 +19,26 @@ fn test_module_config_default() {
     assert!(config.registry_url.is_some());
     assert!(config.disabled_modules.is_empty());
     assert!(config.module_database_backend.is_none());
+    assert!(!config.marketplace_fetch_enabled);
+}
+
+#[test]
+fn test_module_config_marketplace_fetch_from_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+
+[modules]
+marketplace_fetch_enabled = true
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert!(modules.marketplace_fetch_enabled);
 }
 
 #[test]

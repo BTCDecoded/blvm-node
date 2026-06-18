@@ -6,6 +6,8 @@
 #[cfg(feature = "production")]
 pub mod background_validation;
 pub mod block_processor;
+#[cfg(feature = "production")]
+pub mod chain_selector;
 pub mod event_publisher;
 pub mod health;
 pub mod mempool;
@@ -14,6 +16,8 @@ pub mod miner;
 #[cfg(feature = "production")]
 pub mod parallel_ibd;
 pub mod performance;
+#[cfg(feature = "production")]
+pub mod reorg_executor;
 pub mod run_loop;
 pub mod subsystems;
 pub mod sync;
@@ -461,6 +465,39 @@ impl Node {
                     "[START_COMPONENTS] RPC rate-limit-only mode applied (burst={}, rate={})",
                     burst, rate
                 );
+            }
+        }
+
+        #[cfg(feature = "rest-api")]
+        if let Some(ref config) = self.config {
+            if let Some(ref rest_cfg) = config.rest_api {
+                if rest_cfg.enabled {
+                    let bind = rest_cfg.resolve_bind_addr(self.rpc.rpc_addr());
+                    self.rpc.enable_rest_api(bind);
+                    info!("[START_COMPONENTS] REST API enabled on {}", bind);
+                }
+            }
+        }
+        #[cfg(not(feature = "rest-api"))]
+        if self
+            .config
+            .as_ref()
+            .and_then(|c| c.rest_api.as_ref())
+            .is_some_and(|r| r.enabled)
+        {
+            warn!(
+                "[START_COMPONENTS] rest_api.enabled = true but this build lacks the rest-api feature; REST will not start"
+            );
+        }
+
+        if let Some(ref config) = self.config {
+            if config
+                .modules
+                .as_ref()
+                .is_some_and(|m| m.marketplace_fetch_enabled)
+            {
+                self.rpc.set_marketplace_fetch(true);
+                info!("[START_COMPONENTS] loadmodule marketplace auto-fetch enabled");
             }
         }
 
@@ -1478,6 +1515,10 @@ impl Node {
                     .set_event_publisher(Some(Arc::clone(event_publisher)))
                     .await;
                 info!("Event publisher set on network manager");
+
+                self.sync_coordinator
+                    .set_event_publisher(Some(Arc::clone(event_publisher)));
+                info!("Event publisher set on sync coordinator");
 
                 // Publish ConfigLoaded event for modules to react to node configuration
                 // This allows modules like blvm-governance to configure themselves based on node config

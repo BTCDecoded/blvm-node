@@ -10,7 +10,8 @@ use anyhow::Result;
 use blvm_protocol::serialization::deserialize_block_with_witnesses;
 use blvm_protocol::validation::ProtocolValidationContext;
 use blvm_protocol::{
-    BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult, segwit::Witness,
+    BitcoinProtocolEngine, Block, BlockHeader, ProtocolVersion, UtxoSet, ValidationResult,
+    segwit::Witness,
 };
 use std::sync::Arc;
 
@@ -66,6 +67,13 @@ pub fn store_block_with_context_and_index(
         if let Err(e) = storage.index_block(block, &block_hash, height) {
             // Log error but don't fail block storage if indexing fails
             tracing::warn!("Failed to index block transactions: {}", e);
+        }
+        if let Err(e) = storage.chain().record_connected_block(
+            &block_hash,
+            height,
+            &block.header.prev_block_hash,
+        ) {
+            tracing::warn!("Failed to record block in chain index: {}", e);
         }
     }
 
@@ -148,4 +156,99 @@ pub fn validate_block_with_context(
 
     *utxo_set = new_utxo_set;
     Ok(result)
+}
+
+/// Protocol-only validation (no UTXO connect). Use for side-chain blocks stored
+/// without becoming the active tip; full connect runs during reorg.
+#[cfg(feature = "production")]
+pub fn validate_block_protocol_only(
+    blockstore: &BlockStore,
+    protocol: &BitcoinProtocolEngine,
+    block: &Block,
+    witnesses: &[Vec<Witness>],
+    height: u64,
+    utxo_set: &UtxoSet,
+) -> Result<ValidationResult> {
+    let recent_headers = blockstore
+        .get_recent_headers(11)
+        .ok()
+        .filter(|headers| !headers.is_empty());
+
+    let median_time_past = recent_headers
+        .as_ref()
+        .map(|headers| blvm_protocol::bip113::get_median_time_past(headers))
+        .unwrap_or(0);
+    let network_time = current_timestamp();
+
+    let mut context = ProtocolValidationContext::new(protocol.get_protocol_version(), height)?;
+    context
+        .context_data
+        .insert("median_time_past".to_string(), median_time_past.to_string());
+    context
+        .context_data
+        .insert("network_time".to_string(), network_time.to_string());
+
+    protocol
+        .validate_block_with_protocol_and_witnesses(block, witnesses, utxo_set, height, &context)
+        .map_err(Into::into)
+}
+
+/// Validate and connect a block, returning the consensus undo log for persistence.
+#[cfg(feature = "production")]
+pub fn validate_block_with_context_and_undo(
+    blockstore: &BlockStore,
+    protocol: &BitcoinProtocolEngine,
+    block: &Block,
+    witnesses: &[Vec<Witness>],
+    utxo_set: &mut UtxoSet,
+    height: u64,
+) -> Result<(
+    ValidationResult,
+    UtxoSet,
+    blvm_consensus::reorganization::BlockUndoLog,
+)> {
+    let recent_headers = blockstore
+        .get_recent_headers(11)
+        .ok()
+        .filter(|headers| !headers.is_empty());
+
+    let median_time_past = recent_headers
+        .as_ref()
+        .map(|headers| blvm_protocol::bip113::get_median_time_past(headers))
+        .unwrap_or(0);
+    let network_time = current_timestamp();
+
+    let mut context = ProtocolValidationContext::new(protocol.get_protocol_version(), height)?;
+    context
+        .context_data
+        .insert("median_time_past".to_string(), median_time_past.to_string());
+    context
+        .context_data
+        .insert("network_time".to_string(), network_time.to_string());
+
+    let protocol_result = protocol
+        .validate_block_with_protocol_and_witnesses(block, witnesses, utxo_set, height, &context)?;
+    if !matches!(protocol_result, ValidationResult::Valid) {
+        return Ok((
+            protocol_result,
+            utxo_set.clone(),
+            blvm_consensus::reorganization::BlockUndoLog::new(),
+        ));
+    }
+
+    let network = match protocol.get_protocol_version() {
+        ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
+        ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
+        ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
+    };
+    let consensus_ctx = blvm_protocol::block::block_validation_context_for_connect_ibd(
+        recent_headers.as_deref(),
+        network_time,
+        network,
+    );
+    let owned_utxo = std::mem::take(utxo_set);
+    let (result, new_utxo_set, undo_log) =
+        blvm_consensus::block::connect_block(block, witnesses, owned_utxo, height, &consensus_ctx)?;
+    *utxo_set = new_utxo_set;
+    Ok((result, utxo_set.clone(), undo_log))
 }

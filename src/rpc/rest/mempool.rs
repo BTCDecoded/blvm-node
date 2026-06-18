@@ -9,6 +9,7 @@
 //! POST /api/v1/mempool/transactions/{txid}/priority
 
 use crate::rpc::mempool::MempoolRpc;
+use crate::rpc::mining::MiningRpc;
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -64,12 +65,11 @@ pub async fn save_mempool(mempool: &MempoolRpc) -> Result<Value> {
 
 /// Prioritize transaction in mempool
 pub async fn prioritize_transaction(
-    mempool: &MempoolRpc,
+    mining: &MiningRpc,
     txid: &str,
-    fee_delta: f64,
+    fee_delta: i64,
 ) -> Result<Value> {
-    // `prioritisetransaction` is implemented on mining RPC; REST does not delegate yet.
-    Err(anyhow::anyhow!(
-        "prioritisetransaction not yet exposed via REST API"
-    ))
+    let params = json!([txid, fee_delta]);
+    let result = mining.prioritise_transaction(&params).await?;
+    Ok(result)
 }

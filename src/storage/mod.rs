@@ -14,6 +14,7 @@ pub mod bitcoin_core_migrate;
 pub mod bitcoin_core_obfuscation;
 pub mod bitcoin_core_storage;
 pub mod bitcoin_detection;
+pub mod block_index;
 pub mod blockstore;
 pub mod buffered_store;
 pub mod chainstate;
@@ -536,12 +537,13 @@ impl Storage {
     ) -> Result<Self> {
         #[cfg(feature = "compression")]
         {
+            let compression_config = storage_config.and_then(|sc| sc.compression.clone());
             Self::with_backend_pruning_indexing_and_compression(
                 data_dir,
                 backend,
                 pruning_config,
                 indexing_config,
-                None,
+                compression_config,
                 storage_config,
                 core_datadir,
             )
@@ -557,11 +559,7 @@ impl Storage {
             let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
 
             let txindex = if let Some(indexing) = indexing_config {
-                Arc::new(txindex::TxIndex::with_indexing(
-                    Arc::clone(&db),
-                    indexing.enable_address_index,
-                    indexing.enable_value_index,
-                )?)
+                Arc::new(txindex::TxIndex::with_config(Arc::clone(&db), indexing)?)
             } else {
                 Arc::new(txindex::TxIndex::new(Arc::clone(&db))?)
             };
@@ -671,16 +669,20 @@ impl Storage {
         #[cfg(not(feature = "compression"))]
         let blockstore =
             Self::open_blockstore(Arc::clone(&db), store_path, core_datadir, storage_config)?;
-        let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
+        let utxostore = if let Some(compression) = &compression_config {
+            Arc::new(utxostore::UtxoStore::new_with_compression(
+                Arc::clone(&db),
+                compression.utxo_compression_enabled,
+                compression.utxo_compression_level,
+            )?)
+        } else {
+            Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?)
+        };
         let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
 
         // Configure transaction indexing based on config
         let txindex = if let Some(indexing) = indexing_config {
-            Arc::new(txindex::TxIndex::with_indexing(
-                Arc::clone(&db),
-                indexing.enable_address_index,
-                indexing.enable_value_index,
-            )?)
+            Arc::new(txindex::TxIndex::with_config(Arc::clone(&db), indexing)?)
         } else {
             Arc::new(txindex::TxIndex::new(Arc::clone(&db))?)
         };

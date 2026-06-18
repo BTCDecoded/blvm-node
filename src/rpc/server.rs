@@ -30,7 +30,7 @@ use std::sync::OnceLock;
 
 /// Methods that require admin-level access (destructive or privileged operations).
 /// Authenticated but non-admin callers receive HTTP 403.
-fn admin_rpc_methods() -> &'static HashSet<&'static str> {
+pub(crate) fn admin_rpc_methods() -> &'static HashSet<&'static str> {
     static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         HashSet::from([
@@ -45,7 +45,6 @@ fn admin_rpc_methods() -> &'static HashSet<&'static str> {
             "invalidateblock",
             "reconsiderblock",
             "pruneblockchain",
-            "preciousblock",
             // Network manipulation
             "addnode",
             "disconnectnode",
@@ -60,6 +59,7 @@ fn admin_rpc_methods() -> &'static HashSet<&'static str> {
             "sendrawtransaction",
             "createrawtransaction",
             "savemempool",
+            "prioritisetransaction",
         ])
     })
 }

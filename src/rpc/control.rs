@@ -415,16 +415,16 @@ impl ControlRpc {
         )
         .map_err(|e| RpcError::internal_error(e.to_string()))?;
 
-        mgr.lock()
-            .await
-            .load_module(
-                name,
-                &discovered.binary_path,
-                discovered.manifest.to_metadata(),
+        {
+            let mut manager = mgr.lock().await;
+            crate::module::loader::ModuleLoader::load_discovered_module(
+                &mut manager,
+                &discovered,
                 config,
             )
             .await
             .map_err(|e| RpcError::internal_error(e.to_string()))?;
+        }
 
         Ok(json!("Module loaded"))
     }

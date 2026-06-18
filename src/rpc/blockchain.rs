@@ -132,6 +132,26 @@ impl BlockchainRpc {
             .unwrap_or("regtest") // Default fallback
     }
 
+    /// Core-compatible `chain` field for getblockchaininfo (`main`, `test`, `regtest`).
+    fn core_chain_field(&self) -> &str {
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(info)) = storage.chain().load_chain_info() {
+                return match info.chain_params.network.as_str() {
+                    "mainnet" => "main",
+                    "testnet" => "test",
+                    "regtest" => "regtest",
+                    _ => "main",
+                };
+            }
+        }
+        match self.get_chain_name() {
+            "mainnet" => "main",
+            "testnet" => "test",
+            "regtest" => "regtest",
+            _ => "main",
+        }
+    }
+
     /// Calculate difficulty from bits (compact target format).
     /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty(bits: u64) -> f64 {
@@ -241,7 +261,7 @@ impl BlockchainRpc {
             let chainwork_hex = Self::format_chainwork(chainwork);
 
             Ok(json!({
-                "chain": "main",
+                "chain": self.core_chain_field(),
                 "blocks": height,
                 "headers": block_count,
                 "bestblockhash": best_hash_hex,
@@ -287,7 +307,7 @@ impl BlockchainRpc {
                 "getblockchaininfo called but storage not available, returning default values"
             );
             Ok(json!({
-                "chain": "main",
+                "chain": self.core_chain_field(),
                 "blocks": 0,
                 "headers": 0,
                 "bestblockhash": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -931,37 +951,47 @@ impl BlockchainRpc {
         debug!("RPC: getchaintips");
 
         if let Some(ref storage) = self.storage {
-            let (tip_hash, tip_height) = storage.chain().get_tip_hash_and_height()?;
+            let (tip_hash, _tip_height) = storage.chain().get_tip_hash_and_height()?;
+            let index = storage.chain().block_index();
 
-            // Get all chain tips (including forks)
-            // Usually 1-2 tips, but pre-allocate for potential forks
-            let mut tips = Vec::with_capacity(4);
+            let indexed_tips = index.chain_tips()?;
+            let mut tips = Vec::with_capacity(indexed_tips.len().max(1));
 
-            // Add active tip
-            if tip_hash != blvm_protocol::Hash::default() {
-                tips.push(json!({
-                    "height": tip_height,
-                    "hash": encode_hash32_rpc(&tip_hash),
-                    "branchlen": 0,
-                    "status": "active"
-                }));
-            }
-
-            // Add other tracked tips (forks, etc.)
-            if let Ok(chain_tips) = storage.chain().get_chain_tips() {
-                for (hash, height, branchlen, status) in chain_tips {
-                    // Skip if already added as active tip (use cached tip_hash)
-                    if hash == tip_hash {
-                        continue;
-                    }
-
+            if indexed_tips.is_empty() {
+                if tip_hash != blvm_protocol::Hash::default() {
+                    let height = storage.chain().get_height()?.unwrap_or(0);
                     tips.push(json!({
                         "height": height,
+                        "hash": encode_hash32_rpc(&tip_hash),
+                        "branchlen": 0,
+                        "status": "active"
+                    }));
+                }
+            } else {
+                for (hash, entry) in indexed_tips {
+                    let branchlen = index.branch_length(&hash, &tip_hash)?;
+                    let status = if hash == tip_hash {
+                        "active"
+                    } else if storage.chain().is_invalid(&hash).unwrap_or(false)
+                        || entry.status == crate::storage::block_index::BlockIndexStatus::Invalid
+                    {
+                        "invalid"
+                    } else {
+                        "valid"
+                    };
+
+                    tips.push(json!({
+                        "height": entry.height,
                         "hash": encode_hash32_rpc(&hash),
                         "branchlen": branchlen,
                         "status": status
                     }));
                 }
+                tips.sort_by(|a, b| {
+                    let ha = a.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let hb = b.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                    hb.cmp(&ha)
+                });
             }
 
             Ok(json!(tips))

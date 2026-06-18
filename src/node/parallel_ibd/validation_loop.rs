@@ -612,6 +612,7 @@ struct ValidateResult {
     /// Tx ids are already available on the job and unused after validation; drop them here to
     /// avoid an `into_owned()` alloc (Vec<Hash> memcpy) per block on the IBD hot path.
     result: Result<Option<UtxoDelta>>,
+    undo_log: blvm_consensus::reorganization::BlockUndoLog,
     /// BIP30 index after applying this block's coinbase rules.
     bip30_post: Bip30Index,
     /// Wall time spent inside the worker (view-build + `validate_block_only`).
@@ -727,6 +728,7 @@ fn run_validation_worker_shared(
                     let _ = tx.send(ValidateResult {
                         height,
                         result: Err(e.context("IBD engine Phase 2 failed")),
+                        undo_log: blvm_consensus::reorganization::BlockUndoLog::new(),
                         bip30_post: job.bip30_index,
                         elapsed: std::time::Duration::ZERO,
                         view_build_ms: 0,
@@ -819,7 +821,10 @@ fn run_validation_worker_shared(
         let elapsed = t_val.elapsed();
         // Drop tx-ids immediately — they live in `job.tx_ids` and `ValidateResult` discards them
         // on the success path. `into_owned()` would copy every hash into a new Vec; skip it.
-        let result = raw.map(|(_ids, delta)| delta);
+        let (result, undo_log) = match raw {
+            Ok((_ids, delta, undo)) => (Ok(delta), undo),
+            Err(e) => (Err(e), blvm_consensus::reorganization::BlockUndoLog::new()),
+        };
         // Worker-side commit: pre-populate the UTXO cache, *and* stamp the pending
         // log + apply deletions, all on this worker. The retire thread used to do all of this
         // serially while N validation workers stalled on its single mutex; moving it here lets
@@ -848,6 +853,7 @@ fn run_validation_worker_shared(
         let _ = tx.send(ValidateResult {
             height,
             result,
+            undo_log,
             bip30_post: job.bip30_index,
             elapsed,
             view_build_ms,
@@ -1175,8 +1181,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let g = mem_mtx.lock();
         (g.storage_flush_interval, g.budget_mb())
     };
-    let mut pending_blocks: Vec<(Arc<Block>, Arc<Vec<Vec<Witness>>>, u64)> =
-        Vec::with_capacity(storage_flush_interval);
+    let mut pending_blocks: Vec<(
+        Arc<Block>,
+        Arc<Vec<Vec<Witness>>>,
+        u64,
+        blvm_consensus::reorganization::BlockUndoLog,
+    )> = Vec::with_capacity(storage_flush_interval);
     /// Sum of feeder `est_bytes` for entries in `pending_blocks` (same heuristic as [`super::types::estimate_block_bytes`]; pressure-path flush only).
     let mut pending_storage_bytes: u64 = 0;
     let skip_storage = false;
@@ -2324,7 +2334,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 if !skip_storage {
                     pending_storage_bytes =
                         pending_storage_bytes.saturating_add(feeder_est_bytes as u64);
-                    pending_blocks.push((block_arc, Arc::clone(&witnesses_storage), next_height));
+                    pending_blocks.push((
+                        block_arc,
+                        Arc::clone(&witnesses_storage),
+                        next_height,
+                        vres.undo_log,
+                    ));
                 }
                 recent_headers_buf.push_back(header_rc);
                 if recent_headers_buf.len() > 11 {

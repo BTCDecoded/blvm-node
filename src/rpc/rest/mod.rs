@@ -22,6 +22,7 @@ pub mod payment;
 #[cfg(feature = "ctv")]
 #[cfg(feature = "bip70-http")]
 pub mod pool;
+pub mod rbac;
 pub mod server;
 pub mod transactions;
 pub mod types;

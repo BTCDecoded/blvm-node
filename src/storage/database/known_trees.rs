@@ -21,6 +21,8 @@ pub const KNOWN_TREE_NAMES: &[&str] = &[
     "network_hashrate_cache",
     "invalid_blocks",
     "chain_tips",
+    "block_index",
+    "block_undo",
     "block_metadata",
     "tx_by_hash",
     "tx_by_block",
