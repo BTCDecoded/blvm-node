@@ -571,6 +571,16 @@ impl BlockStore {
         Ok(headers)
     }
 
+    /// Get a stored header by block height (from the recent-headers index).
+    pub fn get_header_at_height(&self, height: u64) -> Result<Option<BlockHeader>> {
+        let height_bytes = height.to_be_bytes();
+        if let Some(data) = self.recent_headers.get(&height_bytes)? {
+            Ok(Some(bincode::deserialize(&data)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Get a block by hash
     ///
     /// First tries to get the block from the database.

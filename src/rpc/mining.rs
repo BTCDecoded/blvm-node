@@ -683,7 +683,9 @@ impl MiningRpc {
                 SEGWIT_ACTIVATION_TESTNET,
                 TAPROOT_ACTIVATION_TESTNET,
             ),
-            ConsensusNetwork::Regtest => (BIP112_CSV_ACTIVATION_REGTEST, 0u64, 0u64),
+            ConsensusNetwork::Regtest | ConsensusNetwork::Signet => {
+                (BIP112_CSV_ACTIVATION_REGTEST, 0u64, 0u64)
+            }
         };
 
         let mut rules = Vec::new();
@@ -710,6 +712,7 @@ impl MiningRpc {
             "mainnet" => ConsensusNetwork::Mainnet,
             "testnet" => ConsensusNetwork::Testnet,
             "regtest" => ConsensusNetwork::Regtest,
+            "signet" => ConsensusNetwork::Signet,
             _ => ConsensusNetwork::Mainnet,
         }
     }
@@ -943,7 +946,12 @@ impl MiningRpc {
                             "submitblock: chain not initialized (no tip)".to_string(),
                         )
                     })?;
-                if block.header.prev_block_hash != tip {
+                let prev_ok = if let Ok(Some(tip_header)) = storage.blocks().get_header(&tip) {
+                    blvm_consensus::block::validate_prev_block_hash(&block.header, &tip_header)
+                } else {
+                    block.header.prev_block_hash == tip
+                };
+                if !prev_ok {
                     return Err(RpcError::invalid_params(
                         "submitblock: prev_block_hash does not match current chain tip".to_string(),
                     ));

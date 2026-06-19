@@ -106,6 +106,25 @@ pub fn prepare_block_validation_context(
     Ok((witnesses, recent_headers))
 }
 
+/// Reject when H08 fails and a parent header is available at `height - 1`.
+fn reject_if_bad_prev_hash(
+    blockstore: &BlockStore,
+    block: &Block,
+    height: u64,
+) -> Result<Option<ValidationResult>> {
+    if height == 0 {
+        return Ok(None);
+    }
+    if let Some(parent) = blockstore.get_header_at_height(height - 1)? {
+        if !blvm_consensus::block::validate_prev_block_hash(&block.header, &parent) {
+            return Ok(Some(ValidationResult::Invalid(
+                "Block prev_block_hash does not match parent header hash".to_string(),
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// Validate a block using protocol validation with proper witness data and headers
 ///
 /// This function uses the protocol engine's `validate_and_connect_block()` method,
@@ -118,6 +137,10 @@ pub fn validate_block_with_context(
     utxo_set: &mut UtxoSet,
     height: u64,
 ) -> Result<ValidationResult> {
+    if let Some(invalid) = reject_if_bad_prev_hash(blockstore, block, height)? {
+        return Ok(invalid);
+    }
+
     // Get recent headers for median time-past
     let recent_headers = blockstore
         .get_recent_headers(11)
@@ -207,6 +230,14 @@ pub fn validate_block_with_context_and_undo(
     UtxoSet,
     blvm_consensus::reorganization::BlockUndoLog,
 )> {
+    if let Some(invalid) = reject_if_bad_prev_hash(blockstore, block, height)? {
+        return Ok((
+            invalid,
+            utxo_set.clone(),
+            blvm_consensus::reorganization::BlockUndoLog::new(),
+        ));
+    }
+
     let recent_headers = blockstore
         .get_recent_headers(11)
         .ok()
@@ -236,16 +267,8 @@ pub fn validate_block_with_context_and_undo(
         ));
     }
 
-    let network = match protocol.get_protocol_version() {
-        ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
-        ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
-        ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
-    };
-    let consensus_ctx = blvm_protocol::block::block_validation_context_for_connect_ibd(
-        recent_headers.as_deref(),
-        network_time,
-        network,
-    );
+    let consensus_ctx =
+        protocol.connect_block_validation_context(recent_headers.as_deref(), network_time);
     let owned_utxo = std::mem::take(utxo_set);
     let (result, new_utxo_set, undo_log) =
         blvm_consensus::block::connect_block(block, witnesses, owned_utxo, height, &consensus_ctx)?;

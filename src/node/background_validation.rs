@@ -92,11 +92,7 @@ async fn run_background_validation(
     let blockstore = storage_arc.blocks();
 
     let mut config = ParallelIBDConfig::default();
-    config.network = match protocol.get_protocol_version() {
-        blvm_protocol::ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
-        blvm_protocol::ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
-        blvm_protocol::ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
-    };
+    config.network = protocol.get_protocol_version().consensus_network();
     let mut parallel_ibd = ParallelIBD::new(config);
     parallel_ibd.initialize_peers(&peer_addresses);
     let parallel_ibd = Arc::new(parallel_ibd);

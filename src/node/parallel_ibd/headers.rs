@@ -19,6 +19,23 @@ use crate::storage::blockstore::BlockStore;
 use crate::storage::hashing::double_sha256;
 use blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL;
 
+/// H08: child links to parent when parent header is stored, else compare to expected hash bytes.
+fn header_links_to_parent(
+    blockstore: &BlockStore,
+    header: &BlockHeader,
+    height: u64,
+    last_hash: &[u8; 32],
+) -> Result<bool> {
+    if height > 0 {
+        if let Some(parent) = blockstore.get_header_at_height(height - 1)? {
+            return Ok(blvm_consensus::block::validate_prev_block_hash(
+                header, &parent,
+            ));
+        }
+    }
+    Ok(header.prev_block_hash == *last_hash)
+}
+
 /// Download headers for a range starting from the given locator hash.
 ///
 /// Standalone async function that can be spawned as a task.
@@ -296,7 +313,7 @@ pub(crate) async fn download_headers_parallel(
                 }
             }
 
-            if header.prev_block_hash != last_hash {
+            if !header_links_to_parent(blockstore, &header, current_height, &last_hash)? {
                 return Err(anyhow::anyhow!(
                     "Header chain break at height {} (parallel merge): expected prev {} got {}",
                     current_height,
@@ -548,7 +565,7 @@ pub(crate) async fn download_headers(
                         }
                     }
 
-                    if header.prev_block_hash != last_hash {
+                    if !header_links_to_parent(blockstore, header, current_height, &last_hash)? {
                         return Err(anyhow::anyhow!(
                             "Header chain break at height {}: expected prev {} got {}",
                             current_height,

@@ -120,19 +120,11 @@ impl Node {
         info!("[NODE_INIT] Calling Storage::open_for_node()...");
         let mut storage = Storage::open_for_node(
             data_dir,
-            match protocol_version {
-                ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
-                ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
-                ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
-            },
+            protocol_version.consensus_network(),
             storage_config,
         )?;
         info!("[NODE_INIT] Storage created successfully");
-        let pruning_network = match protocol_version {
-            ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
-            ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
-            ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
-        };
+        let pruning_network = protocol_version.consensus_network();
         storage.set_pruning_network(pruning_network);
         let storage_arc = Arc::new(storage);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
@@ -238,6 +230,26 @@ impl Node {
         // Initialize Rayon pool for script verification (uses BLVM_SCRIPT_THREADS from consensus config)
         #[cfg(feature = "production")]
         blvm_protocol::consensus_config::init_rayon_for_script_verification();
+
+        if self.protocol_version == ProtocolVersion::Signet {
+            if let Some(ref hex) = config.signet_challenge {
+                match crate::config::parse_signet_challenge_hex(hex) {
+                    Ok(bytes) => {
+                        let override_script = if bytes.is_empty() { None } else { Some(bytes) };
+                        let engine = BitcoinProtocolEngine::new(self.protocol_version)?
+                            .with_signet_challenge(override_script);
+                        crate::network::protocol::ProtocolParser::set_network_magic(
+                            engine.get_network_params().magic_bytes,
+                        );
+                        self.protocol = Arc::new(engine);
+                        info!("Signet challenge script loaded from config");
+                    }
+                    Err(e) => {
+                        warn!("Invalid signet_challenge in config: {e}");
+                    }
+                }
+            }
+        }
 
         // Auto-detect governance server if configured (best-effort, non-blocking)
         #[cfg(feature = "governance")]
@@ -1597,6 +1609,7 @@ impl Node {
         let network = match self.protocol_version {
             ProtocolVersion::BitcoinV1 => "mainnet",
             ProtocolVersion::Testnet3 => "testnet",
+            ProtocolVersion::Signet => "signet",
             ProtocolVersion::Regtest => {
                 // Regtest doesn't use DNS seeds
                 info!("Regtest network: skipping DNS seed discovery");

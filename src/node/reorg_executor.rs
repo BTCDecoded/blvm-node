@@ -8,16 +8,12 @@ use anyhow::{Context, Result};
 use blvm_consensus::reorganization::{BlockUndoLog, reorganize_chain_with_witnesses};
 use blvm_consensus::types::Network;
 use blvm_protocol::segwit::Witness;
-use blvm_protocol::{BitcoinProtocolEngine, Block, Hash, ProtocolVersion, UtxoSet};
+use blvm_protocol::{BitcoinProtocolEngine, Block, Hash, UtxoSet};
 use std::sync::Arc;
 use tracing::{info, warn};
 
 fn protocol_network(protocol: &BitcoinProtocolEngine) -> Network {
-    match protocol.get_protocol_version() {
-        ProtocolVersion::BitcoinV1 => Network::Mainnet,
-        ProtocolVersion::Testnet3 => Network::Testnet,
-        ProtocolVersion::Regtest => Network::Regtest,
-    }
+    protocol.get_protocol_version().consensus_network()
 }
 
 /// Walk parent links in the block index from `tip` toward genesis (ascending height).

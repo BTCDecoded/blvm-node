@@ -80,6 +80,7 @@ impl Storage {
                 blvm_protocol::types::Network::Mainnet => CoreDataNetwork::Mainnet,
                 blvm_protocol::types::Network::Testnet => CoreDataNetwork::Testnet,
                 blvm_protocol::types::Network::Regtest => CoreDataNetwork::Regtest,
+                blvm_protocol::types::Network::Signet => CoreDataNetwork::Signet,
             };
             Storage::new_inner(data_dir, core_network)
         }
@@ -250,11 +251,7 @@ impl Storage {
         protocol: blvm_protocol::ProtocolVersion,
         storage_config: Option<&crate::config::StorageConfig>,
     ) -> Result<PathBuf> {
-        let network = match protocol {
-            blvm_protocol::ProtocolVersion::BitcoinV1 => blvm_protocol::types::Network::Mainnet,
-            blvm_protocol::ProtocolVersion::Testnet3 => blvm_protocol::types::Network::Testnet,
-            blvm_protocol::ProtocolVersion::Regtest => blvm_protocol::types::Network::Regtest,
-        };
+        let network = protocol.consensus_network();
         Self::prepare_node_store(data_dir, network, storage_config)
     }
 
@@ -300,6 +297,7 @@ impl Storage {
             blvm_protocol::types::Network::Mainnet => CoreDataNetwork::Mainnet,
             blvm_protocol::types::Network::Testnet => CoreDataNetwork::Testnet,
             blvm_protocol::types::Network::Regtest => CoreDataNetwork::Regtest,
+            blvm_protocol::types::Network::Signet => CoreDataNetwork::Signet,
         }
     }
 

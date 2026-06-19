@@ -128,6 +128,7 @@ impl BlockchainRpc {
                 blvm_protocol::ProtocolVersion::BitcoinV1 => "mainnet",
                 blvm_protocol::ProtocolVersion::Testnet3 => "testnet",
                 blvm_protocol::ProtocolVersion::Regtest => "regtest",
+                blvm_protocol::ProtocolVersion::Signet => "signet",
             })
             .unwrap_or("regtest") // Default fallback
     }

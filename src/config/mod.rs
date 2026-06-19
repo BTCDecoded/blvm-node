@@ -24,6 +24,7 @@ pub mod network;
 pub use network::*;
 
 use crate::network::transport::TransportPreference;
+use anyhow::{Context, Result};
 use serde::de::{Deserializer, Error, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -664,6 +665,17 @@ impl Default for ProtocolLimitsConfig {
     }
 }
 
+/// Parse `-signetchallenge`-style hex script bytes for custom signet networks.
+pub fn parse_signet_challenge_hex(hex_str: &str) -> Result<Vec<u8>> {
+    let trimmed = hex_str.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bytes =
+        hex::decode(trimmed).context("signet_challenge must be hex-encoded script bytes")?;
+    Ok(bytes)
+}
+
 /// Per-network default assume-valid height (Core chainparams defaultAssumeValid)
 pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
     match network.to_lowercase().as_str() {
@@ -714,6 +726,10 @@ pub struct NodeConfig {
 
     /// Protocol version
     pub protocol_version: Option<String>,
+
+    /// Optional BIP325 signet challenge script override (hex). Default public signet when unset.
+    #[serde(default)]
+    pub signet_challenge: Option<String>,
 
     /// Module system configuration. Omitted in a config file ⇒ same as `ModuleConfig::default()` (enabled, auto-discover).
     #[serde(default = "default_modules_option")]
@@ -860,6 +876,7 @@ impl Default for NodeConfig {
             transport_preference: TransportPreferenceConfig::TcpOnly,
             max_outbound_peers: Some(100),
             protocol_version: Some("BitcoinV1".to_string()),
+            signet_challenge: None,
             modules: Some(ModuleConfig::default()),
             #[cfg(feature = "stratum-v2")]
             stratum_v2: None,
