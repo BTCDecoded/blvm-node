@@ -1388,19 +1388,27 @@ jobs:
           show-summary: true
       
       - name: Create git tag
+        env:
+          REPO_ACCESS_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
         run: |
           VERSION_TAG="${{ steps.version.outputs.version_tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Check if tag already exists
-          if git rev-parse "$VERSION_TAG" >/dev/null 2>&1; then
-            echo "⚠️  Tag ${VERSION_TAG} already exists, skipping tag creation"
-          else
-            git tag -a "$VERSION_TAG" -m "Release ${VERSION_TAG}"
-            git push origin "$VERSION_TAG"
-            echo "✅ Created and pushed tag ${VERSION_TAG}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION_TAG}" >/dev/null 2>&1; then
+            echo "⚠️  Tag ${VERSION_TAG} already exists on origin, skipping tag creation"
+            exit 0
           fi
+
+          if [ -z "${REPO_ACCESS_TOKEN}" ]; then
+            echo "::error::REPO_ACCESS_TOKEN org secret not available — cannot push release tag"
+            exit 1
+          fi
+
+          git remote set-url origin "https://x-access-token:${REPO_ACCESS_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git tag -a "$VERSION_TAG" -m "Release ${VERSION_TAG}"
+          git -c credential.helper= push origin "$VERSION_TAG"
+          echo "✅ Created and pushed tag ${VERSION_TAG}"
       
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
