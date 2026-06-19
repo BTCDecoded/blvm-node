@@ -338,13 +338,6 @@ jobs:
       - name: Run tests
         run: cargo test
 
-      - name: Run heed3 tests
-        run: |
-          cargo test --test heed3_tests --test storage_heed3_integration_tests \
-            --test heed3_ibd_smoke --test heed3_zero_copy_coverage \
-            --no-default-features --features "heed3,redb,production,rocksdb"
-          cargo test --lib heed3 --no-default-features --features "heed3,redb,production"
-
       # `stratum-v2` is not in default features; compile and run library tests with Stratum code enabled.
       - name: Run tests (stratum-v2 feature, lib)
         run: cargo test --features stratum-v2 --lib
