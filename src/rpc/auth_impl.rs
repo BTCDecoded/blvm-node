@@ -367,19 +367,18 @@ impl RpcAuthManager {
                             requires_auth: self.auth_required,
                             error: None,
                         };
-                    } else if self.auth_required {
-                        self.auth_failure_tracker.record_failure(client_addr).await;
-                        SecurityEvent::AuthFailure {
-                            client_addr,
-                            reason: "Invalid authentication token".to_string(),
-                        }
-                        .log();
-                        return AuthResult {
-                            user_id: None,
-                            requires_auth: self.auth_required,
-                            error: Some("Invalid authentication token".to_string()),
-                        };
                     }
+                    self.auth_failure_tracker.record_failure(client_addr).await;
+                    SecurityEvent::AuthFailure {
+                        client_addr,
+                        reason: "Invalid authentication token".to_string(),
+                    }
+                    .log();
+                    return AuthResult {
+                        user_id: None,
+                        requires_auth: self.auth_required,
+                        error: Some("Invalid authentication token".to_string()),
+                    };
                 } else if let Some(b64) = auth_str.strip_prefix("Basic ") {
                     if let Some((user, pass)) = decode_http_basic_credentials(b64.trim()) {
                         let expected_user = self.basic_auth_user.lock().await.clone();
