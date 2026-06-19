@@ -961,8 +961,6 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-      # Tag push uses GITHUB_TOKEN; required when release commit ancestry touches .github/workflows/.
-      workflows: write
     if: |
       always() &&
       needs.build.result == 'success' &&
@@ -1390,21 +1388,14 @@ jobs:
           show-summary: true
       
       - name: Create git tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION_TAG="${{ steps.version.outputs.version_tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Self-hosted runners may use a GitHub App in the global credential helper;
-          # push tags with the workflow token (needs contents + workflows permissions).
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
+          
           # Check if tag already exists
           if git rev-parse "$VERSION_TAG" >/dev/null 2>&1; then
             echo "⚠️  Tag ${VERSION_TAG} already exists, skipping tag creation"
-          elif git ls-remote --exit-code --tags origin "refs/tags/${VERSION_TAG}" >/dev/null 2>&1; then
-            echo "⚠️  Tag ${VERSION_TAG} already exists on origin, skipping tag creation"
           else
             git tag -a "$VERSION_TAG" -m "Release ${VERSION_TAG}"
             git push origin "$VERSION_TAG"
