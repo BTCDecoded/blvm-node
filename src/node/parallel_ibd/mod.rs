@@ -3110,10 +3110,7 @@ mod tests {
     #[test]
     fn filter_ibd_download_peers_matches_host_without_port() {
         let preferred = vec!["192.168.1.10".to_string()];
-        let connected = vec![
-            "192.168.1.10:8333".to_string(),
-            "8.8.8.8:8333".to_string(),
-        ];
+        let connected = vec!["192.168.1.10:8333".to_string(), "8.8.8.8:8333".to_string()];
         let out = super::filter_ibd_download_peers(&preferred, connected);
         assert_eq!(out, vec!["192.168.1.10:8333".to_string()]);
     }
