@@ -807,11 +807,39 @@ jobs:
 
       - name: Install nightly and cargo-fuzz
         run: |
-          rustup toolchain install nightly
-          export PATH="$HOME/.cargo/bin:$PATH"
+          set -euo pipefail
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export PATH="${CARGO_HOME}/bin:${PATH}"
+
+          # Isolated self-hosted runners (zeus-workstation-2) can have nightly registered
+          # in rustup but the compiler binary missing after a partial/interrupted install.
+          NIGHTLY_RUSTC="${RUSTUP_HOME}/toolchains/nightly-x86_64-unknown-linux-gnu/bin/rustc"
+          ensure_nightly() {
+            if rustup toolchain list | grep -q '^nightly'; then
+              rustup toolchain uninstall nightly -y || true
+            fi
+            rustup toolchain install nightly --profile minimal
+            rustup component add rust-src --toolchain nightly || true
+          }
+          if [ ! -x "$NIGHTLY_RUSTC" ]; then
+            echo "⚠️  nightly rustc not executable at ${NIGHTLY_RUSTC} — reinstalling"
+            ensure_nightly
+          fi
+          if [ ! -x "$NIGHTLY_RUSTC" ]; then
+            echo "::error::nightly rustc still missing after reinstall"
+            rustup toolchain list -v
+            ls -la "${RUSTUP_HOME}/toolchains/" || true
+            exit 1
+          fi
+          rustc +nightly --version
+
           # cargo-fuzz 0.13+ MSRV is rustc 1.91; project stable is 1.88. Install the
           # subcommand with nightly (libFuzzer builds already use +nightly).
-          command -v cargo-fuzz >/dev/null 2>&1 || cargo +nightly install cargo-fuzz --locked
+          if ! command -v cargo-fuzz >/dev/null 2>&1; then
+            cargo +nightly install cargo-fuzz --locked
+          fi
+          cargo-fuzz --version
 
       - name: Initialize corpus dirs
         working-directory: fuzz
