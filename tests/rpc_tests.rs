@@ -4,7 +4,7 @@ use blvm_node::rpc::*;
 use std::net::SocketAddr;
 use tokio::time::{Duration, timeout};
 mod common;
-use common::{DIFFICULTY_INTERVAL, setup_mining_chain};
+use common::{MINING_RPC_CHAIN_BLOCKS, setup_mining_chain};
 
 #[tokio::test]
 async fn test_rpc_manager_creation() {
@@ -436,7 +436,7 @@ async fn test_mining_rpc_getblocktemplate() {
     let mempool = Arc::new(blvm_node::node::mempool::MempoolManager::new());
     let mining = mining::MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     let template = mining

@@ -379,10 +379,14 @@ pub fn default_protocol_version() -> ProtocolVersion {
 /// Bitcoin difficulty adjustment interval (BIP / Orange Paper).
 pub const DIFFICULTY_INTERVAL: u64 = 2016;
 
+/// Header-only chain length for mining-RPC integration tests (`getblocktemplate`, txid/weight checks).
+/// Full [`DIFFICULTY_INTERVAL`] seeding is only needed when a test asserts retarget-boundary behavior.
+pub const MINING_RPC_CHAIN_BLOCKS: u64 = 8;
+
 /// Seed a chain with `total_blocks` headers (genesis + `total_blocks - 1` extensions).
 ///
 /// Uses 10-minute header spacing and low-difficulty `bits` so `getblocktemplate` can compute
-/// a valid target once at least [`DIFFICULTY_INTERVAL`] blocks are present.
+/// a valid target (only needs ≥2 recent headers for difficulty context).
 pub fn setup_mining_chain(
     storage: &std::sync::Arc<blvm_node::storage::Storage>,
     total_blocks: u64,

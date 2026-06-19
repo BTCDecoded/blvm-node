@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
-use common::{DIFFICULTY_INTERVAL, setup_mining_chain};
+use common::{MINING_RPC_CHAIN_BLOCKS, setup_mining_chain};
 
 /// ckpool `gbt_req` from mempool/ckpool `src/bitcoin.c`.
 fn ckpool_gbt_params() -> serde_json::Value {
@@ -32,7 +32,7 @@ async fn ckpool_getblocktemplate_shape() {
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
     let blockchain = BlockchainRpc::with_dependencies(storage.clone());
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let template = mining
         .get_block_template(&ckpool_gbt_params())

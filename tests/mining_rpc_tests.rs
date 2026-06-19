@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
-use common::{DIFFICULTY_INTERVAL, setup_mining_chain, valid_transaction};
+use common::{MINING_RPC_CHAIN_BLOCKS, setup_mining_chain, valid_transaction};
 
 async fn expect_block_template(
     mining: &MiningRpc,
@@ -48,13 +48,13 @@ async fn test_get_current_height_initialized() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     let template = expect_block_template(&mining, &params).await;
     assert_eq!(
         template.get("height").unwrap().as_u64().unwrap(),
-        DIFFICULTY_INTERVAL
+        MINING_RPC_CHAIN_BLOCKS
     );
 }
 
@@ -65,7 +65,7 @@ async fn test_get_tip_header_initialized() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     let template = expect_block_template(&mining, &params).await;
@@ -83,7 +83,7 @@ async fn test_get_utxo_set_empty() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     expect_block_template(&mining, &params).await;
@@ -96,7 +96,7 @@ async fn test_get_utxo_set_populated() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let outpoint = OutPoint {
         hash: [1u8; 32],
@@ -121,7 +121,7 @@ async fn test_transaction_serialization_in_template() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     let template = expect_block_template(&mining, &params).await;
@@ -140,7 +140,7 @@ async fn test_calculate_tx_hash_format() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     let template = expect_block_template(&mining, &params).await;
@@ -159,7 +159,7 @@ async fn test_calculate_tx_hash_matches_bitcoin_core() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     let template = expect_block_template(&mining, &params).await;
@@ -182,7 +182,7 @@ async fn test_calculate_weight() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let tx = valid_transaction();
     let base_size = serialize_transaction(&tx).len() as u64;
@@ -205,7 +205,7 @@ async fn test_calculate_coinbase_value() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     let template = expect_block_template(&mining, &params).await;
@@ -221,7 +221,7 @@ async fn test_get_active_rules() {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-    setup_mining_chain(&storage, DIFFICULTY_INTERVAL).unwrap();
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
 
     let params = serde_json::json!([]);
     let template = expect_block_template(&mining, &params).await;
@@ -231,7 +231,7 @@ async fn test_get_active_rules() {
         .map(|r| r.as_str().unwrap().to_string())
         .collect();
 
-    // Default storage network is mainnet; at height 2016 no soft-fork rules are active yet.
+    // Default storage network is mainnet; at this short test height no soft-fork rules are active yet.
     assert!(!rule_strings.contains(&"csv".to_string()));
     assert!(!rule_strings.contains(&"segwit".to_string()));
     assert!(!rule_strings.contains(&"taproot".to_string()));
