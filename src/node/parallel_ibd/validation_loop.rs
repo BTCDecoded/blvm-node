@@ -258,8 +258,8 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         // crash+resume will find "not found" for the UTXO (DEL in newer SST beats ADD in older
         // SST) and fail with UTXO_TOTAL_MISS. DELs stay in the pending_log and are written
         // correctly by Phase 3 of the next durable checkpoint flush.
-        let batch = store.maybe_take_flush_batch_adds_only();
-        (0u64, protect_evict_ms, batch, false)
+        let (batch, force_durability) = ibd_retire_pick_flush_batch(store);
+        (0u64, protect_evict_ms, batch, force_durability)
     } else if ibd_defer_flush {
         let at_checkpoint = next_height > 0 && next_height % ibd_defer_checkpoint == 0;
         let batch = if at_checkpoint {
@@ -272,10 +272,8 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         // watermark immediately rather than waiting for the Nth-batch counter.
         (0u64, protect_evict_ms, batch, at_checkpoint)
     } else {
-        // Non-deferred mode: use adds-only drain for the same reason as rss_pressure_elevated_only.
-        // DEL tombstones must not reach SST before the watermark advances past their spend height.
-        let batch = store.maybe_take_flush_batch_adds_only();
-        (0u64, protect_evict_ms, batch, false)
+        let (batch, force_durability) = ibd_retire_pick_flush_batch(store);
+        (0u64, protect_evict_ms, batch, force_durability)
     }
 }
 
@@ -336,6 +334,76 @@ pub(crate) struct IbdRetireWork {
 /// (useful for stress testing crash-recovery; soft autorepair still handles a watermark
 /// gap after a partial-batch crash, but each partial batch loses up to `N-1` packages
 /// of progress on restart).
+/// Minimum useful adds-only batch. Below this with large remaining pending implies a DEL
+/// tombstone backlog that async adds-only flushes cannot drain during heavy IBD.
+const IBD_MIN_ADDS_ONLY_BATCH: usize = 1_000;
+
+/// Pick a flush package for non-deferred retire ticks under None/Elevated RSS pressure.
+///
+/// Async adds-only commits are crash-safe, but DEL tombstones stay in `pending_shards` until
+/// a durable two-phase flush. When validation outruns retire, pending fills with DELs; adds-only
+/// drains return tens of ops while millions of tombstones remain — workers wedge on the cap.
+///
+/// Returns `(package, force_durability)`: `force_durability=true` runs the synchronous
+/// ADD→watermark→DEL path so tombstones actually leave the pending log.
+fn ibd_retire_pick_flush_batch(store: &IbdUtxoStore) -> (Option<PendingFlushPackage>, bool) {
+    let pending = store.pending_len();
+    let threshold = store.flush_threshold();
+
+    // Mostly DEL backlog: skip adds-only and drain everything in one durable batch.
+    if pending >= threshold.saturating_mul(2) {
+        return (store.take_flush_batch_force(), true);
+    }
+
+    let Some(pkg) = store.maybe_take_flush_batch_adds_only() else {
+        if pending >= threshold {
+            return (store.take_flush_batch_force(), true);
+        }
+        return (None, false);
+    };
+
+    let remaining = store.pending_len();
+    if pkg.ops.len() < IBD_MIN_ADDS_ONLY_BATCH && remaining > threshold {
+        return (Some(pkg), true);
+    }
+    (Some(pkg), false)
+}
+
+/// After a durability boundary, drain pending ops at heights `<= watermark` that async
+/// adds-only flushes left behind (DEL tombstones). Watermark is already at `watermark`.
+fn ibd_flush_del_backlog_through_watermark(
+    store: &Arc<IbdUtxoStore>,
+    storage_wm: &Arc<Storage>,
+    ibd_muhash: &Arc<Mutex<blvm_muhash::MuHash3072>>,
+    watermark: u64,
+) -> Result<()> {
+    let Some(follow) = store.take_flush_batch_force_through(watermark) else {
+        return Ok(());
+    };
+    if follow.ops.is_empty() {
+        return Ok(());
+    }
+    let heights = Arc::clone(&follow.heights);
+    let prepared = follow.prepare_for_disk(store.value_codec())?;
+    let mut local_mh = blvm_muhash::MuHash3072::new();
+    store.compute_package_muhash(&prepared, &mut local_mh)?;
+    let muhash_running = {
+        let mut mh_guard = ibd_muhash.lock();
+        *mh_guard = std::mem::take(&mut *mh_guard).multiply(&local_mh);
+        mh_guard.serialize_running_state()
+    };
+    store.flush_prepared_package_adds_only(&prepared)?;
+    store.flush_disk()?;
+    storage_wm
+        .chain()
+        .persist_ibd_utxo_flush_checkpoint(prepared.max_block_height, &muhash_running)?;
+    store.flush_prepared_package_dels_only(&prepared)?;
+    store.flush_disk()?;
+    store.release_protected_heights(&heights);
+    store.note_utxo_flush_completed(prepared.max_block_height);
+    Ok(())
+}
+
 fn retire_flush_batch_size() -> usize {
     std::env::var("BLVM_IBD_RETIRE_FLUSH_BATCH")
         .ok()
@@ -487,6 +555,8 @@ fn push_utxo_flush_from_retire(
         store.flush_disk()?;
         store.release_protected_heights(&heights);
         store.note_utxo_flush_completed(prepared.max_block_height);
+        let watermark = prepared.max_block_height;
+        ibd_flush_del_backlog_through_watermark(store, storage_wm, ibd_muhash, watermark)?;
         debug!(
             "[IBD_DEBUG] Block {}: durability flush boundary (batch_size={}, n={})",
             next_height, batch_size, n,
@@ -3456,6 +3526,189 @@ mod tests {
         assert!(
             final_cap <= nominal / 8,
             "must shrink well below nominal (got {final_cap} for nominal {nominal})",
+        );
+    }
+}
+
+#[cfg(all(test, feature = "production"))]
+mod retire_flush_batch_tests {
+    use super::*;
+    use crate::storage::database::{BatchWriter, Tree};
+    use crate::storage::ibd_utxo_store::IbdUtxoStore;
+    use crate::storage::utxo_value_codec::ValueCodec;
+    use blvm_protocol::block::UtxoDelta;
+    use blvm_protocol::types::{OutPoint, UTXO};
+    use rustc_hash::FxHashMap;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct MemTree {
+        inner: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+    }
+
+    impl Tree for MemTree {
+        fn insert(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
+            self.inner
+                .lock()
+                .unwrap()
+                .insert(key.to_vec(), value.to_vec());
+            Ok(())
+        }
+        fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(self.inner.lock().unwrap().get(key).cloned())
+        }
+        fn get_many(&self, keys: &[&[u8]]) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+            let g = self.inner.lock().unwrap();
+            Ok(keys.iter().map(|k| g.get(*k).cloned()).collect())
+        }
+        fn remove(&self, key: &[u8]) -> anyhow::Result<()> {
+            self.inner.lock().unwrap().remove(key);
+            Ok(())
+        }
+        fn contains_key(&self, key: &[u8]) -> anyhow::Result<bool> {
+            Ok(self.inner.lock().unwrap().contains_key(key))
+        }
+        fn clear(&self) -> anyhow::Result<()> {
+            self.inner.lock().unwrap().clear();
+            Ok(())
+        }
+        fn len(&self) -> anyhow::Result<usize> {
+            Ok(self.inner.lock().unwrap().len())
+        }
+        fn iter(&self) -> Box<dyn Iterator<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + '_> {
+            let entries: Vec<_> = self
+                .inner
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), v.clone())))
+                .collect();
+            Box::new(entries.into_iter())
+        }
+        fn batch(&self) -> anyhow::Result<Box<dyn BatchWriter + '_>> {
+            Ok(Box::new(MemBatch {
+                tree: self,
+                ops: Vec::new(),
+            }))
+        }
+    }
+
+    struct MemBatch<'a> {
+        tree: &'a MemTree,
+        ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    }
+
+    impl<'a> BatchWriter for MemBatch<'a> {
+        fn put(&mut self, key: &[u8], value: &[u8]) {
+            self.ops.push((key.to_vec(), Some(value.to_vec())));
+        }
+        fn delete(&mut self, key: &[u8]) {
+            self.ops.push((key.to_vec(), None));
+        }
+        fn commit(self: Box<Self>) -> anyhow::Result<()> {
+            let mut g = self.tree.inner.lock().unwrap();
+            for (k, v) in self.ops {
+                match v {
+                    Some(val) => {
+                        g.insert(k, val);
+                    }
+                    None => {
+                        g.remove(&k);
+                    }
+                }
+            }
+            Ok(())
+        }
+        fn len(&self) -> usize {
+            self.ops.len()
+        }
+    }
+
+    fn synth_outpoint(seed: u64, idx: u32) -> OutPoint {
+        let mut hash = [0u8; 32];
+        hash[..8].copy_from_slice(&seed.to_le_bytes());
+        hash[8..12].copy_from_slice(&idx.to_le_bytes());
+        OutPoint { hash, index: idx }
+    }
+
+    fn fill_del_backlog(store: &IbdUtxoStore, blocks: u64) {
+        let mut alive: FxHashMap<OutPoint, UTXO> = FxHashMap::default();
+        let mut del_scratch = Vec::new();
+        let mut add_scratch = Vec::new();
+        for h in 1..=blocks {
+            let mut deletions = Vec::new();
+            for op in alive.keys().take(50) {
+                deletions.push(*op);
+            }
+            for op in &deletions {
+                alive.remove(op);
+            }
+            let mut adds = FxHashMap::default();
+            for i in 0..50 {
+                let op = synth_outpoint(h, i);
+                adds.insert(
+                    op,
+                    Arc::new(UTXO {
+                        value: 1,
+                        script_pubkey: (&[0u8; 25][..]).into(),
+                        height: h,
+                        is_coinbase: false,
+                    }),
+                );
+                alive.insert(
+                    op,
+                    UTXO {
+                        value: 1,
+                        script_pubkey: (&[0u8; 25][..]).into(),
+                        height: h,
+                        is_coinbase: false,
+                    },
+                );
+            }
+            let delta = UtxoDelta {
+                additions: adds,
+                deletions: deletions
+                    .iter()
+                    .map(|op| {
+                        let mut k = [0u8; 36];
+                        k[..32].copy_from_slice(&op.hash);
+                        k[32..36].copy_from_slice(&op.index.to_be_bytes());
+                        k
+                    })
+                    .collect(),
+            };
+            store.apply_utxo_delta(&delta, h, &mut del_scratch, &mut add_scratch, false);
+            while let Some(pkg) = store.maybe_take_flush_batch_adds_only() {
+                drop(pkg);
+            }
+        }
+    }
+
+    #[test]
+    fn pick_flush_batch_forces_durable_drain_on_del_backlog() {
+        let disk: Arc<dyn Tree> = Arc::new(MemTree::default());
+        let store = IbdUtxoStore::new_with_options(
+            Arc::clone(&disk),
+            100,
+            false,
+            usize::MAX,
+            crate::storage::ibd_utxo_store::EvictionStrategy::Fifo,
+            0,
+            ValueCodec::Bincode,
+        );
+        fill_del_backlog(&store, 120);
+        assert!(store.pending_len() > 1_000);
+
+        let (pkg, force_durability) = ibd_retire_pick_flush_batch(&store);
+        assert!(
+            force_durability,
+            "DEL backlog must trigger durable full drain"
+        );
+        assert!(pkg.is_some());
+        assert!(
+            pkg.as_ref().unwrap().ops.len() > 1_000,
+            "full drain should move a large batch"
         );
     }
 }

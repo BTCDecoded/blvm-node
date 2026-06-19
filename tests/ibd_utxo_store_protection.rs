@@ -390,3 +390,98 @@ fn flush_height_cap_keeps_higher_block_pending() {
     assert_eq!(pkg2.ops.len(), 1);
     assert_eq!(store.pending_len(), 0);
 }
+
+// ─── DEL tombstone backlog under adds-only async flushes ─────────────────────
+
+/// Async adds-only flushes drain INSERT ops but leave DELETE tombstones in `pending_shards`,
+/// so `pending_len` grows until workers hit the cap. Production retire detects this via
+/// `ibd_retire_pick_flush_batch` and forces a durable full drain.
+#[test]
+fn adds_only_flush_accumulates_del_tombstone_backlog() {
+    let disk: Arc<dyn Tree> = Arc::new(MemTree::default());
+    let store = Arc::new(IbdUtxoStore::new_with_options(
+        Arc::clone(&disk),
+        /*flush_threshold=*/ 100,
+        /*memory_only=*/ false,
+        /*max_entries=*/ usize::MAX,
+        EvictionStrategy::Fifo,
+        /*utxo_disk_commit_through=*/ 0,
+        ValueCodec::Bincode,
+    ));
+
+    let mut del_scratch: Vec<OutPointKey> = Vec::new();
+    let mut add_scratch: Vec<(OutPointKey, Arc<UTXO>)> = Vec::new();
+    let mut alive: FxHashMap<OutPoint, UTXO> = FxHashMap::default();
+
+    const OUTS_PER_BLOCK: usize = 50;
+    const SPENDS_PER_BLOCK: usize = 50;
+    // ~100 ops/block; adds-only clears INSERTs each flush but retains ~50 DELs/block.
+    const N_BLOCKS: u64 = 120;
+
+    for h in 1..=N_BLOCKS {
+        let mut deletions: Vec<OutPoint> = Vec::new();
+        if !alive.is_empty() {
+            for op in alive.keys().take(SPENDS_PER_BLOCK) {
+                deletions.push(*op);
+            }
+        }
+        for op in &deletions {
+            alive.remove(op);
+        }
+
+        let mut additions: Vec<(OutPoint, UTXO)> = Vec::new();
+        for i in 0..OUTS_PER_BLOCK {
+            let op = synth_outpoint(h, i as u32);
+            let u = synth_utxo(50_000, h);
+            additions.push((op, u.clone()));
+            alive.insert(op, u);
+        }
+
+        let delta = build_delta(additions, deletions);
+        store.apply_utxo_delta(&delta, h, &mut del_scratch, &mut add_scratch, false);
+
+        // Mirror non-deferred production retire: async adds-only commits only.
+        while let Some(pkg) = store.maybe_take_flush_batch_adds_only() {
+            let heights = Arc::clone(&pkg.heights);
+            let prepared = pkg
+                .prepare_for_disk(ValueCodec::Bincode)
+                .expect("prepare_for_disk");
+            store
+                .flush_prepared_package_adds_only(&prepared)
+                .expect("flush adds");
+            store.release_protected_heights(&heights);
+        }
+    }
+
+    let pending_before = store.pending_len();
+    assert!(
+        pending_before > 1_000,
+        "adds-only path should leave a large DEL backlog (got {pending_before})"
+    );
+
+    let adds_only = store.maybe_take_flush_batch_adds_only();
+    assert!(
+        adds_only.map(|p| p.ops.len()).unwrap_or(0) < 100,
+        "with DEL-heavy pending, adds-only drain should return a tiny batch"
+    );
+
+    // Fix path: durable full drain clears tombstones so pending_len falls.
+    while store.pending_len() > 0 {
+        let Some(pkg) = store.take_flush_batch_force() else {
+            break;
+        };
+        let heights = Arc::clone(&pkg.heights);
+        let prepared = pkg
+            .prepare_for_disk(ValueCodec::Bincode)
+            .expect("prepare_for_disk");
+        store
+            .flush_prepared_package(&prepared, None)
+            .expect("flush full batch");
+        store.release_protected_heights(&heights);
+    }
+    assert_eq!(
+        store.pending_len(),
+        0,
+        "full drain must clear DEL backlog (had {pending_before} pending)"
+    );
+}

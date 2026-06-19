@@ -662,6 +662,11 @@ impl IbdUtxoStore {
         self.pending_log_size.load(Ordering::Relaxed)
     }
 
+    /// Pending-log flush threshold (ops) before retire considers a batch due.
+    pub fn flush_threshold(&self) -> usize {
+        self.flush_threshold
+    }
+
     pub fn recently_accessed_len(&self) -> usize {
         self.recently_accessed.lock().map(|g| g.len()).unwrap_or(0)
     }
