@@ -143,6 +143,25 @@ async fn test_auth_valid_token_accepted() {
 }
 
 #[tokio::test]
+async fn test_auth_invalid_basic_ignored_when_not_required() {
+    let manager = RpcAuthManager::new(false);
+    let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        "Basic YnRjOg==".parse().unwrap(), // btc:
+    );
+
+    let result = manager.authenticate_request(&headers, addr).await;
+    assert!(!result.requires_auth);
+    assert!(result.error.is_none());
+    match result.user_id {
+        Some(UserId::Ip(ip)) => assert_eq!(ip, addr),
+        _ => panic!("Expected IP-based user_id when auth not required"),
+    }
+}
+
+#[tokio::test]
 async fn test_auth_no_auth_required_allows_access() {
     let manager = RpcAuthManager::new(false);
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();

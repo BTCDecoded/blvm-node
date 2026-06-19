@@ -1833,7 +1833,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
             // Get next block: blocking if no in-flight work, non-blocking otherwise.
             let block_tuple_opt = if is_first {
-                const FEEDER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+                let feeder_wait_timeout = std::time::Duration::from_secs(
+                    parallel_ibd.config.download_timeout_secs.max(5),
+                );
                 loop {
                     let mut guard = feeder_state.0.lock();
                     if let Some((arc_b, w, input_keys, u, tx_ids, spec_adds, est_bytes)) =
@@ -1857,7 +1859,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     }
                     #[cfg(feature = "profile")]
                     let wait_start = std::time::Instant::now();
-                    let wait = feeder_state.1.wait_for(&mut guard, FEEDER_WAIT_TIMEOUT);
+                    let wait = feeder_state.1.wait_for(&mut guard, feeder_wait_timeout);
                     #[cfg(feature = "profile")]
                     if ibd_profile {
                         let wait_ms = wait_start.elapsed().as_millis() as u64;

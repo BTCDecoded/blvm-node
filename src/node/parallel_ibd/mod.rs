@@ -339,6 +339,44 @@ impl ParallelIBDConfig {
     }
 }
 
+/// When `preferred` is non-empty, restrict to matching connected peers.
+/// If none match yet, warn and fall back to all connected peers so IBD can proceed.
+pub(crate) fn filter_ibd_download_peers(
+    preferred: &[String],
+    connected: Vec<String>,
+) -> Vec<String> {
+    if preferred.is_empty() {
+        return connected;
+    }
+    let matches_preferred = |peer: &str| -> bool {
+        preferred.iter().any(|pref| {
+            peer == pref.as_str()
+                || (!pref.contains(':')
+                    && peer.starts_with(pref)
+                    && peer.as_bytes().get(pref.len()) == Some(&b':'))
+        })
+    };
+    let matched: Vec<String> = connected
+        .iter()
+        .filter(|p| matches_preferred(p.as_str()))
+        .cloned()
+        .collect();
+    if matched.is_empty() {
+        warn!(
+            "IBD preferred_peers={preferred:?} but none are connected yet (connected: {connected:?}); \
+             continuing with all connected peers"
+        );
+        connected
+    } else {
+        info!(
+            "IBD preferred_peers: using {} ({})",
+            matched.len(),
+            matched.join(", ")
+        );
+        matched
+    }
+}
+
 /// Block download request
 #[derive(Debug, Clone)]
 struct BlockRequest {
@@ -577,37 +615,8 @@ impl ParallelIBD {
                 .then_with(|| a.cmp(b)) // 4. Stable: same addr string order when all equal
         });
 
-        // preferred_peers: restrict IBD to these peers only (must be connected).
-        // Matches "192.168.2.100" to "192.168.2.100:8333" (preferred without port matches peer with port).
-        let preferred: &[String] = &self.config.preferred_peers;
-        if !preferred.is_empty() {
-            let matches_preferred = |peer: &str| -> bool {
-                preferred.iter().any(|pref| {
-                    peer == pref.as_str()
-                        || (!pref.contains(':')
-                            && peer.starts_with(pref)
-                            && peer.as_bytes().get(pref.len()) == Some(&b':'))
-                })
-            };
-            let matched = filtered_peers
-                .iter()
-                .filter(|p| matches_preferred(p.as_str()))
-                .cloned()
-                .collect::<Vec<_>>();
-            if matched.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "preferred_peers={:?} but none are connected. Connected: {:?}",
-                    preferred,
-                    peer_ids
-                ));
-            }
-            filtered_peers = matched;
-            info!(
-                "IBD preferred_peers: using {} ({})",
-                filtered_peers.len(),
-                filtered_peers.join(", ")
-            );
-        }
+        // preferred_peers: prefer these peers when connected; fall back if none match yet.
+        filtered_peers = filter_ibd_download_peers(&self.config.preferred_peers, filtered_peers);
 
         let ibd_mode: &str = &self.config.mode;
         let wan_multi_peer = ParallelIBDConfig::is_wan_only_multi_peer(&filtered_peers);
@@ -3088,6 +3097,25 @@ mod tests {
             assert_eq!(config.preferred_peers, vec!["192.168.2.100:8333"]);
             assert_eq!(config.min_peers_for_ibd(), 1);
         });
+    }
+
+    #[test]
+    fn filter_ibd_download_peers_falls_back_when_none_connected() {
+        let preferred = vec!["192.168.1.10:8333".to_string()];
+        let connected = vec!["8.8.8.8:8333".to_string(), "1.1.1.1:8333".to_string()];
+        let out = super::filter_ibd_download_peers(&preferred, connected.clone());
+        assert_eq!(out, connected);
+    }
+
+    #[test]
+    fn filter_ibd_download_peers_matches_host_without_port() {
+        let preferred = vec!["192.168.1.10".to_string()];
+        let connected = vec![
+            "192.168.1.10:8333".to_string(),
+            "8.8.8.8:8333".to_string(),
+        ];
+        let out = super::filter_ibd_download_peers(&preferred, connected);
+        assert_eq!(out, vec!["192.168.1.10:8333".to_string()]);
     }
 
     #[test]

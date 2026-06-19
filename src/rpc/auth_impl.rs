@@ -367,7 +367,7 @@ impl RpcAuthManager {
                             requires_auth: self.auth_required,
                             error: None,
                         };
-                    } else {
+                    } else if self.auth_required {
                         self.auth_failure_tracker.record_failure(client_addr).await;
                         SecurityEvent::AuthFailure {
                             client_addr,
@@ -410,18 +410,20 @@ impl RpcAuthManager {
                         }
                     }
 
-                    self.auth_failure_tracker.record_failure(client_addr).await;
-                    SecurityEvent::AuthFailure {
-                        client_addr,
-                        reason: "Invalid HTTP Basic credentials".to_string(),
+                    if self.auth_required {
+                        self.auth_failure_tracker.record_failure(client_addr).await;
+                        SecurityEvent::AuthFailure {
+                            client_addr,
+                            reason: "Invalid HTTP Basic credentials".to_string(),
+                        }
+                        .log();
+                        return AuthResult {
+                            user_id: None,
+                            requires_auth: self.auth_required,
+                            error: Some("Invalid authentication credentials".to_string()),
+                        };
                     }
-                    .log();
-                    return AuthResult {
-                        user_id: None,
-                        requires_auth: self.auth_required,
-                        error: Some("Invalid authentication credentials".to_string()),
-                    };
-                } else {
+                } else if self.auth_required {
                     self.auth_failure_tracker.record_failure(client_addr).await;
                     SecurityEvent::AuthFailure {
                         client_addr,

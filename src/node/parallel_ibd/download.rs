@@ -242,6 +242,7 @@ pub(crate) async fn download_chunk(
 
     let base_timeout_secs = config.download_timeout_secs;
     let timeout_duration = Duration::from_secs(base_timeout_secs);
+    let first_block_wait = timeout_duration;
 
     let pipeline_depth: usize = blocks_sem
         .as_ref()
@@ -354,12 +355,11 @@ pub(crate) async fn download_chunk(
                     stall_res = rx.recv() => {
                         if let Ok(stall_h) = stall_res {
                             if stall_h >= start_height && stall_h <= end_height {
-                                // Only abort if we genuinely have not started — i.e., the first
-                                // height of the chunk is also missing (we cannot make forward
-                                // progress at all). If stall_h > start_height some earlier block
-                                // in the chunk is still pending; biased select above guarantees
-                                // we process any ready in_flight entry before reaching here, so
-                                // landing here means we truly have nothing ready yet.
+                                // Ignore premature coordinator stalls while the first block is
+                                // still in flight (common at height 1 before peer responds).
+                                if chunk_start_time.elapsed() < first_block_wait {
+                                    continue;
+                                }
                                 warn!("Coordinator stall at {}: aborting chunk {}-{} (no first block yet)", stall_h, start_height, end_height);
                                 return Err(anyhow::anyhow!(
                                     "Coordinator stall: aborting chunk {}-{} for retry",
@@ -369,17 +369,21 @@ pub(crate) async fn download_chunk(
                         }
                         continue;
                     }
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                        warn!("Chunk {} to {}: no first block in 5s, failing for retry", start_height, end_height);
-                        return Err(anyhow::anyhow!("Block download stalled (no first block in 5s)"));
+                    _ = tokio::time::sleep(first_block_wait) => {
+                        warn!("Chunk {} to {}: no first block in {}s, failing for retry", start_height, end_height, base_timeout_secs);
+                        return Err(anyhow::anyhow!(
+                            "Block download stalled (no first block in {base_timeout_secs}s)"
+                        ));
                     }
                 }
             } else {
                 tokio::select! {
                     r = in_flight.next() => r,
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                        warn!("Chunk {} to {}: no first block in 5s, failing for retry", start_height, end_height);
-                        return Err(anyhow::anyhow!("Block download stalled (no first block in 5s)"));
+                    _ = tokio::time::sleep(first_block_wait) => {
+                        warn!("Chunk {} to {}: no first block in {}s, failing for retry", start_height, end_height, base_timeout_secs);
+                        return Err(anyhow::anyhow!(
+                            "Block download stalled (no first block in {base_timeout_secs}s)"
+                        ));
                     }
                 }
             }
