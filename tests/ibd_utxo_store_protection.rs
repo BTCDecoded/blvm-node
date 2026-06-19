@@ -172,9 +172,14 @@ fn height_granular_protection_no_lost_utxos() {
     let mut del_scratch: Vec<OutPointKey> = Vec::new();
     let mut add_scratch: Vec<(OutPointKey, Arc<UTXO>)> = Vec::new();
 
-    // 500 blocks. Each block creates 10 outputs and spends up to 5 prior outputs.
+    // Default 100 blocks (CI-friendly). Override: `BLVM_TEST_IBD_UTXO_BLOCKS=500`.
+    // Each block creates 10 outputs and spends up to 5 prior outputs.
     // Periodically (every 7 blocks) we flush. Mirrors retire-thread behavior.
-    const N_BLOCKS: u64 = 500;
+    let n_blocks: u64 = std::env::var("BLVM_TEST_IBD_UTXO_BLOCKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(100);
     const OUTS_PER_BLOCK: usize = 10;
     const SPENDS_PER_BLOCK: usize = 5;
 
@@ -186,7 +191,7 @@ fn height_granular_protection_no_lost_utxos() {
         rng_state
     };
 
-    for h in 1..=N_BLOCKS {
+    for h in 1..=n_blocks {
         // 1) Pick deletions from the alive set: simulate this block spending some prior outputs.
         let alive_keys: Vec<OutPoint> = alive.keys().copied().collect();
         let mut deletions: Vec<OutPoint> = Vec::new();

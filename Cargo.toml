@@ -258,6 +258,8 @@ module-watcher = ["dep:notify"]
 # WASM module support (load .wasm modules in-process, hotloading)
 wasm-modules = []
 # miniscript feature removed — see blvm-miniscript module
+# Coverage-suite integration tests (tarpaulin / local gates only; skipped in default CI).
+coverage-tests = []
 
 # Storage compression optimizations
 block-compression = ["dep:zstd"]
@@ -370,3 +372,170 @@ path = "tools/migrate-bitcoin-core.rs"
 required-features = ["rocksdb"]
 
 # secp256k1 now direct path dep above; no patch needed
+
+# Coverage suites: explicit targets replace auto-discovery so CI skips them unless
+# `--features coverage-tests` (see COVERAGE_TEST_PLAN.md / tarpaulin gates).
+[[test]]
+name = "bip157_handler_coverage_suite"
+path = "tests/bip157_handler_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "blockchain_rpc_coverage_suite"
+path = "tests/blockchain_rpc_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "chainstate_coverage_suite"
+path = "tests/chainstate_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "control_rpc_coverage_suite"
+path = "tests/control_rpc_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "event_publisher_coverage_suite"
+path = "tests/event_publisher_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "hooks_manager_coverage_suite"
+path = "tests/hooks_manager_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "inter_module_coverage_suite"
+path = "tests/inter_module_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "mempool_rpc_coverage_suite"
+path = "tests/mempool_rpc_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "metrics_manager_coverage_suite"
+path = "tests/metrics_manager_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "mining_rpc_coverage_suite"
+path = "tests/mining_rpc_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "module_api_blockchain_coverage_suite"
+path = "tests/module_api_blockchain_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "module_integration_coverage_suite"
+path = "tests/module_integration_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "module_manager_coverage_suite"
+path = "tests/module_manager_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "module_registry_cas_coverage_suite"
+path = "tests/module_registry_cas_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "module_registry_manifest_coverage_suite"
+path = "tests/module_registry_manifest_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "network_manager_coverage_suite"
+path = "tests/network_manager_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "network_rpc_coverage_suite"
+path = "tests/network_rpc_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "node_api_ipc_coverage_suite"
+path = "tests/node_api_ipc_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "node_api_ipc_wrapper_coverage_suite"
+path = "tests/node_api_ipc_wrapper_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "node_mempool_coverage_suite"
+path = "tests/node_mempool_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "node_mod_coverage_suite"
+path = "tests/node_mod_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "payment_settlement_coverage_suite"
+path = "tests/payment_settlement_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "pruning_coverage_suite"
+path = "tests/pruning_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "rawtx_rpc_coverage_suite"
+path = "tests/rawtx_rpc_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "rpc_auth_coverage_suite"
+path = "tests/rpc_auth_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "rpc_server_coverage_suite"
+path = "tests/rpc_server_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "run_loop_coverage_suite"
+path = "tests/run_loop_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "serialization_cache_coverage_suite"
+path = "tests/serialization_cache_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "storage_bounds_coverage_suite"
+path = "tests/storage_bounds_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "storage_database_coverage_suite"
+path = "tests/storage_database_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "storage_mod_coverage_suite"
+path = "tests/storage_mod_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "timer_manager_coverage_suite"
+path = "tests/timer_manager_coverage_suite.rs"
+required-features = ["coverage-tests"]
+
+[[test]]
+name = "validation_mod_coverage_suite"
+path = "tests/validation_mod_coverage_suite.rs"
+required-features = ["coverage-tests"]

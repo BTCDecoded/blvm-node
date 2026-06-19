@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 const MINE_ATTEMPTS: u64 = 2_000_000;
-/// Shorter than `regtest_mine_sync_600` — enough blocks for a mid-chain fork.
+/// Shorter than `regtest_mine_sync` (default 60 blocks) — enough blocks for a mid-chain fork.
 const LINEAR_BLOCK_COUNT: u64 = 12;
 /// Shared prefix heights `0..=3`; first divergent connect height is `4`.
 const FORK_DIVERGE_HEIGHT: u64 = 4;

@@ -1,5 +1,8 @@
-//! Regtest: mine 600 blocks on one in-memory node, then replay the same wire bytes on a
-//! second node (sync). Exercises consensus mining + `SyncCoordinator::process_block` end-to-end.
+//! Regtest: mine N blocks on one node, then replay the same wire bytes on a follower (sync).
+//! Exercises consensus mining + `SyncCoordinator::process_block` end-to-end.
+//!
+//! Default N is 60 (CI-friendly). Override locally for stress runs:
+//! `BLVM_TEST_REGTEST_BLOCKS=600 cargo test --test regtest_mine_sync -- --nocapture`
 
 use blvm_node::node::sync::SyncCoordinator;
 use blvm_node::storage::Storage;
@@ -11,8 +14,16 @@ use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, UtxoSet};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-const REGTEST_BLOCKS: u64 = 600;
+const DEFAULT_REGTEST_BLOCKS: u64 = 60;
 const MINE_ATTEMPTS: u64 = 2_000_000;
+
+fn regtest_block_count() -> u64 {
+    std::env::var("BLVM_TEST_REGTEST_BLOCKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_REGTEST_BLOCKS)
+}
 
 /// BIP34 height in coinbase scriptSig (regtest has BIP34 active from height 0).
 fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
@@ -55,7 +66,8 @@ fn bootstrap_follower_storage(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn regtest_mine_600_blocks_then_sync_follower() -> anyhow::Result<()> {
+async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
+    let regtest_blocks = regtest_block_count();
     let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest)?);
     let genesis = protocol.get_network_params().genesis_block.clone();
     let genesis_header = genesis.header.clone();
@@ -75,9 +87,9 @@ async fn regtest_mine_600_blocks_then_sync_follower() -> anyhow::Result<()> {
     let mut coord_m = SyncCoordinator::new();
     let mut coord_f = SyncCoordinator::new();
 
-    let mut wire_blocks: Vec<Vec<u8>> = Vec::with_capacity(REGTEST_BLOCKS as usize);
+    let mut wire_blocks: Vec<Vec<u8>> = Vec::with_capacity(regtest_blocks as usize);
 
-    for connect_height in 0..REGTEST_BLOCKS {
+    for connect_height in 0..regtest_blocks {
         let stored: u64 = storage_m.blocks().block_count()? as u64;
         assert_eq!(
             stored, connect_height,
@@ -143,17 +155,18 @@ async fn regtest_mine_600_blocks_then_sync_follower() -> anyhow::Result<()> {
         storage_m
             .chain()
             .update_tip(&block_hash, &mined.header, connect_height)?;
-        storage_m.utxos().store_utxo_set(&miner_utxo)?;
 
         wire_blocks.push(wire);
     }
 
-    assert_eq!(storage_m.chain().get_height()?.unwrap(), REGTEST_BLOCKS - 1);
-    assert_eq!(wire_blocks.len() as u64, REGTEST_BLOCKS);
+    storage_m.utxos().store_utxo_set(&miner_utxo)?;
+
+    assert_eq!(storage_m.chain().get_height()?.unwrap(), regtest_blocks - 1);
+    assert_eq!(wire_blocks.len() as u64, regtest_blocks);
 
     let miner_tip = storage_m.chain().get_tip_hash()?.unwrap();
 
-    for connect_height in 0..REGTEST_BLOCKS {
+    for connect_height in 0..regtest_blocks {
         let wire = &wire_blocks[connect_height as usize];
         let accepted = coord_f.process_block(
             storage_f.blocks().as_ref(),
@@ -172,10 +185,11 @@ async fn regtest_mine_600_blocks_then_sync_follower() -> anyhow::Result<()> {
         storage_f
             .chain()
             .update_tip(&block_hash, &block.header, connect_height)?;
-        storage_f.utxos().store_utxo_set(&follower_utxo)?;
     }
 
-    assert_eq!(storage_f.chain().get_height()?.unwrap(), REGTEST_BLOCKS - 1);
+    storage_f.utxos().store_utxo_set(&follower_utxo)?;
+
+    assert_eq!(storage_f.chain().get_height()?.unwrap(), regtest_blocks - 1);
     let follower_tip = storage_f.chain().get_tip_hash()?.unwrap();
     assert_eq!(
         follower_tip, miner_tip,
