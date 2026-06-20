@@ -33,9 +33,8 @@ static RUNTIME_HANDLE: RwLock<Option<tokio::runtime::Handle>> = RwLock::new(None
 
 /// Install the block pipeline using the node's module router and current tokio runtime.
 pub fn install_block_pipeline(router: Arc<ModuleRouter>) {
-    *RUNTIME_HANDLE
-        .write()
-        .expect("pipeline runtime lock") = Some(tokio::runtime::Handle::current());
+    *RUNTIME_HANDLE.write().expect("pipeline runtime lock") =
+        Some(tokio::runtime::Handle::current());
     *PIPELINE_ROUTER.write().expect("pipeline router lock") = Some(router);
     debug!("Block pipeline installed");
 }

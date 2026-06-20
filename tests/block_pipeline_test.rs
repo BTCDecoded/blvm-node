@@ -9,11 +9,11 @@ use blvm_node::module::inter_module::{ModuleApiRegistry, ModuleRouter};
 use blvm_node::module::pipeline::{
     install_block_pipeline, reset_block_pipeline_for_tests, try_filter_block_before_store,
 };
-use serial_test::serial;
 use blvm_node::module::traits::ModuleError;
 use blvm_protocol::{
     Block, BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput,
 };
+use serial_test::serial;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct FilterBlockRequest {
