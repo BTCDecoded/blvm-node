@@ -6,7 +6,7 @@ Implements a JSON-RPC 2.0 API compatible with common Bitcoin RPC method names. A
 
 ## Endpoints
 
-**Default RPC Endpoint**: `http://localhost:18332` (regtest) or `http://localhost:8332` (mainnet)
+**Default RPC Endpoint** (when `--rpc-addr` is omitted): mainnet `http://localhost:8332`, testnet `http://localhost:18332`, regtest `http://localhost:18443` (Core-aligned)
 
 **Protocol**: HTTP POST with JSON-RPC 2.0
 

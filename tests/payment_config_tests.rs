@@ -350,10 +350,15 @@ fn test_rest_api_config_resolve_bind_addr() {
         cfg.resolve_bind_addr(mainnet_rpc),
         "127.0.0.1:8080".parse::<SocketAddr>().unwrap()
     );
-    let regtest_rpc: SocketAddr = "127.0.0.1:18332".parse().unwrap();
+    let testnet_rpc: SocketAddr = "127.0.0.1:18332".parse().unwrap();
+    assert_eq!(
+        cfg.resolve_bind_addr(testnet_rpc),
+        "127.0.0.1:18080".parse::<SocketAddr>().unwrap()
+    );
+    let regtest_rpc: SocketAddr = "127.0.0.1:18443".parse().unwrap();
     assert_eq!(
         cfg.resolve_bind_addr(regtest_rpc),
-        "127.0.0.1:18080".parse::<SocketAddr>().unwrap()
+        "127.0.0.1:28443".parse::<SocketAddr>().unwrap()
     );
     let custom = RestApiConfig {
         listen_addr: Some("0.0.0.0:9090".parse().unwrap()),

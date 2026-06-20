@@ -19,9 +19,10 @@ blvm-node implements Phase 2 and 3 high availability features for production dep
 - RPC metrics (requests processed, errors)
 - Mempool metrics (transaction count, size)
 
-**Example**:
+**Example** (use the same host:port as `--rpc-addr`; mainnet **8332**, testnet **18332**, regtest **18443**):
+
 ```bash
-curl http://localhost:18332/metrics
+curl http://localhost:8332/metrics
 ```
 
 **Response Format**: Prometheus text format
@@ -251,7 +252,7 @@ Metrics and `/health*` paths depend on the running **`blvm`** / RPC stack build 
 scrape_configs:
   - job_name: 'blvm-node'
     static_configs:
-      - targets: ['localhost:18332']
+      - targets: ['localhost:8332']   # match --rpc-addr (testnet 18332, regtest 18443)
     metrics_path: '/metrics'
     scrape_interval: 15s
 ```
@@ -263,14 +264,14 @@ scrape_configs:
 livenessProbe:
   httpGet:
     path: /health/live
-    port: 18332
+    port: 8332   # match --rpc-addr (testnet 18332, regtest 18443)
   initialDelaySeconds: 30
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
     path: /health/ready
-    port: 18332
+    port: 8332   # match --rpc-addr
   initialDelaySeconds: 10
   periodSeconds: 5
 ```

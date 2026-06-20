@@ -31,7 +31,7 @@ use blvm_node::rpc::RpcManager;
 use std::net::SocketAddr;
 
 let tcp_addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
-let quinn_addr: SocketAddr = "127.0.0.1:18332".parse().unwrap();
+let quinn_addr: SocketAddr = "127.0.0.1:18332".parse().unwrap(); // testnet example; regtest default RPC is 18443
 
 // Option 1: Create with both transports
 #[cfg(feature = "quinn")]

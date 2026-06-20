@@ -29,7 +29,7 @@ This guide shows how to integrate blvm-node with existing Bitcoin tools and serv
    - Go to: Tools → Network → Server
    - Uncheck "Select server automatically"
    - Enter: `127.0.0.1`
-   - Port: `18332` (testnet) or `8332` (mainnet)
+   - Port: `18332` (testnet), `8332` (mainnet), or `18443` (regtest)
    - Protocol: TCP
    - Click "Close"
 
@@ -222,12 +222,12 @@ src/ckpool -B -c ckpool.conf
 
 3. **Miners:** pool URL `host:3333`, username = payout address (`bc1…`), password = anything.
 
-**Regtest lab:** use `--network regtest` and RPC port `18332` (BLVM default). `getblocktemplate` works after `generatetoaddress` seeds the chain.
+**Regtest lab:** use `--network regtest` (default RPC **18443** when `--rpc-addr` is omitted). `getblocktemplate` works after `generatetoaddress` seeds the chain.
 
 **Smoke test** before starting ckpool:
 
 ```bash
-curl -s -u ckpool:change-me -X POST http://127.0.0.1:8332 \
+curl -s -u ckpool:change-me -X POST http://127.0.0.1:18443 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"getblocktemplate","params":[{"rules":["segwit"]}],"id":1}'
 ```

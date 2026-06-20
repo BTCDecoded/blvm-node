@@ -2,7 +2,7 @@
 # ckpool-compatible RPC smoke test (node must be running).
 set -euo pipefail
 
-RPC_URL="${RPC_URL:-http://127.0.0.1:18332}"
+RPC_URL="${RPC_URL:-http://127.0.0.1:18443}"
 RPC_USER="${RPC_USER:-ckpool}"
 RPC_PASS="${RPC_PASS:-change-me}"
 

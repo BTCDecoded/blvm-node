@@ -1321,7 +1321,7 @@ pub struct RestApiConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
 
-    /// REST bind address. When unset, defaults to loopback port **8080** (mainnet RPC 8332) or **18080** (18332 testnet/regtest).
+    /// REST bind address. When unset, defaults to loopback port **8080** (mainnet RPC 8332), **18080** (testnet RPC 18332), or RPC port **+ 10000** (e.g. regtest **18443** → **28443**).
     #[serde(default)]
     pub listen_addr: Option<SocketAddr>,
 

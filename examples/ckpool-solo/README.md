@@ -11,12 +11,12 @@ username = "ckpool"
 password = "change-me"   # auto-granted admin (GBT/submitblock); use a strong random secret
 ```
 
-Use `--rpc-addr 127.0.0.1:18332` (regtest) or `127.0.0.1:8332` (mainnet). Do not expose RPC to the LAN without TLS.
+Use `--rpc-addr 127.0.0.1:18443` (regtest default) or `127.0.0.1:8332` (mainnet). Do not expose RPC to the LAN without TLS.
 
 ## 2. Start node
 
 ```bash
-blvm --network regtest --config blvm.toml --rpc-addr 127.0.0.1:18332
+blvm --network regtest --config blvm.toml --rpc-addr 127.0.0.1:18443
 ```
 
 Regtest: seed chain with `generatetoaddress` (RPC) before ckpool starts.
@@ -26,7 +26,7 @@ Regtest: seed chain with `generatetoaddress` (RPC) before ckpool starts.
 ```json
 {
   "btcd": [{
-    "url": "127.0.0.1:18332",
+    "url": "127.0.0.1:18443",
     "auth": "ckpool",
     "pass": "change-me",
     "notify": true
