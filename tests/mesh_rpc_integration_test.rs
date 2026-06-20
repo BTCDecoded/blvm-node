@@ -75,14 +75,14 @@ impl ModuleAPI for MockMeshModule {
                     .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
 
                 if req.destination == [0u8; 32] {
-                    return Ok(bincode::serialize(&SendPacketResponse {
+                    return bincode::serialize(&SendPacketResponse {
                         success: false,
                         packet_id: [0u8; 32],
                         route_length: 0,
                         estimated_cost_sats: 0,
                         error: Some("invalid destination".into()),
                     })
-                    .map_err(|e| ModuleError::SerializationError(e.to_string()))?);
+                    .map_err(|e| ModuleError::SerializationError(e.to_string()));
                 }
 
                 self.deliveries.lock().await.push_back(LocalDelivery {

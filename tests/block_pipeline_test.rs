@@ -1,6 +1,7 @@
 //! Block pipeline: `filter_block_before_store` ModuleAPI routing during IBD flush.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use blvm_node::module::inter_module::api::ModuleAPI;
@@ -170,5 +171,72 @@ async fn block_pipeline_fail_open_without_registered_module() {
     assert!(
         w[1].iter().any(|stack| !stack.is_empty()),
         "expected fail-open pass-through when no module registers filter_block_before_store"
+    );
+}
+
+/// Module that never completes — forces the filter timeout / fail-open path.
+struct HangFilterApi;
+
+#[async_trait]
+impl ModuleAPI for HangFilterApi {
+    async fn handle_request(
+        &self,
+        method: &str,
+        _params: &[u8],
+        _caller: &str,
+    ) -> Result<Vec<u8>, ModuleError> {
+        if method != "filter_block_before_store" {
+            return Err(ModuleError::OperationError(format!(
+                "unknown method {method}"
+            )));
+        }
+        std::future::pending::<()>().await;
+        Ok(vec![])
+    }
+
+    fn list_methods(&self) -> Vec<String> {
+        vec!["filter_block_before_store".to_string()]
+    }
+
+    fn api_version(&self) -> u32 {
+        1
+    }
+}
+
+/// Regression: filter must fail-open on timeout instead of blocking IBD flush threads
+/// indefinitely when the module handler does not return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn block_pipeline_filter_times_out_fail_open_when_module_hangs() {
+    let (block, witnesses) = sample_block_with_witnesses();
+    let registry = Arc::new(ModuleApiRegistry::new());
+    let router = Arc::new(ModuleRouter::new(Arc::clone(&registry)));
+    registry
+        .register_api("selective-sync_test".to_string(), Arc::new(HangFilterApi))
+        .await
+        .expect("register_api");
+    install_block_pipeline(router);
+
+    let start = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || try_filter_block_before_store(1, block, witnesses)),
+    )
+    .await
+    .expect("filter must not block forever when module hangs");
+    let (_, w) = result.expect("spawn_blocking");
+
+    assert!(
+        start.elapsed() >= Duration::from_secs(5),
+        "expected to wait for filter timeout, took {:?}",
+        start.elapsed()
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(9),
+        "expected fail-open within filter timeout, took {:?}",
+        start.elapsed()
+    );
+    assert!(
+        w[1].iter().any(|stack| !stack.is_empty()),
+        "expected fail-open pass-through when filter times out"
     );
 }

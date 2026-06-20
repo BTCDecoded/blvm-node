@@ -150,8 +150,8 @@ mod heed3_tests {
 
         assert_eq!(slices.len(), N);
         for (i, (opt, (_, expected))) in slices.iter().zip(written.iter()).enumerate() {
-            let bytes = opt.expect(&format!("key {i} missing"));
-            let archived = access_utxo(bytes).expect(&format!("key {i} invalid"));
+            let bytes = opt.unwrap_or_else(|| panic!("key {i} missing"));
+            let archived = access_utxo(bytes).unwrap_or_else(|_| panic!("key {i} invalid"));
             let got = utxo_from_archived(archived);
             assert_eq!(got.value, expected.value, "key {i}");
             assert_eq!(got.height, expected.height, "key {i}");

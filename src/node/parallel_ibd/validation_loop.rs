@@ -100,6 +100,7 @@ fn ibd_maybe_heap_trim() {
     }
 }
 
+use super::IbdBlockFlushOpts;
 use super::ParallelIBD;
 use super::ibd_staging::empty_utxo_delta;
 
@@ -436,6 +437,56 @@ fn retire_flush_batch_size() -> usize {
 /// the gap. Two-phase commit inside the durability path (ADDs → flush_disk → watermark →
 /// DELs → flush_disk) ensures that a SIGKILL can only leave stale (already-spent) UTXOs on
 /// disk — never missing UTXOs — so resume always finds what it expects.
+/// Join one UTXO flush worker and fold its sub-MuHash into the global accumulator.
+fn join_utxo_flush_handle_mul_sub_mh(
+    handle: JoinHandle<Result<blvm_muhash::MuHash3072>>,
+    ibd_muhash: &Arc<Mutex<blvm_muhash::MuHash3072>>,
+) -> Result<()> {
+    match handle.join() {
+        Ok(Ok(sub_mh)) => {
+            let mut mh_guard = ibd_muhash.lock();
+            *mh_guard = std::mem::take(&mut *mh_guard).multiply(&sub_mh);
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("UTXO flush panicked: {:?}", e)),
+    }
+}
+
+/// Join one UTXO flush worker and return its sub-MuHash (for batching before a global fold).
+fn join_utxo_flush_handle_collect_sub_mh(
+    handle: JoinHandle<Result<blvm_muhash::MuHash3072>>,
+) -> Result<blvm_muhash::MuHash3072> {
+    match handle.join() {
+        Ok(Ok(sub_mh)) => Ok(sub_mh),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("UTXO flush panicked: {:?}", e)),
+    }
+}
+
+/// Drain and join all in-flight UTXO flush threads. Never hold `utxo_flush_handles` across `join()`.
+fn join_all_utxo_flush_handles(
+    utxo_flush_handles: &Arc<Mutex<VecDeque<JoinHandle<Result<blvm_muhash::MuHash3072>>>>>,
+    log_label: &str,
+) -> Result<blvm_muhash::MuHash3072> {
+    let handles: Vec<_> = utxo_flush_handles.lock().drain(..).collect();
+    let n = handles.len();
+    if n > 0 {
+        info!("IBD shutdown: joining {n} in-flight UTXO flush thread(s) ({log_label})");
+    }
+    let mut combined = blvm_muhash::MuHash3072::new();
+    for (i, handle) in handles.into_iter().enumerate() {
+        debug!(
+            "IBD shutdown: UTXO flush join {}/{} ({log_label})",
+            i + 1,
+            n
+        );
+        let sub = join_utxo_flush_handle_collect_sub_mh(handle)?;
+        combined = combined.multiply(&sub);
+    }
+    Ok(combined)
+}
+
 fn push_utxo_flush_from_retire(
     store: &Arc<IbdUtxoStore>,
     storage_wm: &Arc<Storage>,
@@ -458,27 +509,21 @@ fn push_utxo_flush_from_retire(
     // Do durability on the first call, every Nth call, or whenever the caller requests it
     // (e.g. deferred-checkpoint mode where each call is already rate-limited by interval).
     let do_durability = force_durability || batch_count <= 1 || n % batch_count == 0;
-    let mut q = utxo_flush_handles.lock();
-    // flush_limit cap: join the oldest in-flight commit to keep concurrency bounded.
-    // Each joined thread returns its local MuHash3072 sub-accumulator; we fold it into
-    // the global accumulator here. The lock is held for a single Num3072 multiply
-    // (~10 µs), not for the full batch muhash loop (was seconds under the old design).
-    while q.len() >= flush_limit {
-        let Some(handle) = q.pop_front() else {
-            return Err(anyhow::anyhow!(
-                "IBD invariant violated: UTXO flush wait queue empty under backpressure"
-            ));
+    // Never hold `utxo_flush_handles` across `join()`: shutdown and other retire paths need
+    // the queue mutex; a slow RocksDB commit inside join would wedge IBD exit.
+    loop {
+        let handle = {
+            let mut q = utxo_flush_handles.lock();
+            if q.len() < flush_limit {
+                None
+            } else {
+                q.pop_front()
+            }
         };
-        match handle.join() {
-            Ok(Ok(sub_mh)) => {
-                let mut mh_guard = ibd_muhash.lock();
-                *mh_guard = std::mem::take(&mut *mh_guard).multiply(&sub_mh);
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(e) => {
-                return Err(anyhow::anyhow!("UTXO flush panicked: {:?}", e));
-            }
-        }
+        let Some(handle) = handle else {
+            break;
+        };
+        join_utxo_flush_handle_mul_sub_mh(handle, ibd_muhash)?;
     }
     let batch_size = pkg.ops.len();
     let heights = Arc::clone(&pkg.heights);
@@ -495,21 +540,17 @@ fn push_utxo_flush_from_retire(
         // previous per-thread mutex hold (seconds each, serialized) with a batch of
         // microsecond-cost Num3072 multiplies.
         let mut combined_sub_mh = blvm_muhash::MuHash3072::new();
-        while let Some(handle) = q.pop_front() {
-            match handle.join() {
-                Ok(Ok(sub_mh)) => {
-                    combined_sub_mh = combined_sub_mh.multiply(&sub_mh);
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "UTXO flush panicked while draining for durability: {:?}",
-                        e
-                    ));
-                }
-            }
+        loop {
+            let handle = {
+                let mut q = utxo_flush_handles.lock();
+                q.pop_front()
+            };
+            let Some(handle) = handle else {
+                break;
+            };
+            let sub = join_utxo_flush_handle_collect_sub_mh(handle)?;
+            combined_sub_mh = combined_sub_mh.multiply(&sub);
         }
-        drop(q);
         let prepared = pkg.prepare_for_disk(store.value_codec())?;
         // Drop the raw ops Vec immediately after serialization. After prepare_for_disk()
         // the slab holds all UTXO bytes; the ops Arc<Vec<(key, Arc<UTXO>)>> (~18 MB at
@@ -581,24 +622,26 @@ fn push_utxo_flush_from_retire(
         let prepared = pkg.prepare_for_disk(store.value_codec())?;
         drop(pkg);
         let store_clone = Arc::clone(store);
-        q.push_back(std::thread::spawn(move || {
-            // Compute muhash in the async thread: concurrent with other threads and with
-            // retire loop processing. Retire loop is never blocked by this I/O.
-            // Use adds_only: non-durable async flushes must never write DEL tombstones.
-            // The caller uses take_flush_batch_adds_only / maybe_take_flush_batch_adds_only
-            // so the package should already contain only ADDs; this is a safety net.
-            let mut local_mh = blvm_muhash::MuHash3072::new();
-            store_clone.compute_package_muhash(&prepared, &mut local_mh)?;
-            store_clone.flush_prepared_package_adds_only(&prepared)?;
-            store_clone.release_protected_heights(&heights);
-            store_clone.note_utxo_flush_completed(prepared.max_block_height);
-            Ok(local_mh)
-        }));
+        utxo_flush_handles
+            .lock()
+            .push_back(std::thread::spawn(move || {
+                // Compute muhash in the async thread: concurrent with other threads and with
+                // retire loop processing. Retire loop is never blocked by this I/O.
+                // Use adds_only: non-durable async flushes must never write DEL tombstones.
+                // The caller uses take_flush_batch_adds_only / maybe_take_flush_batch_adds_only
+                // so the package should already contain only ADDs; this is a safety net.
+                let mut local_mh = blvm_muhash::MuHash3072::new();
+                store_clone.compute_package_muhash(&prepared, &mut local_mh)?;
+                store_clone.flush_prepared_package_adds_only(&prepared)?;
+                store_clone.release_protected_heights(&heights);
+                store_clone.note_utxo_flush_completed(prepared.max_block_height);
+                Ok(local_mh)
+            }));
         debug!(
             "[IBD_DEBUG] Block {}: async commit (batch_size={}, in_flight={}, n={})",
             next_height,
             batch_size,
-            q.len(),
+            utxo_flush_handles.lock().len(),
             n,
         );
     }
@@ -1124,6 +1167,54 @@ pub struct ValidationParams {
     /// when it reaches each checkpoint multiple; the background export thread in mod.rs
     /// picks it up and runs `run_checkpoint_export`. `None` in non-engine mode.
     pub checkpoint_tx: Option<std::sync::mpsc::SyncSender<u64>>,
+}
+
+/// Join in-flight async block flushes and persist any deferred batch before validation workers
+/// retire. Avoids a single giant synchronous flush at process shutdown (observed wedge at ~954k).
+fn drain_ibd_pending_blocks_before_shutdown(
+    skip_storage: bool,
+    parallel_ibd: &ParallelIBD,
+    blockstore: &Arc<BlockStore>,
+    storage: &Arc<Storage>,
+    pending_blocks: &mut Vec<(
+        Arc<Block>,
+        Arc<Vec<Vec<Witness>>>,
+        u64,
+        blvm_consensus::reorganization::BlockUndoLog,
+    )>,
+    pending_storage_bytes: &mut u64,
+    flush_handles: &mut VecDeque<std::thread::JoinHandle<Result<()>>>,
+) -> Result<()> {
+    while let Some(handle) = flush_handles.pop_front() {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Block storage flush thread panicked at IBD completion: {:?}",
+                    e
+                ));
+            }
+        }
+    }
+    if skip_storage {
+        pending_blocks.clear();
+        *pending_storage_bytes = 0;
+        return Ok(());
+    }
+    if !pending_blocks.is_empty() {
+        info!(
+            "Flushing {} deferred blocks before IBD shutdown",
+            pending_blocks.len()
+        );
+        parallel_ibd.flush_pending_blocks_with_opts(
+            blockstore,
+            Some(storage),
+            pending_blocks,
+            IbdBlockFlushOpts::shutdown_sync(),
+        )?;
+    }
+    Ok(())
 }
 
 /// Run the IBD validation loop. Called from std::thread::spawn.
@@ -2139,6 +2230,15 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         if in_flight.is_empty() {
             let staged_remaining = staged_count.load(Ordering::Relaxed);
             if staged_remaining == 0 {
+                drain_ibd_pending_blocks_before_shutdown(
+                    skip_storage,
+                    &parallel_ibd,
+                    &blockstore,
+                    &storage_clone,
+                    &mut pending_blocks,
+                    &mut pending_storage_bytes,
+                    &mut flush_handles,
+                )?;
                 break;
             }
             // Retire still has work. Yield CPU briefly, then re-check.
@@ -2533,6 +2633,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             blockstore_clone.as_ref(),
                             Some(&storage_for_flush),
                             to_flush,
+                            IbdBlockFlushOpts::default(),
                         )
                     }));
                     let flush_elapsed = flush_start.elapsed().as_millis() as u64;
@@ -2639,10 +2740,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     let _ = handle.join();
                 }
                 if !skip_storage && !pending_blocks.is_empty() {
-                    let _ = parallel_ibd.flush_pending_blocks(
+                    let _ = parallel_ibd.flush_pending_blocks_with_opts(
                         &blockstore,
                         Some(&storage_clone),
                         &mut pending_blocks,
+                        IbdBlockFlushOpts::shutdown_sync(),
                     );
                 }
                 error!("Failed to validate block at height {}: {}", next_height, e);
@@ -2895,14 +2997,22 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     }
 
     // Signal validation workers to finish, then the retire thread.
+    info!("IBD shutdown: signaling validation workers");
     drop(valjob_tx);
     for worker in _validate_workers {
         if let Err(e) = worker.join() {
             warn!("IBD validate worker join error: {:?}", e);
         }
     }
+    info!("IBD shutdown: validation workers joined; stopping retire thread");
     // Signal retire thread to finish, then take any last flush and join UTXO workers.
     retire_thread_shutdown(&mut _retire_dispatcher, &retire_err)?;
+    info!("IBD shutdown: retire thread stopped");
+
+    // Join retire-spawned UTXO commits before taking the final package so a slow thread
+    // cannot hold the queue mutex while we enqueue shutdown work.
+    let mut combined_shutdown_sub_mh =
+        join_all_utxo_flush_handles(&utxo_flush_handles, "post-retire")?;
 
     // Final UTXO flush: drain remaining pending ops, then join all in-flight handles.
     // Collect sub-MuHash accumulators from all async threads (they ran without the global
@@ -2915,6 +3025,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     > = None;
     if let Some(pkg) = ibd_store_v2_for_validation.take_remaining_flush_package() {
         shutdown_pkg_height = Some(pkg.max_block_height);
+        info!(
+            "IBD shutdown: final UTXO package height={} ops={}",
+            pkg.max_block_height,
+            pkg.ops.len()
+        );
         let heights = Arc::clone(&pkg.heights);
         // Pre-compute muhash in the main thread (full rayon pool) before spawning commit thread.
         let prepared = pkg.prepare_for_disk(ibd_store_v2_for_validation.value_codec())?;
@@ -2934,19 +3049,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 Ok(local_mh)
             }));
     }
-    // Drain all handles, collecting each thread's local MuHash sub-accumulator.
-    let mut combined_shutdown_sub_mh = blvm_muhash::MuHash3072::new();
-    for handle in utxo_flush_handles.lock().drain(..) {
-        match handle.join() {
-            Ok(Ok(sub_mh)) => {
-                combined_shutdown_sub_mh = combined_shutdown_sub_mh.multiply(&sub_mh);
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(e) => {
-                return Err(anyhow::anyhow!("UTXO flush panicked at shutdown: {:?}", e));
-            }
-        }
-    }
+    combined_shutdown_sub_mh = combined_shutdown_sub_mh.multiply(&join_all_utxo_flush_handles(
+        &utxo_flush_handles,
+        "final-package",
+    )?);
     // Fold all async threads' sub-accumulators into the global (multiply by identity is a no-op
     // so this is safe whether or not any handles had real muhash work to contribute).
     {
@@ -2957,8 +3063,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // checkpoints): ADDs flushed before watermark, DELs flushed after.
     if let Some(max_height) = shutdown_pkg_height {
         let muhash_running = ibd_muhash_accumulator.lock().serialize_running_state();
+        info!("IBD shutdown: flush_disk before UTXO watermark advance (height {max_height})");
         // Phase 1 ADDs → disk already written by spawned thread; flush_disk makes them durable.
         ibd_store_v2_for_validation.flush_disk()?;
+        info!("IBD shutdown: persisting UTXO checkpoint at height {max_height}");
         // Phase 2: advance watermark (safe point — any crash after this leaves stale UTXOs,
         // not missing UTXOs; stale UTXOs are harmless per Bitcoin double-spend prevention).
         storage_clone
@@ -2992,10 +3100,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     }
     if !skip_storage && !pending_blocks.is_empty() {
         info!("Flushing final {} pending blocks", pending_blocks.len());
-        parallel_ibd.flush_pending_blocks(
+        parallel_ibd.flush_pending_blocks_with_opts(
             &blockstore,
             Some(&storage_clone),
             &mut pending_blocks,
+            IbdBlockFlushOpts::shutdown_sync(),
         )?;
     }
 
@@ -3011,6 +3120,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     watchdog_shutdown.store(true, Ordering::Relaxed);
     let _ = watchdog_handle.join();
 
+    info!("IBD shutdown: validation loop complete");
     Ok(())
 }
 
@@ -3535,6 +3645,66 @@ mod tests {
         assert!(
             final_cap <= nominal / 8,
             "must shrink well below nominal (got {final_cap} for nominal {nominal})",
+        );
+    }
+
+    /// Regression: holding `utxo_flush_handles` across `join()` wedged IBD shutdown when a
+    /// RocksDB commit was slow — other paths could not drain or enqueue flushes.
+    #[test]
+    fn join_all_utxo_flush_handles_releases_mutex_before_join() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let started_join = Arc::clone(&started);
+        let release_join = Arc::clone(&release);
+        let slow = thread::spawn(move || {
+            started_join.store(true, Ordering::Release);
+            while !release_join.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(blvm_muhash::MuHash3072::new())
+        });
+
+        let utxo_flush_handles = Arc::new(Mutex::new(VecDeque::new()));
+        utxo_flush_handles.lock().push_back(slow);
+
+        let handles_for_join = Arc::clone(&utxo_flush_handles);
+        let joiner = thread::spawn(move || join_all_utxo_flush_handles(&handles_for_join, "test"));
+
+        let wait_start = Instant::now();
+        while !started.load(Ordering::Acquire) {
+            assert!(
+                wait_start.elapsed() < Duration::from_secs(2),
+                "slow flush worker did not start"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let lock_start = Instant::now();
+        {
+            let _guard = utxo_flush_handles.lock();
+        }
+        assert!(
+            lock_start.elapsed() < Duration::from_millis(500),
+            "utxo_flush_handles mutex still held during join"
+        );
+
+        release.store(true, Ordering::Release);
+        joiner.join().expect("join thread").expect("join flushes");
+        assert!(utxo_flush_handles.lock().is_empty());
+    }
+
+    #[test]
+    fn join_all_utxo_flush_handles_empty_queue_is_noop() {
+        let utxo_flush_handles = Arc::new(Mutex::new(VecDeque::new()));
+        let combined =
+            join_all_utxo_flush_handles(&utxo_flush_handles, "test").expect("empty join");
+        assert_eq!(
+            combined.finalize(),
+            blvm_muhash::MuHash3072::new().finalize()
         );
     }
 }

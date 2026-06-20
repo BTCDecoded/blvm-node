@@ -85,9 +85,18 @@ fn filter_sync(
             .await
     };
 
-    let response_bytes = match runtime_handle.block_on(tokio::time::timeout(FILTER_TIMEOUT, fut)) {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(e)) => {
+    // Never `Handle::block_on` from the IBD validation / flush threads: if all Tokio
+    // worker threads are busy (P2P, RPC, module IPC), `block_on` deadlocks and the
+    // timeout future never runs. Queue on the runtime and wait on a std channel instead.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    runtime_handle.spawn(async move {
+        let result = tokio::time::timeout(FILTER_TIMEOUT, fut).await;
+        let _ = tx.send(result);
+    });
+    let channel_wait = FILTER_TIMEOUT + Duration::from_secs(1);
+    let response_bytes = match rx.recv_timeout(channel_wait) {
+        Ok(Ok(Ok(bytes))) => bytes,
+        Ok(Ok(Err(e))) => {
             if !matches!(
                 &e,
                 ModuleError::OperationError(msg) if msg.contains("not found")
@@ -96,10 +105,16 @@ fn filter_sync(
             }
             return (block, witnesses);
         }
-        Err(_) => {
+        Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             warn!(
                 "filter_block_before_store timed out after {}s at height {height}; storing unfiltered",
                 FILTER_TIMEOUT.as_secs()
+            );
+            return (block, witnesses);
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            warn!(
+                "filter_block_before_store channel closed at height {height}; storing unfiltered"
             );
             return (block, witnesses);
         }

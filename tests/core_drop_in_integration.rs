@@ -27,6 +27,7 @@ mod core_drop_in {
         #[serde(default)]
         tip_coinbase_txid: Option<String>,
         #[serde(default)]
+        #[allow(dead_code)]
         utxo_count: u64,
     }
 

@@ -432,7 +432,7 @@ async fn test_node_api_create_directory_smoke() {
     let db_dir = temp_dir.path().join("db");
     let base_data = temp_dir.path().join("base");
     let module_data = base_data.join("cov-mod");
-    std::fs::create_dir_all(&module_data.join("existing")).unwrap();
+    std::fs::create_dir_all(module_data.join("existing")).unwrap();
     let storage = Arc::new(Storage::new(&db_dir).unwrap());
     let api = NodeApiImpl::new(storage);
     api.initialize_module("cov-mod".into(), module_data, base_data)

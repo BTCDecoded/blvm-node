@@ -385,6 +385,34 @@ struct BlockRequest {
     peer_id: String,
 }
 
+/// Options for [`ParallelIBD::do_flush_to_storage`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IbdBlockFlushOpts {
+    /// Use rayon for bincode serialization. Disabled on the validation-thread shutdown path
+    /// to avoid pool contention / nested-par_iter deadlocks while P2P is still active.
+    pub parallel_serialize: bool,
+    /// Emit `info!` per 50-block chunk (terminal flush diagnostics).
+    pub log_progress: bool,
+}
+
+impl Default for IbdBlockFlushOpts {
+    fn default() -> Self {
+        Self {
+            parallel_serialize: true,
+            log_progress: false,
+        }
+    }
+}
+
+impl IbdBlockFlushOpts {
+    pub(crate) fn shutdown_sync() -> Self {
+        Self {
+            parallel_serialize: false,
+            log_progress: true,
+        }
+    }
+}
+
 /// Parallel IBD coordinator
 pub struct ParallelIBD {
     config: ParallelIBDConfig,
@@ -2574,8 +2602,28 @@ impl ParallelIBD {
             blvm_consensus::reorganization::BlockUndoLog,
         )>,
     ) -> Result<()> {
+        self.flush_pending_blocks_with_opts(
+            blockstore,
+            _storage,
+            pending,
+            IbdBlockFlushOpts::default(),
+        )
+    }
+
+    pub(crate) fn flush_pending_blocks_with_opts(
+        &self,
+        blockstore: &BlockStore,
+        _storage: Option<&Arc<Storage>>,
+        pending: &mut Vec<(
+            Arc<Block>,
+            Arc<Vec<Vec<Witness>>>,
+            u64,
+            blvm_consensus::reorganization::BlockUndoLog,
+        )>,
+        opts: IbdBlockFlushOpts,
+    ) -> Result<()> {
         let to_flush = std::mem::take(pending);
-        Self::do_flush_to_storage(blockstore, _storage, to_flush)
+        Self::do_flush_to_storage(blockstore, _storage, to_flush, opts)
     }
 
     /// Core flush logic. Takes ownership of pending. Used by sync flush and async spawn.
@@ -2589,6 +2637,7 @@ impl ParallelIBD {
             u64,
             blvm_consensus::reorganization::BlockUndoLog,
         )>,
+        opts: IbdBlockFlushOpts,
     ) -> Result<()> {
         if pending.is_empty() {
             return Ok(());
@@ -2644,6 +2693,20 @@ impl ParallelIBD {
         // the spike at ~75 MB + ~75 MB = ~150 MB per iteration.
         const FLUSH_BLOCK_CHUNK_SIZE: usize = 50;
 
+        #[cfg(feature = "rayon")]
+        let parallel_serialize = opts.parallel_serialize;
+        #[cfg(not(feature = "rayon"))]
+        let parallel_serialize = false;
+
+        if opts.log_progress && n > 0 {
+            info!(
+                "IBD block flush: storing {} blocks (heights {}-{})",
+                n,
+                pending.first().map(|(_, _, h, _)| *h).unwrap_or(0),
+                flush_max_height,
+            );
+        }
+
         // Saved during the last chunk iteration for the update_tip call below.
         let mut tip_hash_for_update: Option<Hash> = None;
 
@@ -2651,6 +2714,19 @@ impl ParallelIBD {
             let chunk_end = (chunk_start + FLUSH_BLOCK_CHUNK_SIZE).min(n);
             let is_last_chunk = chunk_end == n;
             let chunk = &pending[chunk_start..chunk_end];
+            let chunk_t0 = std::time::Instant::now();
+            if opts.log_progress {
+                let lo = chunk.first().map(|(_, _, h, _)| *h).unwrap_or(0);
+                let hi = chunk.last().map(|(_, _, h, _)| *h).unwrap_or(lo);
+                info!(
+                    "IBD block flush: chunk {}-{}/{} (heights {}-{})",
+                    chunk_start + 1,
+                    chunk_end,
+                    n,
+                    lo,
+                    hi,
+                );
+            }
 
             // ── Serialise this chunk ──────────────────────────────────────────────
             // header_data uses Arc to avoid cloning Vec on cache hit.
@@ -2662,48 +2738,50 @@ impl ParallelIBD {
                 let _ibd_header_cache_bypass =
                     crate::storage::serialization_cache::IbdHeaderSerializeCacheBypassGuard::enter(
                     );
-                #[cfg(feature = "rayon")]
-                {
-                    use blvm_protocol::rayon::iter::IntoParallelRefIterator;
-                    use blvm_protocol::rayon::prelude::*;
-                    let block_hashes: Vec<Hash> = chunk
-                        .par_iter()
-                        .map(|(block, _, _, _)| blockstore.get_block_hash(block))
-                        .collect();
+                use crate::storage::serialization_cache::{
+                    cache_serialized_header, get_cached_serialized_header,
+                };
+                if parallel_serialize {
+                    #[cfg(feature = "rayon")]
+                    {
+                        use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+                        use blvm_protocol::rayon::prelude::*;
+                        let block_hashes: Vec<Hash> = chunk
+                            .par_iter()
+                            .map(|(block, _, _, _)| blockstore.get_block_hash(block))
+                            .collect();
 
-                    let block_data: Vec<Vec<u8>> = chunk
-                        .par_iter()
-                        .map(|(block, _, _, _)| {
-                            bincode::serialize(block)
-                                .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
+                        let block_data: Vec<Vec<u8>> = chunk
+                            .par_iter()
+                            .map(|(block, _, _, _)| {
+                                bincode::serialize(block)
+                                    .map_err(|e| anyhow::anyhow!("Block serialization failed: {e}"))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
 
-                    use crate::storage::serialization_cache::{
-                        cache_serialized_header, get_cached_serialized_header,
-                    };
-                    let header_data: Vec<Arc<Vec<u8>>> = chunk
-                        .par_iter()
-                        .zip(block_hashes.par_iter())
-                        .map(|((block, _, _, _), block_hash)| {
-                            if let Some(cached) = get_cached_serialized_header(block_hash) {
-                                return Ok(cached);
-                            }
-                            let serialized = bincode::serialize(&block.header)
-                                .map_err(|e| anyhow::anyhow!("Header serialization failed: {e}"))?;
-                            cache_serialized_header(*block_hash, serialized.clone());
-                            Ok(Arc::new(serialized))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
+                        let header_data: Vec<Arc<Vec<u8>>> = chunk
+                            .par_iter()
+                            .zip(block_hashes.par_iter())
+                            .map(|((block, _, _, _), block_hash)| {
+                                if let Some(cached) = get_cached_serialized_header(block_hash) {
+                                    return Ok(cached);
+                                }
+                                let serialized =
+                                    bincode::serialize(&block.header).map_err(|e| {
+                                        anyhow::anyhow!("Header serialization failed: {e}")
+                                    })?;
+                                cache_serialized_header(*block_hash, serialized.clone());
+                                Ok(Arc::new(serialized))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
 
-                    (block_hashes, block_data, header_data)
-                }
-
-                #[cfg(not(feature = "rayon"))]
-                {
-                    use crate::storage::serialization_cache::{
-                        cache_serialized_header, get_cached_serialized_header,
-                    };
+                        (block_hashes, block_data, header_data)
+                    }
+                    #[cfg(not(feature = "rayon"))]
+                    {
+                        unreachable!("parallel_serialize requires rayon feature")
+                    }
+                } else {
                     let block_hashes: Vec<Hash> = chunk
                         .iter()
                         .map(|(block, _, _, _)| blockstore.get_block_hash(block))
@@ -2737,34 +2815,37 @@ impl ParallelIBD {
 
             let witness_blobs: Vec<Option<Vec<u8>>> =
                 if chunk.iter().any(|(_, w, _, _)| block_has_witness_data(w)) {
-                    #[cfg(feature = "rayon")]
-                    {
-                        use blvm_protocol::rayon::iter::IntoParallelRefIterator;
-                        use blvm_protocol::rayon::prelude::*;
-                        let witness_data_vec: Vec<(usize, Vec<u8>)> = chunk
-                            .par_iter()
-                            .enumerate()
-                            .filter_map(|(i, (_, witnesses, _, _))| {
-                                if block_has_witness_data(witnesses) {
-                                    match bincode::serialize(witnesses.as_ref()) {
-                                        Ok(data) => Some((i, data)),
-                                        Err(_) => None,
+                    if parallel_serialize {
+                        #[cfg(feature = "rayon")]
+                        {
+                            use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+                            use blvm_protocol::rayon::prelude::*;
+                            let witness_data_vec: Vec<(usize, Vec<u8>)> = chunk
+                                .par_iter()
+                                .enumerate()
+                                .filter_map(|(i, (_, witnesses, _, _))| {
+                                    if block_has_witness_data(witnesses) {
+                                        match bincode::serialize(witnesses.as_ref()) {
+                                            Ok(data) => Some((i, data)),
+                                            Err(_) => None,
+                                        }
+                                    } else {
+                                        None
                                     }
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
+                                })
+                                .collect();
 
-                        let mut v = vec![None; chunk.len()];
-                        for (i, data) in witness_data_vec {
-                            v[i] = Some(data);
+                            let mut v = vec![None; chunk.len()];
+                            for (i, data) in witness_data_vec {
+                                v[i] = Some(data);
+                            }
+                            v
                         }
-                        v
-                    }
-
-                    #[cfg(not(feature = "rayon"))]
-                    {
+                        #[cfg(not(feature = "rayon"))]
+                        {
+                            unreachable!("parallel_serialize requires rayon feature")
+                        }
+                    } else {
                         let mut v = vec![None; chunk.len()];
                         for i in 0..chunk.len() {
                             let witnesses = &chunk[i].1;
@@ -2974,6 +3055,16 @@ impl ParallelIBD {
                 blockstore.store_undo_log(&block_hashes[i], &chunk[i].3)?;
             }
 
+            if opts.log_progress {
+                info!(
+                    "IBD block flush: chunk {}-{}/{} done in {:?}",
+                    chunk_start + 1,
+                    chunk_end,
+                    n,
+                    chunk_t0.elapsed(),
+                );
+            }
+
             // block_data, header_data, witness_blobs, metadata_blobs are dropped here,
             // releasing the serialised bytes before the next chunk is allocated.
         }
@@ -3048,6 +3139,20 @@ mod tests {
                 std::env::remove_var("BLVM_IBD_WAN_SINGLE_PEER");
             }
         }
+    }
+
+    #[test]
+    fn ibd_block_flush_opts_default_enables_parallel_serialize() {
+        let opts = IbdBlockFlushOpts::default();
+        assert!(opts.parallel_serialize);
+        assert!(!opts.log_progress);
+    }
+
+    #[test]
+    fn ibd_block_flush_opts_shutdown_sync_is_serial_with_progress() {
+        let opts = IbdBlockFlushOpts::shutdown_sync();
+        assert!(!opts.parallel_serialize);
+        assert!(opts.log_progress);
     }
 
     #[test]

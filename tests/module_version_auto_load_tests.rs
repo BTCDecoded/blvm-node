@@ -1,10 +1,10 @@
 //! Integration tests for version-pinned module auto-load and config.
 
 use blvm_node::module::manager::ModuleManager;
-use std::path::PathBuf;
+use std::path::Path;
 use tempfile::TempDir;
 
-fn write_installed_module(modules_dir: &PathBuf, name: &str, version: &str, binary_bytes: &[u8]) {
+fn write_installed_module(modules_dir: &Path, name: &str, version: &str, binary_bytes: &[u8]) {
     let module_dir = modules_dir.join(name);
     std::fs::create_dir_all(&module_dir).unwrap();
     std::fs::write(

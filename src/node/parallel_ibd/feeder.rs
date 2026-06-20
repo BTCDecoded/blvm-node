@@ -185,7 +185,7 @@ mod tests {
         assert!(buf.get(5).is_some());
         buf.remove(2);
         assert_eq!(buf.min_buffered_height(), Some(5));
-        assert!(buf.is_empty() == false);
+        assert!(!buf.is_empty());
         buf.remove(5);
         assert!(buf.is_empty());
     }

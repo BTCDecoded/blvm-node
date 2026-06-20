@@ -535,13 +535,14 @@ mod tests {
         header[72..76].copy_from_slice(&0x1d00ffffu32.to_le_bytes()); // bits
         header[76..80].copy_from_slice(&12345u32.to_le_bytes()); // nonce
 
-        let mut data = Vec::new();
-        data.push(0x00); // dummy disk version
-        data.push(0x00); // height 0
-        data.push(0x0c); // status 12 = HAVE_DATA(8) | VALID_TREE(4) — need file+pos
-        data.push(0x00); // n_tx 0
-        data.push(0x00); // n_file 0
-        data.push(0x00); // n_data_pos 0
+        let mut data = vec![
+            0x00, // dummy disk version
+            0x00, // height 0
+            0x0c, // status 12 = HAVE_DATA(8) | VALID_TREE(4) — need file+pos
+            0x00, // n_tx 0
+            0x00, // n_file 0
+            0x00, // n_data_pos 0
+        ];
         data.extend_from_slice(&header);
 
         let idx = parse_disk_block_index(&data).unwrap();

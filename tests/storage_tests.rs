@@ -2,7 +2,6 @@
 
 use blvm_node::storage::*;
 use blvm_protocol::*;
-use std::sync::Arc;
 use tempfile::TempDir;
 mod common;
 use blvm_node::storage::blockstore::BlockStore;
