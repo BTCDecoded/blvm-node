@@ -2,7 +2,7 @@
 
 use blvm_protocol::Block;
 use blvm_protocol::segwit::Witness;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -29,13 +29,22 @@ struct FilterBlockResponse {
 }
 
 static PIPELINE_ROUTER: RwLock<Option<Arc<ModuleRouter>>> = RwLock::new(None);
-static RUNTIME_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+static RUNTIME_HANDLE: RwLock<Option<tokio::runtime::Handle>> = RwLock::new(None);
 
 /// Install the block pipeline using the node's module router and current tokio runtime.
 pub fn install_block_pipeline(router: Arc<ModuleRouter>) {
-    let _ = RUNTIME_HANDLE.set(tokio::runtime::Handle::current());
+    *RUNTIME_HANDLE
+        .write()
+        .expect("pipeline runtime lock") = Some(tokio::runtime::Handle::current());
     *PIPELINE_ROUTER.write().expect("pipeline router lock") = Some(router);
     debug!("Block pipeline installed");
+}
+
+/// Test-only helper: clear installed pipeline state between integration tests.
+#[doc(hidden)]
+pub fn reset_block_pipeline_for_tests() {
+    *PIPELINE_ROUTER.write().expect("pipeline router lock") = None;
+    *RUNTIME_HANDLE.write().expect("pipeline runtime lock") = None;
 }
 
 /// Apply `filter_block_before_store` when a module registers it. Fail-open on errors/timeouts.
@@ -51,11 +60,15 @@ pub fn try_filter_block_before_store(
     let Some(router) = router else {
         return (block, witnesses);
     };
-    let Some(runtime_handle) = RUNTIME_HANDLE.get() else {
+    let Some(runtime_handle) = RUNTIME_HANDLE
+        .read()
+        .expect("pipeline runtime lock")
+        .clone()
+    else {
         return (block, witnesses);
     };
 
-    filter_sync(runtime_handle, &router, height, block, witnesses)
+    filter_sync(&runtime_handle, &router, height, block, witnesses)
 }
 
 fn filter_sync(

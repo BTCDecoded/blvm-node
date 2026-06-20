@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use blvm_node::module::inter_module::api::ModuleAPI;
 use blvm_node::module::inter_module::{ModuleApiRegistry, ModuleRouter};
-use blvm_node::module::pipeline::{install_block_pipeline, try_filter_block_before_store};
+use blvm_node::module::pipeline::{
+    install_block_pipeline, reset_block_pipeline_for_tests, try_filter_block_before_store,
+};
+use serial_test::serial;
 use blvm_node::module::traits::ModuleError;
 use blvm_protocol::{
     Block, BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput,
@@ -129,7 +132,9 @@ fn sample_block_with_witnesses() -> (Block, Arc<Vec<Vec<blvm_protocol::segwit::W
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn block_pipeline_routes_filter_block_before_store() {
+    reset_block_pipeline_for_tests();
     let (block, witnesses) = sample_block_with_witnesses();
 
     // Without pipeline installed: pass-through.
@@ -158,7 +163,9 @@ async fn block_pipeline_routes_filter_block_before_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn block_pipeline_fail_open_without_registered_module() {
+    reset_block_pipeline_for_tests();
     let (block, witnesses) = sample_block_with_witnesses();
     let registry = Arc::new(ModuleApiRegistry::new());
     let router = Arc::new(ModuleRouter::new(Arc::clone(&registry)));
@@ -206,7 +213,9 @@ impl ModuleAPI for HangFilterApi {
 /// Regression: filter must fail-open on timeout instead of blocking IBD flush threads
 /// indefinitely when the module handler does not return.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn block_pipeline_filter_times_out_fail_open_when_module_hangs() {
+    reset_block_pipeline_for_tests();
     let (block, witnesses) = sample_block_with_witnesses();
     let registry = Arc::new(ModuleApiRegistry::new());
     let router = Arc::new(ModuleRouter::new(Arc::clone(&registry)));
