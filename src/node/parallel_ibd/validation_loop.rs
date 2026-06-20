@@ -1829,6 +1829,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let staged_now = staged_count.load(Ordering::Relaxed);
 
         while in_flight.len() < pipeline_depth_live && staged_now < staged_dispatch_cap {
+            // IBD range is [start_height, effective_end_height] inclusive. After validating
+            // effective_end_height, next_validation_height advances to end+1 — do not wait on
+            // the feeder for a block that was never assigned or downloaded.
+            if next_validation_height > effective_end_height {
+                break;
+            }
+
             let is_first = in_flight.is_empty();
 
             // Get next block: blocking if no in-flight work, non-blocking otherwise.

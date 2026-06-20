@@ -1354,6 +1354,7 @@ impl ParallelIBD {
         };
         let assigner_for_coord = Arc::clone(&assigner);
         let validation_height_for_coord = Arc::clone(&validation_height);
+        let effective_end_for_coord = effective_end_height;
         // WAN multi-peer: scale reorder buffer so fast peers can't fill it while a slow peer is
         // stalled. Minimum: num_peers × chunk_size × 2 (absorbs one full chunk per peer ahead).
         // Capped at 4000 to bound peak RSS (~4GB at 1MB/block on large-RAM machines).
@@ -1468,6 +1469,13 @@ impl ParallelIBD {
             #[cfg(target_os = "linux")]
             let mut coord_emergency_log = std::time::Instant::now();
             loop {
+                if validation_height_for_coord.load(Ordering::Relaxed) >= effective_end_for_coord {
+                    info!(
+                        "Coordinator: validation reached effective end height {} — stopping block dispatch",
+                        effective_end_for_coord
+                    );
+                    break;
+                }
                 let dynamic_buffer_limit = coord_buffer_limit;
                 // Under Emergency memory pressure, do not drain block_rx — WAN workers block on send().
                 //
@@ -1612,6 +1620,9 @@ impl ParallelIBD {
                     Ok(n) => n,
                     Err(_) => {
                         let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                        if next_needed > effective_end_for_coord {
+                            continue;
+                        }
                         // next_prefetch_height is the coordinator's delivery cursor. Requeue the
                         // chunk it is waiting on to unblock the download pipeline.
                         // Additionally: if validation is stuck at a height below next_prefetch_height
