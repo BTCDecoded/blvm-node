@@ -4,6 +4,7 @@
 
 use crate::utils::current_timestamp;
 use anyhow::Result;
+use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, BlockHeader, Transaction};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
@@ -29,6 +30,9 @@ pub trait MempoolProvider: Send + Sync {
 
     /// Remove transaction from mempool
     fn remove_transaction(&mut self, hash: &[u8; 32]) -> bool;
+
+    /// SegWit witness stacks for a mempool transaction (one per input), if stored.
+    fn get_transaction_witnesses(&self, hash: &[u8; 32]) -> Option<Vec<Witness>>;
 }
 
 /// Transaction selector for block building
@@ -37,7 +41,7 @@ pub struct TransactionSelector {
     max_block_size: usize,
     /// Maximum block weight
     max_block_weight: u64,
-    /// Minimum fee rate (satoshis per byte)
+    /// Minimum fee rate (satoshis per vbyte)
     min_fee_rate: u64,
 }
 
@@ -83,56 +87,45 @@ impl TransactionSelector {
         let transactions = mempool.get_prioritized_transactions(1000, utxo_set);
 
         for tx in transactions {
-            let tx_size = self.calculate_transaction_size(&tx);
-            let tx_weight = self.calculate_transaction_weight(&tx);
+            use blvm_protocol::block::calculate_tx_id;
+            let txid = calculate_tx_id(&tx);
+            let input_witnesses = mempool.get_transaction_witnesses(&txid);
+            let tx_stripped = blvm_consensus::transaction::calculate_transaction_size(&tx);
+            let tx_weight = bip141_weight(&tx, input_witnesses.as_deref());
+            let tx_vsize = transaction_vsize(&tx, input_witnesses.as_deref());
 
             // Check if adding this transaction would exceed limits
-            if current_size + tx_size > self.max_block_size
+            if current_size + tx_stripped > self.max_block_size
                 || current_weight + tx_weight > self.max_block_weight
             {
                 break;
             }
 
-            // Check minimum fee rate using real UTXO set
-            // Since transactions are already prioritized by fee rate from MempoolManager,
-            // we can calculate the actual fee rate here for the final check
-            let fee_rate = self.calculate_fee_rate_with_utxo(&tx, utxo_set);
+            // Check minimum fee rate (sat/vB) using real UTXO set
+            let fee_rate = self.calculate_fee_rate_with_utxo(&tx, utxo_set, tx_vsize);
             if fee_rate < self.min_fee_rate {
                 continue;
             }
 
             selected.push(tx);
-            current_size += tx_size;
+            current_size += tx_stripped;
             current_weight += tx_weight;
         }
 
         selected
     }
 
-    /// Calculate transaction size in bytes
-    fn calculate_transaction_size(&self, tx: &Transaction) -> usize {
-        // Simplified calculation - in real implementation would serialize
-        tx.inputs.len() * 148 + tx.outputs.len() * 34 + 10
-    }
-
-    /// Calculate transaction weight
-    fn calculate_transaction_weight(&self, tx: &Transaction) -> u64 {
-        // Simplified calculation - in real implementation would use proper weight calculation
-        self.calculate_transaction_size(tx) as u64 * 4
-    }
-
-    /// Calculate fee rate (satoshis per byte) using UTXO set
+    /// Fee rate (sat/vB) using UTXO set and virtual size.
     fn calculate_fee_rate_with_utxo(
         &self,
         tx: &Transaction,
         utxo_set: &blvm_protocol::UtxoSet,
+        tx_vsize: usize,
     ) -> u64 {
-        let size = self.calculate_transaction_size(tx);
-        if size == 0 {
+        if tx_vsize == 0 {
             return 0;
         }
 
-        // Calculate actual fee using UTXO set
         let mut input_total = 0u64;
         for input in &tx.inputs {
             if let Some(utxo) = utxo_set.get(&input.prevout) {
@@ -143,7 +136,7 @@ impl TransactionSelector {
         let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
         let fee = input_total.saturating_sub(output_total);
 
-        fee / size as u64
+        fee / tx_vsize as u64
     }
 
     /// Get maximum block size
@@ -160,6 +153,27 @@ impl TransactionSelector {
     pub fn min_fee_rate(&self) -> u64 {
         self.min_fee_rate
     }
+}
+
+/// BIP141 weight: 4 × stripped_size + total_size (witness bytes included in total).
+fn bip141_weight(tx: &Transaction, input_witnesses: Option<&[Witness]>) -> u64 {
+    let base = blvm_consensus::transaction::calculate_transaction_size(tx) as u64;
+    let witness_bytes: u64 = input_witnesses
+        .map(|wits| {
+            wits.iter()
+                .flat_map(|stack| stack.iter())
+                .map(|elem| elem.len() as u64)
+                .sum()
+        })
+        .unwrap_or(0);
+    let total = base + witness_bytes;
+    base.saturating_mul(4).saturating_add(total)
+}
+
+/// Virtual size (vbytes) from BIP141 weight.
+fn transaction_vsize(tx: &Transaction, input_witnesses: Option<&[Witness]>) -> usize {
+    use blvm_consensus::witness::weight_to_vsize;
+    weight_to_vsize(bip141_weight(tx, input_witnesses)) as usize
 }
 
 /// Mining engine for block mining
@@ -428,6 +442,8 @@ pub struct MiningCoordinator {
     mempool: std::sync::Arc<crate::node::mempool::MempoolManager>,
     /// Storage for UTXO set access
     storage: Option<std::sync::Arc<crate::storage::Storage>>,
+    /// Protocol engine for connecting mined blocks
+    protocol: Option<std::sync::Arc<blvm_protocol::BitcoinProtocolEngine>>,
 }
 
 impl MiningCoordinator {
@@ -441,6 +457,7 @@ impl MiningCoordinator {
             transaction_selector: TransactionSelector::new(),
             mempool,
             storage,
+            protocol: None,
         }
     }
 
@@ -462,29 +479,25 @@ impl MiningCoordinator {
             ),
             mempool,
             storage,
+            protocol: None,
         }
+    }
+
+    /// Wire protocol engine so mined blocks can be connected to the chain.
+    pub fn set_protocol_engine(
+        &mut self,
+        protocol: std::sync::Arc<blvm_protocol::BitcoinProtocolEngine>,
+    ) {
+        self.protocol = Some(protocol);
     }
 
     /// Start the mining coordinator
     pub async fn start(&mut self) -> Result<()> {
-        info!("Starting mining coordinator");
-
-        // Initialize mining
-        self.initialize_mining().await?;
-
-        // Start mining loop
+        info!(
+            "Starting mining coordinator (enabled={})",
+            self.mining_engine.is_mining_enabled()
+        );
         self.mining_loop().await?;
-
-        Ok(())
-    }
-
-    /// Initialize mining
-    async fn initialize_mining(&mut self) -> Result<()> {
-        debug!("Initializing mining");
-
-        // Check if mining should be enabled
-        // In a real implementation, this would check configuration
-
         Ok(())
     }
 
@@ -699,16 +712,105 @@ impl MiningCoordinator {
         })
     }
 
-    /// Submit mined block
-    async fn submit_block(&self, _block: Block) -> Result<()> {
+    /// Submit mined block to the chain via [`SyncCoordinator::connect_mined_block`].
+    async fn submit_block(&self, block: Block) -> Result<()> {
         debug!("Submitting mined block");
 
-        // In a real implementation, this would:
-        // 1. Validate the block using blvm-consensus
-        // 2. Add to blockchain
-        // 3. Relay to peers
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Cannot submit mined block: storage not configured"))?;
+        let protocol = self.protocol.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Cannot submit mined block: protocol engine not configured")
+        })?;
 
+        let (_, tip_height) = storage
+            .chain()
+            .get_tip_hash_and_height()
+            .map_err(|e| anyhow::anyhow!("Failed to get chain tip: {e}"))?;
+        let connect_height = tip_height + 1;
+
+        let mut utxo = storage
+            .utxos()
+            .get_all_utxos()
+            .map_err(|e| anyhow::anyhow!("Failed to load UTXO set: {e}"))?;
+
+        let witnesses = self.build_witnesses_for_block(&block, &utxo)?;
+
+        let mut coord = crate::node::sync::SyncCoordinator::new();
+        let accepted = coord.connect_mined_block(
+            storage.blocks().as_ref(),
+            protocol.as_ref(),
+            storage,
+            &block,
+            &witnesses,
+            connect_height,
+            &mut utxo,
+        )?;
+
+        if !accepted {
+            anyhow::bail!("Mined block rejected at height {connect_height}");
+        }
+
+        info!("Mined block connected at height {connect_height}");
         Ok(())
+    }
+
+    /// Build per-transaction witness stacks for block connect (coinbase uses empty stacks).
+    fn build_witnesses_for_block(
+        &self,
+        block: &Block,
+        utxo_set: &blvm_protocol::UtxoSet,
+    ) -> Result<Vec<Vec<Witness>>> {
+        use blvm_consensus::transaction::is_coinbase;
+        use blvm_consensus::witness::{
+            extract_witness_program, extract_witness_version, validate_witness_program_length,
+        };
+        use blvm_protocol::block::calculate_tx_id;
+
+        block
+            .transactions
+            .iter()
+            .map(|tx| {
+                if is_coinbase(tx) {
+                    return Ok(tx.inputs.iter().map(|_| Witness::default()).collect());
+                }
+                let txid = calculate_tx_id(tx);
+                if let Some(wits) = self.mempool.get_transaction_witnesses(&txid) {
+                    if wits.len() != tx.inputs.len() {
+                        anyhow::bail!(
+                            "witness count {} != input count {} for tx {}",
+                            wits.len(),
+                            tx.inputs.len(),
+                            hex::encode(txid)
+                        );
+                    }
+                    return Ok(wits);
+                }
+
+                let spends_witness_utxo = tx.inputs.iter().any(|input| {
+                    utxo_set.get(&input.prevout).is_some_and(|utxo| {
+                        let script = utxo.script_pubkey.as_ref().to_vec();
+                        extract_witness_version(&script)
+                            .and_then(|version| {
+                                extract_witness_program(&script, version)
+                                    .map(|program| (version, program))
+                            })
+                            .is_some_and(|(version, program)| {
+                                validate_witness_program_length(&program, version)
+                            })
+                    })
+                });
+                if self.mempool.get_transaction(&txid).is_some() && spends_witness_utxo {
+                    anyhow::bail!(
+                        "missing mempool witnesses for witness spend tx {}",
+                        hex::encode(txid)
+                    );
+                }
+
+                Ok(tx.inputs.iter().map(|_| Witness::default()).collect())
+            })
+            .collect()
     }
 
     /// Enable mining
@@ -799,7 +901,7 @@ impl MockMempoolProvider {
         let fee_rate = self.calculate_fee_rate(&tx);
         self.transactions.insert(hash, tx.clone());
         self.prioritized_transactions.push((tx, fee_rate));
-        // Sort by fee rate (simplified)
+        // Sort by fee rate descending.
         self.prioritized_transactions.sort_by(|a, b| b.1.cmp(&a.1));
     }
 
@@ -864,6 +966,10 @@ impl MempoolProvider for MockMempoolProvider {
             false
         }
     }
+
+    fn get_transaction_witnesses(&self, _hash: &[u8; 32]) -> Option<Vec<Witness>> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -927,13 +1033,12 @@ mod tests {
         let selector = TransactionSelector::new();
         let tx = create_test_transaction(1, 1000);
 
-        let size = selector.calculate_transaction_size(&tx);
-        assert!(size > 0);
+        let vsize = transaction_vsize(&tx, None);
+        assert!(vsize > 0);
 
-        let weight = selector.calculate_transaction_weight(&tx);
+        let weight = bip141_weight(&tx, None);
         assert!(weight > 0);
 
-        // Test fee rate calculation with UTXO set
         let mut utxo_set = blvm_protocol::UtxoSet::default();
         let outpoint = blvm_protocol::OutPoint {
             hash: [0u8; 32],
@@ -948,7 +1053,7 @@ mod tests {
                 is_coinbase: false,
             }),
         );
-        let fee_rate = selector.calculate_fee_rate_with_utxo(&tx, &utxo_set);
+        let fee_rate = selector.calculate_fee_rate_with_utxo(&tx, &utxo_set, vsize);
         assert!(fee_rate > 0);
     }
 
@@ -1427,5 +1532,224 @@ mod tests {
             },
             transactions: vec![create_test_transaction(1, 1000)].into_boxed_slice(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_build_witnesses_uses_mempool_stored_witnesses() {
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+        use sha2::{Digest, Sha256};
+        use std::sync::Arc;
+
+        fn p2wsh_scriptpubkey(witness_script: &[u8]) -> Vec<u8> {
+            let hash = Sha256::digest(witness_script);
+            let mut spk = vec![blvm_protocol::opcodes::OP_0, 0x20];
+            spk.extend_from_slice(&hash);
+            spk
+        }
+
+        let witness_script = vec![0x51]; // OP_1
+        let funding_hash = [0xab; 32];
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 100_000,
+                script_pubkey: p2wsh_scriptpubkey(&witness_script).into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+
+        let spend = Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: funding_hash,
+                    index: 0,
+                },
+                script_sig: vec![],
+                sequence: 0xfffffffe,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 90_000,
+                script_pubkey: vec![0x51].into(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let txid = blvm_protocol::block::calculate_tx_id(&spend);
+        let witness_stack: Witness = vec![witness_script.clone()];
+
+        let mut mempool_manager = crate::node::mempool::MempoolManager::new();
+        assert!(
+            mempool_manager
+                .add_transaction_with_witness(spend.clone(), Some(vec![witness_stack.clone()]))
+                .unwrap(),
+            "witness tx must enter mempool"
+        );
+        let mempool = Arc::new(mempool_manager);
+        let coordinator = MiningCoordinator::new(mempool, None);
+
+        let coinbase = coordinator
+            .create_coinbase_transaction(1, &[spend.clone()], &utxo_set)
+            .await
+            .unwrap();
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1,
+                bits: 0x1d00ffff,
+                nonce: 0,
+            },
+            transactions: vec![coinbase, spend].into_boxed_slice(),
+        };
+
+        let witnesses = coordinator
+            .build_witnesses_for_block(&block, &utxo_set)
+            .expect("witness spend with stored mempool witnesses");
+        assert_eq!(witnesses.len(), 2);
+        assert!(witnesses[0].iter().all(|w| w.is_empty()));
+        assert_eq!(witnesses[1], vec![witness_stack.clone()]);
+        assert_eq!(
+            coordinator.mempool.get_transaction_witnesses(&txid),
+            Some(vec![witness_stack])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_witnesses_fails_when_mempool_missing_witness_spend() {
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+        use sha2::{Digest, Sha256};
+        use std::sync::Arc;
+
+        fn p2wsh_scriptpubkey(witness_script: &[u8]) -> Vec<u8> {
+            let hash = Sha256::digest(witness_script);
+            let mut spk = vec![blvm_protocol::opcodes::OP_0, 0x20];
+            spk.extend_from_slice(&hash);
+            spk
+        }
+
+        let witness_script = vec![0x51];
+        let funding_hash = [0xcd; 32];
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 100_000,
+                script_pubkey: p2wsh_scriptpubkey(&witness_script).into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+
+        let spend = Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: funding_hash,
+                    index: 0,
+                },
+                script_sig: vec![],
+                sequence: 0xfffffffe,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 90_000,
+                script_pubkey: vec![0x51].into(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+
+        let mut mempool_manager = crate::node::mempool::MempoolManager::new();
+        assert!(
+            mempool_manager.add_transaction(spend.clone()).unwrap(),
+            "tx must enter mempool"
+        );
+        let mempool = Arc::new(mempool_manager);
+        let coordinator = MiningCoordinator::new(mempool, None);
+
+        let coinbase = coordinator
+            .create_coinbase_transaction(1, &[spend.clone()], &utxo_set)
+            .await
+            .unwrap();
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1,
+                bits: 0x1d00ffff,
+                nonce: 0,
+            },
+            transactions: vec![coinbase, spend].into_boxed_slice(),
+        };
+
+        let err = coordinator
+            .build_witnesses_for_block(&block, &utxo_set)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("missing mempool witnesses"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// REV-TN-04: template → mine → `submit_block` → `connect_mined_block` on regtest storage.
+    #[tokio::test]
+    async fn test_submit_block_connects_regtest() {
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(crate::storage::Storage::new(temp_dir.path()).unwrap());
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let genesis = protocol.get_network_params().genesis_block.header.clone();
+        storage.chain().initialize(&genesis).unwrap();
+
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let mut coordinator = MiningCoordinator::new(mempool, Some(Arc::clone(&storage)));
+        coordinator.set_protocol_engine(Arc::clone(&protocol));
+
+        assert_eq!(
+            storage.chain().get_height().unwrap().unwrap_or(0),
+            0,
+            "genesis only"
+        );
+
+        let mut template = coordinator
+            .generate_block_template()
+            .await
+            .expect("block template");
+        assert_eq!(template.transactions.len(), 1, "coinbase only");
+        // BIP90: post-genesis blocks need version ≥ 4 (same as `generatetoaddress` RPC path).
+        template.header.version = 4;
+
+        let mined = coordinator
+            .mining_engine_mut()
+            .mine_template(template)
+            .await
+            .expect("regtest PoW should succeed");
+
+        coordinator
+            .submit_block(mined)
+            .await
+            .expect("submit connects mined block");
+
+        let height = storage
+            .chain()
+            .get_height()
+            .unwrap()
+            .expect("height after connect");
+        assert_eq!(height, 1, "mined block extends chain from genesis");
     }
 }

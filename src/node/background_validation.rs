@@ -143,11 +143,14 @@ async fn run_background_validation(
             }
         }
         None => {
-            warn!(
-                "AssumeUTXO background validation: no expected hash in chainparams for block {}, \
-                 skipping verification. Add hash_serialized to assumeutxo_data for full security.",
+            error!(
+                "AssumeUTXO background validation: no expected hash in chainparams for block {}. \
+                 Refusing to mark snapshot validated without hash_serialized.",
                 hex::encode(base_blockhash)
             );
+            return Err(anyhow::anyhow!(
+                "AssumeUTXO background validation: missing hash_serialized in chainparams"
+            ));
         }
     }
 

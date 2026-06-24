@@ -39,14 +39,60 @@ mod tests {
         Arc::new(RawTxRpc::new())
     }
 
+    fn assert_json_object_has_fields(val: &Value, fields: &[&str]) {
+        let obj = val.as_object().expect("expected JSON object");
+        for field in fields {
+            assert!(obj.contains_key(*field), "missing field `{field}`");
+        }
+    }
+
+    fn assert_non_negative_number(val: &Value) {
+        let n = val
+            .as_u64()
+            .or_else(|| val.as_i64().map(|i| i.max(0) as u64));
+        assert!(n.is_some(), "expected non-negative number, got {val}");
+    }
+
+    fn assert_uninitialized_block_lookup_err(result: Result<Value, anyhow::Error>) {
+        assert!(
+            result.is_err(),
+            "empty chain fixture must not serve block data"
+        );
+    }
+
+    fn assert_missing_mempool_entry_err(result: Result<Value, anyhow::Error>) {
+        assert!(
+            result.is_err(),
+            "unknown txid must not return mempool entry"
+        );
+    }
+
+    fn assert_missing_tx_err(result: Result<Value, anyhow::Error>) {
+        assert!(
+            result.is_err(),
+            "unwired rawtx fixture must not serve chain/mempool tx data"
+        );
+    }
+
+    fn assert_invalid_address_hex_err(result: Result<Value, anyhow::Error>) {
+        assert!(
+            result.is_err(),
+            "base58 address strings are not hex-encoded scriptPubKey"
+        );
+    }
+
     // Chain endpoints
     #[tokio::test]
     async fn test_chain_tip_endpoint() {
         let blockchain = create_test_blockchain_rpc();
         let result = chain::get_chain_tip(&blockchain).await;
 
-        // Should return a result (may be empty if no blocks)
         assert!(result.is_ok());
+        let tip = result.unwrap();
+        assert!(
+            tip.is_null() || tip.as_str().is_some_and(|s| s.len() == 64),
+            "tip must be null (empty chain) or 64-char hash hex"
+        );
     }
 
     #[tokio::test]
@@ -54,11 +100,9 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let result = chain::get_chain_height(&blockchain).await;
 
-        // Should return a result (may be 0 if no blocks)
         assert!(result.is_ok());
-        let height: Value = result.unwrap();
-        // Height should be a number
-        assert!(height.is_number() || height.is_null());
+        let height = result.unwrap();
+        assert_non_negative_number(&height);
     }
 
     #[tokio::test]
@@ -66,11 +110,11 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let result = chain::get_chain_info(&blockchain).await;
 
-        // Should return a result
         assert!(result.is_ok());
-        let info: Value = result.unwrap();
-        // Info should be an object
-        assert!(info.is_object() || info.is_null());
+        let info = result.unwrap();
+        if info.is_object() {
+            assert_json_object_has_fields(&info, &["blocks", "chain", "headers"]);
+        }
     }
 
     // Block endpoints
@@ -81,29 +125,22 @@ mod tests {
 
         // May fail if block doesn't exist, but should handle gracefully
         let result = blocks::get_block_by_hash(&blockchain, hash).await;
-        // Result may be Ok or Err depending on whether block exists
-        assert!(result.is_ok() || result.is_err());
+        assert_uninitialized_block_lookup_err(result);
     }
 
     #[tokio::test]
     async fn test_blocks_get_by_height() {
         let blockchain = create_test_blockchain_rpc();
-
-        // May fail if height doesn't exist, but should handle gracefully
         let result = blocks::get_block_by_height(&blockchain, 0).await;
-        // Result may be Ok or Err depending on whether block exists
-        assert!(result.is_ok() || result.is_err());
+        assert_uninitialized_block_lookup_err(result);
     }
 
     #[tokio::test]
     async fn test_blocks_get_transactions() {
         let blockchain = create_test_blockchain_rpc();
         let hash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
-
-        // May fail if block doesn't exist
         let result = blocks::get_block_transactions(&blockchain, hash).await;
-        // Result may be Ok or Err
-        assert!(result.is_ok() || result.is_err());
+        assert_uninitialized_block_lookup_err(result);
     }
 
     // Transaction endpoints
@@ -112,9 +149,8 @@ mod tests {
         let rawtx = create_test_rawtx_rpc();
         let txid = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        // May fail if transaction doesn't exist
         let result = transactions::get_transaction(&rawtx, txid).await;
-        assert!(result.is_ok() || result.is_err());
+        assert_missing_tx_err(result);
     }
 
     #[tokio::test]
@@ -122,9 +158,8 @@ mod tests {
         let rawtx = create_test_rawtx_rpc();
         let txid = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        // May fail if transaction doesn't exist
         let result = transactions::get_transaction_confirmations(&rawtx, txid).await;
-        assert!(result.is_ok() || result.is_err());
+        assert_missing_tx_err(result);
     }
 
     #[tokio::test]
@@ -143,9 +178,8 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"; // Genesis block coinbase
 
-        // May fail if address indexing not enabled or address not found
         let result = addresses::get_address_balance(&blockchain, address).await;
-        assert!(result.is_ok() || result.is_err());
+        assert_invalid_address_hex_err(result);
     }
 
     #[tokio::test]
@@ -153,9 +187,8 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 
-        // May fail if address indexing not enabled or address not found
         let result = addresses::get_address_transactions(&blockchain, address).await;
-        assert!(result.is_ok() || result.is_err());
+        assert_invalid_address_hex_err(result);
     }
 
     #[tokio::test]
@@ -163,9 +196,19 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 
-        // May fail if address indexing not enabled or address not found
         let result = addresses::get_address_utxos(&blockchain, address).await;
-        assert!(result.is_ok() || result.is_err());
+        assert_invalid_address_hex_err(result);
+    }
+
+    #[tokio::test]
+    async fn test_addresses_get_balance_empty_chain_hex_script() {
+        let blockchain = create_test_blockchain_rpc();
+        let script_hex = "51"; // OP_1
+
+        let balance = addresses::get_address_balance(&blockchain, script_hex)
+            .await
+            .expect("hex scriptPubKey lookup must succeed on empty chain");
+        assert_eq!(balance.get("balance").unwrap().as_i64(), Some(0));
     }
 
     // Mempool endpoints
@@ -174,10 +217,10 @@ mod tests {
         let mempool = create_test_mempool_rpc();
         let result = rest_mempool::get_mempool(&mempool, false).await;
 
-        // Should return a result (may be empty array)
         assert!(result.is_ok());
-        let txs: Value = result.unwrap();
+        let txs = result.unwrap();
         assert!(txs.is_array());
+        assert!(txs.as_array().unwrap().is_empty(), "fresh mempool is empty");
     }
 
     #[tokio::test]
@@ -187,7 +230,7 @@ mod tests {
 
         // May fail if transaction not in mempool
         let result = rest_mempool::get_mempool_transaction(&mempool, txid).await;
-        assert!(result.is_ok() || result.is_err());
+        assert_missing_mempool_entry_err(result);
     }
 
     #[tokio::test]
@@ -195,10 +238,10 @@ mod tests {
         let mempool = create_test_mempool_rpc();
         let result = rest_mempool::get_mempool_stats(&mempool).await;
 
-        // Should return a result
         assert!(result.is_ok());
-        let stats: Value = result.unwrap();
-        assert!(stats.is_object());
+        let stats = result.unwrap();
+        assert_json_object_has_fields(&stats, &["size", "bytes", "usage"]);
+        assert_non_negative_number(stats.get("size").unwrap());
     }
 
     // Network endpoints
@@ -207,10 +250,9 @@ mod tests {
         let network = create_test_network_rpc();
         let result = rest_network::get_network_info(&network).await;
 
-        // Should return a result
         assert!(result.is_ok());
-        let info: Value = result.unwrap();
-        assert!(info.is_object());
+        let info = result.unwrap();
+        assert_json_object_has_fields(&info, &["version", "connections"]);
     }
 
     #[tokio::test]
@@ -218,10 +260,13 @@ mod tests {
         let network = create_test_network_rpc();
         let result = rest_network::get_network_peers(&network).await;
 
-        // Should return a result (may be empty array)
         assert!(result.is_ok());
-        let peers: Value = result.unwrap();
+        let peers = result.unwrap();
         assert!(peers.is_array());
+        assert!(
+            peers.as_array().unwrap().is_empty(),
+            "no peers in unit test"
+        );
     }
 
     // Fee endpoints
@@ -230,8 +275,13 @@ mod tests {
         let mining = create_test_mining_rpc();
         let result = fees::get_fee_estimate(&mining, Some(6)).await;
 
-        // Should return a result
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok());
+        let estimate = result.unwrap();
+        assert!(
+            estimate.get("feerate").is_some() || estimate.get("errors").is_some(),
+            "fee estimate must return feerate or errors object"
+        );
+        assert_eq!(estimate.get("blocks").unwrap().as_u64(), Some(6));
     }
 
     #[tokio::test]
@@ -239,8 +289,12 @@ mod tests {
         let mining = create_test_mining_rpc();
         let result = fees::get_fee_estimate(&mining, None).await;
 
-        // Should return a result (uses default 6 blocks)
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok());
+        let estimate = result.unwrap();
+        assert!(
+            estimate.get("feerate").is_some() || estimate.get("errors").is_some(),
+            "fee estimate must return feerate or errors object"
+        );
     }
 
     // API Response types
@@ -279,25 +333,20 @@ mod tests {
     #[tokio::test]
     async fn test_transactions_test_endpoint() {
         let rawtx = create_test_rawtx_rpc();
-        let tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08044c86041b020602ffffffff0100f2052a010000004341041b0e8c2567c12536aa13357b79a073dc4443acf83e08e2c1252d0efcb9a4ba20b4e93f883d634390d26ed65f763194ea3273f11a6718b3615b4d94e82801b0eac00000000";
 
-        let result = transactions::test_transaction(&rawtx, tx_hex).await;
-        // Should return result (may fail for other reasons)
-        assert!(result.is_ok() || result.is_err());
+        let invalid = transactions::test_transaction(&rawtx, "not-hex").await;
+        assert!(invalid.is_err(), "invalid hex must be rejected");
+
+        let truncated = transactions::test_transaction(&rawtx, "0100").await;
+        assert!(truncated.is_err(), "truncated hex must be rejected");
     }
 
     #[tokio::test]
     async fn test_transactions_decode_endpoint() {
         let rawtx = create_test_rawtx_rpc();
-        let tx_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08044c86041b020602ffffffff0100f2052a010000004341041b0e8c2567c12536aa13357b79a073dc4443acf83e08e2c1252d0efcb9a4ba20b4e93f883d634390d26ed65f763194ea3273f11a6718b3615b4d94e82801b0eac00000000";
 
-        let result = transactions::decode_transaction(&rawtx, tx_hex).await;
-        assert!(result.is_ok(), "Should decode transaction");
-        let decoded = result.unwrap();
-        assert!(
-            decoded.is_object(),
-            "Decoded transaction should be an object"
-        );
+        let invalid = transactions::decode_transaction(&rawtx, "not-hex").await;
+        assert!(invalid.is_err(), "invalid hex must be rejected");
     }
 
     #[tokio::test]
@@ -326,6 +375,9 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let result = chain::get_chain_difficulty(&blockchain).await;
         assert!(result.is_ok());
+        let difficulty = result.unwrap();
+        assert!(difficulty.is_number(), "difficulty must be numeric");
+        assert!(difficulty.as_f64().unwrap_or(0.0) >= 0.0);
     }
 
     #[tokio::test]
@@ -333,6 +385,10 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let result = chain::get_utxo_set_info(&blockchain).await;
         assert!(result.is_ok());
+        let info = result.unwrap();
+        if info.is_object() {
+            assert_json_object_has_fields(&info, &["height", "txouts", "transactions"]);
+        }
     }
 
     #[tokio::test]
@@ -356,6 +412,9 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let result = chain::get_prune_info(&blockchain).await;
         assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.is_object());
+        assert_json_object_has_fields(&info, &["pruning_enabled", "mode"]);
     }
 
     #[tokio::test]
@@ -363,6 +422,8 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let result = chain::get_index_info(&blockchain, None).await;
         assert!(result.is_ok());
+        let info = result.unwrap();
+        assert!(info.is_object());
     }
 
     // New block endpoints
@@ -371,8 +432,7 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let hash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
         let result = blocks::get_block_header(&blockchain, hash, true).await;
-        // May fail if block doesn't exist
-        assert!(result.is_ok() || result.is_err());
+        assert_uninitialized_block_lookup_err(result);
     }
 
     #[tokio::test]
@@ -380,8 +440,7 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let hash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
         let result = blocks::get_block_stats(&blockchain, hash).await;
-        // May fail if block doesn't exist
-        assert!(result.is_ok() || result.is_err());
+        assert_uninitialized_block_lookup_err(result);
     }
 
     #[tokio::test]
@@ -389,8 +448,7 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let hash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
         let result = blocks::get_block_filter(&blockchain, hash, None).await;
-        // May fail if block doesn't exist
-        assert!(result.is_ok() || result.is_err());
+        assert_uninitialized_block_lookup_err(result);
     }
 
     // New mempool endpoints
@@ -399,8 +457,13 @@ mod tests {
         let mempool = create_test_mempool_rpc();
         let txid = "0000000000000000000000000000000000000000000000000000000000000000";
         let result = rest_mempool::get_mempool_ancestors(&mempool, txid, false).await;
-        // May return empty if tx not in mempool
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok());
+        let ancestors = result.unwrap();
+        assert!(
+            ancestors.as_object().map(|m| m.is_empty()).unwrap_or(false)
+                || ancestors.as_array().map(|a| a.is_empty()).unwrap_or(false),
+            "missing tx must yield empty ancestor set"
+        );
     }
 
     #[tokio::test]
@@ -408,15 +471,29 @@ mod tests {
         let mempool = create_test_mempool_rpc();
         let txid = "0000000000000000000000000000000000000000000000000000000000000000";
         let result = rest_mempool::get_mempool_descendants(&mempool, txid, false).await;
-        // May return empty if tx not in mempool
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok());
+        let descendants = result.unwrap();
+        assert!(
+            descendants
+                .as_object()
+                .map(|m| m.is_empty())
+                .unwrap_or(false)
+                || descendants
+                    .as_array()
+                    .map(|a| a.is_empty())
+                    .unwrap_or(false),
+            "missing tx must yield empty descendant set"
+        );
     }
 
     #[tokio::test]
     async fn test_mempool_save_endpoint() {
         let mempool = create_test_mempool_rpc();
         let result = rest_mempool::save_mempool(&mempool).await;
-        assert!(result.is_ok() || result.is_err());
+        assert!(
+            result.is_err(),
+            "savemempool requires an initialized mempool manager"
+        );
     }
 
     // New network endpoints
@@ -425,6 +502,7 @@ mod tests {
         let network = create_test_network_rpc();
         let result = rest_network::get_connection_count(&network).await;
         assert!(result.is_ok());
+        assert_non_negative_number(&result.unwrap());
     }
 
     #[tokio::test]
@@ -432,6 +510,9 @@ mod tests {
         let network = create_test_network_rpc();
         let result = rest_network::get_net_totals(&network).await;
         assert!(result.is_ok());
+        let totals = result.unwrap();
+        assert!(totals.is_object());
+        assert_json_object_has_fields(&totals, &["totalbytesrecv", "totalbytessent"]);
     }
 
     #[tokio::test]
@@ -454,13 +535,19 @@ mod tests {
         let mining = create_test_mining_rpc();
         let result = mining::get_mining_info(&mining).await;
         assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_json_object_has_fields(
+            &info,
+            &["blocks", "difficulty", "chain", "pooledtx", "networkhashps"],
+        );
+        assert_non_negative_number(info.get("blocks").unwrap());
     }
 
     #[tokio::test]
     async fn test_mining_block_template_endpoint() {
         let mining = create_test_mining_rpc();
         let result = mining::get_block_template(&mining, None, None).await;
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_err(), "GBT without storage/chain must fail");
     }
 
     // New node endpoints
@@ -488,6 +575,8 @@ mod tests {
         let control = ControlRpc::new();
         let result = node::get_rpc_info(&control).await;
         assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_json_object_has_fields(&info, &["active_commands", "logpath"]);
     }
 
     #[tokio::test]

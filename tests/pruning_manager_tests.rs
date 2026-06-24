@@ -35,6 +35,19 @@ fn test_pruning_manager_creation() {
 }
 
 #[test]
+fn test_pruning_manager_with_network() {
+    let (_temp_dir, blockstore) = create_test_blockstore();
+    let config = PruningConfig {
+        mode: PruningMode::Disabled,
+        ..Default::default()
+    };
+
+    let manager = PruningManager::new(config, blockstore)
+        .with_network(blvm_protocol::types::Network::Regtest);
+    assert!(!manager.is_enabled());
+}
+
+#[test]
 fn test_pruning_manager_disabled_mode() {
     let (_temp_dir, blockstore) = create_test_blockstore();
     let config = PruningConfig {

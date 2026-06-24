@@ -112,6 +112,11 @@ impl InventoryManager {
         Ok(GetDataMessage { inventory })
     }
 
+    /// Whether a download for `hash` is already in flight.
+    pub fn has_pending_request(&self, hash: &Hash) -> bool {
+        self.pending_requests.contains_key(hash)
+    }
+
     /// Mark request as fulfilled
     pub fn mark_fulfilled(&mut self, hash: &Hash) {
         self.pending_requests.remove(hash);
@@ -162,5 +167,21 @@ impl InventoryManager {
     /// Get pending request count
     pub fn pending_request_count(&self) -> usize {
         self.pending_requests.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn has_pending_request_tracks_in_flight_getdata() {
+        let mut mgr = InventoryManager::new();
+        let hash = [0xab; 32];
+        assert!(!mgr.has_pending_request(&hash));
+        mgr.request_data(hash, MSG_BLOCK, "1.2.3.4:8333").unwrap();
+        assert!(mgr.has_pending_request(&hash));
+        mgr.mark_fulfilled(&hash);
+        assert!(!mgr.has_pending_request(&hash));
     }
 }

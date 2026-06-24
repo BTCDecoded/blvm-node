@@ -1,7 +1,16 @@
 //! Protocol adapter for Bitcoin message serialization
 //!
-//! Handles conversion between blvm-consensus NetworkMessage types and
-//! transport-specific wire formats (TCP Bitcoin P2P vs Iroh message format).
+//! # Wire formats (REV-N-14)
+//!
+//! | Transport | On-the-wire format | Bitcoin Core compatible? |
+//! |-----------|-------------------|---------------------------|
+//! | **TCP** | Standard P2P envelope: magic + 12-byte command + length + checksum + payload. Payload uses Core wire encoders where implemented (`version`, `addrv2`, …) or bincode for a small ping/pong subset. | **Partial** — only mapped message types; unmapped types return `Err`. |
+//! | **Iroh / Quinn** | **BLVM internal**: bincode serialization of [`ProtocolMessage`](crate::network::protocol::ProtocolMessage). No magic/checksum envelope. | **No** — BLVM-only alternate transport; not interoperable with Core P2P bytes. |
+//!
+//! Production builds cache TCP/Iroh serialization keyed by message variant + salient fields (not by discriminant alone).
+//!
+//! Message *processing* (handshake, inv dispatch, block relay) lives in [`NetworkManager`](crate::network::network_manager::NetworkManager) /
+//! `wire_dispatch`, not in [`MessageBridge`](crate::network::message_bridge::MessageBridge).
 
 use crate::network::transport::TransportType;
 use anyhow::Result;
@@ -33,18 +42,42 @@ fn get_serialization_cache() -> &'static RwLock<blvm_protocol::lru::LruCache<u64
     })
 }
 
-/// Calculate a fast hash of message for cache key
+/// Calculate a cache key for production serialization memoization.
 ///
-/// This hash is used as a cache key and doesn't require serialization.
+/// Keys must differ when serialized bytes would differ. Unsupported adapter types are not cached
+/// on this path (they error in `serialize_message_inner` before caching matters).
 #[cfg(feature = "production")]
 fn calculate_message_cache_key(msg: &ConsensusNetworkMessage, transport: TransportType) -> u64 {
     let mut hasher = DefaultHasher::new();
-    // Hash message type discriminator
     std::mem::discriminant(msg).hash(&mut hasher);
-    // Hash transport type
     std::mem::discriminant(&transport).hash(&mut hasher);
-    // Hash message content (simplified - hash a few key fields)
-    // This is a heuristic - not perfect but fast
+    match msg {
+        ConsensusNetworkMessage::Version(v) => {
+            v.version.hash(&mut hasher);
+            v.services.hash(&mut hasher);
+            v.timestamp.hash(&mut hasher);
+            v.nonce.hash(&mut hasher);
+            v.start_height.hash(&mut hasher);
+            v.relay.hash(&mut hasher);
+            v.user_agent.hash(&mut hasher);
+        }
+        ConsensusNetworkMessage::Ping(p) => p.nonce.hash(&mut hasher),
+        ConsensusNetworkMessage::Pong(p) => p.nonce.hash(&mut hasher),
+        ConsensusNetworkMessage::AddrV2(a) => {
+            a.addresses.len().hash(&mut hasher);
+            for entry in &a.addresses {
+                entry.time.hash(&mut hasher);
+                entry.services.hash(&mut hasher);
+                entry.port.hash(&mut hasher);
+                entry.address.hash(&mut hasher);
+            }
+        }
+        ConsensusNetworkMessage::VerAck => {}
+        _ => {
+            // Rare on this adapter path; fall back to Debug string to avoid collisions.
+            format!("{msg:?}").hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -56,11 +89,8 @@ pub struct ProtocolAdapter;
 impl ProtocolAdapter {
     /// Serialize a blvm-consensus NetworkMessage to transport format
     ///
-    /// For TCP transport, uses Bitcoin P2P wire protocol format.
-    /// For Iroh transport, uses a simplified message format.
-    ///
-    /// Performance optimization: Caches serialized results to avoid re-serializing
-    /// the same message multiple times (used in ping/pong, version messages, etc.)
+    /// - **TCP**: Bitcoin P2P wire envelope (Core-compatible subset only).
+    /// - **Iroh / Quinn**: BLVM-internal bincode of `ProtocolMessage` (not Core wire).
     pub fn serialize_message(
         msg: &ConsensusNetworkMessage,
         transport: TransportType,
@@ -104,11 +134,11 @@ impl ProtocolAdapter {
             TransportType::Tcp => Self::serialize_bitcoin_wire_format(msg),
             #[cfg(feature = "quinn")]
             TransportType::Quinn => {
-                // Quinn uses same format as Iroh (JSON-based) for simplicity
-                Self::serialize_iroh_format(msg)
+                // BLVM-internal bincode envelope (see module docs); not Bitcoin Core P2P.
+                Self::serialize_internal_bincode_format(msg)
             }
             #[cfg(feature = "iroh")]
-            TransportType::Iroh => Self::serialize_iroh_format(msg),
+            TransportType::Iroh => Self::serialize_internal_bincode_format(msg),
         }
     }
 
@@ -120,12 +150,9 @@ impl ProtocolAdapter {
         match transport {
             TransportType::Tcp => Self::deserialize_bitcoin_wire_format(data),
             #[cfg(feature = "quinn")]
-            TransportType::Quinn => {
-                // Quinn uses same format as Iroh (JSON-based) for simplicity
-                Self::deserialize_iroh_format(data)
-            }
+            TransportType::Quinn => Self::deserialize_internal_bincode_format(data),
             #[cfg(feature = "iroh")]
-            TransportType::Iroh => Self::deserialize_iroh_format(data),
+            TransportType::Iroh => Self::deserialize_internal_bincode_format(data),
         }
     }
 
@@ -245,27 +272,22 @@ impl ProtocolAdapter {
     }
 
     #[cfg(any(feature = "iroh", feature = "quinn"))]
-    /// Serialize using simplified message format (bincode-based)
+    /// Serialize using the BLVM-internal bincode transport (Iroh/Quinn only).
     ///
-    /// Used by both Iroh and Quinn transports for simpler wire format.
-    /// Converts to protocol message first, then serializes.
-    fn serialize_iroh_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
-        // Convert to protocol message first (which is serializable)
+    /// This is **not** Bitcoin Core P2P wire format. Peers must both use BLVM alternate transports.
+    fn serialize_internal_bincode_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
         let protocol_msg = Self::consensus_to_protocol_message(msg)?;
-        // Serialize protocol message using bincode
         bincode::serialize(&protocol_msg)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize message: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to serialize internal transport message: {}", e))
     }
 
     #[cfg(any(feature = "iroh", feature = "quinn"))]
-    /// Deserialize from simplified message format (bincode-based)
-    ///
-    /// Used by both Iroh and Quinn transports.
-    fn deserialize_iroh_format(data: &[u8]) -> Result<ConsensusNetworkMessage> {
-        // Deserialize protocol message
+    /// Deserialize BLVM-internal bincode transport bytes (Iroh/Quinn only).
+    fn deserialize_internal_bincode_format(data: &[u8]) -> Result<ConsensusNetworkMessage> {
         let protocol_msg: crate::network::protocol::ProtocolMessage = bincode::deserialize(data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize message: {}", e))?;
-        // Convert back to consensus message
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to deserialize internal transport message: {}", e)
+            })?;
         Self::protocol_to_consensus_message(&protocol_msg)
     }
 

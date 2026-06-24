@@ -296,14 +296,73 @@ fn test_manifest_validator_multiple_errors() {
 }
 
 #[test]
-fn test_validate_module_signature() {
+fn test_manifest_content_without_signatures_strips_table() {
+    use blvm_node::module::validation::manifest_content_without_signatures;
+
+    let input = r#"
+name = "test-module"
+version = "1.0.0"
+entry_point = "test-module.so"
+
+[signatures]
+threshold = "1-of-1"
+
+[[signatures.maintainers]]
+name = "bob"
+public_key = "02bb"
+signature = "cafe"
+"#;
+    let stripped = manifest_content_without_signatures(input).unwrap();
+    let table = toml::from_str::<toml::Value>(&stripped)
+        .unwrap()
+        .as_table()
+        .unwrap()
+        .clone();
+    assert!(!table.contains_key("signatures"));
+    assert_eq!(
+        table.get("entry_point").unwrap().as_str(),
+        Some("test-module.so")
+    );
+}
+
+#[test]
+fn test_validate_module_signature_unsigned_skips() {
     use blvm_node::module::validation::manifest_validator::validate_module_signature;
     use std::path::PathBuf;
 
     let manifest = create_valid_manifest();
     let binary_path = PathBuf::from("/nonexistent/binary.so");
 
-    // Signature verification is currently a no-op (see `validate_module_signature`).
     let result = validate_module_signature(&manifest, &binary_path);
-    assert!(result.is_ok());
+    assert!(
+        result.is_ok(),
+        "unsigned manifests skip signature verification"
+    );
+}
+
+#[test]
+fn test_validate_module_signature_signed_requires_manifest_file() {
+    use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
+    use blvm_node::module::validation::manifest_validator::validate_module_signature;
+    use std::path::Path;
+
+    let mut manifest = create_valid_manifest();
+    manifest.signatures = Some(SignatureSection {
+        threshold: Some("1-of-1".to_string()),
+        maintainers: vec![MaintainerSignature {
+            name: "alice".to_string(),
+            public_key: "02".repeat(32),
+            signature: "00".repeat(64),
+        }],
+    });
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let binary = temp.path().join("test-module.so");
+    std::fs::write(&binary, b"binary").unwrap();
+
+    let result = validate_module_signature(&manifest, &binary);
+    assert!(
+        result.is_err(),
+        "signed manifests must fail when module.toml is missing beside the binary"
+    );
 }

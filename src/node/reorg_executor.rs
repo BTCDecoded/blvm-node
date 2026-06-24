@@ -4,6 +4,7 @@ use crate::node::chain_selector::should_activate_over_active_tip;
 use crate::node::event_publisher::EventPublisher;
 use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
+use crate::utils::current_timestamp;
 use anyhow::{Context, Result};
 use blvm_consensus::reorganization::{BlockUndoLog, reorganize_chain_with_witnesses};
 use blvm_consensus::types::Network;
@@ -44,17 +45,28 @@ pub fn collect_chain_to_tip(
     Ok(blocks)
 }
 
-fn witnesses_for_chain(blockstore: &BlockStore, chain: &[Block]) -> Result<Vec<Vec<Vec<Witness>>>> {
+fn witnesses_for_chain(
+    blockstore: &BlockStore,
+    storage: &Storage,
+    chain: &[Block],
+    protocol: &BitcoinProtocolEngine,
+) -> Result<Vec<Vec<Vec<Witness>>>> {
+    let protocol_version = protocol.get_protocol_version();
     let mut out = Vec::with_capacity(chain.len());
     for block in chain {
         let hash = blockstore.get_block_hash(block);
-        let witnesses = blockstore.get_witness(&hash)?.unwrap_or_else(|| {
-            block
-                .transactions
-                .iter()
-                .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
-                .collect()
-        });
+        let height = storage
+            .chain()
+            .block_index()
+            .get(&hash)?
+            .map(|e| e.height)
+            .unwrap_or(0);
+        let witnesses = crate::node::block_processor::load_witnesses_for_block(
+            blockstore,
+            block,
+            height,
+            protocol_version,
+        )?;
         out.push(witnesses);
     }
     Ok(out)
@@ -154,7 +166,7 @@ pub fn try_activate_heavier_fork(
         return Ok(false);
     }
 
-    let new_witnesses = witnesses_for_chain(blockstore, &new_chain)?;
+    let new_witnesses = witnesses_for_chain(blockstore, storage, &new_chain, protocol)?;
     let network = protocol_network(protocol);
     let utxo_backup = utxo_set.clone();
     let owned_utxo = std::mem::take(utxo_set);
@@ -178,6 +190,7 @@ pub fn try_activate_heavier_fork(
         None::<fn(u64) -> Option<Vec<blvm_protocol::BlockHeader>>>,
         Some(get_undo),
         Some(put_undo),
+        current_timestamp(),
         network,
     )
     .map_err(|e| {

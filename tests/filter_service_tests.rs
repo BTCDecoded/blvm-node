@@ -1,9 +1,21 @@
 //! Tests for filter service (BIP157/158)
 
 use blvm_node::network::filter_service::BlockFilterService;
+use blvm_node::storage::hashing::double_sha256;
 use blvm_protocol::tx_inputs;
 use blvm_protocol::tx_outputs;
 use blvm_protocol::{Block, BlockHeader, Transaction};
+
+fn wire_block_hash(header: &BlockHeader) -> [u8; 32] {
+    let mut header_data = [0u8; 80];
+    header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+    header_data[4..36].copy_from_slice(&header.prev_block_hash);
+    header_data[36..68].copy_from_slice(&header.merkle_root);
+    header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+    header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+    header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
+    double_sha256(&header_data)
+}
 
 fn create_test_block(height: u32) -> Block {
     Block {
@@ -106,20 +118,14 @@ fn test_get_filter_after_caching() {
     let service = BlockFilterService::new();
     let block = create_test_block(0);
     let prev_scripts = vec![];
+    let block_hash = wire_block_hash(&block.header);
 
-    // Generate and cache filter
-    let _filter = service
+    service
         .generate_and_cache_filter(&block, &prev_scripts, 0)
         .unwrap();
 
-    // Calculate block hash (simplified - would use proper calculation in real code)
-    // For test, we'll use the service's internal calculation
-    // Since we can't access private methods, we'll test that filter exists via has_filter
-    // after generation
-
-    // Filter should exist after generation
-    // Note: We can't easily get the block hash without the private method,
-    // but we can verify the service state changed
+    assert!(service.has_filter(&block_hash));
+    assert!(service.get_filter(&block_hash).is_some());
     assert_eq!(service.current_height(), 0);
 }
 

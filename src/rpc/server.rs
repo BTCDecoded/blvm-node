@@ -784,6 +784,22 @@ impl RpcServer {
         output
     }
 
+    fn health_overall_status(value: &Value) -> &str {
+        value
+            .get("overall_status")
+            .or_else(|| value.get("status"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown")
+    }
+
+    fn health_is_live(status: &str) -> bool {
+        matches!(status.to_ascii_lowercase().as_str(), "healthy" | "degraded")
+    }
+
+    fn health_is_ready(status: &str) -> bool {
+        status.eq_ignore_ascii_case("healthy")
+    }
+
     /// Handle health check endpoints
     async fn handle_health_endpoint(
         server: Arc<Self>,
@@ -800,11 +816,8 @@ impl RpcServer {
                 match path {
                     "/health" | "/health/live" => {
                         // Quick health check - just return status
-                        let status = health_value
-                            .get("status")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("unknown");
-                        let is_healthy = status == "healthy" || status == "degraded";
+                        let status = Self::health_overall_status(&health_value);
+                        let is_healthy = Self::health_is_live(status);
 
                         let response_body = json!({
                             "status": status,
@@ -825,11 +838,8 @@ impl RpcServer {
                     }
                     "/health/ready" => {
                         // Readiness probe - check if node is ready to serve traffic
-                        let status = health_value
-                            .get("status")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("unknown");
-                        let is_ready = status == "healthy";
+                        let status = Self::health_overall_status(&health_value);
+                        let is_ready = Self::health_is_ready(status);
 
                         let response_body = json!({
                             "status": if is_ready { "ready" } else { "not_ready" },

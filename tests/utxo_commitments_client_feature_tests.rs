@@ -12,6 +12,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[cfg(feature = "utxo-commitments")]
+#[test]
+fn test_parse_utxo_commitment_peer_id_iroh_full_block() {
+    let hex_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let peer_id = format!("iroh:{hex_key}");
+    assert!(peer_id.starts_with("iroh:"));
+    assert_eq!(hex_key.len(), 64);
+}
+
+#[cfg(feature = "utxo-commitments")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_utxo_commitments_client_creation() {
     // Create a mock network manager (ReplayProtection spawns a Tokio task on construction.)

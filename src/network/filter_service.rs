@@ -59,7 +59,6 @@ impl BlockFilterService {
         let filter = build_block_filter(&block.transactions, previous_outpoint_scripts)
             .map_err(|e| anyhow!("Failed to build filter: {}", e))?;
 
-        // Calculate block hash (simplified - in production would use proper block hash calculation)
         let block_hash = self.calculate_block_hash(&block.header);
 
         // Cache filter
@@ -210,21 +209,18 @@ impl BlockFilterService {
             .cloned()
     }
 
-    /// Calculate block hash from header using proper Bitcoin double SHA256
+    /// Double-SHA256 of the 80-byte Bitcoin wire header (block id).
     fn calculate_block_hash(&self, header: &BlockHeader) -> Hash {
         use crate::storage::hashing::double_sha256;
 
-        // Serialize header
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&header.version.to_le_bytes());
-        bytes.extend_from_slice(&header.prev_block_hash);
-        bytes.extend_from_slice(&header.merkle_root);
-        bytes.extend_from_slice(&header.timestamp.to_le_bytes());
-        bytes.extend_from_slice(&header.bits.to_le_bytes());
-        bytes.extend_from_slice(&header.nonce.to_le_bytes());
-
-        // Double SHA256
-        double_sha256(&bytes)
+        let mut header_data = [0u8; 80];
+        header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+        header_data[4..36].copy_from_slice(&header.prev_block_hash);
+        header_data[36..68].copy_from_slice(&header.merkle_root);
+        header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+        header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+        header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
+        double_sha256(&header_data)
     }
 
     /// Get current chain height

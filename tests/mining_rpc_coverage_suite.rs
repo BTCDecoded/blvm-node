@@ -26,7 +26,7 @@ fn rpc_with_chain() -> (TempDir, MiningRpc) {
     (temp_dir, MiningRpc::with_dependencies(storage, mempool))
 }
 
-fn rpc_with_regtest_protocol() -> (TempDir, MiningRpc, Arc<BitcoinProtocolEngine>) {
+fn rpc_with_regtest_protocol() -> (TempDir, MiningRpc, Arc<BitcoinProtocolEngine>, Arc<Storage>) {
     let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
     let genesis_header = protocol.get_network_params().genesis_block.header.clone();
     let temp_dir = TempDir::new().unwrap();
@@ -35,7 +35,7 @@ fn rpc_with_regtest_protocol() -> (TempDir, MiningRpc, Arc<BitcoinProtocolEngine
     let mempool = Arc::new(MempoolManager::new());
     let rpc = MiningRpc::with_dependencies(Arc::clone(&storage), mempool)
         .with_protocol_engine(Arc::clone(&protocol));
-    (temp_dir, rpc, protocol)
+    (temp_dir, rpc, protocol, storage)
 }
 
 #[tokio::test]
@@ -66,16 +66,37 @@ async fn test_estimate_smart_fee_economical_mode() {
 
 #[tokio::test]
 async fn test_get_block_template_with_difficulty_interval_chain() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     let (_dir, rpc) = rpc_with_chain();
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let template = rpc.get_block_template(&ckpool_gbt_params()).await.unwrap();
     assert!(template.get("coinbasevalue").unwrap().as_u64().unwrap() > 0);
     assert!(template.get("previousblockhash").is_some());
     assert!(template.get("target").is_some());
+
+    // REV-TN-01: GBT must expose curtime/mintime and use live template timestamp.
+    let curtime = template.get("curtime").unwrap().as_u64().unwrap();
+    let mintime = template.get("mintime").unwrap().as_u64().unwrap();
+    assert!(curtime >= before.saturating_sub(5));
+    assert!(mintime <= curtime);
+    assert!(template.get("height").unwrap().as_u64().unwrap() > 0);
 }
 
 #[tokio::test]
 async fn test_generatetoaddress_regtest_smoke() {
-    let (_dir, rpc, _protocol) = rpc_with_regtest_protocol();
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (_dir, rpc, protocol, storage) = rpc_with_regtest_protocol();
+    let genesis_ts = protocol.get_network_params().genesis_block.header.timestamp;
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
     let hashes = rpc
         .generate_to_address(&json!([
             2u64,
@@ -87,6 +108,16 @@ async fn test_generatetoaddress_regtest_smoke() {
     let arr = hashes.as_array().unwrap();
     assert_eq!(arr.len(), 2);
     assert!(arr[0].as_str().unwrap().len() >= 64);
+
+    // REV-TN-01 / REV-C-32: mined blocks use wall-clock time via create_new_block_with_time.
+    let tip_header = storage
+        .chain()
+        .get_tip_header()
+        .unwrap()
+        .expect("tip after generatetoaddress");
+    assert!(tip_header.timestamp > genesis_ts);
+    assert_ne!(tip_header.timestamp, 1_231_006_505);
+    assert!(tip_header.timestamp >= before.saturating_sub(5));
 }
 
 #[tokio::test]

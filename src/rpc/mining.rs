@@ -265,6 +265,8 @@ impl MiningRpc {
 
         // 5. Use formally verified function from blvm-consensus
         // This function has spec-lock verification for block template completeness
+        let network = self.consensus_network_from_storage();
+        let mempool_witnesses = self.build_mempool_witnesses_for_template(&mempool_txs)?;
         let template = match self.consensus.create_block_template(
             &utxo_set,
             &mempool_txs,
@@ -273,6 +275,8 @@ impl MiningRpc {
             &prev_headers,
             &coinbase_script,
             &coinbase_address,
+            network,
+            Some(&mempool_witnesses),
         ) {
             Ok(t) => t,
             Err(e) => {
@@ -456,6 +460,26 @@ impl MiningRpc {
         }
     }
 
+    /// Per-mempool-tx witness stacks aligned with `get_mempool_transactions` ordering.
+    fn build_mempool_witnesses_for_template(
+        &self,
+        mempool_txs: &[Transaction],
+    ) -> RpcResult<Vec<Option<Vec<Witness>>>> {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let Some(ref mempool) = self.mempool else {
+            return Ok(mempool_txs.iter().map(|_| None).collect());
+        };
+
+        Ok(mempool_txs
+            .iter()
+            .map(|tx| {
+                let txid = calculate_tx_id(tx);
+                mempool.get_transaction_witnesses(&txid)
+            })
+            .collect())
+    }
+
     /// Calculate difficulty from bits (compact target format).
     /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
     fn calculate_difficulty(bits: u64) -> f64 {
@@ -555,16 +579,15 @@ impl MiningRpc {
     }
 
     fn extract_coinbase_address(&self, params: &Value) -> Option<ByteString> {
-        // Extract coinbase address from params if provided
         if let Some(template_request) = params.get(0) {
             if let Some(addr) = template_request.get("coinbaseaddress") {
-                if let Some(_addr_str) = addr.as_str() {
-                    // Would decode address to script, for now return empty
-                    return Some(vec![]);
+                if let Some(addr_str) = addr.as_str() {
+                    if let Ok(script) = address_string_to_script_pubkey(addr_str) {
+                        return Some(script);
+                    }
                 }
             }
         }
-        // Default: empty
         Some(vec![])
     }
 
@@ -646,9 +669,22 @@ impl MiningRpc {
     }
 
     fn calculate_weight(&self, tx: &Transaction) -> u64 {
-        // Transaction weight = (base_size * 3) + total_size (for SegWit)
-        // For now, return base size * 4 (non-SegWit transaction)
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::serialization::serialize_transaction_with_witness;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::witness::calculate_transaction_weight_segwit;
+
         let base_size = serialize_transaction(tx).len() as u64;
+        if let Some(ref mempool) = self.mempool {
+            let txid = calculate_tx_id(tx);
+            if let Some(witnesses) = mempool.get_transaction_witnesses(&txid) {
+                if witnesses.iter().any(|stack| !stack.is_empty()) {
+                    let total_size =
+                        serialize_transaction_with_witness(tx, &witnesses).len() as u64;
+                    return calculate_transaction_weight_segwit(base_size, total_size);
+                }
+            }
+        }
         base_size * 4
     }
 
@@ -718,8 +754,15 @@ impl MiningRpc {
     }
 
     fn get_min_time(&self, _height: Natural) -> Natural {
-        // Get minimum time (median time of last 11 blocks + 1)
-        // For now, return current time
+        // BIP113: median time-past of last 11 blocks + 1 (minimum allowed block time).
+        if let Some(ref storage) = self.storage {
+            if let Ok(recent_headers) = storage.blocks().get_recent_headers(11) {
+                if !recent_headers.is_empty() {
+                    return blvm_protocol::bip113::get_median_time_past(&recent_headers)
+                        .saturating_add(1);
+                }
+            }
+        }
         current_timestamp() as Natural
     }
 
@@ -818,7 +861,7 @@ impl MiningRpc {
 
             let mut block = self
                 .consensus
-                .create_new_block(
+                .create_new_block_with_time(
                     &utxo,
                     &[],
                     connect_height,
@@ -826,6 +869,9 @@ impl MiningRpc {
                     &prev_headers,
                     &coinbase_script,
                     &coinbase_address,
+                    current_timestamp(),
+                    ConsensusNetwork::Regtest,
+                    None,
                 )
                 .map_err(|e| {
                     RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
@@ -1069,8 +1115,7 @@ impl MiningRpc {
             let _utxo_set = self.get_utxo_set()?;
             let mut fee_rates = Vec::new();
 
-            // MempoolManager.get_prioritized_transactions() already calculates fees correctly
-            // We can extract fee rates from the prioritized list, but for now calculate directly
+            // MempoolManager.get_prioritized_transactions() already ranks by fee; compute rates here.
             for tx in &mempool_txs {
                 let fee = self.calculate_transaction_fee(tx); // Now uses UTXO set
                 let size = self.calculate_weight(tx) as usize;
@@ -1110,7 +1155,7 @@ impl MiningRpc {
 
     /// Prioritize a transaction in the mempool
     ///
-    /// Params: ["txid", "fee_delta"] (transaction ID, fee delta in satoshis)
+    /// Params: ["txid", fee_delta] or Core-compatible ["txid", dummy, fee_delta]
     pub async fn prioritise_transaction(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: prioritisetransaction");
 
@@ -1119,10 +1164,12 @@ impl MiningRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| RpcError::invalid_params("Transaction ID required".to_string()))?;
 
-        let fee_delta = params
-            .get(1)
-            .and_then(|p| p.as_i64())
-            .ok_or_else(|| RpcError::invalid_params("Fee delta required".to_string()))?;
+        let fee_delta = match params.as_array().map(|a| a.len()) {
+            Some(len) if len >= 3 => params.get(2),
+            _ => params.get(1),
+        }
+        .and_then(|p| p.as_i64())
+        .ok_or_else(|| RpcError::invalid_params("Fee delta required".to_string()))?;
 
         let hash_bytes = hex::decode(txid)
             .map_err(|e| RpcError::invalid_params(format!("Invalid transaction ID: {e}")))?;
@@ -1135,10 +1182,7 @@ impl MiningRpc {
         hash.copy_from_slice(&hash_bytes);
 
         if let Some(ref mempool) = self.mempool {
-            // Check if transaction exists in mempool
-            if mempool.get_transaction(&hash).is_some() {
-                // Note: In production, would update transaction priority/fee delta
-                // For now, just return success
+            if mempool.prioritise_transaction(&hash, fee_delta) {
                 debug!(
                     "Transaction {} prioritized with fee delta: {}",
                     txid, fee_delta

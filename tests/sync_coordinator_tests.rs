@@ -129,12 +129,12 @@ fn test_sync_state_machine_error_message() {
 }
 
 #[test]
-fn test_sync_coordinator_start_sync_reaches_synced() {
+fn test_sync_coordinator_mark_chain_current_reaches_synced() {
     use blvm_node::node::sync::{SyncCoordinator, SyncState};
 
     let mut coordinator = SyncCoordinator::new();
     assert!(!coordinator.is_synced());
-    coordinator.start_sync().unwrap();
+    coordinator.mark_chain_current();
     assert!(coordinator.is_synced());
     assert!(matches!(
         coordinator.current_sync_state(),

@@ -74,6 +74,17 @@ use crossbeam_channel;
 /// than dropping it, so the join of the validation thread and the final `persist_ibd_utxo_flush_checkpoint`
 /// call both execute before the process exits.
 pub static IBD_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// True while `ParallelIBD::sync_parallel` is running (startup IBD or run-loop catch-up).
+pub static PARALLEL_IBD_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct ParallelIbdSessionGuard;
+
+impl Drop for ParallelIbdSessionGuard {
+    fn drop(&mut self) {
+        PARALLEL_IBD_SESSION_ACTIVE.store(false, Ordering::Release);
+    }
+}
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -511,6 +522,9 @@ impl ParallelIBD {
             target_height,
             peer_ids.len()
         );
+
+        PARALLEL_IBD_SESSION_ACTIVE.store(true, Ordering::Release);
+        let _ibd_session_guard = ParallelIbdSessionGuard;
 
         let headers_start = std::time::Instant::now();
 
@@ -1198,7 +1212,7 @@ impl ParallelIBD {
                         };
                         // Hard outer deadline: download_chunk must complete within this window.
                         // Protects against the initial-fill being stuck in send_block_getdata_with_retry
-                        // (up to 30 retries × 5s each = 2min) before the inner chunk_deadline is ever polled.
+                        // (up to 30 retries × 5s each = 2min) before the inner gap deadline is ever polled.
                         const CHUNK_OUTER_DEADLINE_SECS: u64 = 35;
                         let dl_result = match tokio::time::timeout(
                             std::time::Duration::from_secs(CHUNK_OUTER_DEADLINE_SECS),
@@ -1282,6 +1296,9 @@ impl ParallelIBD {
                                     );
                                 }
                                 assigner_clone.on_chunk_complete(&peer_id);
+                                if start == start_height {
+                                    assigner_clone.mark_bootstrap_complete();
+                                }
                                 chunks_completed += 1;
                                 blocks_downloaded += block_count as u64;
                             }
@@ -1318,19 +1335,23 @@ impl ParallelIBD {
                                 if num_peers_clone > 1
                                     && consecutive_failures >= MAX_CONSECUTIVE_FAILURES
                                 {
-                                    // Blacklist the peer so it gets no more chunks for 60s.
+                                    // Blacklist the peer so it gets no more chunks for 300s.
                                     // Chunks it had in-flight are already requeued with exclude=peer.
-                                    // Other peers will steal the work via work-stealing.
+                                    // Do NOT exit the worker: when all peers fail in parallel every
+                                    // worker would exit, block_tx closes, and validation hangs forever
+                                    // on the feeder while retry chunks remain queued.
                                     let blacklist_secs = 300u64;
                                     assigner_clone.blacklist_peer(
                                         &peer_id,
                                         std::time::Duration::from_secs(blacklist_secs),
                                     );
                                     warn!(
-                                        "Peer {} exceeded max failures — blacklisted for {}s, stopping worker",
+                                        "Peer {} exceeded max failures — blacklisted for {}s (worker stays alive)",
                                         peer_id, blacklist_secs
                                     );
-                                    break;
+                                    consecutive_failures = 0;
+                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                    continue;
                                 }
 
                                 if num_peers_clone == 1
@@ -1375,10 +1396,10 @@ impl ParallelIBD {
         // returns. Otherwise parallel workers get chunks 128+ and send blocks before we receive 100,
         // causing interleaving and a stall at 99. Coordinator knows we have 0..=bootstrap_end when
         // we drain that block. Bootstrap is always ≥128 blocks so 99 and 100 are in the same chunk.
-        let bootstrap_end = if start_height == 0 && !chunks.is_empty() {
+        let bootstrap_end = if !chunks.is_empty() {
             chunks[0].end_height
         } else {
-            u64::MAX // No bootstrap; skip coordinator-triggered mark
+            u64::MAX
         };
         let assigner_for_coord = Arc::clone(&assigner);
         let validation_height_for_coord = Arc::clone(&validation_height);
@@ -1550,9 +1571,14 @@ impl ParallelIBD {
                     let mut gap_drained = 0usize;
                     while let Ok((h, block, witnesses)) = block_rx.try_recv() {
                         total_received += 1;
+                        let next_needed =
+                            validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                        if h < next_needed {
+                            continue; // validation already passed this height
+                        }
                         if dispatched.contains(&h) {
-                            gap_drained += 1;
-                            continue; // already dispatched, stale duplicate
+                            // Gap recovery: re-queued chunk re-streams heights validation still needs.
+                            dispatched.remove(&h);
                         }
                         reorder_buffer.insert(h, (block, witnesses));
                         gap_drained += 1;
@@ -1687,6 +1713,9 @@ impl ParallelIBD {
                         total_received
                     );
                     // Channel closed — drain remaining reorder_buffer (any order), then exit.
+                    // Do not mark the feeder done here: blocks may still be in prefetch/bridge
+                    // pipeline. Premature guard.1 caused validation to exit before tail blocks
+                    // (e.g. height 955035) reached the feeder buffer.
                     dispatch_heights_buf.clear();
                     dispatch_heights_buf.extend(
                         reorder_buffer
@@ -1804,9 +1833,14 @@ impl ParallelIBD {
                                 reorder_buffer.len() + 1
                             );
                         }
+                        let next_needed =
+                            validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                        if height < next_needed {
+                            continue; // validation already passed this height
+                        }
                         if dispatched.contains(&height) {
-                            // Stale duplicate from a re-queued chunk already dispatched.
-                            continue;
+                            // Gap recovery: re-queued chunk re-streams heights validation still needs.
+                            dispatched.remove(&height);
                         }
                         reorder_buffer.insert(height, (block, witnesses));
                     }
@@ -2147,16 +2181,35 @@ impl ParallelIBD {
         };
 
         // Wait for validation thread (block_in_place keeps tokio worker free)
+        let mut ibd_pipeline_shutdown = || {
+            drop(prefetch_input_tx_v2);
+            drop(gap_fill_tx_v2);
+            let _ = feeder_handle.join();
+        };
         match tokio::task::block_in_place(|| validation_handle.join()) {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(panic) => return Err(anyhow::anyhow!("Validation thread panicked: {:?}", panic)),
+            Ok(Err(e)) => {
+                ibd_pipeline_shutdown();
+                return Err(e);
+            }
+            Err(panic) => {
+                ibd_pipeline_shutdown();
+                return Err(anyhow::anyhow!("Validation thread panicked: {:?}", panic));
+            }
+        }
+        let validated_through = validation_height.load(Ordering::Relaxed);
+        if validated_through < effective_end_height {
+            ibd_pipeline_shutdown();
+            return Err(anyhow::anyhow!(
+                "Parallel IBD ended early: validated through height {} but need {}",
+                validated_through,
+                effective_end_height
+            ));
         }
         if let Some(h) = progress_handle {
             let _ = h.await;
         }
-        // Feeder exits when ready_rx disconnects; join to avoid stray thread
-        let _ = feeder_handle.join();
+        ibd_pipeline_shutdown();
         // Periodic checkpoint export thread: join (it detects engine completion via end_h check
         // and exits, or the engine Arc drop will cause its next poll to see cl == 0).
         if let Some(h) = periodic_checkpoint_handle {
@@ -2290,6 +2343,7 @@ impl ParallelIBD {
         recent_headers: Option<&[Arc<BlockHeader>]>,
         network_time: u64,
         precomputed_tx_ids: Option<&'a [Hash]>,
+        best_header_chainwork: Option<blvm_consensus::pow::U256>,
     ) -> Result<(
         std::borrow::Cow<'a, [Hash]>,
         Option<blvm_protocol::block::UtxoDelta>,
@@ -2373,10 +2427,6 @@ impl ParallelIBD {
             bip54_boundary,
         );
         let owned_utxo = std::mem::take(utxo_set);
-        // Pass Some(0) so chainwork_ok=true: n_minimum_chain_work defaults to 0, so any Some
-        // value satisfies the gate. During IBD the header chain is already PoW-validated before
-        // block download begins, so skipping scripts below assume_valid_height is safe.
-        let best_header_chainwork = Some(0u128);
         let (result, new_utxo_set, tx_ids, utxo_delta, undo_log) =
             blvm_consensus::block::connect_block_ibd_with_undo(
                 block,

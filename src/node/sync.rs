@@ -193,16 +193,13 @@ impl SyncCoordinator {
         self.event_publisher = publisher;
     }
 
-    /// Start sync process
-    pub fn start_sync(&mut self) -> Result<()> {
-        info!("Starting blockchain sync");
-        self.state_machine.transition_to(SyncState::Headers);
-
-        // In a real implementation, we would download and validate blocks
-        // For now, just transition to synced state
+    /// Mark sync complete when chainstate is already current (no IBD download).
+    ///
+    /// Does not fetch blocks from peers. Production callers must only use this when the local
+    /// tip is known to match the desired chain (e.g. regtest after local mining, restored node).
+    pub fn mark_chain_current(&mut self) {
+        info!("Marking sync state as current (no block download)");
         self.state_machine.transition_to(SyncState::Synced);
-
-        Ok(())
     }
 
     /// Start parallel IBD sync (if enabled and peers available).
@@ -379,12 +376,25 @@ impl SyncCoordinator {
         // Parse block from wire format (extracts witness data)
         let (block, witnesses) = parse_block_from_wire(block_data)?;
 
-        // Prepare validation context (get witnesses and headers)
-        let (stored_witnesses, recent_headers) =
-            prepare_block_validation_context(blockstore, &block, current_height)?;
+        // Use wire witnesses when present; otherwise load from blockstore (fail closed post-SegWit).
+        let (stored_witnesses, recent_headers) = if witnesses.len() == block.transactions.len() {
+            (
+                witnesses.clone(),
+                blockstore
+                    .get_recent_headers(11)
+                    .ok()
+                    .filter(|headers| !headers.is_empty()),
+            )
+        } else {
+            prepare_block_validation_context(
+                blockstore,
+                &block,
+                current_height,
+                protocol.get_protocol_version(),
+            )?
+        };
 
-        // Use witnesses from wire format (they may not be stored yet)
-        let witnesses_to_use = if !witnesses.is_empty() {
+        let witnesses_to_use = if witnesses.len() == block.transactions.len() {
             &witnesses
         } else {
             &stored_witnesses
@@ -472,16 +482,16 @@ impl SyncCoordinator {
         storage: &Arc<Storage>,
         block: &Block,
         witnesses: &[Vec<blvm_protocol::segwit::Witness>],
-        current_height: u64,
+        _current_height: u64,
         utxo_set: &mut UtxoSet,
         metrics: Option<Arc<MetricsCollector>>,
         start_time: Instant,
     ) -> Result<bool> {
         let parent_hash = block.header.prev_block_hash;
-        let (active_tip, _) = storage.chain().get_tip_hash_and_height()?;
+        let (active_tip, active_height) = storage.chain().get_tip_hash_and_height()?;
 
         let connect_height = if parent_hash == active_tip {
-            current_height
+            active_height + 1
         } else if let Some(entry) = storage.chain().block_index().get(&parent_hash)? {
             entry.height + 1
         } else {
@@ -738,7 +748,7 @@ impl MockBlockProvider {
         hash
     }
 
-    /// Calculate header hash (simplified)
+    /// Test mock: approximate header hash from header fields (not consensus hash).
     fn calculate_header_hash(&self, header: &BlockHeader) -> [u8; 32] {
         let mut hash = [0u8; 32];
         hash[0] = header.version as u8;

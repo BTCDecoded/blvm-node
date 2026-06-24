@@ -42,14 +42,6 @@ async fn test_blockchain_rpc() {
 
     // Test getblockhash (requires storage)
     assert!(blockchain.get_block_hash(0).await.is_err());
-
-    // Test getrawtransaction
-    let tx = blockchain
-        .get_raw_transaction("0000000000000000000000000000000000000000000000000000000000000000")
-        .await
-        .unwrap();
-    assert!(tx.get("txid").is_some());
-    assert!(tx.get("version").is_some());
 }
 
 #[tokio::test]
@@ -261,22 +253,6 @@ async fn test_blockchain_rpc_getblockhash() {
 
     let result = blockchain.get_block_hash(999999).await;
     assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn test_blockchain_rpc_getrawtransaction() {
-    let blockchain = blockchain::BlockchainRpc::new();
-
-    // Test getrawtransaction
-    let tx_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let tx = blockchain.get_raw_transaction(tx_hash).await.unwrap();
-
-    // Verify transaction structure
-    assert!(tx.get("txid").is_some());
-    assert!(tx.get("version").is_some());
-    assert!(tx.get("locktime").is_some());
-    assert!(tx.get("vin").is_some());
-    assert!(tx.get("vout").is_some());
 }
 
 #[tokio::test]

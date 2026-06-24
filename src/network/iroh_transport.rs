@@ -11,11 +11,15 @@ use crate::network::transport::{
 #[cfg(feature = "iroh")]
 use anyhow::Result;
 #[cfg(feature = "iroh")]
-use iroh::endpoint::{Connection, Endpoint, SendStream};
+use iroh::endpoint::{Connection, Endpoint};
 #[cfg(feature = "iroh")]
 use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey};
 #[cfg(feature = "iroh")]
+use std::collections::VecDeque;
+#[cfg(feature = "iroh")]
 use std::net::SocketAddr;
+#[cfg(feature = "iroh")]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "iroh")]
 use tracing::{debug, info};
 
@@ -127,7 +131,7 @@ impl Transport for IrohTransport {
             peer_node_id: peer_id,
             peer_addr: TransportAddr::Iroh(peer_addr_bytes),
             connected: true,
-            active_streams: std::collections::HashMap::new(),
+            recv_queue: VecDeque::new(),
             max_message_length: self.max_message_length,
         })
     }
@@ -178,7 +182,7 @@ impl TransportListener for IrohListener {
                 peer_node_id,
                 peer_addr: peer_addr.clone(),
                 connected: true,
-                active_streams: std::collections::HashMap::new(),
+                recv_queue: VecDeque::new(),
                 max_message_length: self.max_message_length,
             },
             peer_addr,
@@ -198,8 +202,59 @@ pub struct IrohConnection {
     peer_addr: TransportAddr,
     connected: bool,
     max_message_length: usize,
-    /// Active streams per channel (for QUIC stream multiplexing)
-    active_streams: std::collections::HashMap<u32, SendStream>,
+    /// Buffered messages from additional incoming uni streams (multi-stream QUIC).
+    recv_queue: VecDeque<Vec<u8>>,
+}
+
+#[cfg(feature = "iroh")]
+impl IrohConnection {
+    async fn read_message_from_stream(
+        mut stream: iroh::endpoint::RecvStream,
+        max_message_length: usize,
+    ) -> Result<Vec<u8>> {
+        let mut len_bytes = [0u8; 4];
+        stream.read_exact(&mut len_bytes).await?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        if len > max_message_length {
+            return Err(anyhow::anyhow!(
+                "Message too large: {} bytes (max: {} bytes)",
+                len,
+                max_message_length
+            ));
+        }
+
+        let mut buffer = vec![0u8; len];
+        stream.read_exact(&mut buffer).await?;
+        Ok(buffer)
+    }
+
+    async fn prefetch_ready_streams(&mut self) {
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(0), self.conn.accept_uni())
+                .await
+            {
+                Ok(Ok(stream)) => {
+                    match Self::read_message_from_stream(stream, self.max_message_length).await {
+                        Ok(data) if data.is_empty() => {
+                            self.connected = false;
+                            break;
+                        }
+                        Ok(data) => self.recv_queue.push_back(data),
+                        Err(e) => {
+                            debug!("Iroh prefetch stream read error: {e}");
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
 }
 
 #[cfg(feature = "iroh")]
@@ -224,32 +279,9 @@ impl TransportConnection for IrohConnection {
         Ok(())
     }
 
-    /// Send data on a specific channel stream (for QUIC stream multiplexing)
-    ///
-    /// Opens a dedicated QUIC stream for the channel, enabling parallel operations.
-    /// Streams are not reused (they're closed after sending) to avoid complexity.
-    /// For true stream reuse, would need async HashMap with proper locking.
+    /// Send data on a specific channel stream (opens a dedicated uni stream per message).
     async fn send_on_channel(&mut self, _channel_id: Option<u32>, data: &[u8]) -> Result<()> {
-        if !self.connected {
-            return Err(anyhow::anyhow!("Connection closed"));
-        }
-
-        // Open a new QUIC stream for this channel (parallel, non-blocking)
-        let mut stream = self.conn.open_uni().await?;
-
-        // Track active stream (for future reuse if needed)
-        // Note: We don't reuse streams here to keep it simple - streams are closed after send
-        // For true multiplexing with reuse, would need async-safe HashMap
-
-        // Write length prefix (4 bytes, big-endian)
-        let len = data.len() as u32;
-        stream.write_all(&len.to_be_bytes()).await?;
-
-        // Write data
-        stream.write_all(data).await?;
-        stream.finish()?;
-
-        Ok(())
+        self.send(data).await
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
@@ -257,8 +289,11 @@ impl TransportConnection for IrohConnection {
             return Ok(Vec::new()); // Graceful close
         }
 
-        // Accept incoming QUIC stream
-        // This is simplified - real implementation would handle multiple streams
+        if let Some(data) = self.recv_queue.pop_front() {
+            self.prefetch_ready_streams().await;
+            return Ok(data);
+        }
+
         let mut stream = match self.conn.accept_uni().await {
             Ok(stream) => stream,
             Err(e) => {
@@ -267,30 +302,14 @@ impl TransportConnection for IrohConnection {
             }
         };
 
-        // Read length prefix (4 bytes)
-        let mut len_bytes = [0u8; 4];
-        stream.read_exact(&mut len_bytes).await?;
-        let len = u32::from_be_bytes(len_bytes) as usize;
-
-        if len == 0 {
+        let data = Self::read_message_from_stream(stream, self.max_message_length).await?;
+        if data.is_empty() {
             self.connected = false;
             return Ok(Vec::new());
         }
 
-        // Validate message size before allocation (DoS protection)
-        if len > self.max_message_length {
-            return Err(anyhow::anyhow!(
-                "Message too large: {} bytes (max: {} bytes)",
-                len,
-                self.max_message_length
-            ));
-        }
-
-        // Read data
-        let mut buffer = vec![0u8; len];
-        stream.read_exact(&mut buffer).await?;
-
-        Ok(buffer)
+        self.prefetch_ready_streams().await;
+        Ok(data)
     }
 
     fn peer_addr(&self) -> TransportAddr {

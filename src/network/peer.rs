@@ -462,7 +462,7 @@ impl Peer {
             c if c == cmd::INV => {
                 let _ = self
                     .message_tx
-                    .send(NetworkMessage::InventoryReceived(data.to_vec()));
+                    .send(NetworkMessage::InventoryReceived(data.to_vec(), self.addr));
             }
             _ => {
                 debug!("Unknown command: {}", command);

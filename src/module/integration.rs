@@ -20,6 +20,10 @@ pub struct ModuleIntegration {
     module_id: String,
     node_api: Arc<dyn NodeAPI>,
     event_receiver: tokio::sync::broadcast::Receiver<ModuleMessage>,
+    /// Broadcast sender for fan-out to `event_receiver()` subscribers.
+    event_broadcast: Arc<tokio::sync::broadcast::Sender<ModuleMessage>>,
+    /// In-process modules forward NodeAPI subscription mpsc into the broadcast channel.
+    forward_events_from_subscribe: bool,
     /// Receiver for CLI/RPC invocations from the node (module handles and sends result)
     invocation_receiver:
         Option<mpsc::Receiver<(InvocationMessage, oneshot::Sender<InvocationResultMessage>)>>,
@@ -147,26 +151,29 @@ impl ModuleIntegration {
 
         // Create NodeAPI over IPC
         let mut node_api_impl = NodeApiIpc::new(ipc_client_arc, module_id.clone());
-        node_api_impl.set_event_broadcast(broadcast_tx_arc);
+        node_api_impl.set_event_broadcast(Arc::clone(&broadcast_tx_arc));
         let node_api = Arc::new(node_api_impl);
 
         Ok(Self {
             module_id,
             node_api,
             event_receiver,
+            event_broadcast: broadcast_tx_arc,
+            forward_events_from_subscribe: false,
             invocation_receiver: Some(invocation_rx),
         })
     }
 
     /// Create from existing NodeAPI (for in-process modules)
     pub fn from_node_api(module_id: String, node_api: Arc<dyn NodeAPI>) -> Self {
-        // In-process: events handled differently (via callbacks or direct subscription)
-        // For now, create empty broadcast receiver - can be enhanced later
-        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        let (broadcast_tx, broadcast_rx) = tokio::sync::broadcast::channel(1000);
+        let event_broadcast = Arc::new(broadcast_tx);
         Self {
             module_id,
             node_api,
-            event_receiver: rx,
+            event_receiver: broadcast_rx,
+            event_broadcast,
+            forward_events_from_subscribe: true,
             invocation_receiver: None,
         }
     }
@@ -177,10 +184,15 @@ impl ModuleIntegration {
     /// set up during connect(). This method sends the subscription request via IPC.
     /// The receiver is already set up and will receive events automatically.
     pub async fn subscribe_events(&self, event_types: Vec<EventType>) -> Result<(), ModuleError> {
-        // Call NodeAPI's subscribe_events which handles the IPC request
-        // The receiver returned is the same one we already have in event_receiver
-        let _receiver = self.node_api.subscribe_events(event_types).await?;
-        // We already have the receiver via event_receiver(), so we can ignore the returned one
+        let mut event_rx = self.node_api.subscribe_events(event_types).await?;
+        if self.forward_events_from_subscribe {
+            let broadcast_tx = Arc::clone(&self.event_broadcast);
+            tokio::spawn(async move {
+                while let Some(msg) = event_rx.recv().await {
+                    let _ = broadcast_tx.send(msg);
+                }
+            });
+        }
         Ok(())
     }
 

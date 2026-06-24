@@ -149,6 +149,15 @@ impl TransactionPackage {
         transactions: Vec<Transaction>,
         utxo_set: Option<&blvm_protocol::UtxoSet>,
     ) -> Result<Self, PackageError> {
+        Self::new_with_utxo_set_and_witnesses(transactions, utxo_set, None)
+    }
+
+    /// Create a package with optional per-transaction witnesses for BIP141 weight.
+    pub fn new_with_utxo_set_and_witnesses(
+        transactions: Vec<Transaction>,
+        utxo_set: Option<&blvm_protocol::UtxoSet>,
+        witnesses: Option<&[Option<blvm_consensus::segwit::Witness>]>,
+    ) -> Result<Self, PackageError> {
         if transactions.is_empty() {
             return Err(PackageError::EmptyPackage);
         }
@@ -157,7 +166,7 @@ impl TransactionPackage {
         Self::validate_ordering(&transactions)?;
 
         // Calculate package ID per BIP331: SHA256 of wtxids in lexicographical order
-        let package_id = PackageId::from_transactions(&transactions, None);
+        let package_id = PackageId::from_transactions(&transactions, witnesses);
 
         // Calculate combined fee from UTXO set if provided
         let combined_fee = if let Some(utxo_set) = utxo_set {
@@ -179,13 +188,12 @@ impl TransactionPackage {
             0 // Fee calculation requires UTXO set
         };
 
-        // Calculate combined weight
         let combined_weight: usize = transactions
             .iter()
-            .map(|tx| {
-                // Simplified weight calculation
-                // In real implementation, would use proper witness weight
-                tx.inputs.len() * 68 + tx.outputs.len() * 31 + 10
+            .enumerate()
+            .map(|(i, tx)| {
+                let witness = witnesses.and_then(|w| w.get(i)).and_then(|o| o.as_ref());
+                package_transaction_weight_wu(tx, witness)
             })
             .sum();
 
@@ -368,6 +376,15 @@ impl PackageRelay {
             debug!("Cleaned up expired package {}", hex::encode(id.0));
         }
     }
+}
+
+/// BIP141 transaction weight (WU) for package fee-rate checks.
+fn package_transaction_weight_wu(
+    tx: &Transaction,
+    witness: Option<&blvm_consensus::segwit::Witness>,
+) -> usize {
+    use blvm_consensus::segwit::calculate_transaction_weight;
+    calculate_transaction_weight(tx, witness).unwrap_or(0) as usize
 }
 
 /// Package error

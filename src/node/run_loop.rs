@@ -8,16 +8,37 @@ use crate::utils::{HANDSHAKE_POLL_SLEEP, log_error, with_custom_timeout};
 
 /// Main node run loop. Called from `Node::start()` after components are started.
 pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
+    // Subscribe before any slow startup work so SIGTERM is not missed.
+    let mut shutdown_rx = crate::utils::create_shutdown_receiver();
+    if *shutdown_rx.borrow() {
+        info!("Shutdown already requested before run loop started");
+        return Ok(());
+    }
+
     info!("Node running - main loop started");
 
-    // Set up graceful shutdown signal handling
-    let shutdown_rx = crate::utils::create_shutdown_receiver();
+    // `current_height` is the height of the next block to connect (chain tip + 1).
+    let chain_tip = node.storage.chain().get_height()?.unwrap_or(0);
+    let mut current_height = chain_tip.saturating_add(1);
+    // Full UTXO load can take minutes at mainnet scale and blocks shutdown; P2P relay
+    // validation reloads from disk as needed. Catch-up sync uses parallel IBD + disk store.
+    let mut utxo_set = if chain_tip == 0 {
+        node.storage.utxos().get_all_utxos().unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    node.network.replace_utxo_snapshot(utxo_set.clone()).await;
 
-    // Get initial state for block processing
-    let mut current_height = node.storage.chain().get_height()?.unwrap_or(0);
-    let mut utxo_set = node.storage.utxos().get_all_utxos().unwrap_or_default();
+    // Catch up immediately if peers are ahead (do not wait for the periodic check).
+    if let Err(e) = node.try_catch_up_ibd(&mut utxo_set).await {
+        warn!("Catch-up sync check failed: {}", e);
+    }
+    if let Ok(Some(h)) = node.storage.chain().get_height() {
+        current_height = h.saturating_add(1);
+    }
 
     // Main node loop - coordinates between all components and handles shutdown signals
+    let mut loop_counter: u64 = 0;
     loop {
         // Check for shutdown signal (non-blocking)
         if *shutdown_rx.borrow() {
@@ -26,6 +47,9 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
         }
         // Process any received blocks (non-blocking)
         while let Some(block_data) = node.network.try_recv_block() {
+            if let Ok(Some(h)) = node.storage.chain().get_height() {
+                current_height = h.saturating_add(1);
+            }
             info!("Processing block from network");
             let blocks_arc = node.storage.blocks();
 
@@ -165,6 +189,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                                     tip_height, e
                                 );
                             }
+                            node.network.replace_utxo_snapshot(utxo_set.clone()).await;
 
                             #[cfg(feature = "utxo-commitments")]
                             {
@@ -299,6 +324,12 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                 }
                 Ok(false) => {
                     warn!("Block rejected at height {}", current_height);
+                    if let Err(e) = node.try_catch_up_ibd(&mut utxo_set).await {
+                        warn!("Catch-up after block rejection failed: {}", e);
+                    }
+                    if let Ok(Some(h)) = node.storage.chain().get_height() {
+                        current_height = h.saturating_add(1);
+                    }
                     let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
 
                     // Publish block validation completed event (failure)
@@ -346,7 +377,28 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
         // (`NetworkManager::process_messages`). Do not call it here: it never returns until
         // the channel closes, which would starve this loop and leave `pending_blocks` undrained.
 
-        tokio::time::sleep(HANDSHAKE_POLL_SLEEP).await;
+        tokio::select! {
+            biased;
+            Ok(()) = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    info!("Shutdown signal received, stopping node gracefully...");
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(HANDSHAKE_POLL_SLEEP) => {}
+        }
+
+        loop_counter = loop_counter.saturating_add(1);
+
+        // Peers advance the tip while we idle; re-check every ~5s and resume parallel IBD when behind.
+        if loop_counter % 50 == 0 {
+            if let Err(e) = node.try_catch_up_ibd(&mut utxo_set).await {
+                warn!("Catch-up sync check failed: {}", e);
+            }
+            if let Ok(Some(h)) = node.storage.chain().get_height() {
+                current_height = h.saturating_add(1);
+            }
+        }
 
         // Check node health periodically
         node.check_health().await?;

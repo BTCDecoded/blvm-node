@@ -146,6 +146,21 @@ fn test_package_fee_rate() {
 }
 
 #[test]
+fn test_transaction_package_weight_includes_witness_bip141() {
+    use blvm_consensus::segwit::{Witness, calculate_transaction_weight};
+
+    let tx = create_minimal_tx();
+    let base_package = TransactionPackage::new(vec![tx.clone()]).unwrap();
+    let witness: Witness = vec![vec![0u8; 64]];
+    let expected = calculate_transaction_weight(&tx, Some(&witness)).expect("weight") as usize;
+    let witness_package =
+        TransactionPackage::new_with_utxo_set_and_witnesses(vec![tx], None, Some(&[Some(witness)]))
+            .unwrap();
+    assert_eq!(witness_package.combined_weight, expected);
+    assert!(witness_package.combined_weight > base_package.combined_weight);
+}
+
+#[test]
 fn test_package_relay_create_package() {
     let relay = PackageRelay::new();
     let tx = create_minimal_tx();

@@ -88,7 +88,7 @@ impl PeerManager {
                         #[cfg(feature = "quinn")]
                         TransportAddr::Quinn(sock) => Some((transport_addr.clone(), *sock)),
                         #[cfg(feature = "iroh")]
-                        TransportAddr::Iroh(_) => None, // Iroh peers don't have SocketAddr for now
+                        TransportAddr::Iroh(_) => None, // Iroh peers have no TCP SocketAddr in the peer table
                     }
                 } else {
                     None

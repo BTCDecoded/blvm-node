@@ -157,7 +157,7 @@ impl NetworkManager {
                     if let Some(storage) = &storage {
                         if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
                             if let Ok(Some(chainwork)) = storage.chain().get_chainwork(&tip_hash) {
-                                chainwork
+                                chainwork.low_u128()
                             } else {
                                 0
                             }

@@ -88,3 +88,16 @@ async fn test_addnode_invalid_address_errors() {
             .is_err()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_getaddednodeinfo_reports_peer_connection_state() {
+    let rpc = rpc_with_network();
+    let result = rpc
+        .getaddednodeinfo(&json!(["127.0.0.1:8333"]))
+        .await
+        .unwrap();
+    let entry = &result.as_array().unwrap()[0];
+    assert_eq!(entry.get("connected").unwrap().as_bool(), Some(false));
+    let addr_entry = &entry.get("addresses").unwrap().as_array().unwrap()[0];
+    assert_eq!(addr_entry.get("connected").unwrap().as_bool(), Some(false));
+}

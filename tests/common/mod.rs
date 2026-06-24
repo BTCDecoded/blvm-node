@@ -479,6 +479,18 @@ pub fn setup_mining_chain_on(
     Ok(())
 }
 
+/// After [`setup_mining_chain`], patch stored chain metadata so mining RPC uses `Network::Regtest`.
+pub fn patch_storage_chain_network_regtest(
+    storage: &blvm_node::storage::Storage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(mut info) = storage.chain().load_chain_info()? else {
+        return Err("chain_info missing after setup_mining_chain".into());
+    };
+    info.chain_params.network = "regtest".to_string();
+    storage.chain().store_chain_info(&info)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECDSA helpers for integration tests (blvm-secp256k1 — no rust-secp256k1 crate).
 // ---------------------------------------------------------------------------

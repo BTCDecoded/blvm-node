@@ -2,6 +2,7 @@
 
 use blvm_node::rpc::control::ControlRpc;
 use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_uptime_and_memory_info() {
@@ -27,9 +28,52 @@ async fn test_getrpcinfo_help_and_logging() {
 async fn test_gethealth_and_getmetrics() {
     let rpc = ControlRpc::new();
     let health = rpc.gethealth(&json!([])).await.unwrap();
-    assert_eq!(health.get("status").unwrap().as_str(), Some("healthy"));
+    assert!(health.get("overall_status").is_some());
+    assert!(health.get("components").is_some());
     let metrics = rpc.getmetrics(&json!([])).await.unwrap();
     assert!(metrics.get("uptime_seconds").unwrap().is_u64());
+}
+
+#[tokio::test]
+async fn test_gethealth_and_getmetrics_with_collector() {
+    use blvm_node::node::metrics::MetricsCollector;
+
+    let metrics = Arc::new(MetricsCollector::new());
+    metrics.update_network(|m| {
+        m.peer_count = 3;
+        m.active_connections = 2;
+    });
+    metrics.update_storage(|m| {
+        m.block_count = 100;
+        m.utxo_count = 50_000;
+        m.within_bounds = true;
+    });
+
+    let rpc = ControlRpc::new().with_monitoring(metrics, None, None);
+    let health = rpc.gethealth(&json!([])).await.unwrap();
+    assert_eq!(
+        health.get("overall_status").unwrap().as_str(),
+        Some("Healthy")
+    );
+    let network = health["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c.get("component").and_then(|v| v.as_str()) == Some("network"))
+        .expect("network component");
+    assert!(
+        network
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .contains("Peers: 3")
+    );
+
+    let metrics_json = rpc.getmetrics(&json!([])).await.unwrap();
+    assert_eq!(
+        metrics_json.get("network").unwrap()["peer_count"].as_u64(),
+        Some(3)
+    );
 }
 
 #[tokio::test]

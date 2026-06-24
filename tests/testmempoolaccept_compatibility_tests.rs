@@ -100,11 +100,33 @@ async fn test_wtxid_non_segwit() {
 /// Test SegWit transaction parsing and wtxid calculation
 #[tokio::test]
 async fn test_segwit_wtxid_calculation() {
+    use blvm_protocol::serialization::serialize_transaction_with_witness;
+    use blvm_protocol::serialization::transaction::serialize_transaction;
+    use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+
     let rawtx = create_test_rawtx_rpc();
 
-    // Minimal well-formed P2WPKH SegWit transaction with dummy witness data.
-    // Structure: version + 0x00 0x01 marker + 1 input (empty scriptSig) + 1 output + witness + locktime.
-    let segwit_tx_hex = "0100000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff01e803000000000000160014000000000000000000000000000000000000000002200000000000000000000000000000000000000000000000000000000000000000210200000000000000000000000000000000000000000000000000000000000000000000000000";
+    let mut spk = vec![0x00, 0x14];
+    spk.extend_from_slice(&[0u8; 20]);
+    let tx = Transaction {
+        version: 2,
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout: OutPoint {
+                hash: [0xab; 32],
+                index: 0,
+            },
+            script_sig: vec![],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 1000,
+            script_pubkey: spk.into(),
+        }],
+        lock_time: 0,
+    };
+    let witnesses = vec![vec![vec![0u8; 72]]];
+    let base_size = serialize_transaction(&tx).len();
+    let segwit_tx_hex = hex::encode(serialize_transaction_with_witness(&tx, &witnesses));
 
     let params = json!([segwit_tx_hex]);
     let result = rawtx.testmempoolaccept(&params).await.unwrap();
@@ -113,14 +135,26 @@ async fn test_segwit_wtxid_calculation() {
     let txid = tx_result.get("txid").unwrap().as_str().unwrap();
     let wtxid = tx_result.get("wtxid").unwrap().as_str().unwrap();
 
-    // For SegWit transactions, wtxid should be different from txid (if witness data exists)
-    // Note: This test may pass even if wtxid == txid if witness is empty, which is valid
-    // The important thing is that wtxid field is present and calculated correctly
     assert!(!wtxid.is_empty(), "wtxid should not be empty");
     assert_eq!(
         wtxid.len(),
         64,
         "wtxid should be 64 hex characters (32 bytes)"
+    );
+    let total_size = serialize_transaction_with_witness(&tx, &witnesses).len();
+    assert_ne!(
+        txid, wtxid,
+        "wtxid should differ from txid when witness is present"
+    );
+
+    let vsize = tx_result.get("vsize").unwrap().as_u64().unwrap();
+    assert!(
+        vsize < total_size as u64,
+        "SegWit vsize ({vsize}) should be below total wire size ({total_size})"
+    );
+    assert!(
+        vsize >= base_size as u64,
+        "vsize ({vsize}) should be at least base size ({base_size})"
     );
 }
 

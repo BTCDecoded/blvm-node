@@ -164,45 +164,10 @@ impl ChainState {
         blvm_protocol::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 
-    /// Calculate work from block bits (compact target format)
-    /// Work = 2^256 / (target + 1) for Bitcoin
-    /// Simplified: work = u128::MAX / (target + 1)
-    fn calculate_work_from_bits(bits: u64) -> u64 {
-        // Expand target from compact format
-        let exponent = (bits >> 24) as u8;
-        let mantissa = bits & 0x00ffffff;
-
-        if mantissa == 0 {
-            return 0;
-        }
-
-        // Calculate target: target = mantissa * 2^(8*(exponent-3))
-        // For simplicity, use a simplified calculation
-        // Prevent overflow by capping the shift amount
-        let target = if exponent <= 3 {
-            let shift = 8 * (3 - exponent);
-            if shift >= 64 {
-                0 // Shift would overflow, return 0
-            } else {
-                mantissa >> shift
-            }
-        } else {
-            let shift = 8 * (exponent - 3);
-            if shift >= 64 {
-                u64::MAX // Shift would overflow, return max value
-            } else {
-                mantissa << shift
-            }
-        };
-
-        // Work = MAX_TARGET / (target + 1)
-        // Use u64::MAX as approximation for MAX_TARGET
-        if target == 0 || target == u64::MAX {
-            return 1; // Minimum work
-        }
-
-        // Prevent division by zero
-        u64::MAX / (target + 1).max(1)
+    /// Per-block work (same formula as `blvm_consensus::pow::get_block_proof`).
+    fn calculate_work_from_bits(bits: u64) -> blvm_consensus::pow::U256 {
+        blvm_consensus::pow::get_block_proof(bits)
+            .unwrap_or_else(|_| blvm_consensus::pow::U256::zero())
     }
 
     /// Update chain tip and calculate incremental chainwork
@@ -253,18 +218,23 @@ impl ChainState {
         Ok(())
     }
 
-    fn chainwork_for_header(&self, header: &BlockHeader, height: u64) -> Result<u128> {
+    fn chainwork_for_header(
+        &self,
+        header: &BlockHeader,
+        height: u64,
+    ) -> Result<blvm_consensus::pow::U256> {
         let block_work = Self::calculate_work_from_bits(header.bits);
         let prev_chainwork = if height > 0 {
             if let Ok(Some(prev_hash)) = self.get_prev_block_hash(header) {
-                self.get_chainwork(&prev_hash)?.unwrap_or(0)
+                self.get_chainwork(&prev_hash)?
+                    .unwrap_or_else(blvm_consensus::pow::U256::zero)
             } else {
-                0
+                blvm_consensus::pow::U256::zero()
             }
         } else {
-            0
+            blvm_consensus::pow::U256::zero()
         };
-        Ok(prev_chainwork + block_work as u128)
+        Ok(prev_chainwork.saturating_add(block_work))
     }
 
     /// Get previous block hash from header
@@ -459,22 +429,41 @@ impl ChainState {
         }
     }
 
-    /// Store work for a block
-    pub fn store_work(&self, hash: &Hash, work: u64) -> Result<()> {
+    fn decode_cached_work(data: &[u8]) -> Option<blvm_consensus::pow::U256> {
+        use blvm_consensus::pow::U256;
+        match data.len() {
+            32 => {
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&data[..32]);
+                Some(U256::from_be_bytes(&bytes))
+            }
+            16 => {
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&data[..16]);
+                Some(U256::from_u128(u128::from_be_bytes(bytes)))
+            }
+            8 => {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(data);
+                Some(U256::from_u128(u64::from_be_bytes(bytes) as u128))
+            }
+            _ => None,
+        }
+    }
+
+    /// Store per-block work for a block hash.
+    pub fn store_work(&self, hash: &Hash, work: blvm_consensus::pow::U256) -> Result<()> {
         let key = hash.as_slice();
         let value = work.to_be_bytes();
         self.work_cache.insert(key, &value)?;
         Ok(())
     }
 
-    /// Get work for a block
-    pub fn get_work(&self, hash: &Hash) -> Result<Option<u64>> {
+    /// Get per-block work for a block hash.
+    pub fn get_work(&self, hash: &Hash) -> Result<Option<blvm_consensus::pow::U256>> {
         let key = hash.as_slice();
         if let Some(data) = self.work_cache.get(key)? {
-            let work = u64::from_be_bytes([
-                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            ]);
-            Ok(Some(work))
+            Ok(Self::decode_cached_work(&data))
         } else {
             Ok(None)
         }
@@ -482,7 +471,7 @@ impl ChainState {
 
     /// Store cumulative chainwork for a block
     /// Chainwork is the sum of work from genesis to this block
-    pub fn store_chainwork(&self, hash: &Hash, chainwork: u128) -> Result<()> {
+    pub fn store_chainwork(&self, hash: &Hash, chainwork: blvm_consensus::pow::U256) -> Result<()> {
         let key = hash.as_slice();
         let value = chainwork.to_be_bytes();
         self.chainwork_cache.insert(key, &value)?;
@@ -491,39 +480,24 @@ impl ChainState {
 
     /// Get cumulative chainwork for a block
     /// Returns the sum of work from genesis to this block (O(1) lookup)
-    pub fn get_chainwork(&self, hash: &Hash) -> Result<Option<u128>> {
+    pub fn get_chainwork(&self, hash: &Hash) -> Result<Option<blvm_consensus::pow::U256>> {
         let key = hash.as_slice();
         if let Some(data) = self.chainwork_cache.get(key)? {
-            // Ensure we have at least 16 bytes for u128
-            if data.len() >= 16 {
-                let mut bytes = [0u8; 16];
-                bytes.copy_from_slice(&data[..16]);
-                Ok(Some(u128::from_be_bytes(bytes)))
-            } else {
-                // Handle shorter data (shouldn't happen, but be defensive)
-                let mut bytes = [0u8; 16];
-                for (i, &byte) in data.iter().enumerate() {
-                    if i < 16 {
-                        bytes[15 - i] = byte; // Pad from right
-                    }
-                }
-                Ok(Some(u128::from_be_bytes(bytes)))
-            }
+            Ok(Self::decode_cached_work(&data))
         } else {
             Ok(None)
         }
     }
 
-    /// Calculate total chain work
+    /// Calculate total chain work (low 64 bits of per-block work entries; test helper only).
     pub fn calculate_total_work(&self) -> Result<u64> {
         let mut total = 0u64;
 
         for result in self.work_cache.iter() {
             let (_, data) = result?;
-            let work = u64::from_be_bytes([
-                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            ]);
-            total += work;
+            if let Some(work) = Self::decode_cached_work(&data) {
+                total = total.saturating_add(work.low_u128() as u64);
+            }
         }
 
         Ok(total)

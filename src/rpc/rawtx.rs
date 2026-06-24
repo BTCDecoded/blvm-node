@@ -223,8 +223,8 @@ impl RawTxRpc {
         })?;
 
         if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
-            use blvm_protocol::serialization::transaction::deserialize_transaction;
-            let tx = deserialize_transaction(&tx_bytes).map_err(|e| {
+            let (tx, tx_witnesses) = Self::deserialize_transaction_with_witness(&tx_bytes)
+                .map_err(|e| {
                 RpcError::invalid_params_with_fields(
                     format!("Failed to parse transaction: {e}"),
                     vec![(
@@ -324,16 +324,18 @@ impl RawTxRpc {
                         }
                     }
 
+                    let has_witness = tx_witnesses.iter().any(|w| !w.is_empty());
+                    let witness_slices = if has_witness {
+                        Some(tx_witnesses.as_slice())
+                    } else {
+                        None
+                    };
+
                     // Calculate transaction fee and fee rate for maxfeerate check
                     let fee_satoshis = mempool.calculate_transaction_fee(&tx, &utxo_set);
 
-                    // Calculate transaction size and vsize
-                    use blvm_protocol::serialization::transaction::serialize_transaction;
-                    let base_size = serialize_transaction(&tx).len() as u64;
-                    // For non-SegWit transactions, weight = 4 * size, vsize = size
-                    // For SegWit, we'd need witness data, but for fee rate check we can use base size
-                    // This is a simplification - in production, we'd need full witness data
-                    let vsize = base_size; // Simplified: assume non-SegWit for now
+                    let (_, _, _, vsize) = Self::calculate_segwit_sizes(&tx, witness_slices);
+                    let vsize = vsize as u64;
 
                     // Calculate fee rate in BTC per kvB
                     let fee_rate_btc_per_kvb = if vsize > 0 {
@@ -365,8 +367,13 @@ impl RawTxRpc {
                         }
                     }
 
-                    // Add to mempool — add_transaction uses &self (interior mutability).
-                    match mempool.add_transaction(tx.clone()) {
+                    // Add to mempool — store witness stacks when present (SegWit).
+                    let witness_arg = if has_witness {
+                        Some(tx_witnesses)
+                    } else {
+                        None
+                    };
+                    match mempool.add_transaction_with_witness(tx.clone(), witness_arg) {
                         Ok(true) => {
                             debug!("Transaction {} accepted to mempool", txid_hex);
                         }
@@ -522,21 +529,14 @@ impl RawTxRpc {
             };
 
             // Calculate transaction size and weight with witness
-            use blvm_protocol::serialization::transaction::serialize_transaction;
-            let base_size = serialize_transaction(tx).len() as u64;
-            // Calculate total witness size (sum of all witness stacks for all inputs)
-            let witness_size: u64 = tx_witnesses
-                .iter()
-                .map(|witness_stack| witness_stack.iter().map(|w| w.len() as u64).sum::<u64>())
-                .sum();
-            let total_size = base_size + witness_size;
-
-            // Calculate weight using BIP141 formula: weight = 4 * base_size + total_size
-            let weight = 4 * base_size + total_size;
-
-            // Calculate vsize using proper BIP141 formula: vsize = ceil(weight / 4)
-            use blvm_protocol::witness::weight_to_vsize;
-            let vsize = weight_to_vsize(weight) as usize;
+            let witness_arg = if tx_witnesses.iter().any(|w| !w.is_empty()) {
+                Some(tx_witnesses.as_slice())
+            } else {
+                None
+            };
+            let (base_size, total_size, weight, vsize) =
+                Self::calculate_segwit_sizes(tx, witness_arg);
+            let _ = (base_size, total_size, weight);
 
             // Calculate fee using mempool manager if available
             let fee_satoshis = if let Some(ref mempool) = self.mempool {
@@ -800,14 +800,20 @@ impl RawTxRpc {
         let tx_bytes = hex::decode(&hex_string)
             .map_err(|e| RpcError::invalid_params(format!("Invalid hex string: {e}")))?;
 
-        use blvm_protocol::serialization::transaction::deserialize_transaction;
-        let tx = deserialize_transaction(&tx_bytes)
-            .map_err(|e| RpcError::invalid_params(format!("Failed to parse transaction: {e}")))?;
+        let (tx, witnesses) = Self::deserialize_transaction_with_witness(&tx_bytes)?;
 
         use blvm_protocol::block::calculate_tx_id;
         let txid = calculate_tx_id(&tx);
         let txid_hex = hex::encode(txid);
-        let size = tx_bytes.len();
+        let wtxid_hex = Self::calculate_wtxid(&tx, &witnesses);
+        let (_, total_size, weight, vsize) =
+            Self::calculate_segwit_sizes(&tx, Some(witnesses.as_slice()));
+        let hash_hex = if witnesses.iter().any(|w| !w.is_empty()) {
+            wtxid_hex.clone()
+        } else {
+            txid_hex.clone()
+        };
+        let tx_hex_out = Self::serialize_transaction_with_witness(&tx, Some(&witnesses));
 
         // Pre-allocate and build vin
         let mut vin = Vec::with_capacity(tx.inputs.len());
@@ -841,15 +847,15 @@ impl RawTxRpc {
 
         Ok(json!({
             "txid": txid_hex.clone(),
-            "hash": txid_hex,
+            "hash": hash_hex,
             "version": tx.version,
-            "size": size,
-            "vsize": size,
-            "weight": size * 4, // Simplified
+            "size": total_size,
+            "vsize": vsize,
+            "weight": weight,
             "locktime": tx.lock_time,
             "vin": vin,
             "vout": vout,
-            "hex": hex_string
+            "hex": tx_hex_out
         }))
     }
 
@@ -961,6 +967,67 @@ impl RawTxRpc {
         (base_size, total_size, weight, vsize)
     }
 
+    fn format_getrawtransaction_response(
+        tx: &blvm_protocol::Transaction,
+        witnesses: Option<&[blvm_protocol::segwit::Witness]>,
+        verbose: bool,
+    ) -> RpcResult<Value> {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let txid_hex = hex::encode(calculate_tx_id(tx));
+        let witness_slices = witnesses.unwrap_or(&[]);
+        let wtxid_hex = if witnesses.is_some() {
+            Self::calculate_wtxid(tx, witness_slices)
+        } else {
+            txid_hex.clone()
+        };
+        let (_, total_size, weight, vsize) = Self::calculate_segwit_sizes(tx, witnesses);
+        let hash_hex = if witnesses
+            .map(|w| w.iter().any(|stack| !stack.is_empty()))
+            .unwrap_or(false)
+        {
+            wtxid_hex
+        } else {
+            txid_hex.clone()
+        };
+        let tx_hex = Self::serialize_transaction_with_witness(tx, witnesses);
+
+        if verbose {
+            Ok(json!({
+                "txid": txid_hex,
+                "hash": hash_hex,
+                "version": tx.version,
+                "size": total_size,
+                "vsize": vsize,
+                "weight": weight,
+                "locktime": tx.lock_time,
+                "vin": tx.inputs.iter().map(|input| json!({
+                    "txid": hex::encode(input.prevout.hash),
+                    "vout": input.prevout.index,
+                    "scriptSig": {
+                        "asm": "",
+                        "hex": hex::encode(&input.script_sig)
+                    },
+                    "sequence": input.sequence
+                })).collect::<Vec<_>>(),
+                "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
+                    "value": output.value as f64 / 100_000_000.0,
+                    "n": i,
+                    "scriptPubKey": {
+                        "asm": "",
+                        "hex": hex::encode(&output.script_pubkey),
+                        "reqSigs": 1,
+                        "type": "pubkeyhash",
+                        "addresses": []
+                    }
+                })).collect::<Vec<_>>(),
+                "hex": tx_hex
+            }))
+        } else {
+            Ok(json!(tx_hex))
+        }
+    }
+
     /// Get raw transaction by txid
     ///
     /// Params: ["txid", verbose (optional, default: false), blockhash (optional)]
@@ -982,78 +1049,20 @@ impl RawTxRpc {
         let mut txid_array = [0u8; 32];
         txid_array.copy_from_slice(&txid_bytes);
 
+        if let Some(ref mempool) = self.mempool {
+            if let Some(tx) = mempool.get_transaction(&txid_array) {
+                let witnesses = mempool.get_transaction_witnesses(&txid_array);
+                return Self::format_getrawtransaction_response(&tx, witnesses.as_deref(), verbose);
+            }
+        }
+
         if let Some(ref storage) = self.storage {
             if let Ok(Some(tx)) = storage.transactions().get_transaction(&txid_array) {
-                use blvm_protocol::block::calculate_tx_id;
-                let calculated_txid = calculate_tx_id(&tx);
-                let txid_hex = hex::encode(calculated_txid);
-
-                // Try to get witness data if available (from raw block data or mempool)
-                // For now, we'll assume no witness data is available from storage
-                // In a full implementation, we'd retrieve witness data from block storage
-                let witnesses: Option<Vec<blvm_protocol::segwit::Witness>> = None;
-
-                // Calculate wtxid
-                let wtxid_hex = if let Some(ref witnesses_vec) = witnesses {
-                    Self::calculate_wtxid(&tx, witnesses_vec)
-                } else {
-                    // No witness data available - assume non-SegWit (wtxid == txid)
-                    txid_hex.clone()
-                };
-
-                // Calculate sizes and weight
-                let (base_size, total_size, weight, vsize) =
-                    Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
-
-                // For SegWit transactions, hash field should be wtxid
-                // For non-SegWit, hash == txid
-                let hash_hex = if witnesses
+                let witnesses = self
+                    .mempool
                     .as_ref()
-                    .map(|w| w.iter().any(|ws| !ws.is_empty()))
-                    .unwrap_or(false)
-                {
-                    wtxid_hex.clone()
-                } else {
-                    txid_hex.clone()
-                };
-
-                // Serialize transaction hex (with witness if available)
-                let tx_hex = Self::serialize_transaction_with_witness(&tx, witnesses.as_deref());
-
-                if verbose {
-                    Ok(json!({
-                        "txid": txid_hex,
-                        "hash": hash_hex,
-                        "version": tx.version,
-                        "size": total_size,
-                        "vsize": vsize,
-                        "weight": weight,
-                        "locktime": tx.lock_time,
-                        "vin": tx.inputs.iter().map(|input| json!({
-                            "txid": hex::encode(input.prevout.hash),
-                            "vout": input.prevout.index,
-                            "scriptSig": {
-                                "asm": "",
-                                "hex": hex::encode(&input.script_sig)
-                            },
-                            "sequence": input.sequence
-                        })).collect::<Vec<_>>(),
-                        "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
-                            "value": output.value as f64 / 100_000_000.0,
-                            "n": i,
-                            "scriptPubKey": {
-                                "asm": "",
-                                "hex": hex::encode(&output.script_pubkey),
-                                "reqSigs": 1,
-                                "type": "pubkeyhash",
-                                "addresses": []
-                            }
-                        })).collect::<Vec<_>>(),
-                        "hex": tx_hex
-                    }))
-                } else {
-                    Ok(json!(tx_hex))
-                }
+                    .and_then(|m| m.get_transaction_witnesses(&txid_array));
+                Self::format_getrawtransaction_response(&tx, witnesses.as_deref(), verbose)
             } else {
                 Err(RpcError::tx_not_found(""))
             }
@@ -1262,81 +1271,6 @@ impl RawTxRpc {
         }
     }
 
-    /// Build merkle proof for transactions in a block
-    fn build_merkle_proof(
-        transactions: &[blvm_protocol::Transaction],
-        tx_indices: &[usize],
-    ) -> Result<Vec<[u8; 32]>, RpcError> {
-        use crate::storage::hashing::double_sha256;
-        use blvm_protocol::block::calculate_tx_id;
-
-        if transactions.is_empty() {
-            return Err(RpcError::internal_error(
-                "Block has no transactions".to_string(),
-            ));
-        }
-
-        // Calculate all transaction hashes
-        let tx_hashes: Vec<[u8; 32]> = transactions.iter().map(calculate_tx_id).collect();
-
-        let mut proof = Vec::new();
-        let mut current_level = tx_hashes.clone();
-        let mut current_indices: Vec<usize> = (0..transactions.len()).collect();
-
-        // Build proof by traversing the merkle tree
-        while current_level.len() > 1 {
-            let mut next_level = Vec::new();
-            let mut next_indices = Vec::new();
-            let mut proof_added = false;
-
-            for chunk in current_level.chunks(2) {
-                if chunk.len() == 2 {
-                    // Hash two hashes together
-                    let mut combined = Vec::with_capacity(64);
-                    combined.extend_from_slice(&chunk[0]);
-                    combined.extend_from_slice(&chunk[1]);
-                    let parent_hash = double_sha256(&combined);
-                    next_level.push(parent_hash);
-
-                    // Check if we need to add sibling to proof
-                    if !proof_added {
-                        for &idx in tx_indices {
-                            let pos = current_indices.iter().position(|&i| i == idx);
-                            if let Some(pos) = pos {
-                                if pos % 2 == 0 && pos + 1 < current_level.len() {
-                                    // Left child - add right sibling
-                                    proof.push(chunk[1]);
-                                } else if pos % 2 == 1 {
-                                    // Right child - add left sibling
-                                    proof.push(chunk[0]);
-                                }
-                                proof_added = true;
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    // Odd number: duplicate the last hash
-                    let mut combined = Vec::with_capacity(64);
-                    combined.extend_from_slice(&chunk[0]);
-                    combined.extend_from_slice(&chunk[0]);
-                    let parent_hash = double_sha256(&combined);
-                    next_level.push(parent_hash);
-                }
-            }
-
-            // Update indices for next level
-            for i in 0..next_level.len() {
-                next_indices.push(i);
-            }
-
-            current_level = next_level;
-            current_indices = next_indices;
-        }
-
-        Ok(proof)
-    }
-
     /// Get merkle proof that a transaction is in a block
     ///
     /// Params: ["txids", blockhash (optional)]
@@ -1347,6 +1281,12 @@ impl RawTxRpc {
             .get(0)
             .and_then(|p| p.as_array())
             .ok_or_else(|| RpcError::invalid_params("Missing txids parameter"))?;
+
+        if txids.is_empty() {
+            return Err(RpcError::invalid_params(
+                "Parameter 'txids' cannot be empty",
+            ));
+        }
 
         let blockhash_opt = param_str(params, 1);
 
@@ -1394,40 +1334,36 @@ impl RawTxRpc {
             }
 
             if let Some(block) = block {
-                // Find transaction indices
+                use crate::rpc::merkle_block::MerkleBlock;
                 use blvm_protocol::block::calculate_tx_id;
-                let mut tx_indices = Vec::new();
-                for (idx, tx) in block.transactions.iter().enumerate() {
-                    let txid = calculate_tx_id(tx);
-                    let txid_hex = hex::encode(txid);
-                    if txids
-                        .iter()
-                        .any(|tid| tid.as_str() == Some(txid_hex.as_str()))
-                    {
-                        tx_indices.push(idx);
+
+                let tx_hashes: Vec<[u8; 32]> =
+                    block.transactions.iter().map(calculate_tx_id).collect();
+
+                let requested: std::collections::HashSet<String> = txids
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
+
+                let mut match_flags = vec![false; tx_hashes.len()];
+                let mut found = 0usize;
+                for (idx, hash) in tx_hashes.iter().enumerate() {
+                    if requested.contains(&hex::encode(hash)) {
+                        match_flags[idx] = true;
+                        found += 1;
                     }
                 }
 
-                if tx_indices.is_empty() {
+                if found != requested.len() {
                     return Err(RpcError::invalid_params(
-                        "None of the specified transactions found in block",
+                        "Not all transactions found in specified or retrieved block",
                     ));
                 }
 
-                // Build merkle proof
-                let proof_hashes = Self::build_merkle_proof(&block.transactions, &tx_indices)
-                    .map_err(|e| {
-                        RpcError::internal_error(format!("Failed to build merkle proof: {e}"))
-                    })?;
+                let merkle_block = MerkleBlock::new(block.header.clone(), &tx_hashes, &match_flags)
+                    .map_err(|e| RpcError::internal_error(format!("Failed to build proof: {e}")))?;
 
-                // Serialize proof (simplified format)
-                let mut proof_bytes = Vec::new();
-                proof_bytes.push(proof_hashes.len() as u8);
-                for hash in &proof_hashes {
-                    proof_bytes.extend_from_slice(hash);
-                }
-
-                Ok(json!(hex::encode(proof_bytes)))
+                Ok(json!(hex::encode(merkle_block.serialize())))
             } else {
                 Err(RpcError::block_not_found(""))
             }
@@ -1438,9 +1374,9 @@ impl RawTxRpc {
         }
     }
 
-    /// Verify a merkle proof
+    /// Verify a merkle proof (Core-compatible: returns matched txid hex strings).
     ///
-    /// Params: ["proof", blockhash"]
+    /// Params: ["proof", blockhash (optional)]
     pub async fn verifytxoutproof(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: verifytxoutproof");
 
@@ -1449,13 +1385,9 @@ impl RawTxRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| RpcError::invalid_params("Missing proof parameter"))?;
 
-        let blockhash = params
-            .get(1)
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| RpcError::invalid_params("Missing blockhash parameter"))?;
+        let blockhash_opt = param_str(params, 1);
 
         if let Some(ref storage) = self.storage {
-            // Decode proof
             let proof_bytes = hex::decode(proof_hex)
                 .map_err(|e| RpcError::invalid_params(format!("Invalid proof hex: {e}")))?;
 
@@ -1463,56 +1395,52 @@ impl RawTxRpc {
                 return Err(RpcError::invalid_params("Empty proof"));
             }
 
-            let num_hashes = proof_bytes[0] as usize;
-            if proof_bytes.len() < 1 + num_hashes * 32 {
-                return Err(RpcError::invalid_params("Invalid proof length"));
+            use crate::rpc::merkle_block::{MerkleBlock, block_hash_from_header};
+
+            let merkle_block = MerkleBlock::deserialize(&proof_bytes).map_err(|e| {
+                RpcError::invalid_params(format!("Invalid merkle block proof: {e}"))
+            })?;
+
+            let mut pmt = merkle_block.txn;
+            let (extracted_root, matched) = pmt.extract_matches();
+            if extracted_root != merkle_block.header.merkle_root {
+                return Ok(json!([]));
             }
 
-            let mut proof_hashes = Vec::new();
-            for i in 0..num_hashes {
-                let start = 1 + i * 32;
-                let end = start + 32;
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&proof_bytes[start..end]);
-                proof_hashes.push(hash);
+            let header_hash = block_hash_from_header(&merkle_block.header);
+            if let Some(blockhash_str) = blockhash_opt {
+                let blockhash_bytes = hex::decode(blockhash_str)
+                    .map_err(|e| RpcError::invalid_params(format!("Invalid blockhash: {e}")))?;
+                if blockhash_bytes.len() != 32 {
+                    return Err(RpcError::invalid_params("Invalid blockhash length"));
+                }
+                let mut expected = [0u8; 32];
+                expected.copy_from_slice(&blockhash_bytes);
+                if expected != header_hash {
+                    return Ok(json!([]));
+                }
             }
 
-            // Get block
-            let blockhash_bytes = hex::decode(blockhash)
-                .map_err(|e| RpcError::invalid_params(format!("Invalid blockhash: {e}")))?;
-            if blockhash_bytes.len() != 32 {
-                return Err(RpcError::invalid_params("Invalid blockhash length"));
+            let block_in_chain = storage
+                .blocks()
+                .get_header(&header_hash)
+                .ok()
+                .flatten()
+                .is_some();
+            if !block_in_chain {
+                return Err(RpcError::block_not_found("Block not found in chain"));
             }
-            let mut blockhash_array = [0u8; 32];
-            blockhash_array.copy_from_slice(&blockhash_bytes);
 
-            if let Ok(Some(block)) = storage.blocks().get_block(&blockhash_array) {
-                // Calculate merkle root from block
-                use blvm_protocol::mining::calculate_merkle_root;
-                let calculated_root = calculate_merkle_root(&block.transactions).map_err(|e| {
-                    RpcError::internal_error(format!("Failed to calculate merkle root: {e}"))
-                })?;
-
-                // Verify proof by reconstructing root (simplified - would need txids from proof)
-                // For now, just verify the block's merkle root matches the header
-                let matches = calculated_root == block.header.merkle_root;
-
-                // Extract transaction IDs from proof (simplified - full implementation would decode txids)
-                use blvm_protocol::block::calculate_tx_id;
-                let txids: Vec<String> = block
-                    .transactions
-                    .iter()
-                    .map(|tx| hex::encode(calculate_tx_id(tx)))
-                    .collect();
-
-                Ok(json!(json!({
-                    "txids": txids,
-                    "merkle_root": hex::encode(calculated_root),
-                    "matches": matches
-                })))
+            if let Ok(Some(block)) = storage.blocks().get_block(&header_hash) {
+                if block.transactions.len() as u32 != pmt.n_transactions() {
+                    return Ok(json!([]));
+                }
             } else {
-                Err(RpcError::block_not_found(""))
+                return Ok(json!([]));
             }
+
+            let txids: Vec<String> = matched.into_iter().map(hex::encode).collect();
+            Ok(json!(txids))
         } else {
             Err(RpcError::invalid_params(
                 "RPC not initialized with dependencies",

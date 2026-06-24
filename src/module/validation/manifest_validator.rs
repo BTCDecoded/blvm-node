@@ -214,13 +214,17 @@ impl Default for ManifestValidator {
     }
 }
 
-/// Stub: signature verification is not implemented; always succeeds.
-///
-/// Production builds should verify a detached signature over the module binary using keys from the manifest/registry before trusting load paths.
+/// Validate module signatures when declared; unsigned manifests skip verification.
 pub fn validate_module_signature(
-    _manifest: &ModuleManifest,
-    _binary_path: &std::path::Path,
+    manifest: &ModuleManifest,
+    binary_path: &std::path::Path,
 ) -> Result<(), ModuleError> {
-    debug!("Module signature validation skipped (not implemented)");
-    Ok(())
+    if !manifest.has_signatures() {
+        debug!(
+            "Module {} has no signatures; skipping signature validation",
+            manifest.name
+        );
+        return Ok(());
+    }
+    super::signature_verifier::verify_module_signatures(manifest, binary_path)
 }

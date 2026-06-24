@@ -370,26 +370,10 @@ impl PaymentStateMachine {
                 }
             };
 
-            // Update state to ProofBroadcast
-            {
-                let mut states = self.states.lock().unwrap();
-                states.insert(
-                    payment_request_id.to_string(),
-                    PaymentState::ProofBroadcast {
-                        request_id: payment_request_id.to_string(),
-                        covenant_proof: covenant_proof.clone(),
-                        broadcast_peers: peers.clone(),
-                    },
-                );
-            }
+            // Update state to ProofBroadcast only after wire send is queued.
+            let mut broadcast_peers = Vec::new();
 
-            info!(
-                "Payment proof broadcast to {} peers for payment: {}",
-                peers.len(),
-                payment_request_id
-            );
-
-            // Actually broadcast via NetworkManager if sender is available
+            // Broadcast via NetworkManager when sender is available.
             let sender_slot = self
                 .network_sender
                 .lock()
@@ -411,31 +395,33 @@ impl PaymentStateMachine {
                 // Serialize message
                 match ProtocolParser::serialize_message(&protocol_msg) {
                     Ok(serialized) => {
-                        // Send to each peer via network message channel
-                        let mut sent_count = 0;
                         for peer_addr in &peers {
-                            // Send payment proof to peer
-                            // Since we don't have direct access to NetworkManager.send_to_peer(),
-                            // we'll use the network message channel to send the serialized message
-                            // The NetworkManager will need to handle routing it to the peer
-                            // For now, we log that it's ready and count it
-                            // The actual sending should be done by NetworkManager when it processes
-                            // the message or by the caller who has NetworkManager access
-                            debug!(
-                                "Payment proof ready to send to {} (payment_id: {}, serialized: {} bytes)",
-                                peer_addr,
-                                payment_request_id,
-                                serialized.len()
-                            );
-                            // Note: Actual sending requires NetworkManager.send_to_peer() which we don't have access to
-                            // The state is updated and the message is serialized, ready for the caller to send
-                            sent_count += 1;
+                            match sender.send(NetworkMessage::SendPaymentProof(
+                                serialized.clone(),
+                                *peer_addr,
+                            )) {
+                                Ok(()) => {
+                                    debug!(
+                                        "Queued payment proof for {} (payment_id: {}, {} bytes)",
+                                        peer_addr,
+                                        payment_request_id,
+                                        serialized.len()
+                                    );
+                                    broadcast_peers.push(*peer_addr);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to queue payment proof for {} (payment_id: {}): {}",
+                                        peer_addr, payment_request_id, e
+                                    );
+                                }
+                            }
                         }
 
-                        if sent_count > 0 {
+                        if !broadcast_peers.is_empty() {
                             info!(
-                                "Payment proof sent to {} of {} peers for payment: {}",
-                                sent_count,
+                                "Payment proof queued for {} of {} peers (payment_id: {})",
+                                broadcast_peers.len(),
                                 peers.len(),
                                 payment_request_id
                             );
@@ -455,7 +441,19 @@ impl PaymentStateMachine {
                 );
             }
 
-            Ok(peers.len())
+            if !broadcast_peers.is_empty() {
+                let mut states = self.states.lock().unwrap();
+                states.insert(
+                    payment_request_id.to_string(),
+                    PaymentState::ProofBroadcast {
+                        request_id: payment_request_id.to_string(),
+                        covenant_proof,
+                        broadcast_peers: broadcast_peers.clone(),
+                    },
+                );
+            }
+
+            Ok(broadcast_peers.len())
         }
     }
 

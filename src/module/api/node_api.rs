@@ -26,7 +26,21 @@ use crate::network::{NetworkManager, transport::TransportAddr};
 use crate::node::mempool::MempoolManager;
 use crate::storage::Storage;
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use blvm_protocol::types::Network as ConsensusNetwork;
 use hex;
+
+fn consensus_network_from_storage(storage: &Storage) -> ConsensusNetwork {
+    let Ok(Some(info)) = storage.chain().load_chain_info() else {
+        return ConsensusNetwork::Mainnet;
+    };
+    match info.chain_params.network.as_str() {
+        "mainnet" => ConsensusNetwork::Mainnet,
+        "testnet" => ConsensusNetwork::Testnet,
+        "regtest" => ConsensusNetwork::Regtest,
+        "signet" => ConsensusNetwork::Signet,
+        _ => ConsensusNetwork::Mainnet,
+    }
+}
 
 /// Node API implementation for modules
 pub struct NodeApiImpl {
@@ -674,7 +688,8 @@ impl NodeAPI for NodeApiImpl {
                     .get_chainwork(&tip_clone)
                     .ok()
                     .flatten()
-                    .unwrap_or(0) as u64;
+                    .map(|w| w.low_u128() as u64)
+                    .unwrap_or(0);
 
                 (difficulty, chain_work, true) // Sync status will be checked below
             }
@@ -849,51 +864,11 @@ impl NodeAPI for NodeApiImpl {
         // Uses a simple approach: calculate fee rate histogram from mempool
         // and return the fee rate needed for target_blocks confirmation
 
-        let transactions = mempool.get_transactions();
-        if transactions.is_empty() {
-            // No transactions in mempool, return minimum fee
-            return Ok(1);
-        }
-
-        // Calculate fee rates for all transactions
-        let fee_rates = tokio::task::spawn_blocking({
-            let storage = Arc::clone(&self.storage);
-            let transactions_clone = transactions.clone();
-            move || {
-                let mut fee_rates = Vec::new();
-                for tx in transactions_clone {
-                    // Skip coinbase
-                    if tx.inputs.is_empty() {
-                        continue;
-                    }
-
-                    // Calculate fee
-                    let mut input_total = 0u64;
-                    for input in &tx.inputs {
-                        if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
-                            input_total = input_total.saturating_add(utxo.value as u64);
-                        }
-                    }
-                    let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-                    let fee = input_total.saturating_sub(output_total);
-
-                    // Estimate transaction size (simplified)
-                    let mut size = 8; // version + locktime
-                    for input in &tx.inputs {
-                        size += 36 + input.script_sig.len() + 4; // prevout + script + sequence
-                    }
-                    for output in &tx.outputs {
-                        size += 8 + output.script_pubkey.len(); // value + script
-                    }
-
-                    // Calculate fee rate (sat/vbyte)
-                    if size > 0 {
-                        let fee_rate = fee / size as u64;
-                        fee_rates.push(fee_rate);
-                    }
-                }
-                fee_rates
-            }
+        let mempool = Arc::clone(mempool);
+        let storage = Arc::clone(&self.storage);
+        let fee_rates = tokio::task::spawn_blocking(move || {
+            let utxo_set = storage.utxos().load_utxo_set().unwrap_or_default();
+            mempool.fee_rates_sat_vb(&utxo_set)
         })
         .await
         .map_err(|e| ModuleError::op_err("Task join error", e))?;
@@ -909,8 +884,7 @@ impl NodeAPI for NodeApiImpl {
         let median_idx = fee_rates.len() / 2;
         let median_fee_rate = fee_rates[median_idx];
 
-        // Adjust for target blocks (more blocks = lower fee needed)
-        // This is a simplified model - real fee estimation uses more sophisticated algorithms
+        // Median fee rate scaled by target confirmation window.
         let adjusted_fee_rate = if target_blocks > 6 {
             median_fee_rate / 2 // Lower fee for longer confirmation time
         } else if target_blocks > 1 {
@@ -1961,6 +1935,17 @@ impl NodeAPI for NodeApiImpl {
             .unwrap_or_default();
 
         // Use formally verified consensus function (same as RPC getblocktemplate)
+        let network = consensus_network_from_storage(&self.storage);
+        let mempool_witnesses: Vec<Option<Vec<blvm_protocol::segwit::Witness>>> = {
+            use blvm_protocol::block::calculate_tx_id;
+            mempool_txs
+                .iter()
+                .map(|tx| {
+                    let txid = calculate_tx_id(tx);
+                    mempool_manager.get_transaction_witnesses(&txid)
+                })
+                .collect()
+        };
         let template = blvm_protocol::mining::create_block_template(
             &utxo_set,
             &mempool_txs,
@@ -1969,6 +1954,8 @@ impl NodeAPI for NodeApiImpl {
             &prev_headers,
             &coinbase_script_bytes,
             &coinbase_address_bytes,
+            network,
+            Some(&mempool_witnesses),
         )
         .map_err(|e| ModuleError::op_err("Template creation failed", e))?;
 

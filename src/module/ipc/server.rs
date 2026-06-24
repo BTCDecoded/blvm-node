@@ -710,8 +710,7 @@ impl ModuleIpcServer {
         // Get base data directory - extract from module_id or use default
         // Module ID format: {module_name}_{uuid}
         // We'll derive the base directory from the module name
-        // The actual base directory should be passed from ModuleManager, but for now
-        // we'll use a reasonable default based on common patterns
+        // Default module data root when ModuleManager does not supply one.
         let base_data_dir = std::path::PathBuf::from("data/modules");
         let module_data_dir = base_data_dir.join(&module_name);
 

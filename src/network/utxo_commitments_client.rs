@@ -57,6 +57,77 @@ async fn collect_utxo_peer_tcp_ids(nm: Arc<RwLock<NetworkManager>>) -> Vec<Strin
     peer_addrs
 }
 
+/// Parse `tcp:…` / `iroh:…` / bare `SocketAddr` peer IDs for UTXO commitment requests.
+#[cfg(feature = "utxo-commitments")]
+pub(crate) fn parse_utxo_commitment_peer_id(
+    peer_id: &str,
+) -> UtxoCommitmentResult<(
+    std::net::SocketAddr,
+    Option<crate::network::transport::TransportAddr>,
+)> {
+    use crate::network::transport::TransportAddr;
+
+    if peer_id.starts_with("tcp:") {
+        return peer_id
+            .strip_prefix("tcp:")
+            .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+            .map(|addr| (addr, None))
+            .ok_or_else(|| {
+                blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    format!("Invalid TCP peer address: {peer_id}"),
+                )
+            });
+    }
+
+    if peer_id.starts_with("iroh:") {
+        #[cfg(feature = "iroh")]
+        {
+            let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
+                blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    format!("Invalid Iroh peer_id format: {peer_id}"),
+                )
+            })?;
+            let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
+                blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    format!("Invalid Iroh node ID hex: {e}"),
+                )
+            })?;
+            if node_id_bytes.len() != 32 {
+                return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                    format!(
+                        "Invalid Iroh node ID length: expected 32 bytes, got {}",
+                        node_id_bytes.len()
+                    ),
+                ));
+            }
+            let ip_bytes = [
+                node_id_bytes[0],
+                node_id_bytes[1],
+                node_id_bytes[2],
+                node_id_bytes[3],
+            ];
+            let port = u16::from_be_bytes([node_id_bytes[30], node_id_bytes[31]]);
+            let placeholder_addr = std::net::SocketAddr::from((ip_bytes, port));
+            return Ok((placeholder_addr, Some(TransportAddr::Iroh(node_id_bytes))));
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                "Iroh feature not enabled".to_string(),
+            ));
+        }
+    }
+
+    peer_id
+        .parse::<std::net::SocketAddr>()
+        .map(|addr| (addr, None))
+        .map_err(|_| {
+            blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
+                format!("Invalid peer address format: {peer_id}"),
+            )
+        })
+}
+
 #[cfg(feature = "utxo-commitments")]
 impl UtxoCommitmentsClient {
     /// Create a new UTXO commitments client
@@ -550,31 +621,20 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             use crate::network::protocol::{
                 GetDataMessage, InventoryVector, ProtocolMessage, ProtocolParser,
             };
-            use blvm_protocol::utxo_commitments::data_structures::UtxoCommitment;
             use blvm_protocol::utxo_commitments::network_integration::FullBlock;
 
-            // Parse peer address
-            let peer_addr = if peer_id.starts_with("tcp:") {
-                peer_id
-                    .strip_prefix("tcp:")
-                    .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
-                    .ok_or_else(|| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Invalid TCP peer address: {peer_id}")
-                    ))?
-            } else if peer_id.starts_with("iroh:") {
-                // For Iroh, we'd need to resolve the pubkey to an address
-                // For now, return error - Iroh support can be added later
-                return Err(blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                    "Iroh peer addresses not yet supported for full block requests".to_string()
-                ));
-            } else {
-                // Try parsing as direct SocketAddr
-                peer_id
-                    .parse::<std::net::SocketAddr>()
-                    .map_err(|_| blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                        format!("Invalid peer address format: {peer_id}")
-                    ))?
-            };
+            let (peer_addr, transport_addr_opt) = parse_utxo_commitment_peer_id(&peer_id)?;
+
+            if let Some(transport_addr) = transport_addr_opt {
+                let socket_to_transport = {
+                    let network = network_manager.read().await;
+                    Arc::clone(network.socket_to_transport())
+                };
+                socket_to_transport
+                    .lock()
+                    .await
+                    .insert(peer_addr, transport_addr);
+            }
 
             // Register block request before sending GetData
             let block_rx = {
@@ -816,5 +876,27 @@ impl UtxoCommitmentsClient {
                 }
             }
         })
+    }
+}
+
+#[cfg(all(test, feature = "utxo-commitments"))]
+mod parse_tests {
+    use super::parse_utxo_commitment_peer_id;
+
+    #[test]
+    fn iroh_peer_id_parses_for_full_block_requests() {
+        let hex_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let peer_id = format!("iroh:{hex_key}");
+        #[cfg(feature = "iroh")]
+        {
+            let (addr, transport) =
+                parse_utxo_commitment_peer_id(&peer_id).expect("iroh peer should parse");
+            assert!(transport.is_some());
+            assert_eq!(addr.port(), u16::from_be_bytes([0xcd, 0xef]));
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            assert!(parse_utxo_commitment_peer_id(&peer_id).is_err());
+        }
     }
 }

@@ -21,8 +21,7 @@ fn block_hash(block: &Block) -> [u8; 32] {
     double_sha256(&header_data)
 }
 
-/// Prefer **Redb** for tests: `Storage::new()` uses the default backend (often RocksDB), whose
-/// background compaction threads have caused SIGSEGV under `cargo test` when the DB is short‑lived.
+/// Unique temp dir per call; `Storage::new` initializes all backend tables.
 fn create_test_storage() -> Arc<Storage> {
     let temp_dir = std::env::temp_dir().join(format!(
         "blvm_pe_test_{}_{}",
@@ -33,16 +32,7 @@ fn create_test_storage() -> Arc<Storage> {
             .as_nanos()
     ));
     std::fs::create_dir_all(&temp_dir).unwrap();
-    #[cfg(feature = "redb")]
-    {
-        let storage = Storage::with_backend(&temp_dir, DatabaseBackend::Redb).unwrap();
-        return Arc::new(storage);
-    }
-    #[cfg(not(feature = "redb"))]
-    {
-        let storage = Storage::new(&temp_dir).unwrap();
-        Arc::new(storage)
-    }
+    Arc::new(Storage::new(&temp_dir).unwrap())
 }
 
 #[tokio::test]
@@ -171,6 +161,7 @@ async fn test_handle_get_filtered_block_with_preferences() {
 
     let block_hash_val = block_hash(&block);
     storage.blocks().store_block(&block).unwrap();
+    storage.blocks().store_height(0, &block_hash_val).unwrap();
 
     let message = GetFilteredBlockMessage {
         request_id: 12345,
@@ -217,6 +208,7 @@ async fn test_handle_get_filtered_block_with_bip158() {
 
     let block_hash_val = block_hash(&block);
     storage.blocks().store_block(&block).unwrap();
+    storage.blocks().store_height(0, &block_hash_val).unwrap();
 
     let message = GetFilteredBlockMessage {
         request_id: 12345,
@@ -237,4 +229,67 @@ async fn test_handle_get_filtered_block_with_bip158() {
     let response = result.unwrap();
     // BIP158 filter may or may not be present depending on filter_service availability
     assert_eq!(response.request_id, 12345);
+}
+
+#[tokio::test]
+async fn test_handle_get_filtered_block_uses_block_height_not_tip() {
+    let storage = create_test_storage();
+
+    let block = Block {
+        header: BlockHeader {
+            version: 1,
+            prev_block_hash: [0; 32],
+            merkle_root: [0; 32],
+            timestamp: 1231006505,
+            bits: 0x1d00ffff,
+            nonce: 0,
+        },
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: vec![].into(),
+            outputs: vec![].into(),
+            lock_time: 0,
+        }]
+        .into_boxed_slice(),
+    };
+
+    let block_hash_val = block_hash(&block);
+    storage.blocks().store_block(&block).unwrap();
+    storage.blocks().store_height(5, &block_hash_val).unwrap();
+
+    // Tip at a different height than the requested block.
+    let tip_header = BlockHeader {
+        version: 1,
+        prev_block_hash: block_hash_val,
+        merkle_root: [1; 32],
+        timestamp: 1231006600,
+        bits: 0x1d00ffff,
+        nonce: 1,
+    };
+    let tip_hash = block_hash(&Block {
+        header: tip_header.clone(),
+        transactions: vec![].into_boxed_slice(),
+    });
+    storage
+        .chain()
+        .update_tip(&tip_hash, &tip_header, 100)
+        .unwrap();
+
+    let message = GetFilteredBlockMessage {
+        request_id: 99,
+        block_hash: block_hash_val,
+        filter_preferences: FilterPreferences {
+            filter_ordinals: false,
+            filter_dust: false,
+            filter_brc20: false,
+            min_output_value: 0,
+        },
+        include_bip158_filter: false,
+    };
+
+    let response = handle_get_filtered_block(message, Some(storage), None)
+        .await
+        .unwrap();
+    assert_eq!(response.commitment.block_height, 5);
+    assert_ne!(response.commitment.block_height, 100);
 }

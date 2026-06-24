@@ -67,4 +67,47 @@ mod tests {
         let result = transport.connect(invalid_addr).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_iroh_connection_multi_stream_roundtrip() {
+        use blvm_node::network::transport::{Transport, TransportConnection, TransportListener};
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let server_transport = IrohTransport::new().await.unwrap();
+        let client_transport = IrohTransport::new().await.unwrap();
+        let server_id = server_transport.node_id();
+        let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut listener = server_transport.listen(listen_addr).await.unwrap();
+
+        let client_addr = TransportAddr::Iroh(server_id.as_bytes().to_vec());
+        let server_handle = tokio::spawn(async move {
+            let (mut server_conn, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            for _ in 0..3 {
+                received.push(server_conn.recv().await.unwrap());
+            }
+            received
+        });
+
+        let mut client_conn = timeout(
+            Duration::from_secs(10),
+            client_transport.connect(client_addr),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        for i in 0..3u8 {
+            let payload = vec![i; 32];
+            client_conn.send(&payload).await.unwrap();
+        }
+
+        let received = timeout(Duration::from_secs(10), server_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.len(), 3);
+        assert_eq!(received[0], vec![0u8; 32]);
+        assert_eq!(received[2], vec![2u8; 32]);
+    }
 }

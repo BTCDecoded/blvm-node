@@ -138,15 +138,17 @@ impl ChunkAssigner {
             chunk_peers.len(),
             "chunks and chunk_peers must match"
         );
-        // Resuming IBD (start_height > 0): no bootstrap serialization, all chunks assignable immediately
-        let bootstrap_complete = start_height > 0;
+        // Always serialize the first chunk (contains `start_height`) before assigning later chunks.
+        // Previously `start_height > 0` skipped this on resume, so parallel workers could download
+        // 954614+ while validation still waited on 954486 — bridge/feeder stall forever.
+        let bootstrap_complete = AtomicBool::new(false);
         Self {
             chunks,
             chunk_peers,
             next_index: AtomicUsize::new(0),
             retry_queue: Mutex::new(VecDeque::new()),
             validation_height,
-            bootstrap_complete: AtomicBool::new(bootstrap_complete),
+            bootstrap_complete,
             start_height,
             in_flight_per_peer: Mutex::new(HashMap::new()),
             work_stealing,
@@ -170,7 +172,7 @@ impl ChunkAssigner {
     }
 
     /// Returns true if the peer is currently blacklisted.
-    fn is_blacklisted(&self, peer_id: &str) -> bool {
+    pub(crate) fn is_peer_blacklisted(&self, peer_id: &str) -> bool {
         let mut bl = self.blacklisted_until.lock().unwrap();
         if let Some(until) = bl.get(peer_id) {
             if Instant::now() < *until {
@@ -201,7 +203,7 @@ impl ChunkAssigner {
         let allow_chunk = |start: u64| bootstrap_done || start == self.start_height;
 
         // Blacklisted peers get no work until their cooldown expires.
-        if self.is_blacklisted(peer_id) {
+        if self.is_peer_blacklisted(peer_id) {
             return None;
         }
 

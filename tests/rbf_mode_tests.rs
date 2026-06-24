@@ -8,18 +8,27 @@
 
 use blvm_node::config::{RbfConfig, RbfMode};
 use blvm_node::node::mempool::MempoolManager;
+use blvm_protocol::block::calculate_tx_id;
 use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
 use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 /// Create a test transaction with RBF signaling
 fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
+    create_rbf_tx_spending(
+        OutPoint {
+            hash: [1; 32],
+            index: 0,
+        },
+        output_value,
+    )
+}
+
+fn create_rbf_tx_spending(prevout: OutPoint, output_value: u64) -> Transaction {
     Transaction {
         version: 1,
         inputs: blvm_protocol::tx_inputs![TransactionInput {
-            prevout: OutPoint {
-                hash: [1; 32],
-                index: 0,
-            },
+            prevout,
             script_sig: vec![],
             sequence: 0xfffffffe, // RBF enabled
         }],
@@ -206,4 +215,51 @@ fn test_rbf_config_with_mode() {
     assert_eq!(standard.mode, RbfMode::Standard);
     assert_eq!(standard.min_fee_rate_multiplier, 1.1);
     assert_eq!(standard.min_fee_bump_satoshis, 1000);
+}
+
+#[test]
+fn test_rbf_package_replacement_uses_descendant_fees() {
+    let mempool = MempoolManager::new();
+    let rbf_config = RbfConfig::with_mode(RbfMode::Aggressive);
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set.clone())));
+
+    // Parent: 15k fee; child: 5k fee (package total 20k).
+    let parent = create_rbf_tx(100_000, 85_000);
+    let parent_hash = calculate_tx_id(&parent);
+    assert!(mempool.add_transaction(parent.clone()).unwrap());
+
+    let child = create_rbf_tx_spending(
+        OutPoint {
+            hash: parent_hash,
+            index: 0,
+        },
+        80_000,
+    );
+    let child_hash = calculate_tx_id(&child);
+    assert!(mempool.add_transaction(child).unwrap());
+    assert_eq!(mempool.size(), 2);
+
+    // 20_200 sat fee beats parent alone (15k) but not parent+child package (20k + 500 min bump).
+    let replacement = create_rbf_tx(100_000, 79_800);
+    let result = mempool.check_rbf_replacement(&replacement, &parent, &utxo_set, None);
+    assert!(result.is_ok());
+    assert!(
+        !result.unwrap(),
+        "package replacement should require fees covering displaced descendants"
+    );
+
+    // 21k fee covers the 20k package with aggressive min bump.
+    let sufficient = create_rbf_tx(100_000, 79_000);
+    let result2 = mempool.check_rbf_replacement(&sufficient, &parent, &utxo_set, None);
+    assert!(result2.is_ok());
+    assert!(result2.unwrap());
+
+    // Displacement removes parent and child when replacement is accepted.
+    assert!(mempool.add_transaction(sufficient).unwrap());
+    assert_eq!(mempool.size(), 1);
+    assert!(mempool.get_transaction(&parent_hash).is_none());
+    assert!(mempool.get_transaction(&child_hash).is_none());
 }

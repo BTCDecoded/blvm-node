@@ -149,10 +149,11 @@ impl Node {
             .with_protocol_engine(Arc::clone(&protocol_arc));
         // Note: EventPublisher will be set later in start_components() after it's created
         let sync_coordinator = sync::SyncCoordinator::default();
-        let mining_coordinator = miner::MiningCoordinator::new(
+        let mut mining_coordinator = miner::MiningCoordinator::new(
             Arc::clone(&mempool_manager_arc),
             Some(Arc::clone(&storage_arc)),
         );
+        mining_coordinator.set_protocol_engine(Arc::clone(&protocol_arc));
         let metrics = metrics_arc;
         let profiler = profiler_arc;
 
@@ -444,9 +445,7 @@ impl Node {
             }
         }
 
-        // Simplified component startup
-        // In a real implementation, each component would be started in separate tasks
-        // For now, we'll just initialize them
+        // Sequential startup in this task: wire RPC auth/events/modules, then start RPC and subsystems.
 
         // Create early event publisher for RPC (BlockchainRpc needs it for invalidateblock → BlockDisconnected)
         // Must be done before rpc.start() so BlockchainRpc gets event_publisher
@@ -532,6 +531,10 @@ impl Node {
         info!("Sync coordinator initialized");
         info!("Mempool manager initialized");
         info!("Mining coordinator initialized");
+
+        if let Err(e) = self.network.sync_utxo_from_storage().await {
+            warn!("Failed to load UTXO snapshot for mempool checks: {}", e);
+        }
 
         // Start network manager
         info!(
@@ -777,111 +780,7 @@ impl Node {
         //
         // Fresh DB: get_height() returns None → start from genesis (synced_tip=0, first_block=0).
         // Existing DB: get_height() returns Some(H) → effective_tip = min(H, watermark).
-        let (synced_tip, ibd_first_block_height) = match self.storage.chain().get_height() {
-            Ok(None) => (0u64, 0u64), // fresh DB — start from genesis
-            Ok(Some(chain_tip)) => {
-                let watermark_val = match self.storage.chain().get_utxo_watermark() {
-                    Ok(Some(w)) => w,
-                    Ok(None) => 0,
-                    Err(e) => {
-                        warn!(
-                            "[START_COMPONENTS] get_utxo_watermark failed ({}); assuming 0",
-                            e
-                        );
-                        0
-                    }
-                };
-                #[cfg(feature = "production")]
-                let watermark_val =
-                    match crate::storage::ibd_autorepair::reconcile_ibd_utxo_watermark_with_disk(
-                        self.storage.as_ref(),
-                        watermark_val,
-                    ) {
-                        Ok(w) => w,
-                        Err(e) => {
-                            warn!(
-                                "[START_COMPONENTS] reconcile_ibd_utxo_watermark_with_disk failed ({}); using disk watermark as read",
-                                e
-                            );
-                            watermark_val
-                        }
-                    };
-
-                #[cfg(feature = "production")]
-                if watermark_val > 0
-                    && std::env::var("BLVM_VERIFY_IBD_UTXO_MUHASH")
-                        .map(|v| v == "1")
-                        .unwrap_or(false)
-                {
-                    crate::storage::ibd_utxo_muhash::verify_ibd_utxo_muhash_startup(
-                        self.storage.as_ref(),
-                    )?;
-                }
-
-                // Engine checkpoint exports write a full UTXO snapshot to ibd_utxos at export
-                // height. Incremental legacy retire flushes may advance watermark further without
-                // a matching export — resume must not start past the last export or engine seed
-                // will miss UTXOs (see seed_from_ibd_utxos).
-                let engine_enabled = std::env::var("BLVM_IBD_ENGINE")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                let export_height = if engine_enabled {
-                    std::env::var("BLVM_IBD_EXPORT_HEIGHT_OVERRIDE")
-                        .ok()
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .or_else(|| {
-                            self.storage
-                                .chain()
-                                .get_engine_export_height()
-                                .ok()
-                                .flatten()
-                        })
-                } else {
-                    None
-                };
-                let durable_watermark = match export_height {
-                    Some(eh) if eh > 0 => {
-                        if watermark_val > eh {
-                            warn!(
-                                "[START_COMPONENTS] ibd_utxo_watermark ({}) > last engine export \
-                                 ({}) — clamping durable resume to export height (re-validate {} \
-                                 blocks)",
-                                watermark_val,
-                                eh,
-                                watermark_val.saturating_sub(eh),
-                            );
-                        }
-                        if watermark_val == 0 {
-                            // Engine mode: legacy watermark may be unset; checkpoint export is authoritative.
-                            eh
-                        } else {
-                            watermark_val.min(eh)
-                        }
-                    }
-                    _ => watermark_val,
-                };
-
-                let effective_tip = chain_tip.min(durable_watermark);
-                if effective_tip < chain_tip {
-                    warn!(
-                        "[START_COMPONENTS] UTXO watermark ({}) < chain tip ({}); \
-                         IBD will re-validate {} block(s) from height {} to restore UTXO consistency",
-                        durable_watermark,
-                        chain_tip,
-                        chain_tip - effective_tip,
-                        effective_tip + 1,
-                    );
-                }
-                (effective_tip, effective_tip.saturating_add(1))
-            }
-            Err(e) => {
-                warn!(
-                    "[START_COMPONENTS] get_height failed: {}, treating as fresh sync",
-                    e
-                );
-                (0u64, 0u64)
-            }
-        };
+        let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
 
         // One-line resume summary (post-reconcile reads reflect disk). Helps verify we are not
         // accidentally treating an existing chain as genesis (e.g. wrong --data-dir or BLVM_CLEAN).
@@ -1008,11 +907,11 @@ impl Node {
                             );
                         }
                         Err(e) => {
-                            error!(
-                                "[START_COMPONENTS] Parallel IBD failed: {}. Sequential sync is not supported.",
+                            warn!(
+                                "[START_COMPONENTS] Parallel IBD failed: {} — continuing to main loop; \
+                                 catch-up will retry periodically",
                                 e
                             );
-                            return Err(e);
                         }
                     }
                 } else {
@@ -1665,6 +1564,237 @@ impl Node {
         run_loop::run(self).await
     }
 
+    /// Effective IBD resume heights: `(synced_tip, next_block_height)`.
+    fn ibd_resume_heights(&self) -> Result<(u64, u64)> {
+        match self.storage.chain().get_height() {
+            Ok(None) => Ok((0u64, 0u64)),
+            Ok(Some(chain_tip)) => {
+                let watermark_val = match self.storage.chain().get_utxo_watermark() {
+                    Ok(Some(w)) => w,
+                    Ok(None) => 0,
+                    Err(e) => {
+                        warn!(
+                            "[IBD_RESUME] get_utxo_watermark failed ({}); assuming 0",
+                            e
+                        );
+                        0
+                    }
+                };
+                #[cfg(feature = "production")]
+                let watermark_val =
+                    match crate::storage::ibd_autorepair::reconcile_ibd_utxo_watermark_with_disk(
+                        self.storage.as_ref(),
+                        watermark_val,
+                    ) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            warn!(
+                                "[IBD_RESUME] reconcile_ibd_utxo_watermark_with_disk failed ({}); using disk watermark as read",
+                                e
+                            );
+                            watermark_val
+                        }
+                    };
+
+                #[cfg(feature = "production")]
+                if watermark_val > 0
+                    && std::env::var("BLVM_VERIFY_IBD_UTXO_MUHASH")
+                        .map(|v| v == "1")
+                        .unwrap_or(false)
+                {
+                    crate::storage::ibd_utxo_muhash::verify_ibd_utxo_muhash_startup(
+                        self.storage.as_ref(),
+                    )?;
+                }
+
+                let engine_enabled = std::env::var("BLVM_IBD_ENGINE")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let export_height = if engine_enabled {
+                    std::env::var("BLVM_IBD_EXPORT_HEIGHT_OVERRIDE")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .or_else(|| {
+                            self.storage
+                                .chain()
+                                .get_engine_export_height()
+                                .ok()
+                                .flatten()
+                        })
+                } else {
+                    None
+                };
+                let durable_watermark = match export_height {
+                    Some(eh) if eh > 0 => {
+                        if watermark_val > eh {
+                            warn!(
+                                "[IBD_RESUME] ibd_utxo_watermark ({}) > last engine export \
+                                 ({}) — clamping durable resume to export height (re-validate {} \
+                                 blocks)",
+                                watermark_val,
+                                eh,
+                                watermark_val.saturating_sub(eh),
+                            );
+                        }
+                        if watermark_val == 0 {
+                            eh
+                        } else {
+                            watermark_val.min(eh)
+                        }
+                    }
+                    _ => watermark_val,
+                };
+
+                let effective_tip = chain_tip.min(durable_watermark);
+                if effective_tip < chain_tip {
+                    warn!(
+                        "[IBD_RESUME] UTXO watermark ({}) < chain tip ({}); \
+                         IBD will re-validate {} block(s) from height {} to restore UTXO consistency",
+                        durable_watermark,
+                        chain_tip,
+                        chain_tip - effective_tip,
+                        effective_tip + 1,
+                    );
+                }
+                Ok((effective_tip, effective_tip.saturating_add(1)))
+            }
+            Err(e) => {
+                warn!(
+                    "[IBD_RESUME] get_height failed: {}, treating as fresh sync",
+                    e
+                );
+                Ok((0u64, 0u64))
+            }
+        }
+    }
+
+    /// Resume parallel IBD when peers report a higher chain tip than our validated watermark.
+    #[cfg(feature = "production")]
+    pub(crate) async fn try_catch_up_ibd(&mut self, utxo_set: &mut blvm_protocol::UtxoSet) -> Result<()> {
+        use crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE;
+        use std::sync::atomic::Ordering;
+
+        if PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
+        let mut peer_height = match self
+            .network
+            .get_highest_peer_start_height_async()
+            .await
+        {
+            Some(h) => h,
+            None => {
+                debug!(
+                    "[CATCH_UP] No peer start_height yet (synced_tip={})",
+                    synced_tip
+                );
+                return Ok(());
+            }
+        };
+
+        // Version start_height and inv bumps are stale; always probe headers for the live tip.
+        if let Ok((tip_hash, _)) = self.storage.chain().get_tip_hash_and_height() {
+            if let Ok(Some(probed)) = self
+                .network
+                .refresh_peer_tip_via_headers(synced_tip, tip_hash)
+                .await
+            {
+                peer_height = peer_height.max(probed);
+            }
+        }
+
+        let target_height = peer_height.max(synced_tip);
+        if synced_tip >= target_height {
+            debug!(
+                "[CATCH_UP] Up to date (synced_tip={} >= target={})",
+                synced_tip, target_height
+            );
+            return Ok(());
+        }
+
+        let peer_addresses: Vec<String> = self
+            .network
+            .peer_addresses()
+            .iter()
+            .map(|addr| addr.to_string())
+            .collect();
+
+        let ibd_config_owned = self.config_sub(|c| c.ibd.as_ref()).cloned();
+        let ibd_session_config =
+            crate::node::parallel_ibd::ParallelIBDConfig::resolve_for_session(
+                ibd_config_owned.as_ref(),
+                synced_tip,
+                &peer_addresses,
+            );
+        let min_peers = ibd_session_config.min_peers_for_ibd();
+        if peer_addresses.len() < min_peers {
+            debug!(
+                "[CATCH_UP] Behind peers (synced_tip={} < target={}) but only {} peers connected (need {})",
+                synced_tip,
+                target_height,
+                peer_addresses.len(),
+                min_peers
+            );
+            return Ok(());
+        }
+
+        info!(
+            "[CATCH_UP] synced_tip={} < peer_tip={} — starting parallel IBD for heights {}..={}",
+            synced_tip, target_height, ibd_first_block_height, target_height
+        );
+
+        let blockstore = Arc::clone(&self.storage.blocks());
+        let storage_arc = Arc::clone(&self.storage);
+        let protocol_arc = Arc::clone(&self.protocol);
+
+        match self
+            .sync_coordinator
+            .start_parallel_ibd(
+                synced_tip,
+                ibd_first_block_height,
+                target_height,
+                blockstore,
+                Some(storage_arc),
+                protocol_arc,
+                utxo_set,
+                Some(Arc::clone(&self.network)),
+                peer_addresses,
+                ibd_config_owned.as_ref(),
+                self.rpc.event_publisher(),
+                Some(self.data_dir.as_path()),
+            )
+            .await
+        {
+            Ok(true) => {
+                if let Err(e) =
+                    crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(self.data_dir.as_path())
+                {
+                    warn!("Failed to clear IBD UTXO autorepair marker after catch-up: {}", e);
+                }
+                let new_height = self.storage.chain().get_height()?.unwrap_or(0);
+                info!("[CATCH_UP] Completed — chain height now {}", new_height);
+            }
+            Ok(false) => {
+                debug!("[CATCH_UP] Parallel IBD not started (already synced or insufficient peers)");
+            }
+            Err(e) => {
+                warn!("[CATCH_UP] Parallel IBD failed: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "production"))]
+    pub(crate) async fn try_catch_up_ibd(
+        &mut self,
+        _utxo_set: &mut blvm_protocol::UtxoSet,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Run node processing once (for testing)
     pub async fn run_once(&mut self) -> Result<()> {
         info!("Running node processing once");
@@ -1712,7 +1842,31 @@ impl Node {
     }
 
     /// Get disk space (total, available, percent_free) for the path's mount.
-    /// Uses sysinfo when available; fallback to placeholder otherwise.
+    /// Uses sysinfo when available; Unix `statvfs` fallback; returns `(0,0,0)` when unknown (fail closed).
+    #[cfg(unix)]
+    fn disk_space_statvfs(path: &Path) -> Option<(u64, u64, f64)> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+            return None;
+        }
+        let frag = stat.f_frsize;
+        if frag == 0 {
+            return None;
+        }
+        let total = stat.f_blocks * frag;
+        let available = stat.f_bavail * frag;
+        let percent_free = if total > 0 {
+            100.0 * (available as f64) / (total as f64)
+        } else {
+            0.0
+        };
+        Some((total, available, percent_free))
+    }
+
     fn get_disk_space_for_path(path: &Path) -> (u64, u64, f64) {
         #[cfg(feature = "sysinfo")]
         {
@@ -1746,12 +1900,13 @@ impl Node {
                 return (total, available, percent_free);
             }
         }
-        // Fallback when sysinfo unavailable or path not found on any disk
+        #[cfg(unix)]
+        if let Some(stats) = Self::disk_space_statvfs(path) {
+            return stats;
+        }
+        // Fail closed: do not invent capacity (avoids bogus auto-prune / DiskSpaceLow metrics).
         let _ = path;
-        let total_bytes = 1_000_000_000_000u64; // 1TB placeholder
-        let available_bytes = total_bytes / 5; // 20% free
-        let percent_free = 20.0;
-        (total_bytes, available_bytes, percent_free)
+        (0, 0, 0.0)
     }
 
     /// Check disk space and trigger pruning if needed
@@ -1772,14 +1927,31 @@ impl Node {
                     Self::get_disk_space_for_path(&self.data_dir);
                 let disk_path = self.data_dir.to_string_lossy().to_string();
 
-                event_publisher
-                    .publish_disk_space_low(available_bytes, total_bytes, percent_free, disk_path)
-                    .await;
+                if total_bytes > 0 {
+                    event_publisher
+                        .publish_disk_space_low(
+                            available_bytes,
+                            total_bytes,
+                            percent_free,
+                            disk_path,
+                        )
+                        .await;
+                } else {
+                    warn!(
+                        "Storage bounds exceeded but disk space for {} is unknown; skipping DiskSpaceLow event",
+                        disk_path
+                    );
+                }
             }
 
-            // Check if pruning is enabled
+            // Check if pruning is enabled (only when disk stats are known)
             if self.storage.is_pruning_enabled() {
-                if let Some(pruning_manager) = self.storage.pruning() {
+                let (total_bytes, _, _) = Self::get_disk_space_for_path(&self.data_dir);
+                if total_bytes == 0 {
+                    warn!(
+                        "Storage bounds exceeded but disk space is unknown; skipping automatic pruning"
+                    );
+                } else if let Some(pruning_manager) = self.storage.pruning() {
                     // Get current chain height from chain info
                     let chain_info = self.storage.chain().load_chain_info()?;
                     if let Some(info) = chain_info {
@@ -1909,8 +2081,19 @@ impl Node {
         // Stop all components
         self.rpc.stop()?;
 
-        // Flush storage
-        self.storage.flush()?;
+        // Flush storage (bounded — large RocksDB datasets can stall for minutes otherwise)
+        let storage = Arc::clone(&self.storage);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::task::spawn_blocking(move || storage.flush()),
+        )
+        .await
+        {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(e))) => warn!("Storage flush failed during shutdown: {}", e),
+            Ok(Err(e)) => warn!("Storage flush task failed during shutdown: {}", e),
+            Err(_) => warn!("Storage flush timed out after 15s during shutdown"),
+        }
 
         // Publish shutdown completed event
         if let Some(event_publisher) = self
@@ -1989,13 +2172,13 @@ impl Node {
         let storage_healthy = self.storage.check_storage_bounds().unwrap_or(false);
         let rpc_healthy = true; // RPC is always healthy if node is running
 
-        // Get metrics if available (simplified for now)
+        let node_metrics = self.metrics.collect();
         let report = checker.check_health(
             network_healthy,
             storage_healthy,
             rpc_healthy,
-            None, // Network metrics - would need to be passed from NetworkManager
-            None, // Storage metrics - would need to be collected
+            Some(&node_metrics.network),
+            Some(&node_metrics.storage),
         );
 
         // Publish HealthCheck event for module subscribers

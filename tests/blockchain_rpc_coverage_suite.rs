@@ -134,6 +134,58 @@ async fn test_get_chain_tx_stats_with_chain() {
 }
 
 #[tokio::test]
+async fn test_verify_chain_reports_missing_witnesses() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let block = blvm_node::Block {
+        header: blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_231_006_505,
+            bits: 0x0f00ffff,
+            nonce: 1,
+        },
+        transactions: vec![].into_boxed_slice(),
+    };
+    let hash = storage.blocks().get_block_hash(&block);
+    storage.blocks().store_block(&block).unwrap();
+    storage.blocks().store_height(0, &hash).unwrap();
+    storage.chain().initialize(&block.header).unwrap();
+
+    let block1 = blvm_node::Block {
+        header: blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: hash,
+            merkle_root: [1u8; 32],
+            timestamp: 1_231_006_605,
+            bits: 0x0f00ffff,
+            nonce: 2,
+        },
+        transactions: vec![].into_boxed_slice(),
+    };
+    let hash1 = storage.blocks().get_block_hash(&block1);
+    storage.blocks().store_block(&block1).unwrap();
+    storage.blocks().store_height(1, &hash1).unwrap();
+    storage
+        .chain()
+        .update_tip(&hash1, &block1.header, 1)
+        .unwrap();
+
+    let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+    let rpc = BlockchainRpc::with_dependencies_and_protocol(storage, protocol);
+    let result = rpc.verify_chain(Some(1), Some(1)).await.unwrap();
+    assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(false));
+    let errors = result.get("errors").unwrap().as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| { e.as_str().is_some_and(|s| s.contains("witness load error")) }),
+        "expected witness load error, got {errors:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_verify_chain_smoke() {
     let (_dir, _storage, rpc) = rpc_with_chain();
     let ok = rpc.verify_chain(Some(1), Some(32)).await.unwrap();
@@ -216,14 +268,32 @@ fn rpc_with_address_index() -> (TempDir, BlockchainRpc, String) {
             Some(indexing),
             None,
             None,
+            None,
         )
         .unwrap(),
     );
     let tx = common::valid_transaction();
     let script_hex = hex::encode(&tx.outputs[0].script_pubkey);
+    use blvm_protocol::block::calculate_tx_id;
+    let tx_hash = calculate_tx_id(&tx);
     storage
         .transactions()
         .index_transaction(&tx, &[0xde; 32], 1, 0)
+        .unwrap();
+    storage
+        .utxos()
+        .add_utxo(
+            &blvm_node::OutPoint {
+                hash: tx_hash,
+                index: 0,
+            },
+            &blvm_node::UTXO {
+                value: tx.outputs[0].value,
+                script_pubkey: tx.outputs[0].script_pubkey.clone().into(),
+                height: 1,
+                is_coinbase: false,
+            },
+        )
         .unwrap();
     let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
     let rpc = BlockchainRpc::with_dependencies_and_protocol(storage, protocol);
@@ -249,6 +319,64 @@ async fn test_getaddressbalance_with_indexed_script() {
         .await
         .unwrap();
     assert!(balance.get("balance").unwrap().as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn test_getaddresstxids_with_bech32_address() {
+    use blvm_protocol::address::BitcoinAddress;
+    use blvm_protocol::{TransactionInput, TransactionOutput};
+
+    let address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+    let decoded = BitcoinAddress::decode(address).expect("regtest bech32 test vector");
+    let mut script = vec![0x00];
+    script.extend_from_slice(&decoded.witness_program);
+
+    use blvm_node::config::IndexingConfig;
+    use blvm_node::storage::database::default_backend;
+
+    let temp_dir = TempDir::new().unwrap();
+    let mut indexing = IndexingConfig::default();
+    indexing.enable_address_index = true;
+    let storage = Arc::new(
+        Storage::with_backend_pruning_and_indexing(
+            temp_dir.path(),
+            default_backend(),
+            None,
+            Some(indexing),
+            None,
+            None,
+            None,
+        )
+        .unwrap(),
+    );
+    let tx = blvm_protocol::Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout: blvm_node::OutPoint {
+                hash: [0x11; 32],
+                index: 0,
+            },
+            script_sig: vec![0x51],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 50_000,
+            script_pubkey: script.clone().into(),
+        }],
+        lock_time: 0,
+    };
+    storage
+        .transactions()
+        .index_transaction(&tx, &[0xee; 32], 1, 0)
+        .unwrap();
+    let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+    let rpc = BlockchainRpc::with_dependencies_and_protocol(storage, protocol);
+
+    let ids = rpc
+        .getaddresstxids(&serde_json::json!([address]))
+        .await
+        .unwrap();
+    assert_eq!(ids.as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -321,6 +449,7 @@ fn rpc_with_pruning_chain() -> (TempDir, Arc<Storage>, BlockchainRpc) {
             None,
             None,
             None,
+            None,
         )
         .unwrap(),
     );
@@ -357,15 +486,6 @@ async fn test_load_txoutset_missing_path_errors() {
 }
 
 #[tokio::test]
-async fn test_get_raw_transaction_stub_shape() {
-    let (_dir, _storage, rpc) = rpc_with_chain();
-    let txid = "0000000000000000000000000000000000000000000000000000000000000001";
-    let tx = rpc.get_raw_transaction(txid).await.unwrap();
-    assert_eq!(tx.get("txid").unwrap().as_str().unwrap(), txid);
-    assert!(tx.get("vin").unwrap().is_array());
-}
-
-#[tokio::test]
 async fn test_verify_chain_default_params() {
     let (_dir, _storage, rpc) = rpc_with_chain();
     let ok = rpc.verify_chain(None, None).await.unwrap();
@@ -383,4 +503,53 @@ async fn test_get_block_header_at_genesis_height() {
     let hex = blvm_node::storage::hashing::hash_to_rpc_hex(&genesis_hash);
     let header = rpc.get_block_header(&hex, true).await.unwrap();
     assert_eq!(header.get("height").unwrap().as_u64(), Some(0));
+}
+
+#[tokio::test]
+async fn test_get_block_stats_bip141_weight() {
+    let (_dir, storage, rpc) = rpc_with_chain();
+    let genesis_hash = storage
+        .blocks()
+        .get_hash_by_height(0)
+        .unwrap()
+        .expect("genesis");
+    let block = storage
+        .blocks()
+        .get_block(&genesis_hash)
+        .unwrap()
+        .expect("genesis block");
+    use blvm_protocol::serialization::transaction::serialize_transaction;
+    let stripped_size: usize = block
+        .transactions
+        .iter()
+        .map(|tx| serialize_transaction(tx).len())
+        .sum::<usize>()
+        + 80;
+
+    let stats = rpc.get_block_stats(&serde_json::json!([0])).await.unwrap();
+    let block_size = stats.get("total_size").unwrap().as_u64().unwrap();
+    let block_weight = stats.get("total_weight").unwrap().as_u64().unwrap();
+    assert_eq!(block_size, stripped_size as u64);
+    assert_eq!(block_weight, (3 * stripped_size + stripped_size) as u64);
+}
+
+#[tokio::test]
+async fn test_getblockstats_totalfee_coinbase_minus_subsidy() {
+    let (_dir, _storage, rpc) = rpc_with_chain();
+    let stats = rpc.get_block_stats(&serde_json::json!([0])).await.unwrap();
+    assert_eq!(stats.get("totalfee").unwrap().as_f64(), Some(0.0));
+}
+
+#[tokio::test]
+async fn test_getchaintxstats_cumulative_txcount() {
+    let (_dir, _storage, rpc) = rpc_with_chain();
+    let stats = rpc
+        .get_chain_tx_stats(&serde_json::json!([5]))
+        .await
+        .unwrap();
+    assert_eq!(stats.get("window_tx_count").unwrap().as_u64(), Some(5));
+    assert_eq!(
+        stats.get("txcount").unwrap().as_u64(),
+        Some(DIFFICULTY_INTERVAL)
+    );
 }

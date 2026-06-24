@@ -13,7 +13,7 @@ use blvm_protocol::features::FeatureRegistry;
 use blvm_protocol::{Block, Hash, ProtocolVersion, segwit::Witness};
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -154,6 +154,140 @@ async fn send_block_getdata_with_retry(
     }
 }
 
+/// Register a block download and send GetData. Fails fast when the peer is gone (avoids orphan
+/// pending requests that time out and blacklist the whole chunk).
+async fn register_and_request_block(
+    network: Arc<NetworkManager>,
+    peer_addr: SocketAddr,
+    peer_id: &str,
+    block_hash: Hash,
+    height: u64,
+) -> Result<
+    tokio::sync::oneshot::Receiver<(
+        Block,
+        Vec<Vec<Witness>>,
+    )>,
+> {
+    if !network.is_peer_connected(peer_addr).await {
+        return Err(anyhow::anyhow!(
+            "Peer {peer_id} not connected — cannot request block at height {height}"
+        ));
+    }
+    let block_rx = network.register_block_request(peer_addr, block_hash);
+    let inventory = vec![InventoryVector {
+        inv_type: MSG_WITNESS_BLOCK,
+        hash: block_hash,
+    }];
+    let wire_msg = ProtocolParser::serialize_message(&ProtocolMessage::GetData(GetDataMessage {
+        inventory,
+    }))?;
+    if let Err(e) = send_block_getdata_with_retry(
+        Arc::clone(&network),
+        peer_addr,
+        wire_msg,
+        height,
+    )
+    .await
+    {
+        network.cancel_block_request(peer_addr, block_hash);
+        return Err(e);
+    }
+    Ok(block_rx)
+}
+
+type PendingBlockResult = (
+    u64,
+    [u8; 32],
+    std::time::Instant,
+    Result<
+        Result<(Block, Vec<Vec<Witness>>), tokio::sync::oneshot::error::RecvError>,
+        tokio::time::error::Elapsed,
+    >,
+    Option<tokio::sync::OwnedSemaphorePermit>,
+);
+
+type PendingBlockFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = PendingBlockResult> + Send>>;
+
+/// Enqueue one block download (local replay or network GetData). Skips if already in flight.
+async fn enqueue_chunk_block(
+    height: u64,
+    block_hash: [u8; 32],
+    network: &Arc<NetworkManager>,
+    peer_addr: SocketAddr,
+    peer_id: &str,
+    blockstore: &BlockStore,
+    protocol_version: ProtocolVersion,
+    timeout_duration: Duration,
+    blocks_sem: &Option<Arc<Semaphore>>,
+    in_flight: &mut FuturesUnordered<PendingBlockFuture>,
+    in_flight_heights: &mut HashSet<u64>,
+    first_block_logged: &mut bool,
+    start_height: u64,
+    end_height: u64,
+) -> Result<()> {
+    if in_flight_heights.contains(&height) {
+        return Ok(());
+    }
+    let permit = match blocks_sem {
+        Some(sem) => Some(
+            sem.clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow::anyhow!("blocks semaphore closed"))?,
+        ),
+        None => None,
+    };
+    if let Some((block, block_witnesses)) =
+        try_load_local_ibd_block(blockstore, height, block_hash, protocol_version)?
+    {
+        if !*first_block_logged {
+            info!(
+                "[IBD] {} chunk {}-{}: local block height {} (hash {})",
+                peer_id,
+                start_height,
+                end_height,
+                height,
+                hex::encode(block_hash)
+            );
+            *first_block_logged = true;
+        }
+        let request_start = std::time::Instant::now();
+        in_flight_heights.insert(height);
+        in_flight.push(Box::pin(async move {
+            let r = Ok(Ok((block, block_witnesses)));
+            (height, block_hash, request_start, r, permit)
+        }));
+    } else {
+        if !*first_block_logged {
+            info!(
+                "[IBD] {} chunk {}-{}: registered block height {} (hash {})",
+                peer_id,
+                start_height,
+                end_height,
+                height,
+                hex::encode(block_hash)
+            );
+            *first_block_logged = true;
+        }
+        let block_rx = register_and_request_block(
+            Arc::clone(network),
+            peer_addr,
+            peer_id,
+            block_hash,
+            height,
+        )
+        .await?;
+        let request_start = std::time::Instant::now();
+        in_flight_heights.insert(height);
+        in_flight.push(Box::pin(async move {
+            let r = timeout(timeout_duration, block_rx).await;
+            (height, block_hash, request_start, r, permit)
+        }));
+    }
+    Ok(())
+}
+
 /// Download a chunk of blocks from a peer.
 ///
 /// When block_tx is Some, streams each block immediately so validation doesn't wait for full chunk.
@@ -216,6 +350,14 @@ pub(crate) async fn download_chunk(
         .parse::<SocketAddr>()
         .map_err(|_| anyhow::anyhow!("Invalid peer address: {}", peer_id))?;
 
+    if !network.is_peer_connected(peer_addr).await {
+        return Err(anyhow::anyhow!(
+            "Peer {peer_id} not connected at chunk {}-{} start — chunk needs retry",
+            start_height,
+            end_height
+        ));
+    }
+
     let mut block_hashes = Vec::new();
     for height in start_height..=end_height {
         if let Ok(Some(hash)) = blockstore.get_hash_by_height(height) {
@@ -249,98 +391,91 @@ pub(crate) async fn download_chunk(
         .map(|_| config.max_blocks_in_transit_per_peer)
         .unwrap_or(config.max_concurrent_per_peer);
 
-    type PendingResult = (
-        u64,
-        [u8; 32],
-        std::time::Instant,
-        Result<
-            Result<(Block, Vec<Vec<Witness>>), tokio::sync::oneshot::error::RecvError>,
-            tokio::time::error::Elapsed,
-        >,
-        Option<tokio::sync::OwnedSemaphorePermit>,
-    );
-    let mut in_flight: FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = PendingResult> + Send>>,
-    > = FuturesUnordered::new();
-    let mut hash_iter = block_hashes.into_iter();
-    let mut all_sent = false;
+    let mut in_flight: FuturesUnordered<PendingBlockFuture> = FuturesUnordered::new();
+    let block_hash_by_height: BTreeMap<u64, [u8; 32]> = block_hashes.into_iter().collect();
+    let mut in_flight_heights: HashSet<u64> = HashSet::new();
     // Arc-wrap immediately so downstream pipeline stages never deep-copy block bytes.
     let mut received: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
     let mut next_to_send = start_height;
 
     let mut first_block_logged = false;
-    while in_flight.len() < pipeline_depth {
-        if let Some((height, block_hash)) = hash_iter.next() {
-            let permit = match &blocks_sem {
-                Some(sem) => Some(
-                    sem.clone()
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| anyhow::anyhow!("blocks semaphore closed"))?,
-                ),
-                None => None,
+
+    async fn fill_pipeline(
+        next_to_send: u64,
+        end_height: u64,
+        pipeline_depth: usize,
+        received: &BTreeMap<u64, (SharedBlock, SharedWitnesses)>,
+        in_flight: &mut FuturesUnordered<PendingBlockFuture>,
+        in_flight_heights: &mut HashSet<u64>,
+        block_hash_by_height: &BTreeMap<u64, [u8; 32]>,
+        network: &Arc<NetworkManager>,
+        peer_addr: SocketAddr,
+        peer_id: &str,
+        blockstore: &BlockStore,
+        protocol_version: ProtocolVersion,
+        timeout_duration: Duration,
+        blocks_sem: &Option<Arc<Semaphore>>,
+        first_block_logged: &mut bool,
+        start_height: u64,
+    ) -> Result<()> {
+        while in_flight.len() < pipeline_depth {
+            let Some(height) = (next_to_send..=end_height).find(|h| {
+                !received.contains_key(h) && !in_flight_heights.contains(h)
+            }) else {
+                break;
             };
-            if let Some((block, block_witnesses)) =
-                try_load_local_ibd_block(blockstore, height, block_hash, protocol_version)?
-            {
-                if !first_block_logged {
-                    info!(
-                        "[IBD] {} chunk {}-{}: local block height {} (hash {})",
-                        peer_id,
-                        start_height,
-                        end_height,
-                        height,
-                        hex::encode(block_hash)
-                    );
-                    first_block_logged = true;
-                }
-                let request_start = std::time::Instant::now();
-                in_flight.push(Box::pin(async move {
-                    let r = Ok(Ok((block, block_witnesses)));
-                    (height, block_hash, request_start, r, permit)
-                }));
-            } else {
-                let block_rx = network.register_block_request(peer_addr, block_hash);
-                if !first_block_logged {
-                    info!(
-                        "[IBD] {} chunk {}-{}: registered block height {} (hash {})",
-                        peer_id,
-                        start_height,
-                        end_height,
-                        height,
-                        hex::encode(block_hash)
-                    );
-                    first_block_logged = true;
-                }
-                let inventory = vec![InventoryVector {
-                    inv_type: MSG_WITNESS_BLOCK,
-                    hash: block_hash,
-                }];
-                let wire_msg =
-                    ProtocolParser::serialize_message(&ProtocolMessage::GetData(GetDataMessage {
-                        inventory,
-                    }))?;
-                send_block_getdata_with_retry(Arc::clone(&network), peer_addr, wire_msg, height)
-                    .await?;
-                let request_start = std::time::Instant::now();
-                in_flight.push(Box::pin(async move {
-                    let r = timeout(timeout_duration, block_rx).await;
-                    (height, block_hash, request_start, r, permit)
-                }));
-            }
-        } else {
-            all_sent = true;
-            break;
+            let block_hash = *block_hash_by_height
+                .get(&height)
+                .ok_or_else(|| anyhow::anyhow!("Block hash missing for height {height}"))?;
+            enqueue_chunk_block(
+                height,
+                block_hash,
+                network,
+                peer_addr,
+                peer_id,
+                blockstore,
+                protocol_version,
+                timeout_duration,
+                blocks_sem,
+                in_flight,
+                in_flight_heights,
+                first_block_logged,
+                start_height,
+                end_height,
+            )
+            .await?;
         }
+        Ok(())
     }
 
-    // Hard deadline: if a chunk takes longer than the per-block timeout, abort and retry.
-    // This catches cases where the broadcast stall signal doesn't reach the worker in time
-    // (e.g. channel lag, racing with recv_many in coordinator) or the per-block timeout fires
-    // but is raced by a stall signal. Deadline = per-block timeout so any stuck chunk self-heals.
+    fill_pipeline(
+        next_to_send,
+        end_height,
+        pipeline_depth,
+        &received,
+        &mut in_flight,
+        &mut in_flight_heights,
+        &block_hash_by_height,
+        &network,
+        peer_addr,
+        peer_id,
+        blockstore,
+        protocol_version,
+        timeout_duration,
+        &blocks_sem,
+        &mut first_block_logged,
+        start_height,
+    )
+    .await?;
+
+    // Hard deadline: abort only when the gap height (next_to_send) makes no progress.
+    // Out-of-order receives ahead of the gap must not extend the deadline indefinitely.
     const CHUNK_DEADLINE_SECS: u64 = 30;
-    let chunk_deadline = tokio::time::sleep(Duration::from_secs(CHUNK_DEADLINE_SECS));
-    tokio::pin!(chunk_deadline);
+    let mut last_gap_at = chunk_start_time;
+    let mut deadline_poll = tokio::time::interval(Duration::from_secs(1));
+    deadline_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Consume the immediate first tick so the first poll is ~1s out.
+    deadline_poll.tick().await;
 
     loop {
         let next_result = if progress.last_block_hash.is_none() {
@@ -395,9 +530,12 @@ pub(crate) async fn download_chunk(
                     // Stall signal received — just continue; the hard deadline handles abort timing.
                     continue;
                 }
-                _ = &mut chunk_deadline => {
+                _ = deadline_poll.tick() => {
+                    if last_gap_at.elapsed() < Duration::from_secs(CHUNK_DEADLINE_SECS) {
+                        continue;
+                    }
                     warn!(
-                        "Chunk {}-{}: hard {}s deadline expired (next_to_send={}, in_flight={}, received={}) — aborting for retry",
+                        "Chunk {}-{}: hard {}s gap deadline expired (next_to_send={}, in_flight={}, received={}) — aborting for retry",
                         start_height, end_height, CHUNK_DEADLINE_SECS,
                         next_to_send, in_flight.len(), received.len()
                     );
@@ -411,9 +549,12 @@ pub(crate) async fn download_chunk(
         } else {
             tokio::select! {
                 r = in_flight.next() => r,
-                _ = &mut chunk_deadline => {
+                _ = deadline_poll.tick() => {
+                    if last_gap_at.elapsed() < Duration::from_secs(CHUNK_DEADLINE_SECS) {
+                        continue;
+                    }
                     warn!(
-                        "Chunk {}-{}: hard {}s deadline expired (no stall_rx, next_to_send={}) — aborting for retry",
+                        "Chunk {}-{}: hard {}s gap deadline expired (no stall_rx, next_to_send={}) — aborting for retry",
                         start_height, end_height, CHUNK_DEADLINE_SECS, next_to_send
                     );
                     peer_scorer.record_failure(peer_addr);
@@ -428,6 +569,7 @@ pub(crate) async fn download_chunk(
         let Some((height, block_hash, request_start, block_result, _permit)) = next_result else {
             break;
         };
+        in_flight_heights.remove(&height);
         match block_result {
             Ok(Ok((block, block_witnesses))) => {
                 let received_hash = blockstore.get_block_hash(&block);
@@ -470,16 +612,59 @@ pub(crate) async fn download_chunk(
                 ));
             }
             Err(_) => {
+                if height == next_to_send {
+                    warn!(
+                        "Block timeout for gap height {} after {}s",
+                        height, base_timeout_secs
+                    );
+                    peer_scorer.record_failure(peer_addr);
+                    return Err(anyhow::anyhow!(
+                        "Block timeout for gap height {} after {}s - chunk needs retry",
+                        height,
+                        base_timeout_secs
+                    ));
+                }
                 warn!(
-                    "Block timeout for height {} after {}s",
-                    height, base_timeout_secs
+                    "Block timeout for height {} ahead of gap {} after {}s — re-requesting",
+                    height, next_to_send, base_timeout_secs
                 );
-                peer_scorer.record_failure(peer_addr);
-                return Err(anyhow::anyhow!(
-                    "Block timeout for height {} after {}s - chunk needs retry",
+                enqueue_chunk_block(
                     height,
-                    base_timeout_secs
-                ));
+                    block_hash,
+                    &network,
+                    peer_addr,
+                    peer_id,
+                    blockstore,
+                    protocol_version,
+                    timeout_duration,
+                    &blocks_sem,
+                    &mut in_flight,
+                    &mut in_flight_heights,
+                    &mut first_block_logged,
+                    start_height,
+                    end_height,
+                )
+                .await?;
+                fill_pipeline(
+                    next_to_send,
+                    end_height,
+                    pipeline_depth,
+                    &received,
+                    &mut in_flight,
+                    &mut in_flight_heights,
+                    &block_hash_by_height,
+                    &network,
+                    peer_addr,
+                    peer_id,
+                    blockstore,
+                    protocol_version,
+                    timeout_duration,
+                    &blocks_sem,
+                    &mut first_block_logged,
+                    start_height,
+                )
+                .await?;
+                continue;
             }
         }
 
@@ -504,53 +689,28 @@ pub(crate) async fn download_chunk(
                 blocks.push((next_to_send, block, block_witnesses));
             }
             next_to_send += 1;
+            last_gap_at = std::time::Instant::now();
         }
 
-        if !all_sent {
-            if let Some((next_height, next_hash)) = hash_iter.next() {
-                let permit = match &blocks_sem {
-                    Some(sem) => Some(
-                        sem.clone()
-                            .acquire_owned()
-                            .await
-                            .map_err(|_| anyhow::anyhow!("blocks semaphore closed"))?,
-                    ),
-                    None => None,
-                };
-                if let Some((block, block_witnesses)) =
-                    try_load_local_ibd_block(blockstore, next_height, next_hash, protocol_version)?
-                {
-                    let request_start = std::time::Instant::now();
-                    in_flight.push(Box::pin(async move {
-                        let r = Ok(Ok((block, block_witnesses)));
-                        (next_height, next_hash, request_start, r, permit)
-                    }));
-                } else {
-                    let block_rx = network.register_block_request(peer_addr, next_hash);
-                    let inventory = vec![InventoryVector {
-                        inv_type: MSG_WITNESS_BLOCK,
-                        hash: next_hash,
-                    }];
-                    let wire_msg = ProtocolParser::serialize_message(&ProtocolMessage::GetData(
-                        GetDataMessage { inventory },
-                    ))?;
-                    send_block_getdata_with_retry(
-                        Arc::clone(&network),
-                        peer_addr,
-                        wire_msg,
-                        next_height,
-                    )
-                    .await?;
-                    let request_start = std::time::Instant::now();
-                    in_flight.push(Box::pin(async move {
-                        let r = timeout(timeout_duration, block_rx).await;
-                        (next_height, next_hash, request_start, r, permit)
-                    }));
-                }
-            } else {
-                all_sent = true;
-            }
-        }
+        fill_pipeline(
+            next_to_send,
+            end_height,
+            pipeline_depth,
+            &received,
+            &mut in_flight,
+            &mut in_flight_heights,
+            &block_hash_by_height,
+            &network,
+            peer_addr,
+            peer_id,
+            blockstore,
+            protocol_version,
+            timeout_duration,
+            &blocks_sem,
+            &mut first_block_logged,
+            start_height,
+        )
+        .await?;
     }
 
     while let Some((block, block_witnesses)) = received.remove(&next_to_send) {

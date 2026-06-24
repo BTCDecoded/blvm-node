@@ -27,6 +27,9 @@ pub struct BlockValidationContext {
     pub height: u64,
     pub prev_utxo_set: UtxoSet,
     pub prev_block_hash: [u8; 32],
+    /// Witness stacks for connect_block (required). Production callers must load via
+    /// blockstore / `load_witnesses_for_block`; empty stacks are valid only pre-SegWit.
+    pub witnesses: Vec<Vec<Witness>>,
 }
 
 /// Parallel block validator
@@ -55,14 +58,7 @@ impl ParallelBlockValidator {
         context: &BlockValidationContext,
         network: Network,
     ) -> Result<(ValidationResult, UtxoSet)> {
-        // Create empty witnesses for each transaction
-        // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
-        let witnesses: Vec<Vec<Witness>> = context
-            .block
-            .transactions
-            .iter()
-            .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
-            .collect();
+        let witnesses = &context.witnesses;
         let network_time = current_timestamp();
         let consensus_ctx = blvm_protocol::block::block_validation_context_for_connect_ibd(
             None::<&[BlockHeader]>,
@@ -71,7 +67,7 @@ impl ParallelBlockValidator {
         );
         let (result, new_utxo_set, _undo_log) = connect_block(
             &context.block,
-            &witnesses,
+            witnesses,
             context.prev_utxo_set.clone(),
             context.height,
             &consensus_ctx,
@@ -108,14 +104,7 @@ impl ParallelBlockValidator {
             contexts
                 .par_iter()
                 .map(|context| {
-                    // Create empty witnesses for each transaction
-                    // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
-                    let witnesses: Vec<Vec<Witness>> = context
-                        .block
-                        .transactions
-                        .iter()
-                        .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
-                        .collect();
+                    let witnesses = &context.witnesses;
                     let network_time = current_timestamp();
                     let consensus_ctx =
                         blvm_protocol::block::block_validation_context_for_connect_ibd(
@@ -141,12 +130,7 @@ impl ParallelBlockValidator {
             contexts
                 .iter()
                 .map(|context| {
-                    let witnesses: Vec<Vec<Witness>> = context
-                        .block
-                        .transactions
-                        .iter()
-                        .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
-                        .collect();
+                    let witnesses = &context.witnesses;
                     let network_time = current_timestamp();
                     let consensus_ctx =
                         blvm_protocol::block::block_validation_context_for_connect_ibd(
@@ -183,14 +167,7 @@ impl ParallelBlockValidator {
         let mut results = Vec::new();
 
         for context in contexts {
-            // Create empty witnesses for each transaction
-            // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
-            let witnesses: Vec<Vec<Witness>> = context
-                .block
-                .transactions
-                .iter()
-                .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
-                .collect();
+            let witnesses = &context.witnesses;
             let network_time = current_timestamp();
             let consensus_ctx = blvm_protocol::block::block_validation_context_for_connect_ibd(
                 None::<&[BlockHeader]>,
@@ -199,7 +176,7 @@ impl ParallelBlockValidator {
             );
             let (result, new_utxo_set, _undo_log) = connect_block(
                 &context.block,
-                &witnesses,
+                witnesses,
                 context.prev_utxo_set.clone(),
                 context.height,
                 &consensus_ctx,

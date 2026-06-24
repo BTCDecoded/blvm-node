@@ -15,6 +15,8 @@ fn seeded_storage(blocks: u64) -> (tempfile::TempDir, Arc<blvm_node::storage::St
     (temp_dir, storage)
 }
 
+use blvm_consensus::pow::U256;
+
 #[test]
 fn test_store_and_load_work_and_chainwork() {
     let temp_db = common::TempDb::new().unwrap();
@@ -22,11 +24,28 @@ fn test_store_and_load_work_and_chainwork() {
     let header = create_test_header(1_700_000_000, [0x11; 32]);
     chain.initialize(&header).unwrap();
     let hash = [0x22u8; 32];
-    chain.store_work(&hash, 42).unwrap();
-    chain.store_chainwork(&hash, 999).unwrap();
-    assert_eq!(chain.get_work(&hash).unwrap(), Some(42));
-    assert_eq!(chain.get_chainwork(&hash).unwrap(), Some(999));
+    chain.store_work(&hash, U256::from_u128(42)).unwrap();
+    chain.store_chainwork(&hash, U256::from_u128(999)).unwrap();
+    assert_eq!(chain.get_work(&hash).unwrap(), Some(U256::from_u128(42)));
+    assert_eq!(
+        chain.get_chainwork(&hash).unwrap(),
+        Some(U256::from_u128(999))
+    );
     assert!(chain.calculate_total_work().unwrap() >= 42);
+}
+
+#[test]
+fn test_cache_block_chainwork_matches_consensus_work() {
+    let temp_db = common::TempDb::new().unwrap();
+    let chain = &temp_db.chain_state;
+    let mut header = create_test_header(1_700_000_000, [0x11; 32]);
+    header.bits = 0x0300ffff;
+    chain.initialize(&header).unwrap();
+    let hash = [0x44u8; 32];
+    chain.cache_block_chainwork(&hash, &header, 0).unwrap();
+    let expected = blvm_consensus::reorganization::work_for_bits(header.bits).unwrap();
+    assert_eq!(chain.get_work(&hash).unwrap(), Some(expected));
+    assert_eq!(chain.get_chainwork(&hash).unwrap(), Some(expected));
 }
 
 #[test]

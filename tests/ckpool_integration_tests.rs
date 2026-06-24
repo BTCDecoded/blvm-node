@@ -235,6 +235,10 @@ async fn regtest_getblocktemplate_after_generatetoaddress() {
         .gbt_target_hex();
     assert_eq!(target, expected);
     assert!(template.get("version").unwrap().as_i64().unwrap() > 0);
+
+    let curtime = template.get("curtime").unwrap().as_u64().unwrap();
+    assert!(curtime > genesis_header.timestamp);
+    assert_ne!(curtime, 1_231_006_505);
 }
 
 #[tokio::test]

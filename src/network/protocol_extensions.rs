@@ -132,10 +132,15 @@ pub async fn handle_get_filtered_block(
             ),
         )
         .map_err(|e| anyhow::anyhow!("Failed to get block from storage: {}", e))?;
-        // Get block height from chain state
-        let height = storage.chain().get_height()?.unwrap_or(0);
-        // Try to find exact height by iterating backwards from tip
-        // For now, use tip height as approximation
+        let height = storage
+            .blocks()
+            .get_height_by_hash(&message.block_hash)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Block height not found for hash {}",
+                    hex::encode(message.block_hash)
+                )
+            })?;
         (block, height)
     } else {
         // Storage is required for filtered blocks
@@ -375,21 +380,28 @@ pub fn deserialize_utxo_proof(data: &[u8]) -> Result<crate::network::protocol::U
 
 /// Handle SendTxRcncl message (Erlay negotiation)
 ///
-/// Responds to Erlay capability announcement and negotiates parameters.
+/// Stores negotiated salts and field size for subsequent reconciliation rounds.
 #[cfg(feature = "erlay")]
 pub async fn handle_send_tx_rcncl(
     message: crate::network::protocol::SendTxRcnclMessage,
-    _storage: Option<Arc<Storage>>,
+    negotiation: &mut crate::network::erlay::ErlayPeerNegotiation,
+    local_salt: u64,
 ) -> Result<()> {
-    // Store Erlay parameters for this peer
-    // In a real implementation, this would be stored in peer state
-    debug!(
-        "Received Erlay negotiation: version={}, min_field={}, max_field={}",
-        message.version, message.min_field_size, message.max_field_size
-    );
+    let remote_salt = crate::network::erlay::salt_from_wire_bytes(&message.salt);
+    negotiation
+        .apply_sendtxrcncl(
+            message.version,
+            remote_salt,
+            message.min_field_size,
+            message.max_field_size,
+            local_salt,
+        )
+        .map_err(|e| anyhow::anyhow!("Erlay negotiation rejected: {}", e))?;
 
-    // Negotiate field size (use minimum of both peers' max)
-    // For now, just acknowledge
+    debug!(
+        "Erlay negotiated with peer: version={}, field_size={}, local_salt={}, remote_salt={}",
+        negotiation.version, negotiation.field_size, negotiation.local_salt, remote_salt
+    );
     Ok(())
 }
 
@@ -399,39 +411,18 @@ pub async fn handle_send_tx_rcncl(
 #[cfg(feature = "erlay")]
 pub async fn handle_req_recon(
     message: crate::network::protocol::ReqReconMessage,
-    storage: Option<Arc<Storage>>,
+    negotiation: &crate::network::erlay::ErlayPeerNegotiation,
     mempool: Option<Arc<MempoolManager>>,
 ) -> Result<crate::network::protocol::ReqSktMessage> {
     use crate::network::erlay::ErlayTxSet;
 
-    // Get local transaction set from mempool
-    let mut tx_set = ErlayTxSet::new();
-
-    if let Some(mempool_mgr) = mempool {
-        // Get all transactions from mempool and add their hashes to the set
-        let transactions = mempool_mgr.get_transactions();
-        for tx in transactions {
-            let tx_hash = calculate_txid(&tx);
-            tx_set.add(tx_hash);
-        }
-        debug!(
-            "Erlay: Populated tx_set with {} transactions from mempool",
-            tx_set.size()
-        );
-    } else {
-        warn!("MempoolManager not available for Erlay reconciliation, using empty set");
-    }
-
-    // Create reconciliation sketch
-    let local_sketch = tx_set
-        .create_reconciliation_sketch(message.local_set_size as usize)
-        .map_err(|e| anyhow::anyhow!("Failed to create reconciliation sketch: {}", e))?;
+    let mut tx_set = erlay_tx_set_from_mempool(negotiation, mempool)?;
 
     // Return ReqSkt message with our sketch
     Ok(crate::network::protocol::ReqSktMessage {
         salt: message.salt,
         remote_set_size: tx_set.size() as u32,
-        field_size: message.field_size,
+        field_size: negotiation.field_size,
     })
 }
 
@@ -441,30 +432,11 @@ pub async fn handle_req_recon(
 #[cfg(feature = "erlay")]
 pub async fn handle_req_skt(
     message: crate::network::protocol::ReqSktMessage,
-    storage: Option<Arc<Storage>>,
+    negotiation: &crate::network::erlay::ErlayPeerNegotiation,
     mempool: Option<Arc<MempoolManager>>,
 ) -> Result<crate::network::protocol::SketchMessage> {
-    use crate::network::erlay::ErlayTxSet;
+    let mut tx_set = erlay_tx_set_from_mempool(negotiation, mempool)?;
 
-    // Get local transaction set from mempool
-    let mut tx_set = ErlayTxSet::new();
-
-    if let Some(mempool_mgr) = mempool {
-        // Get all transactions from mempool and add their hashes to the set
-        let transactions = mempool_mgr.get_transactions();
-        for tx in transactions {
-            let tx_hash = calculate_txid(&tx);
-            tx_set.add(tx_hash);
-        }
-        debug!(
-            "Erlay: Populated tx_set with {} transactions for sketch",
-            tx_set.size()
-        );
-    } else {
-        warn!("MempoolManager not available for Erlay sketch, using empty set");
-    }
-
-    // Create sketch
     let sketch = tx_set
         .create_reconciliation_sketch(message.remote_set_size as usize)
         .map_err(|e| anyhow::anyhow!("Failed to create sketch: {}", e))?;
@@ -472,54 +444,59 @@ pub async fn handle_req_skt(
     Ok(crate::network::protocol::SketchMessage {
         salt: message.salt,
         sketch,
-        field_size: message.field_size,
+        field_size: negotiation.field_size,
     })
 }
 
 /// Handle Sketch message (Erlay reconciliation sketch)
 ///
-/// Processes reconciliation sketch and identifies missing transactions.
+/// Processes reconciliation sketch and identifies set differences.
 #[cfg(feature = "erlay")]
 pub async fn handle_sketch(
     message: crate::network::protocol::SketchMessage,
-    storage: Option<Arc<Storage>>,
+    negotiation: &crate::network::erlay::ErlayPeerNegotiation,
     mempool: Option<Arc<MempoolManager>>,
-) -> Result<Vec<blvm_protocol::Hash>> {
-    use crate::network::erlay::ErlayTxSet;
+) -> Result<crate::network::erlay::ErlayReconcileDiff> {
+    let tx_set = erlay_tx_set_from_mempool(negotiation, mempool)?;
 
-    // Get local transaction set from mempool
-    let mut tx_set = ErlayTxSet::new();
+    let local_sketch = tx_set
+        .create_reconciliation_sketch(0)
+        .map_err(|e| anyhow::anyhow!("Failed to create local sketch: {}", e))?;
 
+    let diff = tx_set
+        .reconcile_with_peer(&local_sketch, &message.sketch)
+        .map_err(|e| anyhow::anyhow!("Failed to reconcile sets: {}", e))?;
+
+    debug!(
+        "Erlay: reconciliation diff peer_missing_short_ids={} we_have_peer_missing={}",
+        diff.peer_has_we_missing.len(),
+        diff.we_have_peer_missing.len()
+    );
+    Ok(diff)
+}
+
+#[cfg(feature = "erlay")]
+fn erlay_tx_set_from_mempool(
+    negotiation: &crate::network::erlay::ErlayPeerNegotiation,
+    mempool: Option<Arc<MempoolManager>>,
+) -> Result<crate::network::erlay::ErlayTxSet> {
+    use crate::network::erlay::{ErlayConfig, ErlayTxSet};
+
+    let config = ErlayConfig::from_negotiation(negotiation)
+        .ok_or_else(|| anyhow::anyhow!("Erlay not negotiated with peer"))?;
+    let mut tx_set = ErlayTxSet::with_config(config);
     if let Some(mempool_mgr) = mempool {
-        // Get all transactions from mempool and add their hashes to the set
-        let transactions = mempool_mgr.get_transactions();
-        for tx in transactions {
-            let tx_hash = calculate_txid(&tx);
-            tx_set.add(tx_hash);
+        for tx in mempool_mgr.get_transactions() {
+            tx_set.add(calculate_txid(&tx));
         }
         debug!(
-            "Erlay: Populated tx_set with {} transactions for reconciliation",
+            "Erlay: Populated tx_set with {} transactions from mempool",
             tx_set.size()
         );
     } else {
         warn!("MempoolManager not available for Erlay reconciliation, using empty set");
     }
-
-    // Create our local sketch
-    let local_sketch = tx_set
-        .create_reconciliation_sketch(0)
-        .map_err(|e| anyhow::anyhow!("Failed to create local sketch: {}", e))?;
-
-    // Reconcile sets
-    let missing_txs = tx_set
-        .reconcile_with_peer(&local_sketch, &message.sketch)
-        .map_err(|e| anyhow::anyhow!("Failed to reconcile sets: {}", e))?;
-
-    debug!(
-        "Erlay: Reconciliation found {} missing transactions",
-        missing_txs.len()
-    );
-    Ok(missing_txs)
+    Ok(tx_set)
 }
 
 /// Serialize GetFilteredBlock message to protocol format

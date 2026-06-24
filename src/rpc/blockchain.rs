@@ -187,6 +187,42 @@ impl BlockchainRpc {
         INITIAL_SUBSIDY >> halvings
     }
 
+    /// Wire-format block sizes for RPC (stripped, total with witness when stored, BIP141 weight).
+    fn compute_block_wire_sizes(
+        block: &blvm_protocol::Block,
+        witnesses: Option<&[Vec<blvm_protocol::segwit::Witness>]>,
+    ) -> (usize, usize, u64) {
+        use blvm_protocol::serialization::serialize_block_with_witnesses;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+
+        let stripped_size: usize = block
+            .transactions
+            .iter()
+            .map(|tx| serialize_transaction(tx).len())
+            .sum::<usize>()
+            + 80;
+
+        let block_size = if let Some(ws) = witnesses {
+            let wire = serialize_block_with_witnesses(block, ws, true);
+            wire.len().max(stripped_size)
+        } else {
+            stripped_size
+        };
+
+        let block_weight = (3 * stripped_size + block_size) as u64;
+        (stripped_size, block_size, block_weight)
+    }
+
+    /// Resolve RPC address param: hex scriptPubKey or Bech32/Base58 address string.
+    fn resolve_script_pubkey_param(address: &str) -> Result<Vec<u8>, RpcError> {
+        if let Ok(script) = hex::decode(address) {
+            if !script.is_empty() {
+                return Ok(script);
+            }
+        }
+        crate::rpc::rawtx::address_string_to_script_pubkey(address)
+    }
+
     /// Calculate MuHash3072 for UTXO set (Core gettxoutsetinfo muhash).
     fn calculate_utxo_muhash(utxo_set: &blvm_protocol::UtxoSet) -> [u8; 32] {
         crate::storage::assumeutxo::AssumeUtxoManager::calculate_utxo_hash(utxo_set)
@@ -201,14 +237,9 @@ impl BlockchainRpc {
         (tip_height - block_height + 1) as i64
     }
 
-    /// Format chainwork as hex string (32 bytes, big-endian)
-    /// Supports both u64 (legacy) and u128 (optimized cached chainwork)
-    fn format_chainwork(work: u128) -> String {
-        let mut bytes = [0u8; 32];
-        // Store work in last 16 bytes (big-endian)
-        let work_bytes = work.to_be_bytes();
-        bytes[16..32].copy_from_slice(&work_bytes);
-        hex::encode(bytes)
+    /// Format chainwork as hex string (32 bytes, Core `GetHex` / RPC order)
+    fn format_chainwork(work: blvm_consensus::pow::U256) -> String {
+        work.gbt_target_hex()
     }
 
     /// Get blockchain information
@@ -255,7 +286,10 @@ impl BlockchainRpc {
                 0
             };
 
-            let chainwork = storage.chain().get_chainwork(&best_hash)?.unwrap_or(0u128);
+            let chainwork = storage
+                .chain()
+                .get_chainwork(&best_hash)?
+                .unwrap_or_else(blvm_consensus::pow::U256::zero);
             // CRITICAL FIX: Removed calculate_total_work() fallback - it iterates over ALL blocks
             // (357k+ iterations) causing 3+ minute RPC delays. If chainwork isn't cached,
             // return 0 instead of doing expensive calculation.
@@ -367,39 +401,9 @@ impl BlockchainRpc {
                         .map(|h| Self::calculate_confirmations(h, tip_height))
                         .unwrap_or(0);
 
-                    // Calculate block sizes
-                    // strippedsize = block size without witness data (TX_NO_WITNESS)
-                    // size = block size with witness data (TX_WITH_WITNESS)
-                    use blvm_protocol::serialization::transaction::serialize_transaction;
-
-                    // Calculate stripped size: serialize block without witness data
-                    // This is the sum of all transaction sizes without witness
-                    let stripped_size: usize = block
-                        .transactions
-                        .iter()
-                        .map(|tx| serialize_transaction(tx).len())
-                        .sum::<usize>()
-                        + 80; // +80 for block header
-
-                    // Calculate total size: serialize block with witness data
-                    // For now, we'll use bincode serialization as approximation
-                    // In full implementation, we'd serialize with witness marker and data
-                    let total_size = bincode::serialize(&block)
-                        .map(|b| b.len())
-                        .unwrap_or(stripped_size);
-
-                    // Use stripped_size as size if we can't determine total_size
-                    // (For non-SegWit blocks, stripped_size == total_size)
-                    let block_size = if total_size > stripped_size {
-                        total_size
-                    } else {
-                        stripped_size
-                    };
-
-                    // Calculate block weight: 4 * base_size + total_size (BIP141)
-                    // base_size = stripped_size (without witness)
-                    // total_size = block_size (with witness)
-                    let block_weight = (4 * stripped_size + block_size) as u64;
+                    let witnesses = storage.blocks().get_witness(&hash_array).ok().flatten();
+                    let (stripped_size, block_size, block_weight) =
+                        Self::compute_block_wire_sizes(&block, witnesses.as_deref());
 
                     // Calculate median time from recent headers
                     let mediantime = if block_height.is_some() {
@@ -507,25 +511,6 @@ impl BlockchainRpc {
         }
 
         Err(anyhow::anyhow!("Storage not available"))
-    }
-
-    /// Get raw transaction (deprecated - use rawtx module)
-    pub async fn get_raw_transaction(&self, txid: &str) -> Result<Value> {
-        debug!("RPC: getrawtransaction {}", txid);
-
-        // Simplified implementation
-        Ok(json!({
-            "txid": txid,
-            "hash": txid,
-            "version": 1,
-            "size": 0,
-            "vsize": 0,
-            "weight": 0,
-            "locktime": 0,
-            "vin": [],
-            "vout": [],
-            "hex": ""
-        }))
     }
 
     /// Get block header
@@ -834,24 +819,31 @@ impl BlockchainRpc {
 
             let blockstore = storage.blocks();
 
+            let protocol_version = engine_arc.get_protocol_version();
+
             // Verify blocks from start_height to tip
             for height in start_height..=tip_height {
                 if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height) {
                     if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
-                        let (witnesses, _) =
-                            prepare_block_validation_context(blockstore.as_ref(), &block, height)
-                                .unwrap_or_else(|_| {
-                                    (
-                                        block
-                                            .transactions
-                                            .iter()
-                                            .map(|tx| {
-                                                tx.inputs.iter().map(|_| Vec::new()).collect()
-                                            })
-                                            .collect(),
-                                        None,
-                                    )
-                                });
+                        let witnesses_result = prepare_block_validation_context(
+                            blockstore.as_ref(),
+                            &block,
+                            height,
+                            protocol_version,
+                        );
+
+                        let witnesses = match witnesses_result {
+                            Ok((w, _)) => w,
+                            Err(e) => {
+                                errors.push(format!(
+                                    "Block at height {height} witness load error: {e}"
+                                ));
+                                if check_level >= 4 {
+                                    break;
+                                }
+                                continue;
+                            }
+                        };
 
                         match validate_block_with_context(
                             blockstore.as_ref(),
@@ -1080,8 +1072,24 @@ impl BlockchainRpc {
                 0.0
             };
 
-            // Get total transaction count (simplified - would need to count all blocks)
-            let total_tx_count = window_tx_count; // Simplified
+            // Cumulative tx count at chain tip (not limited to the stats window).
+            let total_tx_count: u64 = (0..=tip_height)
+                .filter_map(|height| {
+                    storage
+                        .blocks()
+                        .get_hash_by_height(height)
+                        .ok()
+                        .flatten()
+                        .and_then(|hash| {
+                            storage
+                                .blocks()
+                                .get_block_metadata(&hash)
+                                .ok()
+                                .flatten()
+                                .map(|m| m.n_tx as u64)
+                        })
+                })
+                .sum();
 
             Ok(json!({
                 "time": last_timestamp,
@@ -1156,18 +1164,9 @@ impl BlockchainRpc {
             if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
                 let tx_count = block.transactions.len();
 
-                let block_size = {
-                    let serialized_size = bincode::serialize(&block).map(|b| b.len()).unwrap_or(0);
-                    storage
-                        .blocks()
-                        .get_block_metadata(&block_hash)
-                        .ok()
-                        .flatten()
-                        .map(|_m| serialized_size)
-                        .unwrap_or(serialized_size)
-                };
-
-                let block_weight = block_size; // Simplified - would calculate weight properly
+                let witnesses = storage.blocks().get_witness(&block_hash).ok().flatten();
+                let (stripped_size, block_size, block_weight) =
+                    Self::compute_block_wire_sizes(&block, witnesses.as_deref());
 
                 // Get block height
                 let height = storage
@@ -1191,25 +1190,40 @@ impl BlockchainRpc {
                 // Calculate block subsidy
                 let subsidy = Self::calculate_block_subsidy(height);
 
-                // Calculate total fees (simplified - would need UTXO set for accurate calculation)
-                // For now, estimate: total_out - (subsidy * 100_000_000) if coinbase exists
+                // Total fees = coinbase outputs minus block subsidy (satoshis).
                 let total_fees = if !block.transactions.is_empty() {
-                    // Coinbase is first transaction
                     let coinbase_outputs: u64 = block.transactions[0]
                         .outputs
                         .iter()
                         .map(|out| out.value as u64)
                         .sum();
-                    // Fee = total outputs - (coinbase outputs which include subsidy)
-                    // This is simplified - real calculation needs UTXO set
-                    total_out.saturating_sub(coinbase_outputs)
+                    coinbase_outputs.saturating_sub(subsidy)
                 } else {
                     0
                 };
 
+                let non_coinbase_vsize: u64 = if tx_count > 1 {
+                    block
+                        .transactions
+                        .iter()
+                        .skip(1)
+                        .map(|tx| {
+                            use blvm_protocol::serialization::transaction::serialize_transaction;
+                            serialize_transaction(tx).len() as u64
+                        })
+                        .sum()
+                } else {
+                    0
+                };
+                let avgfeerate = if non_coinbase_vsize > 0 {
+                    total_fees as f64 / non_coinbase_vsize as f64 * 1000.0 / 100_000_000.0
+                } else {
+                    0.0
+                };
+
                 Ok(json!({
                     "avgfee": if tx_count > 1 { total_fees as f64 / (tx_count - 1) as f64 / 100_000_000.0 } else { 0.0 },
-                    "avgfeerate": 0.0, // Would need to calculate from fees and sizes
+                    "avgfeerate": avgfeerate,
                     "avgtxsize": if tx_count > 0 { block_size / tx_count } else { 0 },
                     "blockhash": encode_hash32_rpc(&block_hash),
                     "feerate_percentiles": [0, 0, 0, 0, 0],
@@ -1725,14 +1739,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| RpcError::missing_parameter("address", Some("string")))?;
 
-        // Decode address to script_pubkey (hex-encoded for now)
-        let script_pubkey = hex::decode(address).map_err(|e| {
-            RpcError::invalid_address_format(
-                address,
-                Some(&format!("Invalid hex encoding: {e}")),
-                Some("hex-encoded script pubkey"),
-            )
-        })?;
+        // Decode address to script_pubkey (hex script or Bech32/Base58 address).
+        let script_pubkey = Self::resolve_script_pubkey_param(address)?;
 
         // Get transactions for this address
         let transactions = storage
@@ -1767,14 +1775,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| RpcError::missing_parameter("address", Some("string")))?;
 
-        // Decode address to script_pubkey
-        let script_pubkey = hex::decode(address).map_err(|e| {
-            RpcError::invalid_address_format(
-                address,
-                Some(&format!("Invalid hex encoding: {e}")),
-                Some("hex-encoded script pubkey"),
-            )
-        })?;
+        // Decode address to script_pubkey (hex script or Bech32/Base58 address).
+        let script_pubkey = Self::resolve_script_pubkey_param(address)?;
 
         // Get transactions for this address
         let transactions = storage
@@ -1782,21 +1784,34 @@ impl BlockchainRpc {
             .get_transactions_by_address(&script_pubkey)
             .map_err(|e| RpcError::internal_error(format!("Failed to query address: {e}")))?;
 
-        // Calculate balance by summing outputs
-        // Note: This is simplified - full balance calculation would need UTXO tracking
         let mut balance: i64 = 0;
+        let mut received: i64 = 0;
+        let mut sent: i64 = 0;
+
         for tx in &transactions {
-            for output in &tx.outputs {
+            use blvm_protocol::block::calculate_tx_id;
+            let txid = calculate_tx_id(tx);
+
+            for (idx, output) in tx.outputs.iter().enumerate() {
                 if output.script_pubkey == script_pubkey {
-                    balance += output.value;
+                    received += output.value;
+                    let outpoint = blvm_protocol::OutPoint {
+                        hash: txid,
+                        index: idx as u32,
+                    };
+                    if storage.utxos().get_utxo(&outpoint).ok().flatten().is_some() {
+                        balance += output.value;
+                    } else {
+                        sent += output.value;
+                    }
                 }
             }
         }
 
         Ok(json!({
             "balance": balance,
-            "received": balance, // Simplified
-            "sent": 0, // Would need to track inputs
+            "received": received,
+            "sent": sent,
         }))
     }
 
@@ -1935,14 +1950,8 @@ impl BlockchainRpc {
             .and_then(|p| p.as_str())
             .ok_or_else(|| RpcError::missing_parameter("address", Some("string")))?;
 
-        // Decode address to script_pubkey (hex-encoded for now)
-        let script_pubkey = hex::decode(address).map_err(|e| {
-            RpcError::invalid_address_format(
-                address,
-                Some(&format!("Invalid hex encoding: {e}")),
-                Some("hex-encoded script pubkey"),
-            )
-        })?;
+        // Decode address to script_pubkey (hex script or Bech32/Base58 address).
+        let script_pubkey = Self::resolve_script_pubkey_param(address)?;
 
         if let Some(ref storage) = self.storage {
             // Get transactions for this address

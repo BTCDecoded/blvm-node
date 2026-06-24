@@ -9,7 +9,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
-use common::{MINING_RPC_CHAIN_BLOCKS, setup_mining_chain, valid_transaction};
+use common::{
+    MINING_RPC_CHAIN_BLOCKS, patch_storage_chain_network_regtest, setup_mining_chain,
+    valid_transaction,
+};
 
 async fn expect_block_template(
     mining: &MiningRpc,
@@ -235,4 +238,239 @@ async fn test_get_active_rules() {
     assert!(!rule_strings.contains(&"csv".to_string()));
     assert!(!rule_strings.contains(&"segwit".to_string()));
     assert!(!rule_strings.contains(&"taproot".to_string()));
+}
+
+#[tokio::test]
+async fn test_getblocktemplate_includes_prioritized_mempool_tx() {
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{TransactionInput, TransactionOutput};
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
+
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
+
+    let funding_hash = [0x55u8; 32];
+    storage
+        .utxos()
+        .add_utxo(
+            &OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            &UTXO {
+                value: 100_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            },
+        )
+        .unwrap();
+
+    let tx = blvm_protocol::Transaction {
+        version: 1,
+        inputs: vec![TransactionInput {
+            prevout: OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            script_sig: vec![OP_1],
+            sequence: 0xffffffff,
+        }]
+        .into(),
+        outputs: vec![TransactionOutput {
+            value: 90_000,
+            script_pubkey: vec![OP_1].into(),
+        }]
+        .into(),
+        lock_time: 0,
+    };
+    assert!(
+        mempool.add_transaction(tx).expect("add_transaction"),
+        "mempool must accept funded tx"
+    );
+
+    let template = expect_block_template(&mining, &serde_json::json!([])).await;
+    let entries = template.get("transactions").unwrap().as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "GBT transactions list should include one mempool entry"
+    );
+    assert_eq!(entries[0].get("txid").unwrap().as_str().unwrap().len(), 64);
+    assert!(entries[0].get("fee").unwrap().as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn test_getblocktemplate_includes_segwit_mempool_tx_on_regtest() {
+    use blvm_protocol::block::calculate_tx_id;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::segwit::Witness;
+    use blvm_protocol::{TransactionInput, TransactionOutput};
+    use sha2::{Digest, Sha256};
+
+    fn p2wsh_scriptpubkey(witness_script: &[u8]) -> Vec<u8> {
+        let hash = Sha256::digest(witness_script);
+        let mut spk = vec![blvm_protocol::opcodes::OP_0, 0x20];
+        spk.extend_from_slice(&hash);
+        spk
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
+
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
+    patch_storage_chain_network_regtest(storage.as_ref()).unwrap();
+
+    let witness_script = vec![OP_1];
+    let funding_hash = [0x57u8; 32];
+    storage
+        .utxos()
+        .add_utxo(
+            &OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            &UTXO {
+                value: 100_000,
+                script_pubkey: p2wsh_scriptpubkey(&witness_script).into(),
+                height: 0,
+                is_coinbase: false,
+            },
+        )
+        .unwrap();
+
+    let tx = blvm_protocol::Transaction {
+        version: 2,
+        inputs: vec![TransactionInput {
+            prevout: OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            script_sig: vec![],
+            sequence: 0xfffffffe,
+        }]
+        .into(),
+        outputs: vec![TransactionOutput {
+            value: 90_000,
+            script_pubkey: vec![OP_1].into(),
+        }]
+        .into(),
+        lock_time: 0,
+    };
+    let txid = calculate_tx_id(&tx);
+    let witness_stack: Witness = vec![witness_script.clone()];
+    assert!(
+        mempool
+            .add_transaction_with_witness(tx, Some(vec![witness_stack.clone()]))
+            .expect("add segwit tx"),
+        "mempool must accept funded P2WSH spend on regtest"
+    );
+
+    let template =
+        expect_block_template(&mining, &serde_json::json!([{"rules": ["segwit"]}])).await;
+    let entries = template.get("transactions").unwrap().as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "GBT must include SegWit mempool tx when accept_to_memory_pool validates on regtest"
+    );
+    assert_eq!(
+        entries[0].get("txid").unwrap().as_str().unwrap(),
+        hex::encode(txid)
+    );
+    let rules = template.get("rules").unwrap().as_array().unwrap();
+    assert!(
+        rules.iter().any(|r| r.as_str() == Some("segwit")),
+        "regtest GBT must advertise segwit rule"
+    );
+}
+
+#[tokio::test]
+async fn test_getblocktemplate_mempool_witness_available_for_template() {
+    use blvm_protocol::block::calculate_tx_id;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::segwit::Witness;
+    use blvm_protocol::{TransactionInput, TransactionOutput};
+    use sha2::{Digest, Sha256};
+
+    fn p2wsh_scriptpubkey(witness_script: &[u8]) -> Vec<u8> {
+        let hash = Sha256::digest(witness_script);
+        let mut spk = vec![blvm_protocol::opcodes::OP_0, 0x20];
+        spk.extend_from_slice(&hash);
+        spk
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
+
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
+    patch_storage_chain_network_regtest(storage.as_ref()).unwrap();
+
+    let funding_hash = [0x56u8; 32];
+    let witness_script = vec![OP_1];
+    storage
+        .utxos()
+        .add_utxo(
+            &OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            &UTXO {
+                value: 100_000,
+                script_pubkey: p2wsh_scriptpubkey(&witness_script).into(),
+                height: 0,
+                is_coinbase: false,
+            },
+        )
+        .unwrap();
+
+    let tx = blvm_protocol::Transaction {
+        version: 2,
+        inputs: vec![TransactionInput {
+            prevout: OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            script_sig: vec![],
+            sequence: 0xfffffffe,
+        }]
+        .into(),
+        outputs: vec![TransactionOutput {
+            value: 90_000,
+            script_pubkey: vec![OP_1].into(),
+        }]
+        .into(),
+        lock_time: 0,
+    };
+    let txid = calculate_tx_id(&tx);
+    let witness_stack: Witness = vec![witness_script.clone()];
+    assert!(
+        mempool
+            .add_transaction_with_witness(tx, Some(vec![witness_stack.clone()]))
+            .expect("add with witness"),
+        "mempool must store witness-bearing tx"
+    );
+    assert_eq!(
+        mempool.get_transaction_witnesses(&txid),
+        Some(vec![witness_stack])
+    );
+
+    let template = expect_block_template(&mining, &serde_json::json!([])).await;
+    let entries = template.get("transactions").unwrap().as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "witness-backed tx must survive create_block_template on regtest"
+    );
+    assert_eq!(
+        entries[0].get("txid").unwrap().as_str().unwrap(),
+        hex::encode(txid)
+    );
 }

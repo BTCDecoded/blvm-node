@@ -2,8 +2,38 @@
 //!
 //! Provides signal handlers for SIGTERM, SIGINT, and other termination signals.
 
+use std::sync::OnceLock;
+use std::sync::atomic::Ordering;
 use tokio::signal;
+use tokio::sync::watch;
 use tracing::{info, warn};
+
+struct ShutdownWatch {
+    tx: watch::Sender<bool>,
+    /// Keeps the watch channel open for the lifetime of the process.
+    _rx: watch::Receiver<bool>,
+}
+
+static SHUTDOWN: OnceLock<ShutdownWatch> = OnceLock::new();
+
+fn shutdown_watch() -> &'static ShutdownWatch {
+    SHUTDOWN.get_or_init(|| {
+        let (tx, rx) = watch::channel(false);
+        let notify_tx = tx.clone();
+        tokio::spawn(async move {
+            wait_for_shutdown_signal().await;
+            #[cfg(feature = "production")]
+            crate::node::parallel_ibd::IBD_SHUTDOWN_REQUESTED.store(true, Ordering::Release);
+            let _ = notify_tx.send(true);
+            // If the runtime is blocked on sync RocksDB / UTXO work, `node.start()` may not
+            // yield for minutes. Guarantee termination within a bounded wall-clock window.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            warn!("Shutdown grace period elapsed — forcing process exit");
+            std::process::exit(0);
+        });
+        ShutdownWatch { tx, _rx: rx }
+    })
+}
 
 /// Wait for shutdown signal (SIGTERM, SIGINT, or Ctrl+C)
 ///
@@ -67,17 +97,14 @@ pub async fn shutdown_signal() {
     wait_for_shutdown_signal().await;
 }
 
-/// Create a shutdown signal receiver
+/// Subscribe to the process-wide shutdown watch channel.
 ///
-/// Returns a channel that receives a message when shutdown is requested.
-/// Note: oneshot::Receiver doesn't have try_recv(), so use with tokio::select! or check in async context.
-pub fn create_shutdown_receiver() -> tokio::sync::watch::Receiver<bool> {
-    let (tx, rx) = tokio::sync::watch::channel(false);
+/// The OS signal handler is registered once; all subscribers receive the same notification.
+pub fn create_shutdown_receiver() -> watch::Receiver<bool> {
+    shutdown_watch().tx.subscribe()
+}
 
-    tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        let _ = tx.send(true);
-    });
-
-    rx
+/// Returns true after a shutdown signal has been received.
+pub fn shutdown_requested() -> bool {
+    *shutdown_watch().tx.borrow()
 }

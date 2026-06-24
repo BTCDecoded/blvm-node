@@ -8,6 +8,7 @@ use crate::node::mempool::MempoolManager;
 use crate::storage::Storage;
 use crate::utils::{current_timestamp, current_timestamp_nanos};
 use anyhow::Result;
+use blvm_consensus::Network;
 use blvm_protocol::mempool::Mempool;
 use blvm_protocol::{BitcoinProtocolEngine, ConsensusProof, UtxoSet};
 use std::collections::HashMap;
@@ -116,9 +117,11 @@ pub struct NetworkManager {
     peer_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<NetworkMessage>>>,
     /// Block filter service for BIP157/158
     filter_service: crate::network::filter_service::BlockFilterService,
+    /// Peer inventory tracking (inv relay)
+    inventory: Arc<std::sync::Mutex<super::inventory::InventoryManager>>,
     /// Consensus engine for mempool acceptance
     consensus: ConsensusProof,
-    /// Shared UTXO set for mempool checks (placeholder threading)
+    /// Shared UTXO snapshot for mempool fee checks (synced from chainstate storage).
     utxo_set: Arc<Mutex<UtxoSet>>,
     /// Shared mempool
     mempool: Arc<Mutex<Mempool>>,
@@ -420,6 +423,9 @@ impl NetworkManager {
             peer_tx,
             peer_rx,
             filter_service: crate::network::filter_service::BlockFilterService::new(),
+            inventory: Arc::new(std::sync::Mutex::new(
+                super::inventory::InventoryManager::new(),
+            )),
             consensus: ConsensusProof::new(),
             utxo_set: Arc::new(Mutex::new(UtxoSet::default())),
             mempool: Arc::new(Mutex::new(Mempool::new())),
@@ -1099,6 +1105,18 @@ impl NetworkManager {
         ip
     }
 
+    /// Returns true if `addr` maps to a connected peer (TCP socket or transport mapping).
+    pub async fn is_peer_connected(&self, addr: SocketAddr) -> bool {
+        let pm = self.peer_manager.lock().await;
+        if let Some(transport_addr) = pm.find_transport_addr_by_socket(addr) {
+            return pm
+                .get_peer(&transport_addr)
+                .is_some_and(|p| p.is_connected());
+        }
+        pm.get_peer(&TransportAddr::Tcp(addr))
+            .is_some_and(|p| p.is_connected())
+    }
+
     /// Register a pending Block request
     /// Returns a receiver that will receive the Block response
     pub fn register_block_request(
@@ -1117,6 +1135,20 @@ impl NetworkManager {
             })
         });
         rx
+    }
+
+    /// Drop a pending block request (e.g. GetData failed after register).
+    pub fn cancel_block_request(
+        &self,
+        peer_addr: SocketAddr,
+        block_hash: blvm_protocol::Hash,
+    ) {
+        let key = (Self::block_request_key(peer_addr), block_hash);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.pending_block_requests.lock().await.remove(&key);
+            })
+        });
     }
 
     /// Complete a pending Block request
@@ -1202,17 +1234,24 @@ impl NetworkManager {
     pub fn get_highest_peer_start_height(&self) -> Option<u64> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let pm = self.peer_manager.lock().await;
-                let mut max_height: Option<i32> = None;
-                for (_addr, peer) in pm.peers().iter() {
-                    let peer_height = peer.start_height();
-                    if peer_height > 0 {
-                        max_height = Some(max_height.map_or(peer_height, |m| m.max(peer_height)));
-                    }
-                }
-                max_height.map(|h| h as u64)
+                self.get_highest_peer_start_height_async().await
             })
         })
+    }
+
+    /// Async variant for use from the node run loop (avoids block_in_place inside async tasks).
+    pub async fn get_highest_peer_start_height_async(&self) -> Option<u64> {
+        let pm = self.peer_manager.lock().await;
+        let mut max_height: Option<u64> = None;
+        for (_addr, peer) in pm.peers().iter() {
+            let from_version = peer.start_height().max(0) as u64;
+            let from_updates = peer.best_block_height().unwrap_or(0);
+            let peer_height = from_version.max(from_updates);
+            if peer_height > 0 {
+                max_height = Some(max_height.map_or(peer_height, |m| m.max(peer_height)));
+            }
+        }
+        max_height
     }
 
     /// Broadcast a message to all peers
@@ -1919,9 +1958,14 @@ impl NetworkManager {
             let utxo_lock = self.utxo_set.lock().await;
             let mempool_lock = self.mempool.lock().await;
             for tx in txs {
-                let _ =
-                    self.consensus
-                        .accept_to_memory_pool(tx, &utxo_lock, &mempool_lock, 0, None);
+                let _ = self.consensus.accept_to_memory_pool(
+                    tx,
+                    &utxo_lock,
+                    &mempool_lock,
+                    0,
+                    None,
+                    Network::Mainnet,
+                );
             }
         }
         Ok(())
@@ -1997,6 +2041,27 @@ impl NetworkManager {
     /// Get filter service reference
     pub fn filter_service(&self) -> &crate::network::filter_service::BlockFilterService {
         &self.filter_service
+    }
+
+    pub(crate) fn inventory(&self) -> &Arc<std::sync::Mutex<super::inventory::InventoryManager>> {
+        &self.inventory
+    }
+
+    /// Record inventory announced by a peer (`inv` message).
+    pub(crate) fn handle_inventory_received(
+        &self,
+        data: &[u8],
+        peer_addr: SocketAddr,
+    ) -> Result<()> {
+        let inv_msg = match ProtocolParser::parse_message(data) {
+            Ok(ProtocolMessage::Inv(msg)) => msg,
+            _ => return Ok(()),
+        };
+        let peer = peer_addr.to_string();
+        self.inventory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .add_inventory(&peer, &inv_msg.inventory)
     }
 
     /// Add a persistent peer (will be connected to on startup)
@@ -2579,9 +2644,27 @@ impl NetworkManager {
         })
     }
 
-    /// Create version message with service flags
-    ///
-    /// Creates version message with service flags for all supported features
+    /// Returns the shared UTXO set Arc so other components (e.g. MempoolManager) can be wired in.
+    pub fn utxo_set_arc(&self) -> Arc<Mutex<UtxoSet>> {
+        Arc::clone(&self.utxo_set)
+    }
+
+    /// Replace the shared UTXO snapshot (called after loading chainstate or connecting a block).
+    pub async fn replace_utxo_snapshot(&self, snapshot: UtxoSet) {
+        *self.utxo_set.lock().await = snapshot;
+    }
+
+    /// Load the current UTXO set from storage into the shared snapshot.
+    pub async fn sync_utxo_from_storage(&self) -> Result<()> {
+        let Some(ref storage) = self.storage else {
+            return Ok(());
+        };
+        let snapshot = storage.utxos().get_all_utxos()?;
+        self.replace_utxo_snapshot(snapshot).await;
+        Ok(())
+    }
+
+    /// Create version message with service flags for all supported features.
     ///
     /// Sets service flags based on:
     /// - Standard Bitcoin flags:
@@ -2593,12 +2676,6 @@ impl NetworkManager {
     /// - Dandelion: NODE_DANDELION (if feature enabled)
     /// - Package Relay: NODE_PACKAGE_RELAY (always enabled)
     /// - FIBRE: NODE_FIBRE (always enabled)
-    ///
-    /// Returns the shared UTXO set Arc so other components (e.g. MempoolManager) can be wired in.
-    pub fn utxo_set_arc(&self) -> Arc<Mutex<UtxoSet>> {
-        Arc::clone(&self.utxo_set)
-    }
-
     pub fn create_version_message(
         &self,
         version: i32,

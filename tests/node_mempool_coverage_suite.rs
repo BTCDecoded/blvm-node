@@ -174,6 +174,51 @@ fn mempool_prioritized_transactions_by_fee_rate() {
 }
 
 #[test]
+fn mempool_prioritise_transaction_reorders_by_effective_fee() {
+    use blvm_protocol::{OutPoint, UTXO};
+    use std::sync::Arc;
+
+    let mut utxo_set = create_protocol_test_utxo_set();
+    utxo_set.insert(
+        OutPoint {
+            hash: [2; 32],
+            index: 0,
+        },
+        Arc::new(UTXO {
+            value: 100_000,
+            script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20).into(),
+            height: 0,
+            is_coinbase: false,
+        }),
+    );
+
+    let mempool = MempoolManager::new();
+    let low_fee_tx = tx_spending(
+        OutPoint {
+            hash: [1; 32],
+            index: 0,
+        },
+        90_000,
+    );
+    let high_fee_tx = tx_spending(
+        OutPoint {
+            hash: [2; 32],
+            index: 0,
+        },
+        40_000,
+    );
+    mempool.add_transaction(low_fee_tx.clone()).unwrap();
+    mempool.add_transaction(high_fee_tx.clone()).unwrap();
+
+    let low_hash = calculate_tx_id(&low_fee_tx);
+    assert!(mempool.prioritise_transaction(&low_hash, 1_000_000));
+
+    let ordered = mempool.get_prioritized_transactions(2, &utxo_set);
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(calculate_tx_id(&ordered[0]), low_hash);
+}
+
+#[test]
 fn mempool_save_and_load_round_trip() {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("mempool.bin");

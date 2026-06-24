@@ -125,6 +125,16 @@ async fn network_manager_create_version_message_sets_services() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn network_manager_replace_utxo_snapshot() {
+    use blvm_protocol::UtxoSet;
+
+    let nm = NetworkManager::with_config(localhost(), 8, TransportPreference::TCP_ONLY, None);
+    let snapshot = UtxoSet::default();
+    nm.replace_utxo_snapshot(snapshot).await;
+    assert!(nm.utxo_set_arc().lock().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn network_manager_peer_transport_and_start_height() {
     let nm = NetworkManager::with_config(localhost(), 8, TransportPreference::TCP_ONLY, None);
     assert!(nm.get_highest_peer_start_height().is_none());

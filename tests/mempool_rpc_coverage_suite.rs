@@ -84,6 +84,36 @@ async fn test_getmempoolentry_for_known_tx() {
     let entry = rpc.getmempoolentry(&json!([txid])).await.unwrap();
     assert!(entry.get("size").is_some());
     assert!(entry.get("fee").is_some());
+    assert_eq!(
+        entry.get("ancestorfees").unwrap().as_f64(),
+        entry.get("fee").unwrap().as_f64()
+    );
+}
+
+#[tokio::test]
+async fn test_getmempoolentry_modified_fee_in_package_totals() {
+    let (_dir, mempool, rpc, txid) = rpc_with_mempool();
+    let hash_bytes = hex::decode(&txid).unwrap();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hash_bytes);
+    assert!(mempool.prioritise_transaction(&hash, 50_000));
+
+    let entry = rpc.getmempoolentry(&json!([txid])).await.unwrap();
+    let base = entry.get("fee").unwrap().as_f64().unwrap();
+    let modified = entry.get("modifiedfee").unwrap().as_f64().unwrap();
+    assert!(modified >= base);
+    assert_eq!(
+        entry.get("ancestorfees").unwrap().as_f64().unwrap(),
+        modified
+    );
+    assert_eq!(
+        entry.get("descendantfees").unwrap().as_f64().unwrap(),
+        modified
+    );
+    assert_eq!(
+        entry.get("fees").unwrap().get("ancestor").unwrap().as_f64(),
+        Some(modified)
+    );
 }
 
 #[tokio::test]

@@ -68,6 +68,7 @@ fn test_check_storage_bounds_with_pruning_enabled() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     setup_mining_chain_on(&storage, 64).unwrap();

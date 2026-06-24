@@ -751,47 +751,34 @@ impl PruningManager {
             if let Some(block_hash) = self.blockstore.get_hash_by_height(height)? {
                 // Get block
                 if let Some(block) = self.blockstore.get_block(&block_hash)? {
-                    // Get witnesses for this block
-                    let witnesses =
-                        self.blockstore
-                            .get_witness(&block_hash)?
-                            .unwrap_or_else(|| {
-                                // If no witnesses stored, create empty witnesses
-                                block.transactions.iter().map(|_| Vec::new()).collect()
-                            });
+                    let witnesses = crate::node::block_processor::load_witnesses_for_block_network(
+                        &self.blockstore,
+                        &block,
+                        height,
+                        self.network,
+                    )?;
 
                     let ctx =
                         blvm_protocol::block::BlockValidationContext::for_network(self.network);
                     let (validation_result, new_utxo_set, _undo_log) =
                         connect_block(&block, &witnesses, utxo_set, height, &ctx)?;
 
-                    // Check validation result
                     if !matches!(validation_result, blvm_protocol::ValidationResult::Valid) {
-                        warn!(
-                            "Block at height {} failed validation during UTXO reconstruction",
-                            height
-                        );
-                        // Continue anyway - this might be expected for some edge cases
+                        return Err(anyhow!(
+                            "block at height {height} failed validation during UTXO reconstruction"
+                        ));
                     }
 
-                    // Update UTXO set for next iteration
                     utxo_set = new_utxo_set;
                 } else {
-                    // Block not found - this shouldn't happen if chain is intact
-                    warn!(
-                        "Block at height {} not found during UTXO reconstruction, using current UTXO set as fallback",
-                        height
-                    );
-                    // Use current UTXO set as fallback
-                    return utxostore.get_all_utxos();
+                    return Err(anyhow!(
+                        "block at height {height} not found during UTXO reconstruction"
+                    ));
                 }
             } else {
-                // Height not found - use current UTXO set as fallback
-                warn!(
-                    "Height {} not found in chain during UTXO reconstruction, using current UTXO set",
-                    height
-                );
-                return utxostore.get_all_utxos();
+                return Err(anyhow!(
+                    "height {height} not found in chain during UTXO reconstruction"
+                ));
             }
         }
 
@@ -801,5 +788,38 @@ impl PruningManager {
             utxo_set.len()
         );
         Ok(utxo_set)
+    }
+}
+
+#[cfg(all(test, feature = "utxo-commitments"))]
+mod reconstruct_tests {
+    use super::*;
+    use crate::config::{PruningConfig, PruningMode};
+    use crate::storage::blockstore::BlockStore;
+    use crate::storage::database::{create_database, default_backend};
+    use crate::storage::utxostore::UtxoStore;
+    use blvm_protocol::types::Network;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn reconstruct_missing_chain_height_errors() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
+        let blockstore = Arc::new(BlockStore::new(Arc::clone(&db)).unwrap());
+        let utxostore = UtxoStore::new(Arc::clone(&db)).unwrap();
+        let config = PruningConfig {
+            mode: PruningMode::Disabled,
+            ..Default::default()
+        };
+        let manager = PruningManager::new(config, blockstore).with_network(Network::Regtest);
+
+        let err = manager
+            .reconstruct_utxo_set_at_height(1, &utxostore)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "unexpected error: {err}"
+        );
     }
 }

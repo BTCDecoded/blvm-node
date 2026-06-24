@@ -695,6 +695,8 @@ struct ValidateJob {
     recent_headers: Vec<Arc<BlockHeader>>,
     /// Precomputed tx-ids from the feeder coordinator.
     tx_ids: Vec<Hash>,
+    /// Cumulative header chainwork through this block (assume-valid gate).
+    best_header_chainwork: blvm_consensus::pow::U256,
     cached_network_time: u64,
     /// Pre-extracted input keys (filtered: skips coinbase + intra-block spends).
     keys: Vec<OutPointKey>,
@@ -930,6 +932,7 @@ fn run_validation_worker_shared(
             recent_opt,
             job.cached_network_time,
             Some(&job.tx_ids),
+            Some(job.best_header_chainwork),
         );
         let elapsed = t_val.elapsed();
         // Drop tx-ids immediately — they live in `job.tx_ids` and `ValidateResult` discards them
@@ -1359,6 +1362,21 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     );
 
     let mut next_validation_height = start_height;
+    // Consecutive feeder waits at the same height without receiving a block.
+    let mut feeder_stall_count: u32 = 0;
+    let mut feeder_stall_at_height: u64 = start_height;
+
+    use blvm_consensus::pow::{get_block_proof, U256};
+    let mut running_header_chainwork = if start_height == 0 {
+        U256::zero()
+    } else {
+        blockstore
+            .get_hash_by_height(start_height.saturating_sub(1))
+            .ok()
+            .flatten()
+            .and_then(|prev_hash| storage_clone.chain().get_chainwork(&prev_hash).ok().flatten())
+            .unwrap_or(U256::zero())
+    };
 
     // FEEDER BUFFER: Block feeder drains ready_rx into shared state. We read next block and
     // lookahead blocks for protect_keys. Buffer fills while validation runs.
@@ -1799,6 +1817,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // under stop-write throttling, etc. This watchdog observes the height atomic
     // every 30 s and dumps the queue/cap/handle state when it sees a freeze, so
     // the next post-mortem can pinpoint which stage is stuck instead of guessing.
+    struct IbdValidationWatchdogGuard {
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for IbdValidationWatchdogGuard {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
     let watchdog_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watchdog_handle = {
         let validation_height = Arc::clone(&validation_height);
@@ -1881,6 +1911,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 }
             })
             .expect("spawn ibd-validation-watchdog")
+    };
+    let _watchdog_guard = IbdValidationWatchdogGuard {
+        shutdown: Arc::clone(&watchdog_shutdown),
+        handle: Some(watchdog_handle),
     };
 
     loop {
@@ -1990,6 +2024,27 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             guard.1 = true; // mark feeder done; dispatch loop will see None
                             break None;
                         }
+                        if next_validation_height == feeder_stall_at_height {
+                            feeder_stall_count = feeder_stall_count.saturating_add(1);
+                        } else {
+                            feeder_stall_at_height = next_validation_height;
+                            feeder_stall_count = 1;
+                        }
+                        const MAX_FEEDER_STALLS: u32 = 24;
+                        if feeder_stall_count >= MAX_FEEDER_STALLS {
+                            let stall_secs = feeder_wait_timeout.as_secs()
+                                * u64::from(MAX_FEEDER_STALLS);
+                            return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err)
+                            {
+                                Ok(()) => Err(anyhow::anyhow!(
+                                    "IBD download stalled: no block at height {} after ~{}s \
+                                     (coordinator/workers may have exited early)",
+                                    next_validation_height,
+                                    stall_secs
+                                )),
+                                Err(e) => Err(e),
+                            };
+                        }
                         let cur_min = guard.0.min_buffered_height();
                         warn!(
                             "[IBD_STALL] Validation waiting for block {} (buffer has {} blocks, min_height={:?}) — coordinator/feeder may be blocked",
@@ -2030,6 +2085,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             if blocks_synced == 0 && in_flight.is_empty() {
                 info!("Validation: first block received, height {}", h);
             }
+            feeder_stall_count = 0;
 
             // 4d: Lookahead blocks buffer for dynamic eviction protect_keys.
             let need_blocks_buf = ibd_store_v2_for_validation.is_dynamic_eviction();
@@ -2050,6 +2106,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // `witnesses_d` is `SharedWitnesses = Arc<Vec<Vec<Witness>>>` from the feeder;
             // no Arc::new() needed — reuse the same Arc that was allocated at download time.
             let witnesses_storage_d: Arc<Vec<Vec<Witness>>> = if witnesses_d.is_empty() {
+                use blvm_protocol::features::FeatureRegistry;
+                let registry = FeatureRegistry::for_protocol(protocol.get_protocol_version());
+                let segwit_on =
+                    registry.is_feature_active("segwit", h, block_arc_d.header.timestamp);
+                if segwit_on {
+                    return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
+                        Ok(()) => Err(anyhow::anyhow!(
+                            "missing witness data for block at height {h} (SegWit active)"
+                        )),
+                        Err(e) => Err(e),
+                    };
+                }
                 shared_empty_witness_stacks(block_arc_d.transactions.len())
             } else if witnesses_d.len() != block_arc_d.transactions.len() {
                 return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
@@ -2123,6 +2191,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             let recent_snap = std::mem::replace(&mut recent_snap_buf, Vec::with_capacity(12));
             // Per-job wall clock for header validation (reject future blocks). Cheap vs ECDSA work.
             let cached_network_time = current_timestamp();
+            let block_work = get_block_proof(block_arc_d.header.bits).unwrap_or(U256::zero());
+            running_header_chainwork = running_header_chainwork.saturating_add(block_work);
+            let header_chainwork_for_job = running_header_chainwork;
 
             // Speculative additions (all outputs block h creates) were precomputed on the
             // prefetch worker pool — see `prefetch::build_spec_adds`. Here we only do a cheap
@@ -2183,6 +2254,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 bip30_index: bip30_for_job,
                 recent_headers: recent_snap,
                 tx_ids: tx_ids_precomputed_d,
+                best_header_chainwork: header_chainwork_for_job,
                 cached_network_time,
                 keys: keys_for_job,
                 spec_adds_snapshot,
@@ -3079,6 +3151,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
     }
     let last_validated = next_validation_height.saturating_sub(1);
+    if last_validated < effective_end_height {
+        return Err(anyhow::anyhow!(
+            "IBD incomplete: validated through height {} but need {}",
+            last_validated,
+            effective_end_height
+        ));
+    }
     if let Err(e) = ibd_store_v2_for_validation.flush_disk() {
         warn!(
             "Failed to flush ibd_utxos memtable at final shutdown (height {}): {}",
@@ -3113,12 +3192,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // Watermark must advance only from flush worker paths after `flush_disk` (see
     // `push_utxo_flush_from_retire`). Bumping from tip caused resume at height H with an empty or
     // partial `ibd_utxos` tree → immediate `UTXO not found for input`.
-
-    // Signal the watchdog to exit so the validation thread joins cleanly on success. Early-return
-    // (error) paths skip this and let the watchdog die when the process exits — fine because the
-    // watchdog only logs and holds no resources besides Arc clones.
-    watchdog_shutdown.store(true, Ordering::Relaxed);
-    let _ = watchdog_handle.join();
 
     info!("IBD shutdown: validation loop complete");
     Ok(())

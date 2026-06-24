@@ -9,6 +9,7 @@ pub mod cache;
 pub mod control;
 pub mod errors;
 pub mod mempool;
+pub mod merkle_block;
 pub mod methods;
 pub mod mining;
 
@@ -489,6 +490,13 @@ impl RpcManager {
         }
         if self.marketplace_fetch_enabled {
             control_rpc = control_rpc.with_marketplace_fetch(true);
+        }
+        if let Some(ref metrics) = self.metrics {
+            control_rpc = control_rpc.with_monitoring(
+                Arc::clone(metrics),
+                self.network_manager.clone(),
+                self.storage.clone(),
+            );
         }
         let control_rpc = Arc::new(control_rpc);
 

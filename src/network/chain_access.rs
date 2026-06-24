@@ -77,6 +77,10 @@ impl ChainStateAccess for NodeChainAccess {
         // MempoolManager now stores full transactions, so we can retrieve them directly
         self.mempool.get_transactions()
     }
+
+    fn get_block_witnesses(&self, hash: &Hash) -> Option<Vec<Vec<blvm_protocol::segwit::Witness>>> {
+        self.blockstore.get_witness(hash).ok().flatten()
+    }
 }
 
 /// Helper function to process a network message using protocol layer

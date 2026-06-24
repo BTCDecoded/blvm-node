@@ -251,51 +251,117 @@ impl SettlementMonitor {
     ) -> Result<Option<(Hash, Hash, u32)>, PaymentError> {
         // If we have an expected transaction hash, check for it directly
         if let Some(expected_hash) = expected_tx_hash {
-            if let Ok(Some(tx)) = storage.transactions().get_transaction(&expected_hash) {
-                #[cfg(feature = "ctv")]
-                if let Some(ref cache) = self.tx_cache {
-                    cache.store(expected_hash, tx.clone());
-                }
-                // Get transaction metadata
-                if let Ok(Some(metadata)) = storage.transactions().get_metadata(&expected_hash) {
-                    let block_hash = metadata.block_hash;
-                    let block_height = storage
-                        .blocks()
-                        .get_height_by_hash(&block_hash)
-                        .map_err(|e| {
-                            PaymentError::ProcessingError(format!(
-                                "Failed to get block height: {e}"
-                            ))
-                        })?
-                        .ok_or_else(|| {
-                            PaymentError::ProcessingError("Block height not found".to_string())
-                        })?;
-                    let tip_height = storage
-                        .chain()
-                        .get_height()
-                        .map_err(|e| {
-                            PaymentError::ProcessingError(format!("Failed to get tip height: {e}"))
-                        })?
-                        .unwrap_or(0);
-                    let confirmations = (tip_height.saturating_sub(block_height) + 1) as u32;
-
-                    debug!(
-                        "Found confirmed transaction for payment {}: {} (block: {}, confirmations: {})",
-                        payment_id,
-                        hex::encode(expected_hash),
-                        hex::encode(block_hash),
-                        confirmations
-                    );
-
-                    return Ok(Some((expected_hash, block_hash, confirmations)));
-                }
+            if let Some(found) = self.lookup_confirmed_transaction(
+                storage,
+                payment_id,
+                expected_hash,
+                expected_outputs,
+            )? {
+                return Ok(Some(found));
             }
         }
 
-        // Otherwise, search for transactions matching expected outputs
-        // This is more expensive, so we only do it if we don't have an expected hash
-        // In practice, we'd maintain an index of payment outputs -> transactions
-        // For now, we'll rely on the expected transaction hash
+        // Search the tx index by expected output scripts when hash is unknown or lookup failed.
+        self.find_confirmed_by_outputs(storage, payment_id, expected_outputs)
+    }
+
+    fn lookup_confirmed_transaction(
+        &self,
+        storage: &Storage,
+        payment_id: &str,
+        tx_hash: Hash,
+        expected_outputs: &[PaymentOutput],
+    ) -> Result<Option<(Hash, Hash, u32)>, PaymentError> {
+        let tx_index = storage.transactions();
+        let tx = match tx_index.get_transaction(&tx_hash) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                return Err(PaymentError::ProcessingError(format!(
+                    "Failed to load transaction {}: {e}",
+                    hex::encode(tx_hash)
+                )));
+            }
+        };
+
+        if !self.transaction_matches_outputs(&tx, expected_outputs) {
+            return Ok(None);
+        }
+
+        #[cfg(feature = "ctv")]
+        if let Some(ref cache) = self.tx_cache {
+            cache.store(tx_hash, tx);
+        }
+
+        let Some(metadata) = tx_index.get_metadata(&tx_hash).map_err(|e| {
+            PaymentError::ProcessingError(format!(
+                "Failed to load metadata for {}: {e}",
+                hex::encode(tx_hash)
+            ))
+        })?
+        else {
+            return Ok(None);
+        };
+
+        let tip_height = storage
+            .chain()
+            .get_height()
+            .map_err(|e| PaymentError::ProcessingError(format!("Failed to get tip height: {e}")))?
+            .unwrap_or(0);
+        let confirmations = (tip_height.saturating_sub(metadata.block_height) + 1) as u32;
+
+        debug!(
+            "Found confirmed transaction for payment {}: {} (block: {}, confirmations: {})",
+            payment_id,
+            hex::encode(tx_hash),
+            hex::encode(metadata.block_hash),
+            confirmations
+        );
+
+        Ok(Some((tx_hash, metadata.block_hash, confirmations)))
+    }
+
+    fn find_confirmed_by_outputs(
+        &self,
+        storage: &Storage,
+        payment_id: &str,
+        expected_outputs: &[PaymentOutput],
+    ) -> Result<Option<(Hash, Hash, u32)>, PaymentError> {
+        if expected_outputs.is_empty() {
+            return Ok(None);
+        }
+
+        use std::collections::HashSet;
+
+        let tx_index = storage.transactions();
+        let mut seen: HashSet<Hash> = HashSet::new();
+
+        for output in expected_outputs {
+            if output.script.is_empty() {
+                continue;
+            }
+            let candidates = tx_index
+                .get_transactions_by_address(&output.script)
+                .map_err(|e| {
+                    PaymentError::ProcessingError(format!(
+                        "Failed to query transactions for payment output script: {e}"
+                    ))
+                })?;
+            for tx in candidates {
+                let tx_hash = blvm_protocol::block::calculate_tx_id(&tx);
+                if !seen.insert(tx_hash) {
+                    continue;
+                }
+                if let Some(found) = self.lookup_confirmed_transaction(
+                    storage,
+                    payment_id,
+                    tx_hash,
+                    expected_outputs,
+                )? {
+                    return Ok(Some(found));
+                }
+            }
+        }
 
         Ok(None)
     }
@@ -355,5 +421,131 @@ impl SettlementMonitor {
             monitored_payments: Arc::clone(&self.monitored_payments),
             expected_transactions: Arc::clone(&self.expected_transactions),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PaymentConfig;
+    use crate::config::{IndexingConfig, IndexingStrategy};
+    use crate::payment::processor::PaymentProcessor;
+    use crate::storage::database::DatabaseBackend;
+    use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn sample_payment_tx(script: Vec<u8>, amount: u64) -> Transaction {
+        Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: vec![],
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: amount as i64,
+                script_pubkey: script,
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn transaction_matches_outputs_requires_all_scripts_and_amounts() {
+        let processor =
+            Arc::new(PaymentProcessor::new(PaymentConfig::default()).expect("payment processor"));
+        let monitor = SettlementMonitor::new(Arc::new(PaymentStateMachine::new(processor)));
+
+        let script_a = vec![0x51, 0x87];
+        let script_b = vec![0x52, 0x88];
+        let tx = Transaction {
+            version: 2,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![
+                TransactionOutput {
+                    value: 10_000,
+                    script_pubkey: script_a.clone(),
+                },
+                TransactionOutput {
+                    value: 20_000,
+                    script_pubkey: script_b.clone(),
+                },
+            ],
+            lock_time: 0,
+        };
+
+        let expected = vec![
+            PaymentOutput {
+                script: script_a,
+                amount: Some(10_000),
+            },
+            PaymentOutput {
+                script: script_b,
+                amount: Some(20_000),
+            },
+        ];
+
+        assert!(monitor.transaction_matches_outputs(&tx, &expected));
+        assert!(!monitor.transaction_matches_outputs(
+            &tx,
+            &[PaymentOutput {
+                script: vec![0x53],
+                amount: Some(10_000),
+            }]
+        ));
+    }
+
+    #[test]
+    fn find_confirmed_by_outputs_matches_indexed_transaction() {
+        let dir = TempDir::new().unwrap();
+        let storage = Arc::new(
+            Storage::with_backend_pruning_and_indexing(
+                dir.path(),
+                DatabaseBackend::Heed3,
+                None,
+                Some(IndexingConfig {
+                    enable_address_index: true,
+                    strategy: IndexingStrategy::Eager,
+                    ..Default::default()
+                }),
+                None,
+                None,
+                None,
+            )
+            .expect("storage"),
+        );
+
+        let script = vec![0x51, 0x87];
+        let tx = sample_payment_tx(script.clone(), 50_000);
+        let block_hash = [0x42u8; 32];
+        storage
+            .transactions()
+            .index_transaction(&tx, &block_hash, 5, 0)
+            .expect("index tx");
+
+        let processor =
+            Arc::new(PaymentProcessor::new(PaymentConfig::default()).expect("payment processor"));
+        let monitor = SettlementMonitor::new(Arc::new(PaymentStateMachine::new(processor)))
+            .with_storage(storage.clone());
+
+        let outputs = vec![PaymentOutput {
+            script,
+            amount: Some(50_000),
+        }];
+        let found = monitor
+            .find_confirmed_by_outputs(&storage, "payment-index", &outputs)
+            .expect("lookup")
+            .expect("confirmed tx");
+
+        let expected_hash = blvm_protocol::block::calculate_tx_id(&tx);
+        assert_eq!(found.0, expected_hash);
+        assert_eq!(found.1, block_hash);
+        assert!(found.2 >= 1);
     }
 }

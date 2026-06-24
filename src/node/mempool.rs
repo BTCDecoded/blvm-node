@@ -4,14 +4,13 @@
 
 use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
-use crate::utils::MEMPOOL_LOOP_SLEEP;
 use anyhow::Result;
 use blvm_protocol::mempool::{Mempool, has_conflict_with_tx, replacement_checks, signals_rbf};
+use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 /// RBF tracking information for a transaction
@@ -29,6 +28,8 @@ struct RbfTracking {
 /// Wrapped in Mutex for add_transaction from Arc context (re-broadcast, sendrawtransaction)
 struct MempoolPool {
     transactions: HashMap<Hash, Transaction>,
+    /// SegWit witness stacks per txid (one stack per input), when known at accept time.
+    tx_witnesses: HashMap<Hash, Vec<Witness>>,
     spent_outputs: HashSet<OutPoint>,
 }
 
@@ -54,6 +55,8 @@ pub struct MempoolManager {
     /// Cache fee rates per transaction hash
     /// Uses RwLock for interior mutability to allow &self methods
     fee_cache: RwLock<HashMap<Hash, u64>>,
+    /// Mining priority fee deltas (satoshis), cumulative per BIP prioritisetransaction semantics.
+    fee_deltas: RwLock<HashMap<Hash, i64>>,
     /// RBF configuration (optional)
     /// Uses RwLock for interior mutability to allow setting config after Arc sharing
     rbf_config: RwLock<Option<RbfConfig>>,
@@ -88,6 +91,7 @@ impl MempoolManager {
         Self {
             pool: Mutex::new(MempoolPool {
                 transactions: HashMap::new(),
+                tx_witnesses: HashMap::new(),
                 spent_outputs: HashSet::new(),
             }),
             mempool: RwLock::new(Mempool::new()),
@@ -95,6 +99,7 @@ impl MempoolManager {
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
+            fee_deltas: RwLock::new(HashMap::new()),
             rbf_config: RwLock::new(None),
             policy_config: RwLock::new(None),
             rbf_tracking: RwLock::new(HashMap::new()),
@@ -111,6 +116,7 @@ impl MempoolManager {
         Self {
             pool: Mutex::new(MempoolPool {
                 transactions: HashMap::new(),
+                tx_witnesses: HashMap::new(),
                 spent_outputs: HashSet::new(),
             }),
             mempool: RwLock::new(Mempool::new()),
@@ -118,6 +124,7 @@ impl MempoolManager {
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
+            fee_deltas: RwLock::new(HashMap::new()),
             rbf_config: RwLock::new(rbf_config),
             policy_config: RwLock::new(None),
             rbf_tracking: RwLock::new(HashMap::new()),
@@ -169,63 +176,25 @@ impl MempoolManager {
         crate::utils::time::current_timestamp()
     }
 
-    /// Start the mempool manager
+    /// Start mempool maintenance hooks.
+    ///
+    /// P2P and RPC intake call [`add_transaction`](Self::add_transaction) directly via
+    /// `NetworkManager` and `RpcManager`; there is no separate pending-tx queue to drain here.
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting mempool manager");
-
-        // Initialize mempool
         self.initialize_mempool().await?;
-
-        // Start mempool processing loop
-        self.process_loop().await?;
-
         Ok(())
     }
 
-    /// Run mempool processing once (for testing)
+    /// Run periodic mempool maintenance once (expiry cleanup; for tests and manual ticks).
     pub async fn process_once(&mut self) -> Result<()> {
-        // Process pending transactions
-        self.process_pending_transactions().await?;
-
-        // Clean up old transactions
         self.cleanup_old_transactions().await?;
-
         Ok(())
     }
 
     /// Initialize mempool
     async fn initialize_mempool(&mut self) -> Result<()> {
         debug!("Initializing mempool");
-
-        // Load existing mempool from storage if available
-        // In a real implementation, this would restore mempool state
-
-        Ok(())
-    }
-
-    /// Main mempool processing loop
-    async fn process_loop(&mut self) -> Result<()> {
-        loop {
-            // Process pending transactions
-            self.process_pending_transactions().await?;
-
-            // Clean up old transactions
-            self.cleanup_old_transactions().await?;
-
-            // Small delay to prevent busy waiting
-            tokio::time::sleep(MEMPOOL_LOOP_SLEEP).await;
-        }
-    }
-
-    /// Process pending transactions
-    async fn process_pending_transactions(&mut self) -> Result<()> {
-        // In a real implementation, this would:
-        // 1. Get new transactions from network
-        // 2. Validate transactions using blvm-consensus
-        // 3. Add valid transactions to mempool
-        // 4. Relay transactions to peers
-
-        debug!("Processing pending transactions");
         Ok(())
     }
 
@@ -234,7 +203,7 @@ impl MempoolManager {
         let policy = self
             .policy_config
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_default();
 
@@ -269,7 +238,7 @@ impl MempoolManager {
         let policy = self
             .policy_config
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_default();
 
@@ -405,7 +374,7 @@ impl MempoolManager {
                 let fee_rate = self
                     .fee_cache
                     .read()
-                    .unwrap()
+                    .unwrap_or_else(|e| e.into_inner())
                     .get(hash)
                     .copied()
                     .unwrap_or(0);
@@ -804,6 +773,57 @@ impl MempoolManager {
         Ok(())
     }
 
+    /// In-mempool replacement package: `root` plus all transitive descendants.
+    fn replacement_package(&self, root: &Hash) -> HashSet<Hash> {
+        let descendants_map = self
+            .tx_descendants
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let pool = self.pool_lock();
+        let mut package = HashSet::new();
+        let mut stack = vec![*root];
+        while let Some(current) = stack.pop() {
+            if !package.insert(current) {
+                continue;
+            }
+            if let Some(children) = descendants_map.get(&current) {
+                for child in children {
+                    if pool.transactions.contains_key(child) {
+                        stack.push(*child);
+                    }
+                }
+            }
+        }
+        package
+    }
+
+    /// Sum fees and virtual size for a set of in-mempool transactions.
+    fn package_fee_and_vsize(&self, package: &HashSet<Hash>, utxo_set: &UtxoSet) -> (i64, u64) {
+        let mut total_fee = 0i64;
+        let mut total_vsize = 0u64;
+        for hash in package {
+            let tx = {
+                let pool = self.pool_lock();
+                pool.transactions.get(hash).cloned()
+            };
+            if let Some(tx) = tx {
+                total_fee += self.calculate_transaction_fee(&tx, utxo_set) as i64;
+                total_vsize += self.transaction_virtual_size(&tx, hash) as u64;
+            }
+        }
+        (total_fee, total_vsize)
+    }
+
+    /// Value of a prevout created by an in-mempool parent transaction.
+    fn mempool_input_value(&self, prevout: &OutPoint) -> Option<u64> {
+        let pool = self.pool_lock();
+        let parent = pool.transactions.get(&prevout.hash)?;
+        parent
+            .outputs
+            .get(prevout.index as usize)
+            .map(|output| output.value as u64)
+    }
+
     /// Check if a transaction can replace an existing one (RBF)
     ///
     /// This wraps the consensus layer replacement_checks with RBF mode-specific logic
@@ -851,7 +871,7 @@ impl MempoolManager {
         }
 
         let existing_tx_hash = calculate_tx_id(existing_tx);
-        let _new_tx_hash = calculate_tx_id(new_tx);
+        let new_tx_hash = calculate_tx_id(new_tx);
 
         // Check replacement count limit
         if let Some(tracking) = self
@@ -882,17 +902,38 @@ impl MempoolManager {
             }
         }
 
-        // Calculate fees and fee rates using the same method as MempoolManager
-        let new_fee = self.calculate_transaction_fee(new_tx, utxo_set) as i64;
-        let existing_fee = self.calculate_transaction_fee(existing_tx, utxo_set) as i64;
+        // Calculate fees and fee rates. Aggressive package mode compares against the
+        // full in-mempool package (root + descendants), not the root tx alone.
+        let use_package_fees = matches!(rbf_config.mode, crate::config::RbfMode::Aggressive)
+            && rbf_config.allow_package_replacements;
+        let package = if use_package_fees {
+            self.replacement_package(&existing_tx_hash)
+        } else {
+            HashSet::from([existing_tx_hash])
+        };
 
-        // Calculate transaction sizes (simplified - use serialization length)
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-        let new_tx_size = serialize_transaction(new_tx).len();
-        let existing_tx_size = serialize_transaction(existing_tx).len();
+        let (existing_fee, existing_tx_size) = if package.len() > 1 {
+            self.package_fee_and_vsize(&package, utxo_set)
+        } else {
+            (
+                self.calculate_transaction_fee(existing_tx, utxo_set) as i64,
+                self.transaction_virtual_size(existing_tx, &existing_tx_hash) as u64,
+            )
+        };
+
+        let new_fee = self.calculate_transaction_fee(new_tx, utxo_set) as i64;
+        let new_tx_size = self.transaction_virtual_size(new_tx, &new_tx_hash) as u64;
 
         if new_tx_size == 0 || existing_tx_size == 0 {
             return Ok(false);
+        }
+
+        if use_package_fees && package.len() > 1 {
+            debug!(
+                "Aggressive package replacement: comparing against {} txs ({} sat total fee)",
+                package.len(),
+                existing_fee
+            );
         }
 
         // Check fee rate multiplier (mode-specific)
@@ -968,21 +1009,6 @@ impl MempoolManager {
         // Check conflict (must spend at least one input from existing tx)
         if !has_conflict_with_tx(new_tx, existing_tx) {
             return Ok(false);
-        }
-
-        // Aggressive mode: Check for package replacement support
-        // Package replacement = replacing parent + child transactions together
-        if matches!(rbf_config.mode, crate::config::RbfMode::Aggressive)
-            && rbf_config.allow_package_replacements
-        {
-            // Check if new_tx has dependencies (child transactions) that should be replaced together
-            // For now, we allow the replacement if the new transaction has higher fees
-            // Full package replacement logic would require tracking transaction packages
-            // This is a simplified implementation
-            debug!(
-                "Aggressive mode: allowing package replacement for tx {}",
-                hex::encode(existing_tx_hash)
-            );
         }
 
         // For the remaining BIP125 checks (new dependencies), use the consensus replacement_checks
@@ -1196,6 +1222,15 @@ impl MempoolManager {
     /// Add transaction to mempool
     /// Uses interior mutability so it can be called with Arc<MempoolManager> (re-broadcast, sendrawtransaction)
     pub fn add_transaction(&self, tx: Transaction) -> Result<bool> {
+        self.add_transaction_with_witness(tx, None)
+    }
+
+    /// Add transaction with optional SegWit witness stacks (one per input).
+    pub fn add_transaction_with_witness(
+        &self,
+        tx: Transaction,
+        witnesses: Option<Vec<Witness>>,
+    ) -> Result<bool> {
         debug!("Adding transaction to mempool");
 
         use blvm_protocol::block::calculate_tx_id;
@@ -1237,7 +1272,7 @@ impl MempoolManager {
         let effective_policy = self
             .policy_config
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_default();
 
@@ -1266,16 +1301,16 @@ impl MempoolManager {
         let utxo_snapshot: UtxoSet = self
             .utxo_set_arc
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .and_then(|arc| arc.try_lock().ok().map(|g| g.clone()))
             .unwrap_or_default();
 
+        let mut fee_rate_sat_vb = 0u64;
         if !utxo_snapshot.is_empty() {
             let fee = self.calculate_transaction_fee(&tx, &utxo_snapshot);
-            let tx_size = self.estimate_transaction_size(&tx) as u64;
-            // fee_rate in sat/vB (consistent with min_relay_fee_rate units)
-            let fee_rate_sat_vb = if tx_size > 0 { fee / tx_size } else { 0 };
+            let tx_size = self.transaction_virtual_size(&tx, &tx_hash) as u64;
+            fee_rate_sat_vb = if tx_size > 0 { fee / tx_size } else { 0 };
             if fee_rate_sat_vb < effective_policy.min_relay_fee_rate {
                 warn!(
                     "Transaction {} rejected: fee rate {} sat/vB below min relay fee rate {} sat/vB",
@@ -1314,6 +1349,16 @@ impl MempoolManager {
             }
         }
 
+        // BIP125: displacement set includes descendants of each directly conflicting tx.
+        let direct_conflicts = conflicting_tx_hashes.clone();
+        if !conflicting_tx_hashes.is_empty() {
+            let mut displacement_set = HashSet::new();
+            for hash in &direct_conflicts {
+                displacement_set.extend(self.replacement_package(hash));
+            }
+            conflicting_tx_hashes = displacement_set.into_iter().collect();
+        }
+
         // If there are conflicts, attempt RBF replacement.
         // BIP125 Rule 2: at most 100 displaced transactions.
         if !conflicting_tx_hashes.is_empty() {
@@ -1325,11 +1370,8 @@ impl MempoolManager {
                 return Ok(false);
             }
 
-            // All conflicting transactions must be checked for RBF eligibility.
-            // We use the first one as the primary anchor for replacement_checks
-            // (BIP125 Rule 1: the existing tx must signal opt-in RBF).
-            // We also verify that the new tx pays enough to cover all displaced txs.
-            for &existing_hash in &conflicting_tx_hashes {
+            // RBF eligibility is checked against each directly conflicting tx only.
+            for &existing_hash in &direct_conflicts {
                 let existing_clone = {
                     let pool = self.pool_lock();
                     pool.transactions.get(&existing_hash).cloned()
@@ -1355,8 +1397,8 @@ impl MempoolManager {
                 self.remove_transaction(existing_hash);
             }
 
-            // Update RBF tracking (anchor to the primary conflict).
-            let primary_hash = conflicting_tx_hashes[0];
+            // Update RBF tracking (anchor to the primary direct conflict).
+            let primary_hash = direct_conflicts[0];
             let original_hash = {
                 let tracking = self.rbf_tracking.read().unwrap_or_else(|e| e.into_inner());
                 tracking
@@ -1404,17 +1446,30 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        // Add transaction to mempool (store full transaction)
-        self.pool_lock().transactions.insert(tx_hash, tx.clone());
+        // Add transaction to mempool (store full transaction + optional witnesses)
+        {
+            let mut pool = self.pool_lock();
+            pool.transactions.insert(tx_hash, tx.clone());
+            if let Some(wits) = witnesses {
+                if wits.len() == tx.inputs.len() {
+                    pool.tx_witnesses.insert(tx_hash, wits);
+                } else {
+                    warn!(
+                        "Transaction {} witness count {} != input count {}, not storing witnesses",
+                        hex::encode(tx_hash),
+                        wits.len(),
+                        tx.inputs.len()
+                    );
+                }
+            }
+            for input in &tx.inputs {
+                pool.spent_outputs.insert(input.prevout);
+            }
+        }
         self.mempool
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(tx_hash);
-
-        // Track spent outputs
-        for input in &tx.inputs {
-            self.pool_lock().spent_outputs.insert(input.prevout);
-        }
 
         // Update dependency graph
         self.update_dependency_graph(&tx, &tx_hash);
@@ -1425,9 +1480,8 @@ impl MempoolManager {
             .unwrap()
             .insert(tx_hash, Self::current_timestamp());
 
-        // Calculate and cache fee rate (will be updated when UTXO set is available)
-        // For now, set to 0 - will be recalculated in get_prioritized_transactions
-        let fee_rate = 0u64;
+        // Cache fee rate at insert (sat/vB) so eviction/sorting do not see stale zero rates.
+        let fee_rate = fee_rate_sat_vb;
         self.fee_cache
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1446,8 +1500,6 @@ impl MempoolManager {
             .unwrap_or_else(|e| e.into_inner())
         {
             let mempool_size = self.pool_lock().transactions.len();
-            // Convert fee_rate from u64 to f64 (satoshis per vbyte)
-            // Note: fee_rate is currently 0, will be updated later when UTXO set is available
             let fee_rate_f64 = fee_rate as f64;
             let tx_hash_clone = tx_hash;
             let event_pub_clone = Arc::clone(event_pub);
@@ -1482,6 +1534,21 @@ impl MempoolManager {
     /// Get mempool transaction hashes
     pub fn transaction_hashes(&self) -> Vec<Hash> {
         self.pool_lock().transactions.keys().cloned().collect()
+    }
+
+    /// Get stored SegWit witness stacks for a mempool transaction (one per input).
+    pub fn get_transaction_witnesses(&self, hash: &Hash) -> Option<Vec<Witness>> {
+        self.pool_lock().tx_witnesses.get(hash).cloned()
+    }
+
+    /// Cumulative mining priority fee delta (satoshis) from `prioritisetransaction`.
+    pub fn get_fee_delta(&self, hash: &Hash) -> i64 {
+        self.fee_deltas
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(hash)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Get transaction by hash
@@ -1539,6 +1606,25 @@ impl MempoolManager {
             }
         }
         result
+    }
+
+    /// Apply a mining priority fee delta to a mempool transaction (cumulative).
+    ///
+    /// Returns `false` when the transaction is not in the mempool.
+    pub fn prioritise_transaction(&self, hash: &Hash, fee_delta: i64) -> bool {
+        if !self.pool_lock().transactions.contains_key(hash) {
+            return false;
+        }
+        {
+            let mut deltas = self.fee_deltas.write().unwrap_or_else(|e| e.into_inner());
+            let entry = deltas.entry(*hash).or_insert(0);
+            *entry = entry.saturating_add(fee_delta);
+        }
+        *self
+            .utxo_set_hash
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        true
     }
 
     /// Calculate a simple hash of the UTXO set for change detection
@@ -1632,9 +1718,21 @@ impl MempoolManager {
 
             let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
             let fee = input_total.saturating_sub(output_total);
-            let size = self.estimate_transaction_size(tx);
+            let size = self.transaction_virtual_size(tx, tx_hash);
+            let delta = self
+                .fee_deltas
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(tx_hash)
+                .copied()
+                .unwrap_or(0);
+            let effective_fee = (fee as i64 + delta).max(0) as u64;
             // Store fee rate in sat/vB (consistent with min_relay_fee_rate config units).
-            let fee_rate = if size > 0 { fee / size as u64 } else { 0 };
+            let fee_rate = if size > 0 {
+                effective_fee / size as u64
+            } else {
+                0
+            };
 
             {
                 let mut fee_cache = self.fee_cache.write().unwrap_or_else(|e| e.into_inner());
@@ -1646,6 +1744,17 @@ impl MempoolManager {
                 .or_default()
                 .push(*tx_hash);
         }
+    }
+
+    /// Fee rates (sat/vB) for mempool transactions after refreshing the fee index.
+    pub fn fee_rates_sat_vb(&self, utxo_set: &UtxoSet) -> Vec<u64> {
+        self.update_fee_index(utxo_set);
+        self.fee_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .copied()
+            .collect()
     }
 
     /// Calculate transaction fee
@@ -1663,6 +1772,8 @@ impl MempoolManager {
         for prevout in prevouts {
             if let Some(utxo) = utxo_set.get(prevout) {
                 input_total += utxo.value as u64;
+            } else if let Some(value) = self.mempool_input_value(prevout) {
+                input_total += value;
             }
         }
 
@@ -1671,6 +1782,24 @@ impl MempoolManager {
 
         // Fee is difference (inputs - outputs)
         input_total.saturating_sub(output_total)
+    }
+
+    /// Virtual size for fee-rate and RBF comparisons (vbytes).
+    fn transaction_virtual_size(&self, tx: &Transaction, tx_hash: &Hash) -> usize {
+        use blvm_protocol::serialization::serialize_transaction_with_witness;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::witness::{calculate_transaction_weight_segwit, weight_to_vsize};
+
+        let base_size = serialize_transaction(tx).len();
+        if let Some(witnesses) = self.get_transaction_witnesses(tx_hash) {
+            if witnesses.iter().any(|stack| !stack.is_empty()) {
+                let total_size = serialize_transaction_with_witness(tx, &witnesses).len();
+                let weight =
+                    calculate_transaction_weight_segwit(base_size as u64, total_size as u64);
+                return weight_to_vsize(weight) as usize;
+            }
+        }
+        self.estimate_transaction_size(tx)
     }
 
     /// Estimate transaction size in vbytes.
@@ -1722,6 +1851,7 @@ impl MempoolManager {
             let Some(tx) = pool.transactions.remove(hash) else {
                 return false;
             };
+            pool.tx_witnesses.remove(hash);
             for input in &tx.inputs {
                 pool.spent_outputs.remove(&input.prevout);
             }
@@ -1757,6 +1887,11 @@ impl MempoolManager {
 
         // Remove timestamp
         self.tx_timestamps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(hash);
+
+        self.fee_deltas
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(hash);
@@ -1826,6 +1961,10 @@ impl MempoolManager {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.fee_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.fee_deltas
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -1915,6 +2054,10 @@ impl crate::node::miner::MempoolProvider for MempoolManager {
         use blvm_protocol::Hash;
         let hash_array: Hash = *hash;
         MempoolManager::remove_transaction(self, &hash_array)
+    }
+
+    fn get_transaction_witnesses(&self, hash: &[u8; 32]) -> Option<Vec<Witness>> {
+        self.pool_lock().tx_witnesses.get(hash).cloned()
     }
 }
 

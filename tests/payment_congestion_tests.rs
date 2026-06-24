@@ -40,6 +40,38 @@ fn create_test_pending_transaction(tx_id: &str, amount: u64) -> PendingTransacti
     }
 }
 
+/// Test batch persistence reload on manager init
+#[test]
+fn test_load_batches_from_storage_on_init() {
+    use blvm_node::storage::Storage;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    let covenant_engine = Arc::new(CovenantEngine::new());
+    let batch_id = "persisted_batch";
+
+    {
+        let mut manager = CongestionManager::new(
+            covenant_engine.clone(),
+            None,
+            Some(storage.clone()),
+            BatchConfig::default(),
+        );
+        manager.create_batch(batch_id, Some(5));
+        manager
+            .add_to_batch(batch_id, create_test_pending_transaction("tx1", 1000))
+            .expect("add tx persists batch");
+    }
+
+    let reloaded =
+        CongestionManager::new(covenant_engine, None, Some(storage), BatchConfig::default());
+    let batch = reloaded.get_batch(batch_id).expect("batch restored");
+    assert_eq!(batch.target_fee_rate, 5);
+    assert_eq!(batch.transactions.len(), 1);
+}
+
 /// Test batch creation
 #[test]
 fn test_create_batch() {

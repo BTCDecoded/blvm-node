@@ -108,7 +108,7 @@ impl PaymentReorgHandler {
                                 "PaymentReorgHandler: ChainReorg old={:?} new={:?}",
                                 old_tip, new_tip
                             );
-                            // BlockDisconnected is published per block; we rely on that for now
+                            // ChainReorg summary only; per-block BlockDisconnected drives payment rollback.
                         }
                         _ => {}
                     }

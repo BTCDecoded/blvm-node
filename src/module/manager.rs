@@ -1459,13 +1459,6 @@ impl ModuleManager {
             }
         }
 
-        // If registry is available and we have missing dependencies, try fetching from registry
-        if let Some(ref registry) = self.module_registry {
-            // Check for missing dependencies (this would be determined by dependency resolution)
-            // For now, we'll just try to fetch any modules that are requested but not found
-            // In a full implementation, we'd check dependencies first
-        }
-
         // Opt-out: drop explicitly disabled modules before allowlist and bootstrap.
         discovered_modules = self.filter_discovered_for_auto_load(discovered_modules);
 
@@ -2022,7 +2015,7 @@ impl ModuleManager {
 
         // Handle wildcard (x or *)
         if req.contains('x') || req.contains('*') {
-            // Simple prefix match for now
+            // Semver wildcard: prefix match on dot-separated components.
             let version_parts: Vec<&str> = version.split('.').collect();
             let req_parts: Vec<&str> = req.split('.').collect();
 

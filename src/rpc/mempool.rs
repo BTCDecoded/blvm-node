@@ -256,39 +256,10 @@ impl MempoolRpc {
                 for ancestor_hash in ancestors {
                     if let Some(ancestor_tx) = mempool.get_transaction(&ancestor_hash) {
                         let ancestor_txid = hex::encode(ancestor_hash);
-                        let ancestor_txid_clone = ancestor_txid.clone();
-                        use blvm_protocol::serialization::transaction::serialize_transaction;
-                        let size = serialize_transaction(&ancestor_tx).len();
-
-                        result.insert(ancestor_txid, json!({
-                            "size": size,
-                            "fee": if let Some(ref storage) = self.storage {
-                                let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                                let fee_satoshis = mempool.calculate_transaction_fee(&ancestor_tx, &utxo_set);
-                                fee_satoshis as f64 / 100_000_000.0
-                            } else {
-                                0.0
-                            },
-                            "modifiedfee": 0.0,
-                            "time": current_timestamp(),
-                            "height": -1,
-                            "descendantcount": 1,
-                            "descendantsize": size,
-                            "descendantfees": 0.0,
-                            "ancestorcount": 1,
-                            "ancestorsize": size,
-                            "ancestorfees": 0.0,
-                            "wtxid": ancestor_txid_clone,
-                            "fees": {
-                                "base": 0.0,
-                                "modified": 0.0,
-                                "ancestor": 0.0,
-                                "descendant": 0.0
-                            },
-                            "depends": [],
-                            "spentby": [],
-                            "bip125-replaceable": false
-                        }));
+                        result.insert(
+                            ancestor_txid,
+                            self.build_mempool_entry_json(mempool, &ancestor_hash, &ancestor_tx),
+                        );
                     }
                 }
                 Ok(json!(result))
@@ -363,39 +334,14 @@ impl MempoolRpc {
                 for descendant_hash in descendants {
                     if let Some(descendant_tx) = mempool.get_transaction(&descendant_hash) {
                         let descendant_txid = hex::encode(descendant_hash);
-                        let descendant_txid_clone = descendant_txid.clone();
-                        use blvm_protocol::serialization::transaction::serialize_transaction;
-                        let size = serialize_transaction(&descendant_tx).len();
-
-                        result.insert(descendant_txid, json!({
-                            "size": size,
-                            "fee": if let Some(ref storage) = self.storage {
-                                let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                                let fee_satoshis = mempool.calculate_transaction_fee(&descendant_tx, &utxo_set);
-                                fee_satoshis as f64 / 100_000_000.0
-                            } else {
-                                0.0
-                            },
-                            "modifiedfee": 0.0,
-                            "time": current_timestamp(),
-                            "height": -1,
-                            "descendantcount": 1,
-                            "descendantsize": size,
-                            "descendantfees": 0.0,
-                            "ancestorcount": 1,
-                            "ancestorsize": size,
-                            "ancestorfees": 0.0,
-                            "wtxid": descendant_txid_clone,
-                            "fees": {
-                                "base": 0.0,
-                                "modified": 0.0,
-                                "ancestor": 0.0,
-                                "descendant": 0.0
-                            },
-                            "depends": [],
-                            "spentby": [],
-                            "bip125-replaceable": false
-                        }));
+                        result.insert(
+                            descendant_txid,
+                            self.build_mempool_entry_json(
+                                mempool,
+                                &descendant_hash,
+                                &descendant_tx,
+                            ),
+                        );
                     }
                 }
                 Ok(json!(result))
@@ -436,57 +382,7 @@ impl MempoolRpc {
 
         if let Some(ref mempool) = self.mempool {
             if let Some(tx) = mempool.get_transaction(&hash) {
-                use blvm_protocol::serialization::transaction::serialize_transaction;
-                let size = serialize_transaction(&tx).len();
-
-                // Get ancestors and descendants
-                let ancestors = self.get_ancestors(mempool, &hash);
-                let descendants = self.get_descendants(mempool, &hash);
-
-                let ancestor_count = ancestors.len();
-                let descendant_count = descendants.len();
-                let ancestor_size: usize = ancestors
-                    .iter()
-                    .filter_map(|h| mempool.get_transaction(h))
-                    .map(|tx| serialize_transaction(&tx).len())
-                    .sum();
-                let descendant_size: usize = descendants
-                    .iter()
-                    .filter_map(|h| mempool.get_transaction(h))
-                    .map(|tx| serialize_transaction(&tx).len())
-                    .sum();
-
-                let fee = if let Some(ref storage) = self.storage {
-                    let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                    let fee_satoshis = mempool.calculate_transaction_fee(&tx, &utxo_set);
-                    fee_satoshis as f64 / 100_000_000.0
-                } else {
-                    0.0
-                };
-
-                Ok(json!({
-                    "size": size,
-                    "fee": fee,
-                    "modifiedfee": fee,
-                    "time": current_timestamp(),
-                    "height": -1,
-                    "descendantcount": descendant_count + 1,
-                    "descendantsize": descendant_size + size,
-                    "descendantfees": fee, // Simplified
-                    "ancestorcount": ancestor_count + 1,
-                    "ancestorsize": ancestor_size + size,
-                    "ancestorfees": fee, // Simplified
-                    "wtxid": txid,
-                    "fees": {
-                        "base": fee,
-                        "modified": fee,
-                        "ancestor": fee,
-                        "descendant": fee
-                    },
-                    "depends": ancestors.iter().map(hex::encode).collect::<Vec<_>>(),
-                    "spentby": descendants.iter().map(hex::encode).collect::<Vec<_>>(),
-                    "bip125-replaceable": false
-                }))
+                Ok(self.build_mempool_entry_json(mempool, &hash, &tx))
             } else {
                 Err(crate::rpc::errors::RpcError::invalid_params(format!(
                     "Transaction {txid} not found in mempool"
@@ -497,6 +393,113 @@ impl MempoolRpc {
                 "Mempool not initialized".to_string(),
             ))
         }
+    }
+
+    /// Build a Core-shaped mempool entry with package fee totals.
+    fn build_mempool_entry_json(
+        &self,
+        mempool: &MempoolManager,
+        hash: &Hash,
+        tx: &blvm_protocol::Transaction,
+    ) -> Value {
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+
+        let size = serialize_transaction(tx).len();
+        let ancestors = self.get_ancestors(mempool, hash);
+        let descendants = self.get_descendants(mempool, hash);
+
+        let ancestor_size: usize = ancestors
+            .iter()
+            .filter_map(|h| mempool.get_transaction(h))
+            .map(|tx| serialize_transaction(&tx).len())
+            .sum();
+        let descendant_size: usize = descendants
+            .iter()
+            .filter_map(|h| mempool.get_transaction(h))
+            .map(|tx| serialize_transaction(&tx).len())
+            .sum();
+
+        let base_fee_btc = self.mempool_tx_fee_btc(mempool, tx);
+        let modified_fee_btc = self.mempool_modified_fee_btc(mempool, hash, tx);
+        let ancestor_fees_btc =
+            self.sum_mempool_modified_fees_btc(mempool, &ancestors) + modified_fee_btc;
+        let descendant_fees_btc =
+            self.sum_mempool_modified_fees_btc(mempool, &descendants) + modified_fee_btc;
+
+        let wtxid = match mempool.get_transaction_witnesses(hash) {
+            Some(wits) if wits.iter().any(|w| !w.is_empty()) => hex::encode(
+                crate::network::txhash::calculate_wtxid(tx, Some(wits.as_slice())),
+            ),
+            _ => hex::encode(hash),
+        };
+
+        json!({
+            "size": size,
+            "fee": base_fee_btc,
+            "modifiedfee": modified_fee_btc,
+            "time": current_timestamp(),
+            "height": -1,
+            "descendantcount": descendants.len() + 1,
+            "descendantsize": descendant_size + size,
+            "descendantfees": descendant_fees_btc,
+            "ancestorcount": ancestors.len() + 1,
+            "ancestorsize": ancestor_size + size,
+            "ancestorfees": ancestor_fees_btc,
+            "wtxid": wtxid,
+            "fees": {
+                "base": base_fee_btc,
+                "modified": modified_fee_btc,
+                "ancestor": ancestor_fees_btc,
+                "descendant": descendant_fees_btc
+            },
+            "depends": ancestors.iter().map(hex::encode).collect::<Vec<_>>(),
+            "spentby": descendants.iter().map(hex::encode).collect::<Vec<_>>(),
+            "bip125-replaceable": false
+        })
+    }
+
+    fn mempool_tx_fee_sat(&self, mempool: &MempoolManager, tx: &blvm_protocol::Transaction) -> u64 {
+        if let Some(ref storage) = self.storage {
+            let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
+            mempool.calculate_transaction_fee(tx, &utxo_set)
+        } else {
+            0
+        }
+    }
+
+    fn mempool_tx_fee_btc(&self, mempool: &MempoolManager, tx: &blvm_protocol::Transaction) -> f64 {
+        self.mempool_tx_fee_sat(mempool, tx) as f64 / 100_000_000.0
+    }
+
+    fn mempool_modified_fee_sat(
+        &self,
+        mempool: &MempoolManager,
+        hash: &Hash,
+        tx: &blvm_protocol::Transaction,
+    ) -> u64 {
+        let base = self.mempool_tx_fee_sat(mempool, tx);
+        let delta = mempool.get_fee_delta(hash).max(0) as u64;
+        base.saturating_add(delta)
+    }
+
+    fn mempool_modified_fee_btc(
+        &self,
+        mempool: &MempoolManager,
+        hash: &Hash,
+        tx: &blvm_protocol::Transaction,
+    ) -> f64 {
+        self.mempool_modified_fee_sat(mempool, hash, tx) as f64 / 100_000_000.0
+    }
+
+    fn sum_mempool_modified_fees_btc(&self, mempool: &MempoolManager, hashes: &[Hash]) -> f64 {
+        hashes
+            .iter()
+            .filter_map(|h| {
+                mempool
+                    .get_transaction(h)
+                    .map(|tx| self.mempool_modified_fee_btc(mempool, h, &tx))
+            })
+            .sum()
     }
 
     /// Helper: Get ancestors for a transaction

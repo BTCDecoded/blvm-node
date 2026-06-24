@@ -225,7 +225,10 @@ async fn higher_work_fork_from_mid_chain() -> anyhow::Result<()> {
     }
 
     let main_tip = storage_main.chain().get_tip_hash()?.unwrap();
-    let main_work = storage_main.chain().get_chainwork(&main_tip)?.unwrap_or(0);
+    let main_work = storage_main
+        .chain()
+        .get_chainwork(&main_tip)?
+        .unwrap_or_else(blvm_consensus::pow::U256::zero);
 
     let mut fork_utxo = UtxoSet::default();
     let mut fork_coord = SyncCoordinator::new();
@@ -254,12 +257,15 @@ async fn higher_work_fork_from_mid_chain() -> anyhow::Result<()> {
     }
 
     let fork_tip = storage_fork.chain().get_tip_hash()?.unwrap();
-    let fork_work = storage_fork.chain().get_chainwork(&fork_tip)?.unwrap_or(0);
+    let fork_work = storage_fork
+        .chain()
+        .get_chainwork(&fork_tip)?
+        .unwrap_or_else(blvm_consensus::pow::U256::zero);
 
     assert_ne!(fork_tip, main_tip, "fork must diverge by tip hash");
     assert!(
         fork_work > main_work,
-        "fork must carry more cumulative chainwork (fork={fork_work}, main={main_work})"
+        "fork must carry more cumulative chainwork (fork={fork_work:?}, main={main_work:?})"
     );
 
     // Import fork branch blocks onto the main node (side chain until the fork wins on work).

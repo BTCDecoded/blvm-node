@@ -1,6 +1,9 @@
 //! RPC Authentication Manager Implementation
 //!
-//! This file contains the full RpcAuthManager implementation with constant-time token comparison.
+//! Bearer-token authentication: opaque tokens registered via `add_token` / `add_admin_token`,
+//! validated with constant-time comparison (`constant_time_eq`). Tokens are stored server-side
+//! only; clients send `Authorization: Bearer <token>`. This is not HMAC-signed JWT — rotate
+//! tokens via config reload or `remove_token` when compromised.
 
 use crate::utils::current_timestamp;
 use anyhow::Result;
@@ -12,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-/// Authentication token (simple string-based for now)
+/// Opaque bearer token registered server-side (not a self-describing JWT/HMAC credential).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuthToken(String);
 

@@ -4,7 +4,10 @@
 
 // nix imports are used conditionally within functions
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::Instant;
 use tracing::{debug, warn};
 
 use crate::module::traits::ModuleError;
@@ -85,12 +88,41 @@ impl SandboxConfig {
 /// Process sandbox manager
 pub struct ProcessSandbox {
     config: SandboxConfig,
+    /// Previous `/proc/<pid>/stat` CPU samples for delta-based CPU % (Linux).
+    cpu_samples: Mutex<HashMap<u32, CpuSample>>,
+}
+
+#[derive(Debug, Clone)]
+struct CpuSample {
+    utime: u64,
+    stime: u64,
+    sampled_at: Instant,
+}
+
+/// Compute CPU usage percentage from two `/proc` stat samples.
+fn cpu_percent_from_samples(prev: &CpuSample, utime: u64, stime: u64, now: Instant) -> f64 {
+    let delta_ticks = (utime + stime).saturating_sub(prev.utime + prev.stime);
+    let delta_wall = now.duration_since(prev.sampled_at).as_secs_f64();
+    if delta_wall <= 0.0 || delta_ticks == 0 {
+        return 0.0;
+    }
+    #[cfg(feature = "libc")]
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    #[cfg(not(feature = "libc"))]
+    let hz = 100.0;
+    if hz <= 0.0 {
+        return 0.0;
+    }
+    ((delta_ticks as f64 / hz) / delta_wall * 100.0).clamp(0.0, 100.0)
 }
 
 impl ProcessSandbox {
     /// Create a new process sandbox
     pub fn new(config: SandboxConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            cpu_samples: Mutex::new(HashMap::new()),
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -303,13 +335,11 @@ impl ProcessSandbox {
                         }
                     }
 
-                    // Apply CPU limit using prlimit (RLIMIT_CPU = CPU time in seconds)
-                    if let Some(max_cpu_percent) = limits.max_cpu_percent {
-                        // Convert percentage to CPU time limit (approximate: 100% = unlimited)
-                        // For now, we'll skip CPU percentage as it requires more complex calculation
+                    // CPU percentage limits require cgroups/scheduling policy; not enforced via prlimit.
+                    if limits.max_cpu_percent.is_some() {
                         debug!(
-                            "CPU percentage limit ({}) not yet implemented for prlimit",
-                            max_cpu_percent
+                            "CPU percentage limit ({:?}) is monitored via monitor_resources, not prlimit",
+                            limits.max_cpu_percent
                         );
                     }
 
@@ -429,16 +459,31 @@ impl ProcessSandbox {
                         let page_size = 4096u64; // Default page size
                         let memory_bytes = rss_pages * page_size;
 
-                        // CPU percentage calculation would require sampling over time
-                        // For now, return 0.0 (would need previous sample to calculate)
-                        let cpu_percent = 0.0;
+                        let now = Instant::now();
+                        let cpu_percent = {
+                            let mut samples =
+                                self.cpu_samples.lock().unwrap_or_else(|e| e.into_inner());
+                            let percent = samples
+                                .get(&pid)
+                                .map(|prev| cpu_percent_from_samples(prev, _utime, _stime, now))
+                                .unwrap_or(0.0);
+                            samples.insert(
+                                pid,
+                                CpuSample {
+                                    utime: _utime,
+                                    stime: _stime,
+                                    sampled_at: now,
+                                },
+                            );
+                            percent
+                        };
 
                         // Count file descriptors from /proc/<pid>/fd
                         let fd_count = std::fs::read_dir(format!("/proc/{pid}/fd"))
                             .map(|dir| dir.count() as u32)
                             .unwrap_or(0);
 
-                        // Count child processes (simplified - would need to traverse process tree)
+                        // Child process count not tracked (would require /proc tree walk).
                         let child_processes = 0;
 
                         return Ok(ResourceUsage {
@@ -522,5 +567,24 @@ impl ResourceUsage {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cpu_percent_from_samples() {
+        let prev = CpuSample {
+            utime: 100,
+            stime: 50,
+            sampled_at: Instant::now() - std::time::Duration::from_secs(1),
+        };
+        let now = Instant::now();
+        let pct = cpu_percent_from_samples(&prev, 200, 100, now);
+        // 150 ticks over ~1s at 100Hz ≈ 150% raw, clamped to 100
+        assert!(pct > 0.0);
+        assert!(pct <= 100.0);
     }
 }

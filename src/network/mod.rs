@@ -11,7 +11,6 @@ pub mod chain_access;
 pub mod connection_manager;
 pub mod dns_seeds;
 pub mod dos_protection;
-#[cfg(feature = "erlay")]
 pub mod erlay;
 pub mod ibd_protection;
 pub mod inventory;
@@ -47,6 +46,7 @@ pub mod compact_blocks;
 mod background_tasks;
 pub mod bip157_handler;
 pub mod filter_service;
+mod block_announced_sync;
 mod getdata_serve;
 mod handlers;
 mod network_message_dispatch;
@@ -80,7 +80,7 @@ pub enum NetworkMessage {
     PeerDisconnected(TransportAddr),
     BlockReceived(Vec<u8>),
     TransactionReceived(Vec<u8>),
-    InventoryReceived(Vec<u8>),
+    InventoryReceived(Vec<u8>, SocketAddr),
     #[cfg(feature = "utxo-commitments")]
     UTXOSetReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     #[cfg(feature = "utxo-commitments")]
@@ -117,6 +117,9 @@ pub enum NetworkMessage {
     // CTV Payment Proof messages
     #[cfg(feature = "ctv")]
     PaymentProofReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    /// Outbound payment proof queued by PaymentStateMachine for NetworkManager delivery.
+    #[cfg(feature = "ctv")]
+    SendPaymentProof(Vec<u8>, SocketAddr), // (wire payload, peer_addr)
     SettlementNotificationReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     // Mesh networking packets
     MeshPacketReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
@@ -356,10 +359,12 @@ mod tests {
     #[tokio::test]
     async fn test_network_message_inventory_received() {
         let data = b"inv data".to_vec();
-        let message = NetworkMessage::InventoryReceived(data.clone());
+        let peer: SocketAddr = "127.0.0.1:18333".parse().unwrap();
+        let message = NetworkMessage::InventoryReceived(data.clone(), peer);
         match message {
-            NetworkMessage::InventoryReceived(msg_data) => {
+            NetworkMessage::InventoryReceived(msg_data, addr) => {
                 assert_eq!(msg_data, data);
+                assert_eq!(addr, peer);
             }
             _ => panic!("Expected InventoryReceived message"),
         }

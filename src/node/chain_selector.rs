@@ -4,9 +4,14 @@ use crate::storage::Storage;
 use anyhow::Result;
 use blvm_protocol::Hash;
 
-/// Return cumulative chainwork for a block hash (0 when unknown).
-pub fn chainwork_at(storage: &Storage, hash: &Hash) -> Result<u128> {
-    Ok(storage.chain().get_chainwork(hash)?.unwrap_or(0))
+use blvm_consensus::pow::U256;
+
+/// Return cumulative chainwork for a block hash (zero when unknown).
+pub fn chainwork_at(storage: &Storage, hash: &Hash) -> Result<U256> {
+    Ok(storage
+        .chain()
+        .get_chainwork(hash)?
+        .unwrap_or_else(U256::zero))
 }
 
 fn sequence_id_at(storage: &Storage, hash: &Hash) -> u64 {
@@ -56,6 +61,8 @@ mod tests {
     use blvm_protocol::BlockHeader;
     use tempfile::TempDir;
 
+    use blvm_consensus::pow::U256;
+
     fn header() -> BlockHeader {
         BlockHeader {
             version: 1,
@@ -67,7 +74,7 @@ mod tests {
         }
     }
 
-    fn storage_with_sibling_tips(first: Hash, second: Hash, tip: Hash, work: u128) -> Storage {
+    fn storage_with_sibling_tips(first: Hash, second: Hash, tip: Hash, work: U256) -> Storage {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(dir.path()).unwrap();
         storage.chain().initialize(&header()).unwrap();
@@ -99,7 +106,7 @@ mod tests {
     fn equal_work_prefers_lower_sequence() {
         let active = [1u8; 32];
         let candidate = [2u8; 32];
-        let storage = storage_with_sibling_tips(active, candidate, active, 100);
+        let storage = storage_with_sibling_tips(active, candidate, active, U256::from_u128(100));
         assert!(!should_activate_over_active_tip(&storage, &candidate).unwrap());
     }
 
@@ -107,7 +114,7 @@ mod tests {
     fn equal_work_activates_earlier_sequence() {
         let active = [2u8; 32];
         let candidate = [1u8; 32];
-        let storage = storage_with_sibling_tips(candidate, active, active, 100);
+        let storage = storage_with_sibling_tips(candidate, active, active, U256::from_u128(100));
         assert!(should_activate_over_active_tip(&storage, &candidate).unwrap());
     }
 
@@ -115,8 +122,11 @@ mod tests {
     fn heavier_work_always_activates() {
         let active = [1u8; 32];
         let candidate = [2u8; 32];
-        let storage = storage_with_sibling_tips(active, candidate, active, 100);
-        storage.chain().store_chainwork(&candidate, 200).unwrap();
+        let storage = storage_with_sibling_tips(active, candidate, active, U256::from_u128(100));
+        storage
+            .chain()
+            .store_chainwork(&candidate, U256::from_u128(200))
+            .unwrap();
         assert!(should_activate_over_active_tip(&storage, &candidate).unwrap());
     }
 }

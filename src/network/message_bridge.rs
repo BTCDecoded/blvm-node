@@ -1,7 +1,11 @@
 //! Message bridge between blvm-consensus and transport layer
 //!
-//! Provides conversion between blvm-consensus NetworkMessage types
-//! and the transport layer's message format.
+//! Converts [`NetworkMessage`](blvm_protocol::network::NetworkMessage) values to/from transport bytes
+//! via [`ProtocolAdapter`]. Outgoing [`NetworkResponse`] values are turned into wire payloads here.
+//!
+//! **Incoming message processing** (handshake, inv/getdata, block validation) is implemented in
+//! [`NetworkManager`](crate::network::network_manager::NetworkManager) (`handle_incoming_wire_tcp`,
+//! `wire_dispatch`). This module intentionally does not duplicate that path.
 
 use crate::network::protocol_adapter::ProtocolAdapter;
 use crate::network::transport::TransportType;
@@ -67,34 +71,5 @@ impl MessageBridge {
                 Ok(Vec::new()) // Rejection doesn't send a message
             }
         }
-    }
-
-    /// Process incoming transport message and generate response
-    ///
-    /// Takes transport bytes, converts to protocol message, processes it,
-    /// and returns wire format messages to send back (if any).
-    ///
-    /// NOTE: This is a future integration point. To fully implement, this would:
-    /// 1. Take `&BitcoinProtocolEngine`, `&mut PeerState`, and `Option<&dyn ChainStateAccess>`
-    /// 2. Call `blvm_protocol::network::process_network_message()` with these parameters
-    /// 3. Convert the `NetworkResponse` to wire format messages using `extract_send_messages()`
-    ///
-    /// For now, this method only handles message conversion, not processing.
-    pub fn process_incoming_message(data: &[u8], transport: TransportType) -> Result<Vec<Vec<u8>>> {
-        // Convert to protocol message
-        let protocol_msg = Self::from_transport_message(data, transport)?;
-
-        // Note: Protocol layer processing is handled in NetworkManager::handle_incoming_wire_tcp
-        // This function provides message extraction for transport layer
-        // This requires:
-        // - BitcoinProtocolEngine instance
-        // - PeerState management
-        // - ChainStateAccess implementation
-        // - UTXO set and height for block/tx validation
-        debug!("Converted incoming protocol message: {:?}", protocol_msg);
-
-        // Return empty for now - actual processing would be done by network handlers
-        // that have access to protocol engine and chain state
-        Ok(Vec::new())
     }
 }

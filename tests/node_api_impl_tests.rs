@@ -113,7 +113,7 @@ async fn test_node_api_sync_status_via_coordinator() {
     let (_dir, storage) = storage_with_chain();
     let mut api = NodeApiImpl::new(storage);
     let coordinator = Arc::new(tokio::sync::Mutex::new(SyncCoordinator::new()));
-    coordinator.lock().await.start_sync().unwrap();
+    coordinator.lock().await.mark_chain_current();
     api.set_sync_coordinator(coordinator);
 
     let status = api.get_sync_status().await.unwrap();

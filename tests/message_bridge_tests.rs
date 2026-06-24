@@ -124,30 +124,3 @@ fn test_message_bridge_extract_send_messages_reject() {
     let messages = result.unwrap();
     assert_eq!(messages.len(), 0);
 }
-
-#[test]
-fn test_message_bridge_process_incoming_message() {
-    let msg = create_test_version_message();
-
-    // Serialize message
-    let wire = MessageBridge::to_transport_message(&msg, TransportType::Tcp).unwrap();
-    assert!(!wire.is_empty());
-
-    // Process incoming message (may fail due to protocol validation)
-    let result = MessageBridge::process_incoming_message(&wire, TransportType::Tcp);
-    // Result may be Ok or Err depending on protocol validation
-    if result.is_ok() {
-        // Should return empty vec (processing is handled elsewhere)
-        let responses = result.unwrap();
-        assert_eq!(responses.len(), 0);
-    }
-}
-
-#[test]
-fn test_message_bridge_process_incoming_invalid() {
-    let invalid_data = vec![0u8; 10];
-
-    // Should error on invalid data
-    let result = MessageBridge::process_incoming_message(&invalid_data, TransportType::Tcp);
-    assert!(result.is_err());
-}

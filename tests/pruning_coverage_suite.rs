@@ -94,6 +94,7 @@ fn test_storage_with_pruning_config_enables_manager() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(storage.is_pruning_enabled());

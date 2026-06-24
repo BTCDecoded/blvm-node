@@ -1,8 +1,8 @@
 //! Tests for block processing and validation
 
 use blvm_node::node::block_processor::{
-    parse_block_from_wire, prepare_block_validation_context, store_block_with_context,
-    store_block_with_context_and_index, validate_block_with_context,
+    load_witnesses_for_block, parse_block_from_wire, prepare_block_validation_context,
+    store_block_with_context, store_block_with_context_and_index, validate_block_with_context,
 };
 use blvm_node::storage::Storage;
 use blvm_node::{Block, BlockHeader, UtxoSet};
@@ -128,13 +128,19 @@ fn test_prepare_block_validation_context() {
     let (_temp_dir, storage) = create_test_storage();
     let block = create_test_block();
 
-    // Store block first
+    // Store block first (witness blob stored separately for SegWit-era validation)
     let witnesses = create_empty_witnesses();
     store_block_with_context(&storage.blocks(), &block, &witnesses, 0).unwrap();
+    let block_hash = storage.blocks().get_block_hash(&block);
+    storage
+        .blocks()
+        .store_witness(&block_hash, &witnesses)
+        .unwrap();
 
     // Prepare validation context
     let (witnesses_result, recent_headers) =
-        prepare_block_validation_context(&storage.blocks(), &block, 0).unwrap();
+        prepare_block_validation_context(&storage.blocks(), &block, 0, ProtocolVersion::Regtest)
+            .unwrap();
 
     // Should return witnesses (empty in this case)
     assert_eq!(witnesses_result.len(), block.transactions.len());
@@ -150,18 +156,28 @@ fn test_prepare_block_validation_context_with_no_headers() {
     let (_temp_dir, storage) = create_test_storage();
     let block = create_test_block();
 
-    // Don't store block, so no headers available
-    let (witnesses_result, recent_headers) =
-        prepare_block_validation_context(&storage.blocks(), &block, 0).unwrap();
+    // Without stored witnesses, regtest (SegWit active) fails closed.
+    let err =
+        prepare_block_validation_context(&storage.blocks(), &block, 0, ProtocolVersion::Regtest)
+            .unwrap_err();
+    assert!(
+        err.to_string().contains("missing witness data"),
+        "unexpected error: {err}"
+    );
+}
 
-    // Should still return witnesses (empty for empty block)
-    assert_eq!(witnesses_result.len(), block.transactions.len());
+#[test]
+fn test_load_witnesses_missing_post_segwit_fails_closed() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    store_block_with_context(&storage.blocks(), &block, &[], 0).unwrap();
 
-    // Recent headers may be None if not enough headers stored
-    // This is acceptable
-    if let Some(headers) = recent_headers {
-        assert!(!headers.is_empty());
-    }
+    let err = load_witnesses_for_block(&storage.blocks(), &block, 0, ProtocolVersion::Regtest)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("missing witness data"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

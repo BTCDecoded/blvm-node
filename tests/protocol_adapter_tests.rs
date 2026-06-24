@@ -219,3 +219,17 @@ fn test_protocol_adapter_unsupported_message() {
     let result = ProtocolAdapter::serialize_message(&msg, TransportType::Tcp);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_protocol_adapter_ping_nonces_produce_distinct_tcp_wire() {
+    let p1 = NetworkMessage::Ping(PingMessage { nonce: 1 });
+    let p2 = NetworkMessage::Ping(PingMessage { nonce: 2 });
+    let w1 = ProtocolAdapter::serialize_message(&p1, TransportType::Tcp).unwrap();
+    let w2 = ProtocolAdapter::serialize_message(&p2, TransportType::Tcp).unwrap();
+    assert_ne!(w1, w2);
+    #[cfg(feature = "production")]
+    {
+        let w1_cached = ProtocolAdapter::serialize_message(&p1, TransportType::Tcp).unwrap();
+        assert_eq!(w1, w1_cached);
+    }
+}

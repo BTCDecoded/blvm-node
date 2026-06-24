@@ -11,9 +11,13 @@
 
 use crate::module::manager::ModuleManager;
 use crate::module::registry::discovery::ModuleDiscovery;
+use crate::network::NetworkManager;
+use crate::node::health::HealthChecker;
+use crate::node::metrics::MetricsCollector;
 use crate::rpc::cache::ThreadLocalTimedCache;
 use crate::rpc::errors::{RpcError, RpcResult};
 use crate::rpc::params::param_str;
+use crate::storage::Storage;
 use crate::utils::{CACHE_REFRESH_MEMORY, CACHE_REFRESH_UPTIME};
 use serde_json::{Number, Value, json};
 use std::sync::Arc;
@@ -79,6 +83,12 @@ pub struct ControlRpc {
     /// Whether marketplace auto-fetch is permitted for unknown modules.
     /// Defaults to false to prevent remote code load via RPC.
     marketplace_fetch_enabled: bool,
+    /// Metrics collector for getmetrics / gethealth (optional).
+    metrics: Option<Arc<MetricsCollector>>,
+    /// Network manager for health checks (optional).
+    network_manager: Option<Arc<NetworkManager>>,
+    /// Storage for health checks (optional).
+    storage: Option<Arc<Storage>>,
 }
 
 impl ControlRpc {
@@ -111,6 +121,9 @@ impl ControlRpc {
             cached_memory_info: None,
             module_manager: None,
             marketplace_fetch_enabled: false,
+            metrics: None,
+            network_manager: None,
+            storage: None,
         }
     }
 
@@ -133,6 +146,9 @@ impl ControlRpc {
             cached_memory_info: None,
             module_manager: None,
             marketplace_fetch_enabled: false,
+            metrics: None,
+            network_manager: None,
+            storage: None,
         }
     }
 
@@ -142,6 +158,19 @@ impl ControlRpc {
         module_manager: Arc<tokio::sync::Mutex<ModuleManager>>,
     ) -> Self {
         self.module_manager = Some(module_manager);
+        self
+    }
+
+    /// Wire monitoring dependencies for `gethealth` / `getmetrics`.
+    pub fn with_monitoring(
+        mut self,
+        metrics: Arc<MetricsCollector>,
+        network_manager: Option<Arc<NetworkManager>>,
+        storage: Option<Arc<Storage>>,
+    ) -> Self {
+        self.metrics = Some(metrics);
+        self.network_manager = network_manager;
+        self.storage = storage;
         self
     }
 
@@ -757,13 +786,36 @@ impl ControlRpc {
     pub async fn gethealth(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: gethealth");
 
-        // This would need access to Node instance to get full health report
-        // For now, return basic health status
-        Ok(json!({
-            "status": "healthy",
-            "message": "Node is operational",
-            "note": "Full health check requires node instance access"
-        }))
+        let checker = HealthChecker::new();
+        let network_healthy = self
+            .network_manager
+            .as_ref()
+            .map(|nm| nm.is_network_active())
+            .unwrap_or(true);
+        let storage_healthy = self
+            .storage
+            .as_ref()
+            .and_then(|s| s.check_storage_bounds().ok())
+            .unwrap_or(true);
+
+        let (network_metrics, storage_metrics) = if let Some(ref metrics) = self.metrics {
+            let collected = metrics.collect();
+            (Some(collected.network), Some(collected.storage))
+        } else {
+            (None, None)
+        };
+
+        let report = checker.check_health(
+            network_healthy,
+            storage_healthy,
+            true,
+            network_metrics.as_ref(),
+            storage_metrics.as_ref(),
+        );
+
+        serde_json::to_value(report).map_err(|e| {
+            RpcError::internal_error(format!("Failed to serialize health report: {e}"))
+        })
     }
 
     /// Get node metrics
@@ -772,12 +824,16 @@ impl ControlRpc {
     pub async fn getmetrics(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: getmetrics");
 
-        // This would need access to MetricsCollector to get full metrics
-        // For now, return basic metrics
-        let uptime = self.start_time.elapsed().as_secs();
+        if let Some(ref metrics) = self.metrics {
+            let collected = metrics.collect();
+            return serde_json::to_value(collected).map_err(|e| {
+                RpcError::internal_error(format!("Failed to serialize metrics: {e}"))
+            });
+        }
+
         Ok(json!({
-            "uptime_seconds": uptime,
-            "note": "Full metrics require MetricsCollector integration"
+            "uptime_seconds": self.start_time.elapsed().as_secs(),
+            "note": "MetricsCollector not configured on this RPC server"
         }))
     }
 }

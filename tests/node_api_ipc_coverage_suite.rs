@@ -80,7 +80,7 @@ mod tests {
         let mut api =
             NodeApiImpl::with_dependencies(storage, None, None, Some(mempool), Some(network));
         let coordinator = Arc::new(tokio::sync::Mutex::new(SyncCoordinator::new()));
-        coordinator.lock().await.start_sync().unwrap();
+        coordinator.lock().await.mark_chain_current();
         api.set_sync_coordinator(coordinator);
         api.set_metrics_manager(Arc::new(MetricsManager::new()), "cov-test".to_string());
         api.set_event_manager(Arc::new(EventManager::new()), "cov-test".to_string());

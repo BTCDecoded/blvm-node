@@ -2,6 +2,7 @@
 
 use blvm_node::storage::Storage;
 use blvm_node::validation::{BlockValidationContext, ParallelBlockValidator};
+use blvm_protocol::segwit::Witness;
 use blvm_protocol::types::Network;
 
 mod common;
@@ -30,11 +31,18 @@ fn parallel_validator_validate_seeded_regtest_block() {
         .expect("block 1");
     let utxo_set = storage.utxos().get_all_utxos().unwrap();
 
+    let witnesses: Vec<Vec<Witness>> = block
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
+        .collect();
+
     let context = BlockValidationContext {
         block,
         height: 1,
         prev_utxo_set: utxo_set,
         prev_block_hash: prev_hash,
+        witnesses,
     };
 
     let validator = ParallelBlockValidator::new(0);

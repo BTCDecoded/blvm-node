@@ -288,6 +288,7 @@ impl Storage {
             indexing_config,
             storage_config,
             Some(data_dir.as_ref()),
+            Some(network),
         )
     }
 
@@ -521,7 +522,15 @@ impl Storage {
         backend: DatabaseBackend,
         pruning_config: Option<PruningConfig>,
     ) -> Result<Self> {
-        Self::with_backend_pruning_and_indexing(data_dir, backend, pruning_config, None, None, None)
+        Self::with_backend_pruning_and_indexing(
+            data_dir,
+            backend,
+            pruning_config,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Create a new storage instance with backend, pruning, and indexing config
@@ -532,7 +541,9 @@ impl Storage {
         indexing_config: Option<crate::config::IndexingConfig>,
         storage_config: Option<&crate::config::StorageConfig>,
         core_datadir: Option<&Path>,
+        consensus_network: Option<blvm_protocol::types::Network>,
     ) -> Result<Self> {
+        let network = consensus_network.unwrap_or(blvm_protocol::types::Network::Mainnet);
         #[cfg(feature = "compression")]
         {
             let compression_config = storage_config.and_then(|sc| sc.compression.clone());
@@ -544,6 +555,7 @@ impl Storage {
                 compression_config,
                 storage_config,
                 core_datadir,
+                Some(network),
             )
         }
         #[cfg(not(feature = "compression"))]
@@ -562,34 +574,13 @@ impl Storage {
                 Arc::new(txindex::TxIndex::new(Arc::clone(&db))?)
             };
 
-            let pruning_manager = pruning_config.map(|config| {
-                #[cfg(feature = "utxo-commitments")]
-                {
-                    let needs_commitments = matches!(config.mode, crate::config::PruningMode::Aggressive { keep_commitments: true, .. })
-                        || matches!(config.mode, crate::config::PruningMode::Custom { keep_commitments: true, .. });
-                    if needs_commitments {
-                        let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db)) {
-                            Ok(store) => Arc::new(store),
-                            Err(e) => {
-                                warn!("Failed to create commitment store: {}. Pruning will continue without commitments.", e);
-                                return Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)));
-                            }
-                        };
-                        Arc::new(pruning::PruningManager::with_utxo_commitments(
-                            config,
-                            Arc::clone(&blockstore),
-                            commitment_store,
-                            Arc::clone(&utxostore),
-                        ))
-                    } else {
-                        Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
-                    }
-                }
-                #[cfg(not(feature = "utxo-commitments"))]
-                {
-                    Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
-                }
-            });
+            let pruning_manager = Self::build_pruning_manager(
+                pruning_config,
+                Arc::clone(&db),
+                Arc::clone(&blockstore),
+                Arc::clone(&utxostore),
+                network,
+            );
 
             Ok(Self {
                 db,
@@ -602,6 +593,70 @@ impl Storage {
         }
     }
 
+    fn build_pruning_manager(
+        pruning_config: Option<PruningConfig>,
+        db: Arc<dyn database::Database>,
+        blockstore: Arc<blockstore::BlockStore>,
+        utxostore: Arc<utxostore::UtxoStore>,
+        network: blvm_protocol::types::Network,
+    ) -> Option<Arc<pruning::PruningManager>> {
+        pruning_config.map(|config| {
+            #[cfg(feature = "utxo-commitments")]
+            {
+                let needs_commitments = matches!(
+                    config.mode,
+                    crate::config::PruningMode::Aggressive {
+                        keep_commitments: true,
+                        ..
+                    }
+                ) || matches!(
+                    config.mode,
+                    crate::config::PruningMode::Custom {
+                        keep_commitments: true,
+                        ..
+                    }
+                );
+                if needs_commitments {
+                    let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db))
+                    {
+                        Ok(store) => Arc::new(store),
+                        Err(e) => {
+                            warn!(
+                                "Failed to create commitment store: {}. Pruning will continue without commitments.",
+                                e
+                            );
+                            return Arc::new(
+                                pruning::PruningManager::new(config, Arc::clone(&blockstore))
+                                    .with_network(network),
+                            );
+                        }
+                    };
+                    Arc::new(
+                        pruning::PruningManager::with_utxo_commitments(
+                            config,
+                            Arc::clone(&blockstore),
+                            commitment_store,
+                            Arc::clone(&utxostore),
+                        )
+                        .with_network(network),
+                    )
+                } else {
+                    Arc::new(
+                        pruning::PruningManager::new(config, Arc::clone(&blockstore))
+                            .with_network(network),
+                    )
+                }
+            }
+            #[cfg(not(feature = "utxo-commitments"))]
+            {
+                Arc::new(
+                    pruning::PruningManager::new(config, Arc::clone(&blockstore))
+                        .with_network(network),
+                )
+            }
+        })
+    }
+
     /// Create a new storage instance with backend, pruning, indexing, and compression config
     #[cfg(feature = "compression")]
     pub fn with_backend_pruning_indexing_and_compression<P: AsRef<Path>>(
@@ -612,7 +667,9 @@ impl Storage {
         compression_config: Option<crate::config::CompressionConfig>,
         storage_config: Option<&crate::config::StorageConfig>,
         core_datadir: Option<&Path>,
+        consensus_network: Option<blvm_protocol::types::Network>,
     ) -> Result<Self> {
+        let network = consensus_network.unwrap_or(blvm_protocol::types::Network::Mainnet);
         let store_path = data_dir.as_ref();
         let db = Arc::from(create_database(store_path, backend, storage_config)?);
 
@@ -685,35 +742,13 @@ impl Storage {
             Arc::new(txindex::TxIndex::new(Arc::clone(&db))?)
         };
 
-        let pruning_manager = pruning_config.map(|config| {
-            #[cfg(feature = "utxo-commitments")]
-            {
-                // Check if aggressive mode requires UTXO commitments
-                let needs_commitments = matches!(config.mode, crate::config::PruningMode::Aggressive { keep_commitments: true, .. })
-                    || matches!(config.mode, crate::config::PruningMode::Custom { keep_commitments: true, .. });
-                if needs_commitments {
-                    let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db)) {
-                        Ok(store) => Arc::new(store),
-                        Err(e) => {
-                            warn!("Failed to create commitment store: {}. Pruning will continue without commitments.", e);
-                            return Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)));
-                        }
-                    };
-                    Arc::new(pruning::PruningManager::with_utxo_commitments(
-                        config,
-                        Arc::clone(&blockstore),
-                        commitment_store,
-                        Arc::clone(&utxostore),
-                    ))
-                } else {
-                    Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
-                }
-            }
-            #[cfg(not(feature = "utxo-commitments"))]
-            {
-                Arc::new(pruning::PruningManager::new(config, Arc::clone(&blockstore)))
-            }
-        });
+        let pruning_manager = Self::build_pruning_manager(
+            pruning_config,
+            Arc::clone(&db),
+            Arc::clone(&blockstore),
+            Arc::clone(&utxostore),
+            network,
+        );
 
         Ok(Self {
             db,

@@ -1,12 +1,10 @@
-//! Tests for BIP158 implementation
+//! Node-level smoke tests for BIP158 (implementation lives in `blvm-protocol`).
 
 use blvm_protocol::bip158::{build_block_filter, match_filter};
 use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 
 #[test]
-#[ignore] // BIP158 module not yet implemented
 fn test_build_block_filter_with_transactions() {
-    // Create transactions with different scripts
     let tx1 = Transaction {
         version: 1,
         inputs: blvm_protocol::tx_inputs![],
@@ -33,7 +31,6 @@ fn test_build_block_filter_with_transactions() {
 }
 
 #[test]
-#[ignore] // BIP158 module not yet fully implemented
 fn test_match_filter_positive() {
     let tx = Transaction {
         version: 1,
@@ -46,13 +43,10 @@ fn test_match_filter_positive() {
     };
 
     let filter = build_block_filter(&[tx.clone()], &[]).unwrap();
-
-    // Script that's in the filter should match
     assert!(match_filter(&filter, &tx.outputs[0].script_pubkey));
 }
 
 #[test]
-#[ignore] // BIP158 module not yet fully implemented
 fn test_match_filter_with_previous_scripts() {
     let tx = Transaction {
         version: 1,
@@ -71,11 +65,7 @@ fn test_match_filter_with_previous_scripts() {
         lock_time: 0,
     };
 
-    // Previous output script (UTXO being spent)
     let prev_script = vec![0x54, 0x55]; // OP_4 OP_5
-
-    let filter = build_block_filter(&[tx], &[prev_script.clone()]).unwrap();
-
-    // Both output script and previous script should match
+    let filter = build_block_filter(&[tx], &[prev_script]).unwrap();
     assert!(filter.num_elements >= 1);
 }

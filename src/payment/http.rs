@@ -1,7 +1,8 @@
-//! HTTP BIP70 Payment Protocol Handlers
+//! HTTP payment protocol handlers (BLVM JSON API + bincode payloads).
 //!
-//! Provides HTTP endpoints for BIP70 payment protocol.
-//! Requires `bip70-http` feature flag.
+//! Endpoints accept JSON for request creation and return **bincode-serialized**
+//! `PaymentRequest` / `PaymentACK` bodies. This is **not** wire-format BIP70 protobuf;
+//! use P2P BIP70 handlers when protobuf interchange is required.
 
 use crate::payment::processor::PaymentError;
 #[cfg(feature = "bip70-http")]
@@ -43,8 +44,7 @@ pub async fn handle_create_payment_request(
     })?;
     let body_bytes = body.to_bytes();
 
-    // Parse payment request parameters (JSON or form data)
-    // For now, expect JSON with outputs and optional merchant_data
+    // Payment request body: JSON with `outputs` and optional `merchant_data` (BIP270-style).
     let params: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
         PaymentError::ProcessingError(format!("Failed to parse request body: {}", e))
     })?;
@@ -85,15 +85,14 @@ pub async fn handle_create_payment_request(
         .create_payment_request(outputs, merchant_data, None)
         .await?;
 
-    // Serialize payment request (BIP70 format)
+    // Serialize for BLVM internal HTTP transport (bincode, not BIP70 protobuf).
     let serialized = bincode::serialize(&payment_request).map_err(|e| {
         PaymentError::ProcessingError(format!("Failed to serialize payment request: {}", e))
     })?;
 
-    // Return with proper content type
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/bitcoin-paymentrequest")
+        .header("Content-Type", "application/x-blvm-paymentrequest-bincode")
         .body(Full::new(Bytes::from(serialized)))
         .unwrap())
 }
@@ -121,15 +120,14 @@ pub async fn handle_get_payment_request(
     // Get payment request
     let payment_request = processor.get_payment_request(payment_id).await?;
 
-    // Serialize payment request
+    // Serialize for BLVM internal HTTP transport (bincode, not BIP70 protobuf).
     let serialized = bincode::serialize(&payment_request).map_err(|e| {
         PaymentError::ProcessingError(format!("Failed to serialize payment request: {}", e))
     })?;
 
-    // Return with proper content type
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/bitcoin-paymentrequest")
+        .header("Content-Type", "application/x-blvm-paymentrequest-bincode")
         .body(Full::new(Bytes::from(serialized)))
         .unwrap())
 }
@@ -173,22 +171,21 @@ pub async fn handle_submit_payment(
     })?;
     let body_bytes = body.to_bytes();
 
-    // Parse payment (BIP70 format) - body already limited to MAX_BODY_SIZE
+    // Parse payment body (bincode; not BIP70 protobuf).
     let payment: Payment = bincode::deserialize(&body_bytes)
         .map_err(|e| PaymentError::ProcessingError(format!("Failed to parse payment: {}", e)))?;
 
     // Process payment
     let ack = processor.process_payment(payment, payment_id, None).await?;
 
-    // Serialize payment ACK
+    // Serialize payment ACK (bincode; not BIP70 protobuf).
     let serialized = bincode::serialize(&ack).map_err(|e| {
         PaymentError::ProcessingError(format!("Failed to serialize payment ACK: {}", e))
     })?;
 
-    // Return with proper content type
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/bitcoin-paymentack")
+        .header("Content-Type", "application/x-blvm-paymentack-bincode")
         .body(Full::new(Bytes::from(serialized)))
         .unwrap())
 }

@@ -6,6 +6,7 @@ use blvm_node::storage::Storage;
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -20,6 +21,11 @@ async fn generatetoaddress_regtest_extends_chain() -> anyhow::Result<()> {
     let mempool = Arc::new(MempoolManager::new());
     let mining = MiningRpc::with_dependencies(Arc::clone(&storage), mempool)
         .with_protocol_engine(Arc::clone(&protocol));
+
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
 
     let params = json!([
         3u64,
@@ -37,6 +43,38 @@ async fn generatetoaddress_regtest_extends_chain() -> anyhow::Result<()> {
     assert_eq!(
         height, 3,
         "genesis at height 0 plus 3 mined blocks => tip height 3"
+    );
+
+    // REV-TN-01 / REV-C-32: mined headers must use wall-clock time, not genesis constant.
+    let tip_header = storage
+        .chain()
+        .get_tip_header()?
+        .expect("tip header after mining");
+    assert!(
+        tip_header.timestamp > genesis_header.timestamp,
+        "tip timestamp {} must exceed genesis {}",
+        tip_header.timestamp,
+        genesis_header.timestamp
+    );
+    assert_ne!(
+        tip_header.timestamp, 1_231_006_505,
+        "must not use hardcoded genesis timestamp"
+    );
+
+    let after = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 60;
+    assert!(
+        tip_header.timestamp >= before.saturating_sub(5),
+        "tip timestamp {} should be near wall clock (before={before})",
+        tip_header.timestamp
+    );
+    assert!(
+        tip_header.timestamp <= after,
+        "tip timestamp {} should not be far in the future",
+        tip_header.timestamp
     );
 
     Ok(())

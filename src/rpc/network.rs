@@ -502,9 +502,13 @@ impl NetworkRpc {
             let persistent_peers = network.get_persistent_peers().await;
             let _is_added = persistent_peers.contains(&addr);
 
-            // Get connection status
-            let peer_count = network.peer_count();
-            let is_connected = peer_count > 0; // Simplified - would check actual connection
+            let peer_manager = network.peer_manager().await;
+            use crate::network::transport::TransportAddr;
+            let transport_addr = TransportAddr::Tcp(addr);
+            let is_connected = peer_manager
+                .get_peer(&transport_addr)
+                .map(|peer| peer.is_connected())
+                .unwrap_or(false);
 
             Ok(json!([{
                 "addednode": node,

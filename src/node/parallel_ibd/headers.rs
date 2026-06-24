@@ -87,18 +87,16 @@ pub(crate) async fn download_header_range(
                     match blvm_protocol::pow::check_proof_of_work(&header) {
                         Ok(true) => {}
                         Ok(false) => {
-                            warn!(
-                                "Header at height {} failed PoW check, skipping",
+                            return Err(anyhow::anyhow!(
+                                "Header at height {} failed PoW — refusing to skip (would corrupt height index)",
                                 current_height
-                            );
-                            continue;
+                            ));
                         }
                         Err(e) => {
-                            warn!(
-                                "Header at height {} PoW check error: {}, skipping",
-                                current_height, e
-                            );
-                            continue;
+                            return Err(anyhow::anyhow!(
+                                "Header at height {} PoW check error: {e}",
+                                current_height
+                            ));
                         }
                     }
 

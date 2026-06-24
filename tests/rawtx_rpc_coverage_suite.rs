@@ -89,8 +89,8 @@ async fn test_gettxout_with_indexed_utxo() {
 #[tokio::test]
 async fn test_getrawtransaction_from_index() {
     let (_dir, rpc, txid) = rpc_with_mempool();
-    let result = rpc.getrawtransaction(&json!([txid])).await;
-    assert!(result.is_err() || result.unwrap().get("hex").is_some());
+    let result = rpc.getrawtransaction(&json!([txid])).await.unwrap();
+    assert!(result.as_str().is_some_and(|hex| !hex.is_empty()) || result.get("hex").is_some());
 }
 
 #[tokio::test]
@@ -150,11 +150,14 @@ async fn test_gettxoutproof_and_verifytxoutproof_on_chain() {
 
     let tip = storage.chain().get_height().unwrap().unwrap_or(0);
     let prev_hash = storage.blocks().get_hash_by_height(tip).unwrap().unwrap();
-    let block = TestBlockBuilder::new()
+    let mut block = TestBlockBuilder::new()
         .set_prev_hash(prev_hash)
         .add_coinbase_transaction(p2pkh_script(random_hash20()))
         .add_transaction(tx.clone())
         .build();
+    use blvm_protocol::mining::calculate_merkle_root;
+    block.header.merkle_root =
+        calculate_merkle_root(block.transactions.as_ref()).expect("merkle root");
     let height = tip + 1;
     let block_hash = storage.blocks().get_block_hash(&block);
     storage.blocks().store_block(&block).unwrap();
@@ -183,8 +186,12 @@ async fn test_gettxoutproof_and_verifytxoutproof_on_chain() {
         .verifytxoutproof(&json!([proof, blockhash_hex]))
         .await
         .unwrap();
-    assert!(verified.get("txids").unwrap().is_array());
-    assert!(verified.get("matches").is_some());
+    let arr = verified.as_array().expect("Core returns txid array");
+    assert!(arr.iter().any(|v| v.as_str() == Some(txid.as_str())));
+
+    let verified_core = rpc.verifytxoutproof(&json!([proof])).await.unwrap();
+    let core_arr = verified_core.as_array().unwrap();
+    assert!(core_arr.iter().any(|v| v.as_str() == Some(txid.as_str())));
 }
 
 #[tokio::test]

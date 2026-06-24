@@ -172,7 +172,10 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
         0,
     )?;
     let hash_a = storage_main.blocks().get_block_hash(&block_a);
-    let work_a = storage_main.chain().get_chainwork(&hash_a)?.unwrap_or(0);
+    let work_a = storage_main
+        .chain()
+        .get_chainwork(&hash_a)?
+        .unwrap_or_else(blvm_consensus::pow::U256::zero);
 
     let mut fork_utxo = UtxoSet::default();
     let mut fork_coord = SyncCoordinator::new();
@@ -198,7 +201,10 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
         FORK_SALT,
     )?;
     let hash_b = storage_fork.blocks().get_block_hash(&block_b);
-    let work_b = storage_fork.chain().get_chainwork(&hash_b)?.unwrap_or(0);
+    let work_b = storage_fork
+        .chain()
+        .get_chainwork(&hash_b)?
+        .unwrap_or_else(blvm_consensus::pow::U256::zero);
     assert_eq!(
         work_a, work_b,
         "siblings must carry equal cumulative chainwork"

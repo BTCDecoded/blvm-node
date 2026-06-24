@@ -251,18 +251,14 @@ pub struct MigrateCoreArgs {
     pub reuse_core_block_files: bool,
 }
 
-/// Run Bitcoin Core to BLVM migration (initializes tracing subscriber).
+/// Run Bitcoin Core to BLVM migration (initializes tracing subscriber when not already set).
 pub fn run_migrate_core(args: MigrateCoreArgs) -> Result<()> {
-    if args.verbose {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .init();
+    let level = if args.verbose {
+        tracing::Level::DEBUG
     } else {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .init();
-    }
-
+        tracing::Level::INFO
+    };
+    let _ = tracing_subscriber::fmt().with_max_level(level).try_init();
     migrate_core_data(args)
 }
 

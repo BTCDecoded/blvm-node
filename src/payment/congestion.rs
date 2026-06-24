@@ -109,7 +109,7 @@ impl CongestionManager {
         storage: Option<Arc<Storage>>,
         config: BatchConfig,
     ) -> Self {
-        let manager = Self {
+        let mut manager = Self {
             covenant_engine,
             mempool_manager,
             storage,
@@ -123,8 +123,8 @@ impl CongestionManager {
         manager
     }
 
-    /// Load all batches from storage
-    fn load_all_batches(&self) -> Result<(), PaymentError> {
+    /// Load all batches from storage into memory.
+    fn load_all_batches(&mut self) -> Result<(), PaymentError> {
         let storage = self
             .storage
             .as_ref()
@@ -134,11 +134,21 @@ impl CongestionManager {
             PaymentError::ProcessingError(format!("Failed to open batches tree: {}", e))
         })?;
 
-        // Note: batches is not mutex-protected in the struct, so we need to handle this carefully
-        // For now, we'll just log that batches were loaded - actual loading would need to be done
-        // during initialization or with proper synchronization
-        let _count = batches_tree.len().unwrap_or(0);
-        tracing::info!("Found {} batches in storage", _count);
+        let mut loaded = 0usize;
+        for entry in batches_tree.iter() {
+            let (_key, value) = entry.map_err(|e| {
+                PaymentError::ProcessingError(format!("Failed to read batch from storage: {e}"))
+            })?;
+            let batch: TransactionBatch = bincode::deserialize(&value).map_err(|e| {
+                PaymentError::ProcessingError(format!("Failed to deserialize batch: {e}"))
+            })?;
+            self.batches.insert(batch.batch_id.clone(), batch);
+            loaded += 1;
+        }
+
+        if loaded > 0 {
+            tracing::info!("Loaded {} batches from storage", loaded);
+        }
         Ok(())
     }
 
@@ -253,25 +263,29 @@ impl CongestionManager {
 
         let mempool_size = mempool_manager.size();
 
-        // Get prioritized transactions to calculate fee rates
-        // Note: This requires UTXO set, which we may not have access to here
-        // For now, we'll use a simplified approach
-        let transactions = mempool_manager.get_transactions();
+        let utxo_set = self
+            .storage
+            .as_ref()
+            .and_then(|s| s.utxos().load_utxo_set().ok())
+            .unwrap_or_default();
 
-        // Calculate average fee rate (simplified - would need UTXO set for accurate calculation)
-        let avg_fee_rate = if transactions.is_empty() {
-            self.config.min_fee_rate
+        let mut fee_rates: Vec<u64> = mempool_manager
+            .fee_rates_sat_vb(&utxo_set)
+            .into_iter()
+            .filter(|rate| *rate > 0)
+            .collect();
+
+        let (avg_fee_rate, median_fee_rate) = if fee_rates.is_empty() {
+            (self.config.min_fee_rate, self.config.min_fee_rate)
         } else {
-            // Estimate based on mempool size
-            // Larger mempool = higher fees
-            let base_fee = self.config.min_fee_rate;
-            let congestion_multiplier = (mempool_size as f64 / 1000.0).min(10.0) as u64;
-            base_fee + congestion_multiplier
+            fee_rates.sort_unstable();
+            let sum: u64 = fee_rates.iter().sum();
+            let avg = sum / fee_rates.len() as u64;
+            let median = fee_rates[fee_rates.len() / 2];
+            (avg, median)
         };
 
-        let median_fee_rate = avg_fee_rate; // Simplified - would calculate actual median
-
-        // Estimate blocks until confirmation (simplified)
+        // Heuristic: higher avg fee rate → fewer blocks to confirm.
         let estimated_blocks = if avg_fee_rate >= self.config.target_fee_rate {
             1 // High fee rate = fast confirmation
         } else {

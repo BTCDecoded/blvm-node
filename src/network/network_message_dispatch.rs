@@ -62,9 +62,13 @@ pub(crate) async fn handle_network_message(
                 .await;
             }
         }
-        NetworkMessage::InventoryReceived(_data) => {
-            // Inventory relay - no-op for now (inv processing in protocol layer)
-            debug!("InventoryReceived");
+        NetworkMessage::InventoryReceived(data, peer_addr) => {
+            if let Err(e) = nm.handle_inventory_received(&data, peer_addr) {
+                debug!("Error processing inventory from {peer_addr}: {e}");
+            }
+            if let Err(e) = nm.process_announced_block_inventory(&data, peer_addr).await {
+                debug!("Block inv follow-up from {peer_addr}: {e}");
+            }
         }
         NetworkMessage::GetCfiltersReceived(data, peer_addr) => {
             ignore_error(
@@ -223,6 +227,14 @@ pub(crate) async fn handle_network_message(
         #[cfg(feature = "ctv")]
         NetworkMessage::PaymentProofReceived(_data, _peer_addr) => {
             debug!("PaymentProofReceived");
+        }
+        #[cfg(feature = "ctv")]
+        NetworkMessage::SendPaymentProof(data, peer_addr) => {
+            ignore_error(
+                || nm.send_to_peer(peer_addr, data),
+                &format!("Error sending payment proof to {peer_addr}"),
+            )
+            .await;
         }
         #[cfg(feature = "utxo-commitments")]
         NetworkMessage::UTXOSetReceived(data, _peer_addr) => {
@@ -409,6 +421,10 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
         nm.peer_tx_rate_limiters().lock().await.remove(&sock);
         nm.peer_tx_byte_rate_limiters().lock().await.remove(&sock);
         nm.peer_message_rates().lock().await.remove(&sock);
+        nm.inventory()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove_peer(&sock.to_string());
         nm.peer_states().write().await.remove(&sock);
 
         // Decrement eclipse-prevention diversity counter for this peer's IP.
@@ -479,7 +495,8 @@ mod tests {
     async fn inventory_and_pkgtxn_smoke() {
         let nm = manager();
         let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
-        handle_network_message(&nm, NetworkMessage::InventoryReceived(vec![]))
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::InventoryReceived(vec![], addr))
             .await
             .unwrap();
         handle_network_message(&nm, NetworkMessage::SendPkgTxnReceived(vec![], addr))

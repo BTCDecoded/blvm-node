@@ -21,19 +21,75 @@ pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Vec<Witness>>)> 
     let (block, witnesses) = deserialize_block_with_witnesses(data)
         .map_err(|e| anyhow::anyhow!("Failed to parse block from wire format: {}", e))?;
 
-    // Validate that consensus serialization matches the original wire size
-    // Uses consensus serialization through blvm_protocol::serialization re-exports.
-    let include_witness = true;
-    if !blvm_protocol::serialization::block::validate_block_serialized_size(
-        &block,
-        &witnesses,
-        include_witness,
-        data.len(),
-    ) {
-        anyhow::bail!("Block size mismatch: serialized block does not match wire size");
-    }
+    // Do not compare against serialize_block_with_witnesses length: that re-encode is not
+    // byte-identical to the P2P block payload for segwit mainnet blocks (lossy round-trip).
 
     Ok((block, witnesses))
+}
+
+/// Empty witness stacks (one per input) for pre-SegWit blocks.
+fn empty_witnesses_for_block(block: &Block) -> Vec<Vec<Witness>> {
+    block
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
+        .collect()
+}
+
+fn load_witnesses_from_store(
+    blockstore: &BlockStore,
+    block: &Block,
+    height: u64,
+    segwit_active: bool,
+) -> Result<Vec<Vec<Witness>>> {
+    let block_hash = blockstore.get_block_hash(block);
+    match blockstore.get_witness(&block_hash)? {
+        Some(w) => {
+            if w.len() != block.transactions.len() {
+                anyhow::bail!(
+                    "witness count {} != transaction count {} at height {height}",
+                    w.len(),
+                    block.transactions.len()
+                );
+            }
+            Ok(w)
+        }
+        None if !segwit_active => Ok(empty_witnesses_for_block(block)),
+        None => anyhow::bail!("missing witness data for block at height {height}"),
+    }
+}
+
+/// Load witnesses for validation using consensus network fork activation (height-based).
+pub fn load_witnesses_for_block_network(
+    blockstore: &BlockStore,
+    block: &Block,
+    height: u64,
+    network: blvm_protocol::types::Network,
+) -> Result<Vec<Vec<Witness>>> {
+    use blvm_consensus::activation::IsForkActive;
+    use blvm_consensus::block::BlockValidationContext;
+    use blvm_consensus::types::ForkId;
+
+    let ctx = BlockValidationContext::for_network(network);
+    let segwit_active = ctx.is_fork_active(ForkId::SegWit, height);
+    load_witnesses_from_store(blockstore, block, height, segwit_active)
+}
+
+/// Load witnesses for validation. Pre-SegWit: synthesize empty stacks when not stored.
+/// Post-SegWit: absent blockstore entry is an error (fail closed). Stored all-empty stacks
+/// are valid (e.g. coinbase-only blocks).
+pub fn load_witnesses_for_block(
+    blockstore: &BlockStore,
+    block: &Block,
+    height: u64,
+    protocol_version: ProtocolVersion,
+) -> Result<Vec<Vec<Witness>>> {
+    load_witnesses_for_block_network(
+        blockstore,
+        block,
+        height,
+        protocol_version.consensus_network(),
+    )
 }
 
 /// Store a block with its witnesses and update recent headers
@@ -85,17 +141,10 @@ pub fn store_block_with_context_and_index(
 pub fn prepare_block_validation_context(
     blockstore: &BlockStore,
     block: &Block,
-    _current_height: u64,
+    current_height: u64,
+    protocol_version: ProtocolVersion,
 ) -> Result<(Vec<Vec<Witness>>, Option<Vec<BlockHeader>>)> {
-    // Get witnesses for this block
-    let block_hash = blockstore.get_block_hash(block);
-    let witnesses = blockstore.get_witness(&block_hash)?.unwrap_or_else(|| {
-        block
-            .transactions
-            .iter()
-            .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
-            .collect()
-    });
+    let witnesses = load_witnesses_for_block(blockstore, block, current_height, protocol_version)?;
 
     // Get recent headers for median time-past (BIP113)
     let recent_headers = blockstore

@@ -48,8 +48,12 @@ pub(crate) fn validate_and_store_block(
     witnesses: &[Vec<Witness>],
     height: u64,
 ) -> Result<()> {
-    let (stored_witnesses, _recent_headers) =
-        prepare_block_validation_context(blockstore, block, height)?;
+    let (stored_witnesses, _recent_headers) = prepare_block_validation_context(
+        blockstore,
+        block,
+        height,
+        protocol.get_protocol_version(),
+    )?;
 
     let witnesses_to_use = if !witnesses.is_empty() {
         witnesses

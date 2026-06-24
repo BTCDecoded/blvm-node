@@ -428,7 +428,9 @@ impl NetworkManager {
                         )
                         .await;
                 }
-                let _ = self.peer_tx().send(NetworkMessage::InventoryReceived(data));
+                let _ = self
+                    .peer_tx()
+                    .send(NetworkMessage::InventoryReceived(data, peer_addr));
                 return Ok(());
             }
             ProtocolMessage::GetModule(_) => {
@@ -537,18 +539,31 @@ impl NetworkManager {
                     );
                     return Ok(());
                 }
-                // Relay / post-IBD: main loop / process_block expect consensus block+witness bytes,
-                // not a full P2P frame (magic/command/checksum wrapper).
-                let wire = blvm_protocol::serialization::serialize_block_with_witnesses(
-                    &block_msg.block,
-                    &block_msg.witnesses,
-                    true,
-                );
-                self.queue_block(wire);
+                // Relay / post-IBD: queue the P2P block payload for the main loop.
+                // Do not re-serialize with serialize_block_with_witnesses — that round-trip is
+                // lossy on segwit mainnet blocks and breaks parse_block_from_wire.
+                let payload_len =
+                    u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+                if data.len() < 24 + payload_len {
+                    warn!(
+                        "Block from {} truncated (frame {} bytes, payload {} bytes)",
+                        peer_addr,
+                        data.len(),
+                        payload_len
+                    );
+                    return Ok(());
+                }
+                let payload = data[24..24 + payload_len].to_vec();
+                let payload_bytes = payload.len();
+                self.queue_block(payload);
+                if let Ok(mut inv) = self.inventory().lock() {
+                    inv.mark_fulfilled(&block_hash);
+                }
                 debug!(
-                    "Block from {} (hash {}) queued for main loop (no IBD getdata pending)",
+                    "Block from {} (hash {}) queued for main loop ({} payload bytes)",
                     peer_addr,
-                    hex::encode(block_hash)
+                    hex::encode(block_hash),
+                    payload_bytes
                 );
                 return Ok(());
             }
@@ -611,14 +626,46 @@ impl NetworkManager {
                     .send(NetworkMessage::FilteredBlockReceived(data, peer_addr));
                 return Ok(());
             }
-            ProtocolMessage::GetBlocks(_) => {
-                // We serve headers via GetHeaders; respond with an empty Inv so
-                // old-style peers learn we have nothing from their locator.
-                let empty_inv = ProtocolMessage::Inv(crate::network::protocol::InvMessage {
-                    inventory: vec![],
-                });
-                if let Ok(wire) = ProtocolParser::serialize_message(&empty_inv) {
-                    let _ = self.send_to_peer(peer_addr, wire).await;
+            ProtocolMessage::GetBlocks(getblocks) => {
+                if let Some(storage) = self.storage().as_ref() {
+                    use crate::network::inventory::MSG_BLOCK;
+                    use blvm_consensus::block::block_header_hash;
+
+                    const MAX_GETBLOCKS_INV: usize = 500;
+                    match storage.blocks().build_headers_response(
+                        &getblocks.block_locator_hashes,
+                        &getblocks.hash_stop,
+                        MAX_GETBLOCKS_INV,
+                    ) {
+                        Ok(headers) if !headers.is_empty() => {
+                            let inventory: Vec<crate::network::protocol::InventoryVector> = headers
+                                .into_iter()
+                                .map(|header| crate::network::protocol::InventoryVector {
+                                    inv_type: MSG_BLOCK,
+                                    hash: block_header_hash(&header),
+                                })
+                                .collect();
+                            let inv_msg =
+                                ProtocolMessage::Inv(crate::network::protocol::InvMessage {
+                                    inventory,
+                                });
+                            if let Ok(wire) = ProtocolParser::serialize_message(&inv_msg) {
+                                let _ = self.send_to_peer(peer_addr, wire).await;
+                            }
+                        }
+                        Ok(_) => {
+                            let empty_inv =
+                                ProtocolMessage::Inv(crate::network::protocol::InvMessage {
+                                    inventory: vec![],
+                                });
+                            if let Ok(wire) = ProtocolParser::serialize_message(&empty_inv) {
+                                let _ = self.send_to_peer(peer_addr, wire).await;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("GetBlocks: build_headers_response failed: {}", e);
+                        }
+                    }
                 }
                 return Ok(());
             }

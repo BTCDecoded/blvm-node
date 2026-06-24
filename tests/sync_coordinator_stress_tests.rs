@@ -57,7 +57,7 @@ async fn test_sync_coordinator_peer_disconnection_during_sync() {
     let mut coordinator = SyncCoordinator::new();
 
     // Start sync
-    coordinator.start_sync().unwrap();
+    coordinator.mark_chain_current();
 
     // Simulate peer disconnection by transitioning to error state
     // In real scenario, this would be handled by network layer
@@ -72,7 +72,7 @@ async fn test_sync_coordinator_chain_tip_divergence() {
     let mut coordinator = SyncCoordinator::new();
 
     // Start sync
-    coordinator.start_sync().unwrap();
+    coordinator.mark_chain_current();
 
     // Simulate chain tip divergence (multiple headers at same height)
     // In real scenario, this would trigger reorganization logic
@@ -132,7 +132,8 @@ async fn test_sync_coordinator_concurrent_operations() {
         let coordinator_clone = Arc::clone(&coordinator);
         handles.push(tokio::spawn(async move {
             let mut coordinator = coordinator_clone.lock().await;
-            coordinator.start_sync().ok()
+            coordinator.mark_chain_current();
+            Some(())
         }));
     }
 
