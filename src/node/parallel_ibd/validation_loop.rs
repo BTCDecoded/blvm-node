@@ -1332,6 +1332,30 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // Track last 11 block headers for BIP113 median-time-past calculation
     // Vec + drain keeps contiguity; avoids VecDeque::make_contiguous() per-block alloc
     let mut recent_headers_buf: VecDeque<Arc<BlockHeader>> = VecDeque::with_capacity(12);
+    // Seed from blockstore so near-tip catch-up (few blocks) has a full MTP window. Without this
+    // the buffer starts empty and block H+1 can fail H05 when its timestamp is below block H.
+    if start_height > 1 {
+        let lo = start_height.saturating_sub(11);
+        for h in lo..start_height {
+            if let Ok(Some(header)) = blockstore.get_header_at_height(h) {
+                recent_headers_buf.push_back(Arc::new(header));
+            }
+        }
+        if recent_headers_buf.is_empty() {
+            if let Ok(stored) = blockstore.get_recent_headers(11) {
+                for header in stored {
+                    recent_headers_buf.push_back(Arc::new(header));
+                }
+            }
+        }
+        if !recent_headers_buf.is_empty() {
+            info!(
+                "Seeded {} recent header(s) from blockstore for BIP113 MTP (before height {})",
+                recent_headers_buf.len(),
+                start_height
+            );
+        }
+    }
     // Reusable scratch Vec for the per-job recent_headers snapshot: avoid one collect() alloc per
     // dispatch (the deque holds ≤11 Arc<BlockHeader> ptrs; small but occurs every block).
     let mut recent_snap_buf: Vec<Arc<BlockHeader>> = Vec::with_capacity(12);
