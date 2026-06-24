@@ -279,10 +279,10 @@ compression = ["block-compression", "utxo-compression", "witness-compression"]
 
 # Security: patch transitive deps via git (crates-io ↔ crates-io patch not allowed).
 # Exit criteria (reconcile with `.cargo/audit.toml` + `docs/AUDIT_SUPPRESSIONS.md`):
-# - quinn-proto: drop when crates.io ships fixes merged at tag `quinn-proto-0.11.14` (RUSTSEC-2026-0037).
+# - quinn-proto: drop git patch when all consumers resolve >=0.11.15 from crates.io (RUSTSEC-2026-0185).
 # After bump: run plain `cargo audit`, `cargo tree -i quinn-proto`, `cargo tree -i time`, then remove obsolete ignores.
 [patch.crates-io]
-quinn-proto = { git = "https://github.com/quinn-rs/quinn", tag = "quinn-proto-0.11.14" }
+quinn-proto = { git = "https://github.com/quinn-rs/quinn", tag = "quinn-proto-0.11.15" }
 # Local monorepo: sibling paths override the blvm-* version pins above.
 blvm-protocol = { path = "../blvm-protocol" }
 blvm-consensus = { path = "../blvm-consensus" }
