@@ -10,6 +10,7 @@ use blvm_protocol::ConsensusProof;
 use blvm_protocol::mining::MiningResult;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::serialization::serialize_block_with_witnesses;
+use blvm_protocol::types::Network;
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, UtxoSet};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -49,20 +50,34 @@ fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
     script_sig
 }
 
+fn seed_genesis_block(storage: &Storage, genesis: &blvm_protocol::Block) -> anyhow::Result<()> {
+    let hash = storage.blocks().get_block_hash(genesis);
+    storage.blocks().store_block(genesis)?;
+    storage.blocks().store_height(0, &hash)?;
+    storage.blocks().store_recent_header(0, &genesis.header)?;
+    let witnesses: Vec<Vec<Witness>> = genesis
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+        .collect();
+    storage.blocks().store_witness(&hash, &witnesses)?;
+    Ok(())
+}
+
 fn bootstrap_miner_storage(
     storage: &Arc<Storage>,
-    genesis_header: &blvm_protocol::BlockHeader,
+    genesis: &blvm_protocol::Block,
 ) -> anyhow::Result<()> {
-    storage.chain().initialize(genesis_header)?;
-    Ok(())
+    storage.chain().initialize(&genesis.header)?;
+    seed_genesis_block(storage.as_ref(), genesis)
 }
 
 fn bootstrap_follower_storage(
     storage: &Arc<Storage>,
-    genesis_header: &blvm_protocol::BlockHeader,
+    genesis: &blvm_protocol::Block,
 ) -> anyhow::Result<()> {
-    storage.chain().initialize(genesis_header)?;
-    Ok(())
+    storage.chain().initialize(&genesis.header)?;
+    seed_genesis_block(storage.as_ref(), genesis)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -70,7 +85,6 @@ async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
     let regtest_blocks = regtest_block_count();
     let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest)?);
     let genesis = protocol.get_network_params().genesis_block.clone();
-    let genesis_header = genesis.header.clone();
 
     let consensus = ConsensusProof::new();
 
@@ -79,8 +93,8 @@ async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
     let storage_m = Arc::new(Storage::new(miner_dir.path())?);
     let storage_f = Arc::new(Storage::new(follower_dir.path())?);
 
-    bootstrap_miner_storage(&storage_m, &genesis_header)?;
-    bootstrap_follower_storage(&storage_f, &genesis_header)?;
+    bootstrap_miner_storage(&storage_m, &genesis)?;
+    bootstrap_follower_storage(&storage_f, &genesis)?;
 
     let mut miner_utxo = UtxoSet::default();
     let mut follower_utxo = UtxoSet::default();
@@ -89,11 +103,12 @@ async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
 
     let mut wire_blocks: Vec<Vec<u8>> = Vec::with_capacity(regtest_blocks as usize);
 
-    for connect_height in 0..regtest_blocks {
+    for _ in 0..regtest_blocks {
+        let connect_height = storage_m.chain().get_height()?.unwrap_or(0) + 1;
         let stored: u64 = storage_m.blocks().block_count()? as u64;
         assert_eq!(
             stored, connect_height,
-            "miner blockstore height index vs loop"
+            "miner blockstore height index vs connect height"
         );
 
         let prev_header = storage_m
@@ -111,10 +126,9 @@ async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
 
         let coinbase_script = regtest_coinbase_script_sig(connect_height);
         let coinbase_address = vec![0x51u8];
+        let block_time = prev_header.timestamp.saturating_add(600);
 
-        // Use `create_new_block` (not `create_block_template`): template path calls
-        // `mining::expand_target` into u128, which cannot represent regtest nBits (0x207fffff).
-        let mut block = consensus.create_new_block(
+        let mut block = consensus.create_new_block_with_time(
             &miner_utxo,
             &[],
             connect_height,
@@ -122,6 +136,9 @@ async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
             &prev_headers,
             &coinbase_script,
             &coinbase_address,
+            block_time,
+            Network::Regtest,
+            None,
         )?;
         // BIP90 on regtest: BIP34/BIP66/BIP65 active from height 0 → need version >= 4.
         block.header.version = 4;
@@ -151,23 +168,18 @@ async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
         )?;
         assert!(accepted, "miner rejected block at {connect_height}");
 
-        let block_hash = storage_m.blocks().as_ref().get_block_hash(&mined);
-        storage_m
-            .chain()
-            .update_tip(&block_hash, &mined.header, connect_height)?;
-
         wire_blocks.push(wire);
     }
 
     storage_m.utxos().store_utxo_set(&miner_utxo)?;
 
-    assert_eq!(storage_m.chain().get_height()?.unwrap(), regtest_blocks - 1);
+    assert_eq!(storage_m.chain().get_height()?.unwrap(), regtest_blocks);
     assert_eq!(wire_blocks.len() as u64, regtest_blocks);
 
     let miner_tip = storage_m.chain().get_tip_hash()?.unwrap();
 
-    for connect_height in 0..regtest_blocks {
-        let wire = &wire_blocks[connect_height as usize];
+    for wire in &wire_blocks {
+        let connect_height = storage_f.chain().get_height()?.unwrap_or(0) + 1;
         let accepted = coord_f.process_block(
             storage_f.blocks().as_ref(),
             protocol.as_ref(),
@@ -179,17 +191,11 @@ async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
             None,
         )?;
         assert!(accepted, "follower rejected block at {connect_height}");
-        let (block, _) =
-            blvm_protocol::serialization::block::deserialize_block_with_witnesses(wire)?;
-        let block_hash = storage_f.blocks().as_ref().get_block_hash(&block);
-        storage_f
-            .chain()
-            .update_tip(&block_hash, &block.header, connect_height)?;
     }
 
     storage_f.utxos().store_utxo_set(&follower_utxo)?;
 
-    assert_eq!(storage_f.chain().get_height()?.unwrap(), regtest_blocks - 1);
+    assert_eq!(storage_f.chain().get_height()?.unwrap(), regtest_blocks);
     let follower_tip = storage_f.chain().get_tip_hash()?.unwrap();
     assert_eq!(
         follower_tip, miner_tip,
