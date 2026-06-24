@@ -6,6 +6,7 @@ use blvm_protocol::ConsensusProof;
 use blvm_protocol::mining::MiningResult;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::serialization::serialize_block_with_witnesses;
+use blvm_protocol::types::Network;
 use blvm_protocol::{BitcoinProtocolEngine, Block, ProtocolVersion, UtxoSet};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -90,7 +91,8 @@ fn mine_and_connect(
     }
 
     let coinbase_script = regtest_coinbase_script_sig(connect_height, fork_salt);
-    let mut block = consensus.create_new_block(
+    let block_time = prev_header.timestamp.saturating_add(600);
+    let mut block = consensus.create_new_block_with_time(
         utxo,
         &[],
         connect_height,
@@ -98,6 +100,9 @@ fn mine_and_connect(
         &prev_headers,
         &coinbase_script,
         &vec![0x51u8],
+        block_time,
+        Network::Regtest,
+        None,
     )?;
     block.header.version = 4;
 
