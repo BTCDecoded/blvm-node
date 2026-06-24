@@ -162,12 +162,7 @@ async fn register_and_request_block(
     peer_id: &str,
     block_hash: Hash,
     height: u64,
-) -> Result<
-    tokio::sync::oneshot::Receiver<(
-        Block,
-        Vec<Vec<Witness>>,
-    )>,
-> {
+) -> Result<tokio::sync::oneshot::Receiver<(Block, Vec<Vec<Witness>>)>> {
     if !network.is_peer_connected(peer_addr).await {
         return Err(anyhow::anyhow!(
             "Peer {peer_id} not connected — cannot request block at height {height}"
@@ -178,16 +173,10 @@ async fn register_and_request_block(
         inv_type: MSG_WITNESS_BLOCK,
         hash: block_hash,
     }];
-    let wire_msg = ProtocolParser::serialize_message(&ProtocolMessage::GetData(GetDataMessage {
-        inventory,
-    }))?;
-    if let Err(e) = send_block_getdata_with_retry(
-        Arc::clone(&network),
-        peer_addr,
-        wire_msg,
-        height,
-    )
-    .await
+    let wire_msg =
+        ProtocolParser::serialize_message(&ProtocolMessage::GetData(GetDataMessage { inventory }))?;
+    if let Err(e) =
+        send_block_getdata_with_retry(Arc::clone(&network), peer_addr, wire_msg, height).await
     {
         network.cancel_block_request(peer_addr, block_hash);
         return Err(e);
@@ -270,14 +259,9 @@ async fn enqueue_chunk_block(
             );
             *first_block_logged = true;
         }
-        let block_rx = register_and_request_block(
-            Arc::clone(network),
-            peer_addr,
-            peer_id,
-            block_hash,
-            height,
-        )
-        .await?;
+        let block_rx =
+            register_and_request_block(Arc::clone(network), peer_addr, peer_id, block_hash, height)
+                .await?;
         let request_start = std::time::Instant::now();
         in_flight_heights.insert(height);
         in_flight.push(Box::pin(async move {
@@ -419,9 +403,9 @@ pub(crate) async fn download_chunk(
         start_height: u64,
     ) -> Result<()> {
         while in_flight.len() < pipeline_depth {
-            let Some(height) = (next_to_send..=end_height).find(|h| {
-                !received.contains_key(h) && !in_flight_heights.contains(h)
-            }) else {
+            let Some(height) = (next_to_send..=end_height)
+                .find(|h| !received.contains_key(h) && !in_flight_heights.contains(h))
+            else {
                 break;
             };
             let block_hash = *block_hash_by_height

@@ -1138,11 +1138,7 @@ impl NetworkManager {
     }
 
     /// Drop a pending block request (e.g. GetData failed after register).
-    pub fn cancel_block_request(
-        &self,
-        peer_addr: SocketAddr,
-        block_hash: blvm_protocol::Hash,
-    ) {
+    pub fn cancel_block_request(&self, peer_addr: SocketAddr, block_hash: blvm_protocol::Hash) {
         let key = (Self::block_request_key(peer_addr), block_hash);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -1233,9 +1229,8 @@ impl NetworkManager {
     /// Returns None if no peers are connected or no peers have reported a start_height
     pub fn get_highest_peer_start_height(&self) -> Option<u64> {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.get_highest_peer_start_height_async().await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { self.get_highest_peer_start_height_async().await })
         })
     }
 

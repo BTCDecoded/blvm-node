@@ -45,8 +45,8 @@ pub mod compact_blocks;
 // Block Filter Service (BIP157/158)
 mod background_tasks;
 pub mod bip157_handler;
-pub mod filter_service;
 mod block_announced_sync;
+pub mod filter_service;
 mod getdata_serve;
 mod handlers;
 mod network_message_dispatch;

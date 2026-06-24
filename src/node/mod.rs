@@ -1573,10 +1573,7 @@ impl Node {
                     Ok(Some(w)) => w,
                     Ok(None) => 0,
                     Err(e) => {
-                        warn!(
-                            "[IBD_RESUME] get_utxo_watermark failed ({}); assuming 0",
-                            e
-                        );
+                        warn!("[IBD_RESUME] get_utxo_watermark failed ({}); assuming 0", e);
                         0
                     }
                 };
@@ -1670,7 +1667,10 @@ impl Node {
 
     /// Resume parallel IBD when peers report a higher chain tip than our validated watermark.
     #[cfg(feature = "production")]
-    pub(crate) async fn try_catch_up_ibd(&mut self, utxo_set: &mut blvm_protocol::UtxoSet) -> Result<()> {
+    pub(crate) async fn try_catch_up_ibd(
+        &mut self,
+        utxo_set: &mut blvm_protocol::UtxoSet,
+    ) -> Result<()> {
         use crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE;
         use std::sync::atomic::Ordering;
 
@@ -1679,11 +1679,7 @@ impl Node {
         }
 
         let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
-        let mut peer_height = match self
-            .network
-            .get_highest_peer_start_height_async()
-            .await
-        {
+        let mut peer_height = match self.network.get_highest_peer_start_height_async().await {
             Some(h) => h,
             None => {
                 debug!(
@@ -1722,12 +1718,11 @@ impl Node {
             .collect();
 
         let ibd_config_owned = self.config_sub(|c| c.ibd.as_ref()).cloned();
-        let ibd_session_config =
-            crate::node::parallel_ibd::ParallelIBDConfig::resolve_for_session(
-                ibd_config_owned.as_ref(),
-                synced_tip,
-                &peer_addresses,
-            );
+        let ibd_session_config = crate::node::parallel_ibd::ParallelIBDConfig::resolve_for_session(
+            ibd_config_owned.as_ref(),
+            synced_tip,
+            &peer_addresses,
+        );
         let min_peers = ibd_session_config.min_peers_for_ibd();
         if peer_addresses.len() < min_peers {
             debug!(
@@ -1768,16 +1763,21 @@ impl Node {
             .await
         {
             Ok(true) => {
-                if let Err(e) =
-                    crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(self.data_dir.as_path())
-                {
-                    warn!("Failed to clear IBD UTXO autorepair marker after catch-up: {}", e);
+                if let Err(e) = crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
+                    self.data_dir.as_path(),
+                ) {
+                    warn!(
+                        "Failed to clear IBD UTXO autorepair marker after catch-up: {}",
+                        e
+                    );
                 }
                 let new_height = self.storage.chain().get_height()?.unwrap_or(0);
                 info!("[CATCH_UP] Completed — chain height now {}", new_height);
             }
             Ok(false) => {
-                debug!("[CATCH_UP] Parallel IBD not started (already synced or insufficient peers)");
+                debug!(
+                    "[CATCH_UP] Parallel IBD not started (already synced or insufficient peers)"
+                );
             }
             Err(e) => {
                 warn!("[CATCH_UP] Parallel IBD failed: {}", e);

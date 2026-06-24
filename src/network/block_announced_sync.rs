@@ -71,7 +71,9 @@ impl NetworkManager {
 
         // Multi-block gap: do not fetch tip blocks out of order (parent not in index).
         if let Ok((tip_hash, _)) = storage.chain().get_tip_hash_and_height() {
-            if let Ok(Some(probed)) = self.refresh_peer_tip_via_headers(local_height, tip_hash).await
+            if let Ok(Some(probed)) = self
+                .refresh_peer_tip_via_headers(local_height, tip_hash)
+                .await
             {
                 if probed > local_height.saturating_add(1) {
                     info!(
@@ -97,8 +99,7 @@ impl NetworkManager {
 
         let getdata = GetDataMessage { inventory };
         let count = getdata.inventory.len();
-        let wire =
-            ProtocolParser::serialize_message(&ProtocolMessage::GetData(getdata))?;
+        let wire = ProtocolParser::serialize_message(&ProtocolMessage::GetData(getdata))?;
         self.send_to_peer(peer_addr, wire).await?;
         info!(
             "[BLOCK_RELAY] Requested {} block(s) from {} (local height {})",
@@ -162,7 +163,10 @@ impl NetworkManager {
                 Ok(Some(peer_tip))
             }
             Ok(Err(_)) => {
-                warn!("[CATCH_UP] getheaders response channel closed for {}", peer_addr);
+                warn!(
+                    "[CATCH_UP] getheaders response channel closed for {}",
+                    peer_addr
+                );
                 Ok(None)
             }
             Err(_) => {

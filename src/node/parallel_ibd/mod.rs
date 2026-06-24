@@ -1571,8 +1571,7 @@ impl ParallelIBD {
                     let mut gap_drained = 0usize;
                     while let Ok((h, block, witnesses)) = block_rx.try_recv() {
                         total_received += 1;
-                        let next_needed =
-                            validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                        let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
                         if h < next_needed {
                             continue; // validation already passed this height
                         }
@@ -1833,8 +1832,7 @@ impl ParallelIBD {
                                 reorder_buffer.len() + 1
                             );
                         }
-                        let next_needed =
-                            validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                        let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
                         if height < next_needed {
                             continue; // validation already passed this height
                         }

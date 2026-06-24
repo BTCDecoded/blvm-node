@@ -405,6 +405,7 @@ mod tests {
             "one in flight per peer"
         );
         assigner.on_chunk_complete("p1");
+        assigner.mark_bootstrap_complete();
         let w1 = assigner.get_work("p2", 1000).expect("chunk 1");
         assert_eq!(w1, (264, 327));
     }

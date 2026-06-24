@@ -1366,7 +1366,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let mut feeder_stall_count: u32 = 0;
     let mut feeder_stall_at_height: u64 = start_height;
 
-    use blvm_consensus::pow::{get_block_proof, U256};
+    use blvm_consensus::pow::{U256, get_block_proof};
     let mut running_header_chainwork = if start_height == 0 {
         U256::zero()
     } else {
@@ -1374,7 +1374,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             .get_hash_by_height(start_height.saturating_sub(1))
             .ok()
             .flatten()
-            .and_then(|prev_hash| storage_clone.chain().get_chainwork(&prev_hash).ok().flatten())
+            .and_then(|prev_hash| {
+                storage_clone
+                    .chain()
+                    .get_chainwork(&prev_hash)
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or(U256::zero())
     };
 
@@ -2032,10 +2038,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         }
                         const MAX_FEEDER_STALLS: u32 = 24;
                         if feeder_stall_count >= MAX_FEEDER_STALLS {
-                            let stall_secs = feeder_wait_timeout.as_secs()
-                                * u64::from(MAX_FEEDER_STALLS);
-                            return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err)
-                            {
+                            let stall_secs =
+                                feeder_wait_timeout.as_secs() * u64::from(MAX_FEEDER_STALLS);
+                            return match retire_thread_shutdown(
+                                &mut _retire_dispatcher,
+                                &retire_err,
+                            ) {
                                 Ok(()) => Err(anyhow::anyhow!(
                                     "IBD download stalled: no block at height {} after ~{}s \
                                      (coordinator/workers may have exited early)",
