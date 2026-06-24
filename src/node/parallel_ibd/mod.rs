@@ -1313,13 +1313,20 @@ impl ParallelIBD {
                                     MAX_CONSECUTIVE_FAILURES,
                                     e
                                 );
-                                let exclude = if num_peers_clone > 1 {
+                                // Exclude the failing peer only when another worker can take the
+                                // retry. With a single chunk, other workers exit after taking no
+                                // work — exclude would deadlock the only live worker.
+                                let exclude = if num_peers_clone > 1
+                                    && assigner_clone.total_chunks() > 1
+                                {
                                     Some(peer_id.clone())
                                 } else {
-                                    info!(
-                                        "[IBD] Single peer: re-queuing chunk {}-{} without exclude (no fallback)",
-                                        start, end
-                                    );
+                                    if num_peers_clone == 1 {
+                                        info!(
+                                            "[IBD] Single peer: re-queuing chunk {}-{} without exclude (no fallback)",
+                                            start, end
+                                        );
+                                    }
                                     None
                                 };
                                 if exclude.is_some() {

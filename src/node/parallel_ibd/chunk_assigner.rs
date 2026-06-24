@@ -303,7 +303,18 @@ impl ChunkAssigner {
             return;
         };
         let mut rq = self.retry_queue.lock().unwrap();
-        if rq.iter().any(|(s, e, _)| *s == start && *e == end) {
+        if let Some(entry) = rq.iter_mut().find(|(s, e, _)| *s == start && *e == end) {
+            // Already queued (e.g. after peer failure with exclude=). Clear exclude so a live
+            // worker can retry — with one chunk, other workers often already exited.
+            if entry.2.is_some() {
+                entry.2 = None;
+                tracing::warn!(
+                    "stall recovery: cleared exclude on chunk {}-{} for missing height {}",
+                    start,
+                    end,
+                    height
+                );
+            }
             return;
         }
         rq.push_back((start, end, None));
@@ -431,6 +442,19 @@ mod tests {
         assigner.requeue_chunk_containing_height(150);
         assigner.requeue_chunk_containing_height(150);
         assert_eq!(assigner.remaining_count(), 2);
+    }
+
+    #[test]
+    fn stall_recovery_clears_exclude_on_existing_retry_entry() {
+        let chunks = vec![(100, 199)];
+        let assigner = assigner_for_heights(&chunks, &["p1", "p2"], 100, true);
+        assigner.requeue(100, 199, Some("p1".into()));
+        assigner.requeue_chunk_containing_height(150);
+        assert_eq!(
+            assigner.get_work("p1", 1000),
+            Some((100, 199)),
+            "exclude must be cleared so the only live worker can retry"
+        );
     }
 
     #[test]
