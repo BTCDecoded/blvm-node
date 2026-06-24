@@ -1152,6 +1152,7 @@ impl ParallelIBD {
                     .ok_or_else(|| anyhow::anyhow!("Peer {} not found", peer_id))?
                     .clone();
 
+                let validation_height_clone = Arc::clone(&validation_height);
                 let handle = tokio::spawn(async move {
                     let mut chunks_completed = 0u64;
                     let mut blocks_downloaded = 0u64;
@@ -1210,12 +1211,20 @@ impl ParallelIBD {
                         } else {
                             peer_blocks_semaphores_clone.get(&peer_id).cloned()
                         };
-                        // Hard outer deadline: download_chunk must complete within this window.
-                        // Protects against the initial-fill being stuck in send_block_getdata_with_retry
-                        // (up to 30 retries × 5s each = 2min) before the inner gap deadline is ever polled.
-                        const CHUNK_OUTER_DEADLINE_SECS: u64 = 35;
+                        // Hard outer deadline: scale with remaining blocks so near-tip multi-block
+                        // chunks are not aborted after a single per-block timeout window.
+                        let validated_tip =
+                            validation_height_clone.load(std::sync::atomic::Ordering::Relaxed);
+                        let resume_from = download::resume_download_height(start, end, validated_tip)
+                            .unwrap_or(start);
+                        let outer_secs = download::chunk_outer_deadline_secs(
+                            start,
+                            end,
+                            resume_from,
+                            config.download_timeout_secs,
+                        );
                         let dl_result = match tokio::time::timeout(
-                            std::time::Duration::from_secs(CHUNK_OUTER_DEADLINE_SECS),
+                            std::time::Duration::from_secs(outer_secs),
                             download_chunk(
                                 start,
                                 end,
@@ -1228,6 +1237,7 @@ impl ParallelIBD {
                                 blocks_sem,
                                 Some(&mut stall_rx),
                                 ibd_pv,
+                                Some(Arc::clone(&validation_height_clone)),
                             ),
                         )
                         .await
@@ -1236,7 +1246,7 @@ impl ParallelIBD {
                             Err(_elapsed) => {
                                 warn!(
                                     "[IBD] chunk {}-{} outer deadline ({}s) expired — aborting for retry",
-                                    start, end, CHUNK_OUTER_DEADLINE_SECS
+                                    start, end, outer_secs
                                 );
                                 peer_scorer_clone.record_failure(
                                     peer_id
@@ -1247,7 +1257,7 @@ impl ParallelIBD {
                                     "Chunk {}-{}: outer deadline {}s",
                                     start,
                                     end,
-                                    CHUNK_OUTER_DEADLINE_SECS
+                                    outer_secs
                                 ))
                             }
                         };

@@ -188,6 +188,15 @@ impl ChunkAssigner {
         self.bootstrap_complete.store(true, Ordering::Relaxed);
     }
 
+    /// Returns true if any worker is already downloading this exact chunk range.
+    fn chunk_range_in_flight(&self, start: u64, end: u64) -> bool {
+        self.in_flight_per_peer
+            .lock()
+            .unwrap()
+            .values()
+            .any(|(s, e)| *s == start && *e == end)
+    }
+
     /// Returns the next assignable chunk for this peer, or None if nothing ready.
     /// Per-peer serial: returns None if this peer already has a chunk in flight (eliminates chunk-boundary stalls).
     /// Round-robin: prioritizes critical chunk (containing next_needed) from retry, then earliest available.
@@ -230,7 +239,11 @@ impl ChunkAssigner {
                     && allow_chunk(*s)
             });
             if let Some((i, _)) = critical {
-                let (start, end, _) = retry.remove(i).unwrap();
+                let (start, end, ex) = retry.remove(i).unwrap();
+                if self.chunk_range_in_flight(start, end) {
+                    retry.push_back((start, end, ex));
+                    return None;
+                }
                 guard.insert(peer_id.to_string(), (start, end));
                 return Some((start, end));
             }
@@ -241,7 +254,11 @@ impl ChunkAssigner {
                 .filter(|(_, (s, _, _))| allow_chunk(*s))
                 .min_by_key(|(_, (s, _, _))| *s);
             if let Some((i, _)) = candidate {
-                let (start, end, _) = retry.remove(i).unwrap();
+                let (start, end, ex) = retry.remove(i).unwrap();
+                if self.chunk_range_in_flight(start, end) {
+                    retry.push_back((start, end, ex));
+                    return None;
+                }
                 guard.insert(peer_id.to_string(), (start, end));
                 return Some((start, end));
             }
@@ -262,6 +279,9 @@ impl ChunkAssigner {
             return None;
         }
         let (start, end) = self.chunks[idx];
+        if self.chunk_range_in_flight(start, end) {
+            return None;
+        }
         if start > current_validation.saturating_add(max_ahead) {
             return None;
         }

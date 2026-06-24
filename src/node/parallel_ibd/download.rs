@@ -16,6 +16,7 @@ use hex;
 use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, timeout};
@@ -154,6 +155,67 @@ async fn send_block_getdata_with_retry(
     }
 }
 
+/// First height to request when retrying a chunk after partial validation progress.
+pub(crate) fn resume_download_height(
+    start_height: u64,
+    end_height: u64,
+    validated_tip: u64,
+) -> Option<u64> {
+    if validated_tip >= end_height {
+        return None;
+    }
+    let resume = start_height.max(validated_tip.saturating_add(1));
+    if resume > end_height {
+        None
+    } else {
+        Some(resume)
+    }
+}
+
+/// Outer wall-clock budget for one chunk download (per-block timeout × remaining blocks).
+pub(crate) fn chunk_outer_deadline_secs(
+    start_height: u64,
+    end_height: u64,
+    resume_from: u64,
+    per_block_timeout_secs: u64,
+) -> u64 {
+    let blocks_remaining = end_height
+        .saturating_sub(resume_from)
+        .saturating_add(1)
+        .max(1);
+    per_block_timeout_secs
+        .saturating_mul(blocks_remaining)
+        .max(35)
+        .min(7200)
+}
+
+/// Wait for outbound peer connection, spawning reconnect if needed.
+async fn wait_for_peer_connected(
+    network: &Arc<NetworkManager>,
+    peer_addr: SocketAddr,
+    peer_id: &str,
+    max_wait: Duration,
+) -> Result<()> {
+    if network.is_peer_connected(peer_addr).await {
+        return Ok(());
+    }
+    NetworkManager::spawn_outbound_reconnect_attempt(Arc::clone(network), peer_addr);
+    let deadline = tokio::time::Instant::now() + max_wait;
+    let mut poll = tokio::time::interval(Duration::from_millis(200));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    poll.tick().await;
+    while tokio::time::Instant::now() < deadline {
+        if network.is_peer_connected(peer_addr).await {
+            return Ok(());
+        }
+        poll.tick().await;
+    }
+    Err(anyhow::anyhow!(
+        "Peer {peer_id} not connected after {}s — chunk needs retry",
+        max_wait.as_secs()
+    ))
+}
+
 /// Register a block download and send GetData. Fails fast when the peer is gone (avoids orphan
 /// pending requests that time out and blacklist the whole chunk).
 async fn register_and_request_block(
@@ -289,6 +351,7 @@ pub(crate) async fn download_chunk(
     blocks_sem: Option<Arc<Semaphore>>,
     mut stall_rx: Option<&mut broadcast::Receiver<u64>>,
     protocol_version: ProtocolVersion,
+    validation_height: Option<Arc<AtomicU64>>,
 ) -> Result<DownloadChunkResult> {
     let streaming = block_tx.is_some();
     let mut blocks = Vec::new();
@@ -334,12 +397,27 @@ pub(crate) async fn download_chunk(
         .parse::<SocketAddr>()
         .map_err(|_| anyhow::anyhow!("Invalid peer address: {}", peer_id))?;
 
-    if !network.is_peer_connected(peer_addr).await {
-        return Err(anyhow::anyhow!(
-            "Peer {peer_id} not connected at chunk {}-{} start — chunk needs retry",
-            start_height,
-            end_height
-        ));
+    let connect_wait = Duration::from_secs(config.download_timeout_secs.max(15));
+    wait_for_peer_connected(&network, peer_addr, peer_id, connect_wait).await?;
+
+    let validated_tip = validation_height
+        .as_ref()
+        .map(|h| h.load(Ordering::Relaxed))
+        .unwrap_or(start_height.saturating_sub(1));
+    let resume_from = match resume_download_height(start_height, end_height, validated_tip) {
+        Some(h) => h,
+        None => {
+            return Ok(DownloadChunkResult {
+                blocks,
+                streamed_block_count: 0,
+            });
+        }
+    };
+    if resume_from > start_height {
+        info!(
+            "[IBD] {} chunk {}-{}: resuming download at height {} (validated tip {})",
+            peer_id, start_height, end_height, resume_from, validated_tip
+        );
     }
 
     let mut block_hashes = Vec::new();
@@ -380,7 +458,7 @@ pub(crate) async fn download_chunk(
     let mut in_flight_heights: HashSet<u64> = HashSet::new();
     // Arc-wrap immediately so downstream pipeline stages never deep-copy block bytes.
     let mut received: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-    let mut next_to_send = start_height;
+    let mut next_to_send = resume_from;
 
     let mut first_block_logged = false;
 
@@ -737,4 +815,23 @@ pub(crate) async fn download_chunk(
         blocks,
         streamed_block_count: if streaming { streamed_block_count } else { 0 },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_download_height_skips_validated_prefix() {
+        assert_eq!(resume_download_height(955186, 955241, 955194), Some(955195));
+        assert_eq!(resume_download_height(955186, 955241, 955185), Some(955186));
+        assert_eq!(resume_download_height(955186, 955241, 955241), None);
+    }
+
+    #[test]
+    fn chunk_outer_deadline_scales_with_remaining_blocks() {
+        assert_eq!(chunk_outer_deadline_secs(955186, 955241, 955186, 30), 56 * 30);
+        assert_eq!(chunk_outer_deadline_secs(955186, 955241, 955195, 30), 47 * 30);
+        assert_eq!(chunk_outer_deadline_secs(0, 0, 0, 30), 35);
+    }
 }
