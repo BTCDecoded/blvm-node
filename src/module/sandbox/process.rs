@@ -106,9 +106,9 @@ fn cpu_percent_from_samples(prev: &CpuSample, utime: u64, stime: u64, now: Insta
     if delta_wall <= 0.0 || delta_ticks == 0 {
         return 0.0;
     }
-    #[cfg(feature = "libc")]
+    #[cfg(all(unix, feature = "libc"))]
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
-    #[cfg(not(feature = "libc"))]
+    #[cfg(not(all(unix, feature = "libc")))]
     let hz = 100.0;
     if hz <= 0.0 {
         return 0.0;
@@ -453,9 +453,9 @@ impl ProcessSandbox {
                             fields.get(22).and_then(|s| s.parse().ok()).unwrap_or(0);
 
                         // Get page size (typically 4096 bytes on Linux)
-                        #[cfg(feature = "libc")]
+                        #[cfg(all(unix, feature = "libc"))]
                         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
-                        #[cfg(not(feature = "libc"))]
+                        #[cfg(not(all(unix, feature = "libc")))]
                         let page_size = 4096u64; // Default page size
                         let memory_bytes = rss_pages * page_size;
 
