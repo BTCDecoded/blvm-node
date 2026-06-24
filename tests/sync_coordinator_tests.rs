@@ -200,6 +200,47 @@ fn test_sync_coordinator_process_block_invalid_wire_rejects() {
     assert!(result.is_err());
 }
 
+fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
+    if height == 0 {
+        return vec![0x00, 0xff];
+    }
+    let mut n = height;
+    let mut height_bytes = Vec::new();
+    while n > 0 {
+        height_bytes.push((n & 0xff) as u8);
+        n >>= 8;
+    }
+    if height_bytes.last().is_some_and(|&b| b & 0x80 != 0) {
+        height_bytes.push(0x00);
+    }
+    let mut script_sig = Vec::with_capacity(1 + height_bytes.len());
+    script_sig.push(height_bytes.len() as u8);
+    script_sig.extend_from_slice(&height_bytes);
+    if script_sig.len() < 2 {
+        script_sig.push(0x00);
+    }
+    script_sig
+}
+
+fn seed_genesis_block(
+    storage: &blvm_node::storage::Storage,
+    genesis: &blvm_protocol::Block,
+) -> anyhow::Result<()> {
+    use blvm_protocol::segwit::Witness;
+
+    let hash = storage.blocks().get_block_hash(genesis);
+    storage.blocks().store_block(genesis)?;
+    storage.blocks().store_height(0, &hash)?;
+    storage.blocks().store_recent_header(0, &genesis.header)?;
+    let witnesses: Vec<Vec<Witness>> = genesis
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+        .collect();
+    storage.blocks().store_witness(&hash, &witnesses)?;
+    Ok(())
+}
+
 #[test]
 fn test_sync_coordinator_process_block_valid_regtest_block() {
     use blvm_node::node::metrics::MetricsCollector;
@@ -209,6 +250,7 @@ fn test_sync_coordinator_process_block_valid_regtest_block() {
     use blvm_protocol::mining::MiningResult;
     use blvm_protocol::segwit::Witness;
     use blvm_protocol::serialization::serialize_block_with_witnesses;
+    use blvm_protocol::types::Network;
     use blvm_protocol::{BitcoinProtocolEngine, ConsensusProof, ProtocolVersion, UtxoSet};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -218,22 +260,29 @@ fn test_sync_coordinator_process_block_valid_regtest_block() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     storage.chain().initialize(&genesis.header).unwrap();
+    seed_genesis_block(storage.as_ref(), &genesis).unwrap();
+
+    let connect_height = storage.chain().get_height().unwrap().unwrap_or(0) + 1;
 
     let mut coordinator = SyncCoordinator::new();
     let mut utxo_set = UtxoSet::default();
     let consensus = ConsensusProof::new();
     let prev_header = genesis.header.clone();
     let prev_headers = vec![prev_header.clone(); 2016];
+    let coinbase_script = regtest_coinbase_script_sig(connect_height);
 
     let mut block = consensus
-        .create_new_block(
+        .create_new_block_with_time(
             &utxo_set,
             &[],
-            0,
+            connect_height,
             &prev_header,
             &prev_headers,
-            &vec![0x00, 0xff],
+            &coinbase_script,
             &vec![0x51],
+            prev_header.timestamp + 600,
+            Network::Regtest,
+            None,
         )
         .unwrap();
     block.header.version = 4;
@@ -256,12 +305,12 @@ fn test_sync_coordinator_process_block_valid_regtest_block() {
             protocol.as_ref(),
             Some(&storage),
             &wire,
-            0,
+            connect_height,
             &mut utxo_set,
             Some(metrics),
             Some(profiler),
         )
         .unwrap();
-    assert!(accepted);
-    assert!(storage.blocks().block_count().unwrap() >= 1);
+    assert!(accepted, "process_block rejected height {connect_height}");
+    assert!(storage.blocks().block_count().unwrap() >= 2);
 }
