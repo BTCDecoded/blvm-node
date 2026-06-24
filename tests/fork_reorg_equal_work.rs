@@ -11,10 +11,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 const MINE_ATTEMPTS: u64 = 2_000_000;
-/// Shared prefix ends at height 6; siblings connect at height 7.
-const PREFIX_HEIGHT: u64 = 6;
-const SIBLING_HEIGHT: u64 = 7;
-const CHILD_HEIGHT: u64 = 8;
+/// Shared prefix ends at height 7; siblings connect at height 8.
+const PREFIX_HEIGHT: u64 = 7;
+const SIBLING_HEIGHT: u64 = 8;
+const CHILD_HEIGHT: u64 = 9;
 const FORK_SALT: u64 = 42_000;
 
 fn regtest_coinbase_script_sig(height: u64, fork_salt: u64) -> Vec<u8> {
@@ -52,15 +52,30 @@ fn witnesses_for(block: &Block) -> Vec<Vec<Witness>> {
         .collect()
 }
 
+fn seed_genesis_block(storage: &Storage, protocol: &BitcoinProtocolEngine) -> anyhow::Result<()> {
+    let genesis = protocol.get_network_params().genesis_block.clone();
+    let hash = storage.blocks().get_block_hash(&genesis);
+    storage.blocks().store_block(&genesis)?;
+    storage.blocks().store_height(0, &hash)?;
+    storage.blocks().store_recent_header(0, &genesis.header)?;
+    let witnesses: Vec<Vec<Witness>> = genesis
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+        .collect();
+    storage.blocks().store_witness(&hash, &witnesses)?;
+    Ok(())
+}
+
 fn mine_and_connect(
     storage: &Arc<Storage>,
     coord: &mut SyncCoordinator,
     utxo: &mut UtxoSet,
     protocol: &BitcoinProtocolEngine,
     consensus: &ConsensusProof,
-    connect_height: u64,
     fork_salt: u64,
 ) -> anyhow::Result<Block> {
+    let connect_height = storage.chain().get_height()?.unwrap_or(0) + 1;
     let prev_header = storage
         .chain()
         .get_tip_header()?
@@ -102,12 +117,8 @@ fn mine_and_connect(
         None,
         None,
     )?;
-    assert!(accepted);
+    assert!(accepted, "process_block rejected height {connect_height}");
 
-    let block_hash = storage.blocks().as_ref().get_block_hash(&mined);
-    storage
-        .chain()
-        .update_tip(&block_hash, &mined.header, connect_height)?;
     storage.utxos().store_utxo_set(utxo)?;
     Ok(mined)
 }
@@ -118,8 +129,8 @@ fn import_side_chain_block(
     utxo: &mut UtxoSet,
     protocol: &BitcoinProtocolEngine,
     block: &Block,
-    connect_height: u64,
 ) -> anyhow::Result<()> {
+    let connect_height = storage.chain().get_height()?.unwrap_or(0) + 1;
     let wire = serialize_block_with_witnesses(block, &witnesses_for(block), true);
     let accepted = coord.process_block(
         storage.blocks().as_ref(),
@@ -147,17 +158,18 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
     let storage_fork = Arc::new(Storage::new(fork_dir.path())?);
     storage_main.chain().initialize(&genesis_header)?;
     storage_fork.chain().initialize(&genesis_header)?;
+    seed_genesis_block(&storage_main, &protocol)?;
+    seed_genesis_block(&storage_fork, &protocol)?;
 
     let mut main_utxo = UtxoSet::default();
     let mut main_coord = SyncCoordinator::new();
-    for h in 0..=PREFIX_HEIGHT {
+    for _ in 0..PREFIX_HEIGHT {
         mine_and_connect(
             &storage_main,
             &mut main_coord,
             &mut main_utxo,
             &protocol,
             &consensus,
-            h,
             0,
         )?;
     }
@@ -168,7 +180,6 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
         &mut main_utxo,
         &protocol,
         &consensus,
-        SIBLING_HEIGHT,
         0,
     )?;
     let hash_a = storage_main.blocks().get_block_hash(&block_a);
@@ -179,14 +190,13 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
 
     let mut fork_utxo = UtxoSet::default();
     let mut fork_coord = SyncCoordinator::new();
-    for h in 0..=PREFIX_HEIGHT {
+    for _ in 0..PREFIX_HEIGHT {
         mine_and_connect(
             &storage_fork,
             &mut fork_coord,
             &mut fork_utxo,
             &protocol,
             &consensus,
-            h,
             0,
         )?;
     }
@@ -197,7 +207,6 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
         &mut fork_utxo,
         &protocol,
         &consensus,
-        SIBLING_HEIGHT,
         FORK_SALT,
     )?;
     let hash_b = storage_fork.blocks().get_block_hash(&block_b);
@@ -217,7 +226,6 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
         &mut fork_utxo,
         &protocol,
         &consensus,
-        CHILD_HEIGHT,
         FORK_SALT,
     )?;
     let hash_c = storage_fork.blocks().get_block_hash(&block_c);
@@ -231,7 +239,6 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
         &mut replay_utxo,
         &protocol,
         &block_b,
-        SIBLING_HEIGHT,
     )?;
 
     assert_eq!(
@@ -259,7 +266,6 @@ async fn equal_work_sibling_keeps_first_tip_child_on_lagging_fork_wins() -> anyh
         &mut replay_utxo,
         &protocol,
         &block_c,
-        CHILD_HEIGHT,
     )?;
 
     assert_eq!(

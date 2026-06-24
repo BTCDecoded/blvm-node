@@ -13,7 +13,7 @@ use tempfile::TempDir;
 
 const MINE_ATTEMPTS: u64 = 2_000_000;
 const MAIN_BLOCKS: u64 = 8;
-const FORK_DIVERGE_HEIGHT: u64 = 4;
+const FORK_DIVERGE_HEIGHT: u64 = 5;
 
 fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
     if height == 0 {
@@ -45,15 +45,30 @@ fn witnesses_for(block: &Block) -> Vec<Vec<Witness>> {
         .collect()
 }
 
+fn seed_genesis_block(storage: &Storage, protocol: &BitcoinProtocolEngine) -> anyhow::Result<()> {
+    let genesis = protocol.get_network_params().genesis_block.clone();
+    let hash = storage.blocks().get_block_hash(&genesis);
+    storage.blocks().store_block(&genesis)?;
+    storage.blocks().store_height(0, &hash)?;
+    storage.blocks().store_recent_header(0, &genesis.header)?;
+    let witnesses: Vec<Vec<Witness>> = genesis
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+        .collect();
+    storage.blocks().store_witness(&hash, &witnesses)?;
+    Ok(())
+}
+
 fn mine_and_connect(
     storage: &Arc<Storage>,
     coord: &mut SyncCoordinator,
     utxo: &mut UtxoSet,
     protocol: &BitcoinProtocolEngine,
     consensus: &ConsensusProof,
-    connect_height: u64,
     nonce_salt: u64,
 ) -> anyhow::Result<(Block, Vec<u8>)> {
+    let connect_height = storage.chain().get_height()?.unwrap_or(0) + 1;
     let prev_header = storage
         .chain()
         .get_tip_header()?
@@ -100,12 +115,7 @@ fn mine_and_connect(
         None,
         None,
     )?;
-    assert!(accepted);
-
-    let block_hash = storage.blocks().as_ref().get_block_hash(&mined);
-    storage
-        .chain()
-        .update_tip(&block_hash, &mined.header, connect_height)?;
+    assert!(accepted, "process_block rejected height {connect_height}");
 
     Ok((mined, wire))
 }
@@ -119,18 +129,18 @@ async fn getchaintips_lists_main_and_orphan_fork() -> anyhow::Result<()> {
     let dir = TempDir::new()?;
     let storage = Arc::new(Storage::new(dir.path())?);
     storage.chain().initialize(&genesis_header)?;
+    seed_genesis_block(&storage, protocol.as_ref())?;
 
     let mut utxo = UtxoSet::default();
     let mut coord = SyncCoordinator::new();
 
-    for h in 0..MAIN_BLOCKS {
+    for _ in 0..MAIN_BLOCKS {
         mine_and_connect(
             &storage,
             &mut coord,
             &mut utxo,
             protocol.as_ref(),
             &consensus,
-            h,
             0,
         )?;
     }
@@ -141,16 +151,16 @@ async fn getchaintips_lists_main_and_orphan_fork() -> anyhow::Result<()> {
     let fork_dir = TempDir::new()?;
     let fork_storage = Arc::new(Storage::new(fork_dir.path())?);
     fork_storage.chain().initialize(&genesis_header)?;
+    seed_genesis_block(&fork_storage, protocol.as_ref())?;
     let mut fork_utxo = UtxoSet::default();
     let mut fork_coord = SyncCoordinator::new();
-    for h in 0..FORK_DIVERGE_HEIGHT {
+    for _ in 0..(FORK_DIVERGE_HEIGHT - 1) {
         mine_and_connect(
             &fork_storage,
             &mut fork_coord,
             &mut fork_utxo,
             protocol.as_ref(),
             &consensus,
-            h,
             0,
         )?;
     }
@@ -161,7 +171,6 @@ async fn getchaintips_lists_main_and_orphan_fork() -> anyhow::Result<()> {
         &mut fork_utxo,
         protocol.as_ref(),
         &consensus,
-        FORK_DIVERGE_HEIGHT,
         FORK_NONCE_SALT,
     )?;
 

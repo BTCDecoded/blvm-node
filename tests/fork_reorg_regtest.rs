@@ -13,10 +13,10 @@ use tempfile::TempDir;
 const MINE_ATTEMPTS: u64 = 2_000_000;
 /// Shorter than `regtest_mine_sync` (default 60 blocks) — enough blocks for a mid-chain fork.
 const LINEAR_BLOCK_COUNT: u64 = 12;
-/// Shared prefix heights `0..=3`; first divergent connect height is `4`.
-const FORK_DIVERGE_HEIGHT: u64 = 4;
-/// Main chain tip height after `LINEAR_BLOCK_COUNT` blocks (`0..=11`).
-const MAIN_TIP_HEIGHT: u64 = LINEAR_BLOCK_COUNT - 1;
+/// Shared prefix heights `1..=4`; first divergent connect height is `5`.
+const FORK_DIVERGE_HEIGHT: u64 = 5;
+/// Main chain tip height after `LINEAR_BLOCK_COUNT` blocks (`1..=12`).
+const MAIN_TIP_HEIGHT: u64 = LINEAR_BLOCK_COUNT;
 /// Fork extends one block past main after the diverge point (`0..=12`).
 const FORK_TIP_HEIGHT: u64 = MAIN_TIP_HEIGHT + 1;
 
@@ -50,15 +50,30 @@ fn witnesses_for(block: &Block) -> Vec<Vec<Witness>> {
         .collect()
 }
 
+fn seed_genesis_block(storage: &Storage, protocol: &BitcoinProtocolEngine) -> anyhow::Result<()> {
+    let genesis = protocol.get_network_params().genesis_block.clone();
+    let hash = storage.blocks().get_block_hash(&genesis);
+    storage.blocks().store_block(&genesis)?;
+    storage.blocks().store_height(0, &hash)?;
+    storage.blocks().store_recent_header(0, &genesis.header)?;
+    let witnesses: Vec<Vec<Witness>> = genesis
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+        .collect();
+    storage.blocks().store_witness(&hash, &witnesses)?;
+    Ok(())
+}
+
 fn mine_and_connect(
     storage: &Arc<Storage>,
     coord: &mut SyncCoordinator,
     utxo: &mut UtxoSet,
     protocol: &BitcoinProtocolEngine,
     consensus: &ConsensusProof,
-    connect_height: u64,
     nonce_salt: u64,
 ) -> anyhow::Result<(Block, Vec<u8>)> {
+    let connect_height = storage.chain().get_height()?.unwrap_or(0) + 1;
     let prev_header = storage
         .chain()
         .get_tip_header()?
@@ -114,10 +129,6 @@ fn mine_and_connect(
         "process_block rejected height {connect_height} (nonce_salt={nonce_salt})"
     );
 
-    let block_hash = storage.blocks().as_ref().get_block_hash(&mined);
-    storage
-        .chain()
-        .update_tip(&block_hash, &mined.header, connect_height)?;
     storage.utxos().store_utxo_set(utxo)?;
 
     Ok((mined, wire))
@@ -129,8 +140,8 @@ fn connect_wire(
     utxo: &mut UtxoSet,
     protocol: &BitcoinProtocolEngine,
     wire: &[u8],
-    connect_height: u64,
 ) -> anyhow::Result<Block> {
+    let connect_height = storage.chain().get_height()?.unwrap_or(0) + 1;
     let accepted = coord.process_block(
         storage.blocks().as_ref(),
         protocol,
@@ -143,10 +154,6 @@ fn connect_wire(
     )?;
     assert!(accepted, "replay rejected at height {connect_height}");
     let (block, _) = blvm_protocol::serialization::block::deserialize_block_with_witnesses(wire)?;
-    let block_hash = storage.blocks().as_ref().get_block_hash(&block);
-    storage
-        .chain()
-        .update_tip(&block_hash, &block.header, connect_height)?;
     storage.utxos().store_utxo_set(utxo)?;
     Ok(block)
 }
@@ -160,20 +167,13 @@ async fn linear_chain_control() -> anyhow::Result<()> {
     let dir = TempDir::new()?;
     let storage = Arc::new(Storage::new(dir.path())?);
     storage.chain().initialize(&genesis_header)?;
+    seed_genesis_block(&storage, &protocol)?;
 
     let mut utxo = UtxoSet::default();
     let mut coord = SyncCoordinator::new();
 
-    for connect_height in 0..LINEAR_BLOCK_COUNT {
-        mine_and_connect(
-            &storage,
-            &mut coord,
-            &mut utxo,
-            &protocol,
-            &consensus,
-            connect_height,
-            0,
-        )?;
+    for _ in 0..LINEAR_BLOCK_COUNT {
+        mine_and_connect(&storage, &mut coord, &mut utxo, &protocol, &consensus, 0)?;
     }
 
     assert_eq!(
@@ -204,22 +204,23 @@ async fn higher_work_fork_from_mid_chain() -> anyhow::Result<()> {
     let storage_fork = Arc::new(Storage::new(fork_dir.path())?);
     storage_main.chain().initialize(&genesis_header)?;
     storage_fork.chain().initialize(&genesis_header)?;
+    seed_genesis_block(&storage_main, &protocol)?;
+    seed_genesis_block(&storage_fork, &protocol)?;
 
     let mut main_utxo = UtxoSet::default();
     let mut main_coord = SyncCoordinator::new();
     let mut prefix_wires: Vec<Vec<u8>> = Vec::new();
 
-    for connect_height in 0..LINEAR_BLOCK_COUNT {
+    for _ in 0..LINEAR_BLOCK_COUNT {
         let (_, wire) = mine_and_connect(
             &storage_main,
             &mut main_coord,
             &mut main_utxo,
             &protocol,
             &consensus,
-            connect_height,
             0,
         )?;
-        if connect_height < FORK_DIVERGE_HEIGHT {
+        if storage_main.chain().get_height()?.unwrap_or(0) < FORK_DIVERGE_HEIGHT {
             prefix_wires.push(wire);
         }
     }
@@ -232,26 +233,24 @@ async fn higher_work_fork_from_mid_chain() -> anyhow::Result<()> {
 
     let mut fork_utxo = UtxoSet::default();
     let mut fork_coord = SyncCoordinator::new();
-    for (h, wire) in prefix_wires.iter().enumerate() {
+    for wire in prefix_wires.iter() {
         connect_wire(
             &storage_fork,
             &mut fork_coord,
             &mut fork_utxo,
             &protocol,
             wire,
-            h as u64,
         )?;
     }
 
     const FORK_NONCE_SALT: u64 = 1_000_000;
-    for connect_height in FORK_DIVERGE_HEIGHT..=FORK_TIP_HEIGHT {
+    for _ in FORK_DIVERGE_HEIGHT..=FORK_TIP_HEIGHT {
         mine_and_connect(
             &storage_fork,
             &mut fork_coord,
             &mut fork_utxo,
             &protocol,
             &consensus,
-            connect_height,
             FORK_NONCE_SALT,
         )?;
     }
