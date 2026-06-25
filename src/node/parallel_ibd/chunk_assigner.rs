@@ -189,10 +189,8 @@ impl ChunkAssigner {
     }
 
     /// Returns true if any worker is already downloading this exact chunk range.
-    fn chunk_range_in_flight(&self, start: u64, end: u64) -> bool {
-        self.in_flight_per_peer
-            .lock()
-            .unwrap()
+    fn chunk_range_in_flight(in_flight: &HashMap<String, (u64, u64)>, start: u64, end: u64) -> bool {
+        in_flight
             .values()
             .any(|(s, e)| *s == start && *e == end)
     }
@@ -240,7 +238,7 @@ impl ChunkAssigner {
             });
             if let Some((i, _)) = critical {
                 let (start, end, ex) = retry.remove(i).unwrap();
-                if self.chunk_range_in_flight(start, end) {
+                if Self::chunk_range_in_flight(&guard, start, end) {
                     retry.push_back((start, end, ex));
                     return None;
                 }
@@ -255,7 +253,7 @@ impl ChunkAssigner {
                 .min_by_key(|(_, (s, _, _))| *s);
             if let Some((i, _)) = candidate {
                 let (start, end, ex) = retry.remove(i).unwrap();
-                if self.chunk_range_in_flight(start, end) {
+                if Self::chunk_range_in_flight(&guard, start, end) {
                     retry.push_back((start, end, ex));
                     return None;
                 }
@@ -279,7 +277,7 @@ impl ChunkAssigner {
             return None;
         }
         let (start, end) = self.chunks[idx];
-        if self.chunk_range_in_flight(start, end) {
+        if Self::chunk_range_in_flight(&guard, start, end) {
             return None;
         }
         // Allow the chunk that contains the next validation height even when max_ahead is 0
