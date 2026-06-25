@@ -155,6 +155,16 @@ dashmap = "=6.0"
 sysinfo = { version = "=0.30", optional = true }
 reqwest = { version = "=0.12", optional = true, features = ["json"] }
 
+# Cross-platform optional deps (top-level so Windows release builds match Linux defaults).
+zstd = { version = "=0.13", optional = true }
+notify = { version = "=6.1", optional = true }
+iroh = { version = "=0.95", optional = true }
+quinn = { version = "=0.11", optional = true }
+rcgen = { version = "=0.12", optional = true }
+rustls = { version = "=0.23", optional = true }
+h3 = { version = "=0.0.8", optional = true }
+h3-quinn = { version = "=0.0.10", optional = true }
+
 # Memory allocator optimization
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -168,25 +178,6 @@ libmimalloc-sys = { version = "=0.1", features = ["extended"], optional = true }
 # System calls for process sandboxing (Unix)
 nix = { version = "=0.28", features = ["process", "resource"], optional = true }
 libc = { version = "=0.2", optional = true }
-
-# Compression for storage optimization (optional feature)
-zstd = { version = "=0.13", optional = true }
-
-# ZeroMQ moved to first-party `blvm-zmq` module (no longer a blvm-node feature).
-# File watcher for module hot-reload on change (optional feature)
-notify = { version = "=6.1", optional = true }
-# (miniscript, base64, regex removed — now live in blvm-miniscript module only)
-
-# Iroh networking (optional feature)
-iroh = { version = "=0.95", optional = true }
-# WASM: blvm-node defines WasmModuleLoader trait; blvm-sdk implements it.
-# blvm-node does NOT depend on blvm-sdk. The binary injects the loader.
-# Quinn QUIC transport (optional feature)
-quinn = { version = "=0.11", optional = true }
-rcgen = { version = "=0.12", optional = true }
-rustls = { version = "=0.23", optional = true }
-h3 = { version = "=0.0.8", optional = true }
-h3-quinn = { version = "=0.0.10", optional = true }
 
 # Windows Job Objects for process sandboxing (Windows)
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -206,9 +197,21 @@ windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32
 [features]
 # Storage: `database_backend = "auto"` picks heed3 when the `heed3` feature is enabled
 # (see `storage/database/mod.rs::default_backend`), else RocksDB, TidesDB, Redb, Sled.
-# No LevelDB (backends: rocksdb, redb, sled, tidesdb, heed3).
-# Pure Rust/no C++ compile: `cargo build --no-default-features --features "redb,production,..."`.
-default = ["sysinfo", "heed3", "rocksdb", "nix", "libc", "production", "governance", "utxo-commitments", "protocol-verification"]
+# Shared default stack (blvm adds nix/libc/sled/compression on Linux native).
+default = [
+    "sysinfo",
+    "heed3",
+    "redb",
+    "production",
+    "governance",
+    "utxo-commitments",
+    "protocol-verification",
+    "iroh",
+    "dandelion",
+    "sigop",
+    "rest-api",
+    "bip70-http",
+]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
 iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls", "dep:h3", "dep:h3-quinn"]
@@ -232,10 +235,10 @@ libc = ["dep:libc"]
 # `dep:rayon` is the actual crate; `rayon = []` enables parallel paths in blvm-consensus.
 rayon = ["dep:rayon"]
 # Production optimizations (parallel block validation, etc.)
-production = ["blvm-protocol/production", "dep:blvm-consensus", "rayon", "mimalloc", "libc"]
+production = ["blvm-protocol/production", "dep:blvm-consensus", "rayon", "mimalloc"]
 # Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
 profile = ["blvm-protocol/profile", "dep:blvm-consensus"]
-# Privacy relay (Dandelion++) compiled behind feature flag; default OFF
+# Privacy relay (Dandelion++); enabled in default release builds.
 # blvm-spec-lock: #[spec_locked("10.6")] for Orange Paper Dandelion verification
 dandelion = ["dep:blvm-spec-lock", "blvm-protocol/dandelion"]
 # Protocol (10.1) and handshake (10.2) verification
