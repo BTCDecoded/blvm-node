@@ -13,7 +13,7 @@ use anyhow::Result;
 #[cfg(feature = "iroh")]
 use iroh::endpoint::{Connection, Endpoint};
 #[cfg(feature = "iroh")]
-use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey};
+use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, TransportAddr as IrohTransportAddr};
 #[cfg(feature = "iroh")]
 use std::collections::VecDeque;
 #[cfg(feature = "iroh")]
@@ -27,6 +27,9 @@ use tracing::{debug, info};
 ///
 /// Implements the Transport trait for QUIC-based connections using Iroh.
 /// Provides modern P2P networking with encryption and NAT traversal.
+#[cfg(feature = "iroh")]
+const IROH_ALPN: &[u8] = b"bitcoin/1.0";
+
 #[cfg(feature = "iroh")]
 #[derive(Debug)]
 pub struct IrohTransport {
@@ -43,7 +46,10 @@ impl IrohTransport {
 
     /// Create with configurable max message length (for constrained networks).
     pub async fn with_max_message_length(max_message_length: usize) -> Result<Self> {
-        let endpoint = Endpoint::bind().await?;
+        let endpoint = Endpoint::builder()
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .bind()
+            .await?;
         info!(
             "Iroh transport initialized with endpoint ID: {}",
             endpoint.id()
@@ -62,6 +68,27 @@ impl IrohTransport {
     /// Get the secret key (for persistence if needed)
     pub fn secret_key(&self) -> &SecretKey {
         self.endpoint.secret_key()
+    }
+
+    /// Connect when the peer's direct UDP socket is known (local/LAN bootstrap).
+    pub async fn connect_direct(
+        &self,
+        remote_id: EndpointId,
+        direct_addr: SocketAddr,
+    ) -> Result<IrohConnection> {
+        let endpoint_addr =
+            EndpointAddr::from_parts(remote_id, [IrohTransportAddr::Ip(direct_addr)]);
+        let conn = self.endpoint.connect(endpoint_addr, IROH_ALPN).await?;
+        let peer_id = conn.remote_id();
+        let peer_addr_bytes = peer_id.as_bytes().to_vec();
+        Ok(IrohConnection {
+            conn,
+            peer_node_id: peer_id,
+            peer_addr: TransportAddr::Iroh(peer_addr_bytes),
+            connected: true,
+            recv_queue: VecDeque::new(),
+            max_message_length: self.max_message_length,
+        })
     }
 }
 
@@ -119,8 +146,7 @@ impl Transport for IrohTransport {
 
         // Dial peer using endpoint
         // ALPN identifier for Bitcoin protocol over Iroh
-        let alpn = b"bitcoin/1.0";
-        let conn = self.endpoint.connect(endpoint_addr, alpn).await?;
+        let conn = self.endpoint.connect(endpoint_addr, IROH_ALPN).await?;
 
         // Get peer's public key from connection
         let peer_id = conn.remote_id();

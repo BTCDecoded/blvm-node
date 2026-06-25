@@ -79,8 +79,8 @@ mod tests {
         let server_id = server_transport.node_id();
         let listen_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let mut listener = server_transport.listen(listen_addr).await.unwrap();
+        let direct_addr = listener.local_addr().unwrap();
 
-        let client_addr = TransportAddr::Iroh(server_id.as_bytes().to_vec());
         let server_handle = tokio::spawn(async move {
             let (mut server_conn, _) = listener.accept().await.unwrap();
             let mut received = Vec::new();
@@ -92,7 +92,7 @@ mod tests {
 
         let mut client_conn = timeout(
             Duration::from_secs(10),
-            client_transport.connect(client_addr),
+            client_transport.connect_direct(server_id, direct_addr),
         )
         .await
         .unwrap()
