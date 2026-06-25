@@ -74,11 +74,51 @@ mod tests {
         );
     }
 
-    fn assert_invalid_address_hex_err(result: Result<Value, anyhow::Error>) {
-        assert!(
-            result.is_err(),
-            "base58 address strings are not hex-encoded scriptPubKey"
-        );
+    fn assert_invalid_address_err(result: Result<Value, anyhow::Error>) {
+        assert!(result.is_err(), "malformed address must not succeed");
+    }
+
+    // Address endpoints
+    #[tokio::test]
+    async fn test_addresses_get_balance() {
+        let blockchain = create_test_blockchain_rpc();
+        let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"; // Genesis block coinbase
+
+        let balance = addresses::get_address_balance(&blockchain, address)
+            .await
+            .expect("base58 address lookup must succeed on empty chain");
+        assert_eq!(balance.get("balance").unwrap().as_i64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_addresses_get_transactions() {
+        let blockchain = create_test_blockchain_rpc();
+        let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
+
+        let txids = addresses::get_address_transactions(&blockchain, address)
+            .await
+            .expect("base58 address lookup must succeed on empty chain");
+        assert!(txids.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_addresses_get_utxos() {
+        let blockchain = create_test_blockchain_rpc();
+        let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
+
+        let utxos = addresses::get_address_utxos(&blockchain, address)
+            .await
+            .expect("base58 address lookup must succeed on empty chain");
+        assert_eq!(utxos.get("balance").unwrap().as_f64(), Some(0.0));
+        assert_eq!(utxos.get("utxo_count").unwrap().as_i64(), Some(0));
+        assert_eq!(utxos.get("tx_count").unwrap().as_i64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_addresses_reject_malformed_input() {
+        let blockchain = create_test_blockchain_rpc();
+        let result = addresses::get_address_balance(&blockchain, "not-a-valid-address").await;
+        assert_invalid_address_err(result);
     }
 
     // Chain endpoints
@@ -170,34 +210,6 @@ mod tests {
         // Should fail with invalid transaction
         let result = transactions::submit_transaction(&rawtx, invalid_hex).await;
         assert!(result.is_err());
-    }
-
-    // Address endpoints
-    #[tokio::test]
-    async fn test_addresses_get_balance() {
-        let blockchain = create_test_blockchain_rpc();
-        let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"; // Genesis block coinbase
-
-        let result = addresses::get_address_balance(&blockchain, address).await;
-        assert_invalid_address_hex_err(result);
-    }
-
-    #[tokio::test]
-    async fn test_addresses_get_transactions() {
-        let blockchain = create_test_blockchain_rpc();
-        let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
-
-        let result = addresses::get_address_transactions(&blockchain, address).await;
-        assert_invalid_address_hex_err(result);
-    }
-
-    #[tokio::test]
-    async fn test_addresses_get_utxos() {
-        let blockchain = create_test_blockchain_rpc();
-        let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
-
-        let result = addresses::get_address_utxos(&blockchain, address).await;
-        assert_invalid_address_hex_err(result);
     }
 
     #[tokio::test]
