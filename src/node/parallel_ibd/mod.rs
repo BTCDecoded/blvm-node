@@ -1215,8 +1215,9 @@ impl ParallelIBD {
                         // chunks are not aborted after a single per-block timeout window.
                         let validated_tip =
                             validation_height_clone.load(std::sync::atomic::Ordering::Relaxed);
-                        let resume_from = download::resume_download_height(start, end, validated_tip)
-                            .unwrap_or(start);
+                        let resume_from =
+                            download::resume_download_height(start, end, validated_tip)
+                                .unwrap_or(start);
                         let outer_secs = download::chunk_outer_deadline_secs(
                             start,
                             end,

@@ -344,7 +344,6 @@ fn test_validate_module_signature_unsigned_skips() {
 fn test_validate_module_signature_signed_requires_manifest_file() {
     use blvm_node::module::registry::manifest::{MaintainerSignature, SignatureSection};
     use blvm_node::module::validation::manifest_validator::validate_module_signature;
-    use std::path::Path;
 
     let mut manifest = create_valid_manifest();
     manifest.signatures = Some(SignatureSection {

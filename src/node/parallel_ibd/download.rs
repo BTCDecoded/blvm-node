@@ -185,8 +185,7 @@ pub(crate) fn chunk_outer_deadline_secs(
         .max(1);
     per_block_timeout_secs
         .saturating_mul(blocks_remaining)
-        .max(35)
-        .min(7200)
+        .clamp(35, 7200)
 }
 
 /// Wait for outbound peer connection, spawning reconnect if needed.
@@ -830,8 +829,14 @@ mod tests {
 
     #[test]
     fn chunk_outer_deadline_scales_with_remaining_blocks() {
-        assert_eq!(chunk_outer_deadline_secs(955186, 955241, 955186, 30), 56 * 30);
-        assert_eq!(chunk_outer_deadline_secs(955186, 955241, 955195, 30), 47 * 30);
+        assert_eq!(
+            chunk_outer_deadline_secs(955186, 955241, 955186, 30),
+            56 * 30
+        );
+        assert_eq!(
+            chunk_outer_deadline_secs(955186, 955241, 955195, 30),
+            47 * 30
+        );
         assert_eq!(chunk_outer_deadline_secs(0, 0, 0, 30), 35);
     }
 }

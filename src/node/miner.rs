@@ -1576,7 +1576,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 90_000,
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: vec![0x51],
             }]
             .into(),
             lock_time: 0,
@@ -1664,7 +1664,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 90_000,
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: vec![0x51],
             }]
             .into(),
             lock_time: 0,

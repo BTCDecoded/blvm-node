@@ -282,7 +282,7 @@ async fn test_getblocktemplate_includes_prioritized_mempool_tx() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1].into(),
+            script_pubkey: vec![OP_1],
         }]
         .into(),
         lock_time: 0,
@@ -357,7 +357,7 @@ async fn test_getblocktemplate_includes_segwit_mempool_tx_on_regtest() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1].into(),
+            script_pubkey: vec![OP_1],
         }]
         .into(),
         lock_time: 0,
@@ -444,7 +444,7 @@ async fn test_getblocktemplate_mempool_witness_available_for_template() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1].into(),
+            script_pubkey: vec![OP_1],
         }]
         .into(),
         lock_time: 0,

@@ -68,7 +68,7 @@ fn test_transaction_selector_selects_mempool_tx() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_0, OP_CHECKSIG].into(),
+            script_pubkey: vec![OP_0, OP_CHECKSIG],
         }]
         .into(),
         lock_time: 0,
@@ -231,7 +231,7 @@ async fn test_mining_coordinator_mempool_witness_storage() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 50_000,
-            script_pubkey: vec![OP_0, OP_CHECKSIG].into(),
+            script_pubkey: vec![OP_0, OP_CHECKSIG],
         }]
         .into(),
         lock_time: 0,
@@ -291,7 +291,7 @@ async fn test_mining_coordinator_template_selects_mempool_tx() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_0, OP_CHECKSIG].into(),
+            script_pubkey: vec![OP_0, OP_CHECKSIG],
         }]
         .into(),
         lock_time: 0,

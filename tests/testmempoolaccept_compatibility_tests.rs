@@ -120,7 +120,7 @@ async fn test_segwit_wtxid_calculation() {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
-            script_pubkey: spk.into(),
+            script_pubkey: spk,
         }],
         lock_time: 0,
     };

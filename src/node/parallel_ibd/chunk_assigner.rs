@@ -189,10 +189,12 @@ impl ChunkAssigner {
     }
 
     /// Returns true if any worker is already downloading this exact chunk range.
-    fn chunk_range_in_flight(in_flight: &HashMap<String, (u64, u64)>, start: u64, end: u64) -> bool {
-        in_flight
-            .values()
-            .any(|(s, e)| *s == start && *e == end)
+    fn chunk_range_in_flight(
+        in_flight: &HashMap<String, (u64, u64)>,
+        start: u64,
+        end: u64,
+    ) -> bool {
+        in_flight.values().any(|(s, e)| *s == start && *e == end)
     }
 
     /// Returns the next assignable chunk for this peer, or None if nothing ready.
@@ -445,13 +447,7 @@ mod tests {
     fn main_queue_assigns_next_height_when_max_ahead_zero() {
         let chunks = vec![(955186, 955244)];
         let vh = Arc::new(AtomicU64::new(955185));
-        let assigner = ChunkAssigner::new(
-            chunks,
-            vec!["p1".into()],
-            Arc::clone(&vh),
-            955186,
-            true,
-        );
+        let assigner = ChunkAssigner::new(chunks, vec!["p1".into()], Arc::clone(&vh), 955186, true);
         assert_eq!(
             assigner.get_work("p1", 0),
             Some((955186, 955244)),

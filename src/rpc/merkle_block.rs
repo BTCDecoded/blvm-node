@@ -398,7 +398,7 @@ mod tests {
             }],
             outputs: blvm_protocol::tx_outputs![TransactionOutput {
                 value: 1000,
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: vec![0x51],
             }],
             lock_time: 0,
         }

@@ -12,10 +12,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 const MINE_ATTEMPTS: u64 = 2_000_000;
-/// Shared prefix ends at height 7; siblings connect at height 8.
+/// Shared prefix ends at height 7; siblings connect at height 8, child at 9.
 const PREFIX_HEIGHT: u64 = 7;
-const SIBLING_HEIGHT: u64 = 8;
-const CHILD_HEIGHT: u64 = 9;
 const FORK_SALT: u64 = 42_000;
 
 fn regtest_coinbase_script_sig(height: u64, fork_salt: u64) -> Vec<u8> {
