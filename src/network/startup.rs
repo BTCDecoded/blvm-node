@@ -52,7 +52,7 @@ pub(crate) async fn init_iroh_transport(nm: &NetworkManager) -> Result<()> {
     {
         Ok(iroh) => {
             if let Ok(mut guard) = nm.iroh_transport().lock() {
-                *guard = Some(iroh);
+                *guard = Some(std::sync::Arc::new(iroh));
             }
             info!("Iroh transport initialized");
         }
@@ -289,16 +289,17 @@ pub(crate) async fn start_iroh_listener(
     nm: &NetworkManager,
     listen_addr: SocketAddr,
 ) -> Result<()> {
-    let listen_result = {
+    let transport = {
         let guard = match nm.iroh_transport().lock() {
             Ok(g) => g,
             Err(_) => return Ok(()),
         };
-        let Some(transport) = guard.as_ref() else {
-            return Ok(());
-        };
-        transport.listen(listen_addr).await
+        match guard.as_ref() {
+            Some(t) => std::sync::Arc::clone(t),
+            None => return Ok(()),
+        }
     };
+    let listen_result = transport.listen(listen_addr).await;
 
     let mut iroh_listener = match listen_result {
         Ok(l) => l,

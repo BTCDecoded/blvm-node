@@ -1,7 +1,7 @@
 //! Tests for TCP transport
 
 use blvm_node::network::tcp_transport::TcpTransport;
-use blvm_node::network::transport::{Transport, TransportListener};
+use blvm_node::network::transport::{Transport, TransportAddr, TransportListener};
 use std::net::SocketAddr;
 
 #[tokio::test]

@@ -70,7 +70,7 @@ pub async fn handle_payment_request(
         _ => error_response(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("Payment endpoint not found: {} {}", method, path),
+            &format!("Payment endpoint not found: {method} {path}"),
             request_id,
         ),
     }
@@ -234,7 +234,7 @@ async fn get_payment_state(
             error_response(
                 StatusCode::NOT_FOUND,
                 "PAYMENT_NOT_FOUND",
-                &format!("Payment not found: {}", e),
+                &format!("Payment not found: {e}"),
                 request_id,
             )
         }

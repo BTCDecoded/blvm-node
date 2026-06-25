@@ -622,7 +622,7 @@ impl RpcManager {
             if let Some(ref state_machine) = self.payment_state_machine {
                 let mut payment_rpc =
                     payment::PaymentRpc::with_state_machine(Arc::clone(state_machine));
-                if let (Some(ref mempool), Some(ref storage)) =
+                if let (Some(mempool), Some(storage)) =
                     (self.mempool.as_ref(), self.storage.as_ref())
                 {
                     payment_rpc =

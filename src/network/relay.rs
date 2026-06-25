@@ -207,10 +207,10 @@ impl RelayManager {
                     "Transaction {} transitioned to fluff phase",
                     hex::encode(tx_hash)
                 );
-                return None; // Broadcast to all
+                None // Broadcast to all
             } else {
                 // Advance stem phase
-                return dandelion.advance_stem(tx_hash, available_peers);
+                dandelion.advance_stem(tx_hash, available_peers)
             }
         } else {
             // Start stem phase
@@ -225,7 +225,7 @@ impl RelayManager {
                     hex::encode(tx_hash)
                 );
             }
-            return next_peer;
+            next_peer
         }
     }
     #[cfg(not(feature = "dandelion"))]

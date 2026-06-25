@@ -111,7 +111,8 @@ pub struct NetworkManager {
     #[cfg(feature = "quinn")]
     quinn_transport: std::sync::Mutex<Option<Arc<crate::network::quinn_transport::QuinnTransport>>>,
     #[cfg(feature = "iroh")]
-    iroh_transport: std::sync::Mutex<Option<crate::network::iroh_transport::IrohTransport>>,
+    iroh_transport:
+        std::sync::Mutex<Option<std::sync::Arc<crate::network::iroh_transport::IrohTransport>>>,
     transport_preference: TransportPreference,
     peer_tx: mpsc::UnboundedSender<NetworkMessage>,
     peer_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<NetworkMessage>>>,
@@ -1437,7 +1438,7 @@ impl NetworkManager {
                         .lock()
                         .await
                         .iter()
-                        .find_map(|(sock, &ref ta)| if *ta == addr { Some(*sock) } else { None })
+                        .find_map(|(sock, ta)| if *ta == addr { Some(*sock) } else { None })
                 }
             };
 
@@ -2538,7 +2539,8 @@ impl NetworkManager {
     #[cfg(feature = "iroh")]
     pub(crate) fn iroh_transport(
         &self,
-    ) -> &std::sync::Mutex<Option<crate::network::iroh_transport::IrohTransport>> {
+    ) -> &std::sync::Mutex<Option<std::sync::Arc<crate::network::iroh_transport::IrohTransport>>>
+    {
         &self.iroh_transport
     }
 

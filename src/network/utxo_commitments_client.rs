@@ -193,13 +193,13 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
 
                     let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
                         blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                            format!("Invalid Iroh peer_id format: {}", peer_id)
+                            format!("Invalid Iroh peer_id format: {peer_id}")
                         )
                     })?;
 
                     let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
                         blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                            format!("Invalid Iroh node ID hex: {}", e)
+                            format!("Invalid Iroh node ID hex: {e}")
                         )
                     })?;
 
@@ -407,13 +407,13 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
 
                     let node_id_hex = peer_id.strip_prefix("iroh:").ok_or_else(|| {
                         blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                            format!("Invalid Iroh peer_id format: {}", peer_id)
+                            format!("Invalid Iroh peer_id format: {peer_id}")
                         )
                     })?;
 
                     let node_id_bytes = hex::decode(node_id_hex).map_err(|e| {
                         blvm_protocol::utxo_commitments::data_structures::UtxoCommitmentError::SerializationError(
-                            format!("Invalid Iroh node ID hex: {}", e)
+                            format!("Invalid Iroh node ID hex: {e}")
                         )
                     })?;
 
@@ -780,9 +780,7 @@ impl UtxoCommitmentsClient {
                         .and_then(|s| hex::decode(s).ok())
                         .and_then(|bytes| {
                             if bytes.len() == 32 {
-                                Some(crate::network::transport::TransportAddr::Iroh(
-                                    bytes.try_into().unwrap(),
-                                ))
+                                Some(crate::network::transport::TransportAddr::Iroh(bytes))
                             } else {
                                 None
                             }

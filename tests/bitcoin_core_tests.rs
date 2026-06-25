@@ -285,8 +285,8 @@ mod bitcoin_core_tests {
     #[test]
     fn test_bitcoin_core_not_available() {
         // Tests that Bitcoin Core features are not available when rocksdb feature is disabled
-        use blvm_node::storage::bitcoin_core_detection::CoreDataNetwork;
         use blvm_node::storage::bitcoin_core_storage::BitcoinCoreStorage;
+        use blvm_node::storage::bitcoin_detection::CoreDataNetwork;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();

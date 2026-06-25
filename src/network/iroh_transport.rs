@@ -234,24 +234,19 @@ impl IrohConnection {
     }
 
     async fn prefetch_ready_streams(&mut self) {
-        loop {
-            match tokio::time::timeout(std::time::Duration::from_millis(0), self.conn.accept_uni())
-                .await
-            {
-                Ok(Ok(stream)) => {
-                    match Self::read_message_from_stream(stream, self.max_message_length).await {
-                        Ok(data) if data.is_empty() => {
-                            self.connected = false;
-                            break;
-                        }
-                        Ok(data) => self.recv_queue.push_back(data),
-                        Err(e) => {
-                            debug!("Iroh prefetch stream read error: {e}");
-                            break;
-                        }
-                    }
+        while let Ok(Ok(stream)) =
+            tokio::time::timeout(std::time::Duration::from_millis(0), self.conn.accept_uni()).await
+        {
+            match Self::read_message_from_stream(stream, self.max_message_length).await {
+                Ok(data) if data.is_empty() => {
+                    self.connected = false;
+                    break;
                 }
-                _ => break,
+                Ok(data) => self.recv_queue.push_back(data),
+                Err(e) => {
+                    debug!("Iroh prefetch stream read error: {e}");
+                    break;
+                }
             }
         }
     }

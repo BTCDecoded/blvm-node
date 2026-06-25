@@ -1683,10 +1683,9 @@ impl NodeAPI for NodeApiImpl {
                 return Err(ModuleError::OperationError(
                     "Quinn transport not enabled".to_string(),
                 ));
-            } else if peer_addr.starts_with("iroh:") {
+            } else if let Some(node_id_str) = peer_addr.strip_prefix("iroh:") {
                 #[cfg(feature = "iroh")]
                 {
-                    let node_id_str = &peer_addr[5..];
                     let node_id_bytes = hex::decode(node_id_str)
                         .map_err(|e| ModuleError::op_err("Invalid Iroh node ID hex", e))?;
                     if node_id_bytes.len() != 32 {
@@ -1755,10 +1754,9 @@ impl NodeAPI for NodeApiImpl {
                 return Err(ModuleError::OperationError(
                     "Quinn transport not enabled".to_string(),
                 ));
-            } else if peer_addr.starts_with("iroh:") {
+            } else if let Some(node_id_str) = peer_addr.strip_prefix("iroh:") {
                 #[cfg(feature = "iroh")]
                 {
-                    let node_id_str = &peer_addr[5..];
                     let node_id_bytes = hex::decode(node_id_str)
                         .map_err(|e| ModuleError::op_err("Invalid Iroh node ID hex", e))?;
                     if node_id_bytes.len() != 32 {

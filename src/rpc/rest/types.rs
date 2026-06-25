@@ -104,13 +104,13 @@ impl ApiError {
 /// Build "Failed to {context}: {e}" for REST error messages. Use instead of ad hoc format!.
 #[inline]
 pub fn rest_error_failed(context: &str, e: impl std::fmt::Display) -> String {
-    format!("Failed to {}: {}", context, e)
+    format!("Failed to {context}: {e}")
 }
 
 /// Build "Invalid {context}: {e}" for REST error messages. Use instead of ad hoc format!.
 #[inline]
 pub fn rest_error_invalid(context: &str, e: impl std::fmt::Display) -> String {
-    format!("Invalid {}: {}", context, e)
+    format!("Invalid {context}: {e}")
 }
 
 // Helper functions for REST responses
@@ -130,7 +130,7 @@ pub async fn read_json_body(req: Request<Incoming>) -> Result<Option<Value>, Str
     let limited = Limited::new(body, MAX_REQUEST_SIZE);
     let body_bytes = match limited.collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(e) => return Err(format!("Request body too large or read error: {}", e)),
+        Err(e) => return Err(format!("Request body too large or read error: {e}")),
     };
 
     if body_bytes.is_empty() {

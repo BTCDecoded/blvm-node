@@ -102,18 +102,20 @@ impl NetworkManager {
             return Ok(0);
         }
 
-        let guard = match self.iroh_transport().lock() {
-            Ok(g) => g,
-            Err(_) => {
-                warn!("Iroh transport lock poisoned");
-                return Ok(0);
-            }
-        };
-        let iroh_transport = match guard.as_ref() {
-            Some(transport) => transport,
-            None => {
-                warn!("Iroh transport not initialized, cannot connect to Iroh peers");
-                return Ok(0);
+        let iroh_transport = {
+            let guard = match self.iroh_transport().lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    warn!("Iroh transport lock poisoned");
+                    return Ok(0);
+                }
+            };
+            match guard.as_ref() {
+                Some(transport) => std::sync::Arc::clone(transport),
+                None => {
+                    warn!("Iroh transport not initialized, cannot connect to Iroh peers");
+                    return Ok(0);
+                }
             }
         };
 

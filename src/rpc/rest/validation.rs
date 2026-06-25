@@ -71,8 +71,7 @@ pub fn validate_block_height(height: u64) -> Result<u64, String> {
 
     if height > MAX_BLOCK_HEIGHT {
         return Err(format!(
-            "Block height too large: {} (max: {})",
-            height, MAX_BLOCK_HEIGHT
+            "Block height too large: {height} (max: {MAX_BLOCK_HEIGHT})"
         ));
     }
 

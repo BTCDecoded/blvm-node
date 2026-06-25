@@ -31,6 +31,12 @@ pub struct PaymentRpc {
     storage: Option<Arc<Storage>>,
 }
 
+impl Default for PaymentRpc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PaymentRpc {
     /// Create a new payment RPC handler
     pub fn new() -> Self {
@@ -68,7 +74,7 @@ impl PaymentRpc {
             .ok_or_else(|| {
                 PaymentError::ProcessingError("Payment state machine not available".to_string())
             })
-            .map(|sm| Arc::clone(sm))
+            .map(Arc::clone)
     }
 
     /// Create a payment request
@@ -90,7 +96,7 @@ impl PaymentRpc {
         })?;
 
         let outputs: Vec<PaymentOutput> = serde_json::from_value(outputs_value.clone())
-            .map_err(|e| PaymentError::ProcessingError(format!("Invalid outputs format: {}", e)))?;
+            .map_err(|e| PaymentError::ProcessingError(format!("Invalid outputs format: {e}")))?;
 
         // Parse merchant_data (optional)
         let merchant_data = params
@@ -565,10 +571,10 @@ impl PaymentRpc {
         #[cfg(not(feature = "ctv"))]
         {
             let _ = (output_index, amount_sats, proof_bytes);
-            return Ok(json!({
+            Ok(json!({
                 "verified": false,
                 "reason": "CTV feature not enabled on node",
-            }));
+            }))
         }
 
         #[cfg(feature = "ctv")]
@@ -1305,10 +1311,7 @@ fn decode_tx_hash(hex_str: &str) -> Result<crate::Hash, PaymentError> {
 }
 
 fn tx_output_total_sats(tx: &Transaction) -> u64 {
-    tx.outputs
-        .iter()
-        .map(|o| (o.value as i64).max(0) as u64)
-        .sum()
+    tx.outputs.iter().map(|o| o.value.max(0) as u64).sum()
 }
 
 fn transaction_matches_outputs(tx: &Transaction, expected_outputs: &[PaymentOutput]) -> bool {

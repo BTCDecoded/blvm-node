@@ -39,15 +39,15 @@ pub async fn handle_create_payment_request(
     // Read request body with size limit (S-006)
     let (_, body) = req.into_parts();
     let limited = Limited::new(body, MAX_BODY_SIZE);
-    let body = limited.collect().await.map_err(|e| {
-        PaymentError::ProcessingError(format!("Failed to read request body: {}", e))
-    })?;
+    let body = limited
+        .collect()
+        .await
+        .map_err(|e| PaymentError::ProcessingError(format!("Failed to read request body: {e}")))?;
     let body_bytes = body.to_bytes();
 
     // Payment request body: JSON with `outputs` and optional `merchant_data` (BIP270-style).
-    let params: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-        PaymentError::ProcessingError(format!("Failed to parse request body: {}", e))
-    })?;
+    let params: serde_json::Value = serde_json::from_slice(&body_bytes)
+        .map_err(|e| PaymentError::ProcessingError(format!("Failed to parse request body: {e}")))?;
 
     // Extract outputs
     let outputs: Vec<PaymentOutput> = params
@@ -87,7 +87,7 @@ pub async fn handle_create_payment_request(
 
     // Serialize for BLVM internal HTTP transport (bincode, not BIP70 protobuf).
     let serialized = bincode::serialize(&payment_request).map_err(|e| {
-        PaymentError::ProcessingError(format!("Failed to serialize payment request: {}", e))
+        PaymentError::ProcessingError(format!("Failed to serialize payment request: {e}"))
     })?;
 
     Ok(Response::builder()
@@ -122,7 +122,7 @@ pub async fn handle_get_payment_request(
 
     // Serialize for BLVM internal HTTP transport (bincode, not BIP70 protobuf).
     let serialized = bincode::serialize(&payment_request).map_err(|e| {
-        PaymentError::ProcessingError(format!("Failed to serialize payment request: {}", e))
+        PaymentError::ProcessingError(format!("Failed to serialize payment request: {e}"))
     })?;
 
     Ok(Response::builder()
@@ -166,21 +166,22 @@ pub async fn handle_submit_payment(
     // Read request body with size limit (S-006, S-007)
     let (_, body) = req.into_parts();
     let limited = Limited::new(body, MAX_BODY_SIZE);
-    let body = limited.collect().await.map_err(|e| {
-        PaymentError::ProcessingError(format!("Failed to read request body: {}", e))
-    })?;
+    let body = limited
+        .collect()
+        .await
+        .map_err(|e| PaymentError::ProcessingError(format!("Failed to read request body: {e}")))?;
     let body_bytes = body.to_bytes();
 
     // Parse payment body (bincode; not BIP70 protobuf).
     let payment: Payment = bincode::deserialize(&body_bytes)
-        .map_err(|e| PaymentError::ProcessingError(format!("Failed to parse payment: {}", e)))?;
+        .map_err(|e| PaymentError::ProcessingError(format!("Failed to parse payment: {e}")))?;
 
     // Process payment
     let ack = processor.process_payment(payment, payment_id, None).await?;
 
     // Serialize payment ACK (bincode; not BIP70 protobuf).
     let serialized = bincode::serialize(&ack).map_err(|e| {
-        PaymentError::ProcessingError(format!("Failed to serialize payment ACK: {}", e))
+        PaymentError::ProcessingError(format!("Failed to serialize payment ACK: {e}"))
     })?;
 
     Ok(Response::builder()
