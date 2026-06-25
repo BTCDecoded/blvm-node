@@ -139,9 +139,9 @@ impl ChunkAssigner {
             "chunks and chunk_peers must match"
         );
         // Always serialize the first chunk (contains `start_height`) before assigning later chunks.
-        // Previously `start_height > 0` skipped this on resume, so parallel workers could download
-        // 954614+ while validation still waited on 954486 — bridge/feeder stall forever.
-        let bootstrap_complete = AtomicBool::new(false);
+        // On near-tip resume (`start_height > 0`) there is only one chunk — treat bootstrap done so
+        // workers are not blocked waiting for a bootstrap marker that only applies to height 0.
+        let bootstrap_complete = AtomicBool::new(start_height > 0);
         Self {
             chunks,
             chunk_peers,
@@ -282,7 +282,9 @@ impl ChunkAssigner {
         if self.chunk_range_in_flight(start, end) {
             return None;
         }
-        if start > current_validation.saturating_add(max_ahead) {
+        // Allow the chunk that contains the next validation height even when max_ahead is 0
+        // (near-tip catch-up). Otherwise workers poll forever and the retry queue never drains.
+        if start > max_start && start > next_needed {
             return None;
         }
         if !allow_chunk(start) {
@@ -439,6 +441,24 @@ mod tests {
         assigner.mark_bootstrap_complete();
         let w1 = assigner.get_work("p2", 1000).expect("chunk 1");
         assert_eq!(w1, (264, 327));
+    }
+
+    #[test]
+    fn main_queue_assigns_next_height_when_max_ahead_zero() {
+        let chunks = vec![(955186, 955244)];
+        let vh = Arc::new(AtomicU64::new(955185));
+        let assigner = ChunkAssigner::new(
+            chunks,
+            vec!["p1".into()],
+            Arc::clone(&vh),
+            955186,
+            true,
+        );
+        assert_eq!(
+            assigner.get_work("p1", 0),
+            Some((955186, 955244)),
+            "next block must be assignable even when max_ahead=0"
+        );
     }
 
     #[test]
