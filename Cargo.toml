@@ -104,6 +104,13 @@ zeroize = { version = "=1.8.2", features = ["zeroize_derive"] }  # ^1.8 required
 constant_time_eq = "=0.3"  # Constant-time comparison for token authentication
 # RUSTSEC-2026-0009: iroh/rcgen transitive; force >=0.3.47 (crates.io ships 0.3.47+).
 time = { version = ">=0.3.47", default-features = false }
+# Pin ed25519 + pkcs8: iroh 0.95 → ed25519-dalek 3.0.0-pre.1 → ed25519 =3.0.0-rc.4
+# → pkcs8 ^0.11.0-rc.10. pkcs8 0.11.0 stable changed KeyMalformed to a tuple
+# variant which breaks ed25519-rc.4; pkcs8 0.11.0-rc.10 doesn't compile on
+# rustc ≥1.95. rc.11 is the only version in the range that compiles cleanly.
+# Remove both pins once iroh ships with a stable ed25519-dalek.
+ed25519 = "=3.0.0-rc.4"
+pkcs8 = "=0.11.0-rc.11"
 aes-gcm = "=0.10.3"  # Module encryption
 hkdf = "=0.12.4"  # Key derivation for module encryption
 
@@ -197,11 +204,13 @@ windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32
 [features]
 # Storage: `database_backend = "auto"` picks heed3 when the `heed3` feature is enabled
 # (see `storage/database/mod.rs::default_backend`), else RocksDB, TidesDB, Redb, Sled.
-# Shared default stack (blvm adds nix/libc/sled/compression on Linux native).
+# Shared default stack (blvm adds sled/compression on the binary crate).
 default = [
     "sysinfo",
     "heed3",
     "redb",
+    "nix",
+    "libc",
     "production",
     "governance",
     "utxo-commitments",
