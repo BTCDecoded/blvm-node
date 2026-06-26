@@ -587,8 +587,26 @@ pub(crate) async fn download_chunk(
             // We have started receiving blocks. Race in_flight, stall signal, and hard deadline.
             tokio::select! {
                 r = in_flight.next() => r,
-                _ = rx.recv() => {
-                    // Stall signal received — just continue; the hard deadline handles abort timing.
+                stall_res = rx.recv() => {
+                    // Coordinator detected validation waiting on our gap height — fail fast so
+                    // assigner can requeue a gap micro-chunk to another peer instead of burning
+                    // another CHUNK_DEADLINE_SECS on the same slow peer.
+                    if let Ok(stall_h) = stall_res {
+                        if stall_h >= start_height
+                            && stall_h <= end_height
+                            && stall_h == next_to_send
+                        {
+                            warn!(
+                                "Coordinator stall at gap height {}: aborting chunk {}-{} for immediate peer retry",
+                                stall_h, start_height, end_height
+                            );
+                            peer_scorer.record_failure(peer_addr);
+                            return Err(anyhow::anyhow!(
+                                "Coordinator stall at gap height {} - chunk {}-{} needs retry",
+                                stall_h, start_height, end_height
+                            ));
+                        }
+                    }
                     continue;
                 }
                 _ = deadline_poll.tick() => {

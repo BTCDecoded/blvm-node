@@ -1324,6 +1324,14 @@ impl ParallelIBD {
                                     MAX_CONSECUTIVE_FAILURES,
                                     e
                                 );
+                                let err_str = e.to_string();
+                                if err_str.contains("gap height")
+                                    || err_str.contains("stuck at height")
+                                    || err_str.contains("Coordinator stall at gap")
+                                {
+                                    let gap_h = assigner_clone.next_needed_height();
+                                    assigner_clone.requeue_stall_gaps(gap_h);
+                                }
                                 // Exclude the failing peer only when another worker can take the
                                 // retry. With a single chunk, other workers exit after taking no
                                 // work — exclude would deadlock the only live worker.
@@ -1524,9 +1532,10 @@ impl ParallelIBD {
             };
             info!("Coordinator: started, awaiting blocks from download workers");
             // Stall timeout: 90s for LAN (Bitcoin Core needs 40-80s for dense Satoshi Dice era
-            // chunks at h=285k-310k). 20s for WAN multi-peer: slow WAN peers should be abandoned
-            // faster so work-stealing reassigns the chunk to a healthier peer.
-            let coord_stall_secs: u64 = if wan_multi_peer { 20 } else { 90 };
+            // chunks at h=285k-310k). 5s for WAN multi-peer: fail fast and requeue gap
+            // micro-chunks so another peer can race the missing block (override via
+            // BLVM_IBD_COORD_STALL_SECS).
+            let coord_stall_secs: u64 = if wan_multi_peer { 5 } else { 90 };
             let coord_stall_secs = std::env::var("BLVM_IBD_COORD_STALL_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -1544,6 +1553,12 @@ impl ParallelIBD {
                     break;
                 }
                 let dynamic_buffer_limit = coord_buffer_limit;
+                let coord_stall_effective_secs = if assigner_for_coord.is_bootstrap_complete() {
+                    coord_stall_log_secs
+                } else {
+                    // Bootstrap is single-worker; short stall + requeue only churns micro-chunks.
+                    coord_stall_log_secs.saturating_mul(6).max(30)
+                };
                 // Under Emergency memory pressure, do not drain block_rx — WAN workers block on send().
                 //
                 // Eviction is handled by the retire thread (which calls `evict_aggressive_for_rss`
@@ -1614,16 +1629,17 @@ impl ParallelIBD {
                         let now = std::time::Instant::now();
                         let stall_start = *coord_buffer_full_since.get_or_insert(now);
                         let stuck_secs = now.duration_since(stall_start).as_secs();
-                        if stuck_secs >= coord_stall_log_secs {
-                            warn!(
-                                "Coordinator stall: buffer full ({}) but height {} not in buffer for {}s — requeuing",
-                                reorder_buffer.len(),
-                                min_undispatched_needed,
-                                stuck_secs
-                            );
-                            let _ = stall_tx_for_coord.send(min_undispatched_needed);
-                            assigner_for_coord
-                                .requeue_chunk_containing_height(min_undispatched_needed);
+                        if stuck_secs >= coord_stall_effective_secs {
+                            if assigner_for_coord.is_bootstrap_complete() {
+                                warn!(
+                                    "Coordinator stall: buffer full ({}) but height {} not in buffer for {}s — requeuing",
+                                    reorder_buffer.len(),
+                                    min_undispatched_needed,
+                                    stuck_secs
+                                );
+                                let _ = stall_tx_for_coord.send(min_undispatched_needed);
+                                assigner_for_coord.requeue_stall_gaps(min_undispatched_needed);
+                            }
                             coord_buffer_full_since = None;
                         }
                         tokio::time::sleep(IBD_YIELD_SLEEP).await;
@@ -1687,11 +1703,16 @@ impl ParallelIBD {
                     continue;
                 }
                 let recv_fut = block_rx.recv_many(&mut batch, BATCH_DRAIN_LIMIT);
-                let n = match timeout(Duration::from_secs(coord_stall_log_secs), recv_fut).await {
+                let n = match timeout(Duration::from_secs(coord_stall_effective_secs), recv_fut)
+                    .await
+                {
                     Ok(n) => n,
                     Err(_) => {
                         let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
                         if next_needed > effective_end_for_coord {
+                            continue;
+                        }
+                        if !assigner_for_coord.is_bootstrap_complete() {
                             continue;
                         }
                         // next_prefetch_height is the coordinator's delivery cursor. Requeue the
@@ -1717,9 +1738,9 @@ impl ParallelIBD {
                             stall_height
                         );
                         let _ = stall_tx_for_coord.send(stall_height);
-                        assigner_for_coord.requeue_chunk_containing_height(stall_height);
+                        assigner_for_coord.requeue_stall_gaps(stall_height);
                         if stall_height != next_needed {
-                            assigner_for_coord.requeue_chunk_containing_height(next_needed);
+                            assigner_for_coord.requeue_stall_gaps(next_needed);
                         }
                         continue;
                     }

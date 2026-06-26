@@ -188,12 +188,29 @@ impl ChunkAssigner {
         self.bootstrap_complete.store(true, Ordering::Relaxed);
     }
 
+    /// Max parallel single-height gap fetches (different peers racing the same block).
+    const MAX_GAP_FETCHERS_PER_HEIGHT: usize = 3;
+    /// On coordinator stall, prefetch this many consecutive gap heights so peers can race ahead
+    /// of validation instead of one micro-chunk per stall tick.
+    const GAP_MICRO_CHUNK_BATCH: u64 = 8;
+
+    pub(crate) fn is_bootstrap_complete(&self) -> bool {
+        self.bootstrap_complete.load(Ordering::Relaxed)
+    }
+
     /// Returns true if any worker is already downloading this exact chunk range.
     fn chunk_range_in_flight(
         in_flight: &HashMap<String, (u64, u64)>,
         start: u64,
         end: u64,
     ) -> bool {
+        if start == end {
+            let n = in_flight
+                .values()
+                .filter(|(s, e)| *s == start && *e == end)
+                .count();
+            return n >= Self::MAX_GAP_FETCHERS_PER_HEIGHT;
+        }
         in_flight.values().any(|(s, e)| *s == start && *e == end)
     }
 
@@ -232,9 +249,31 @@ impl ChunkAssigner {
         // (0–1 entries in practice), so skipping the window check here poses no memory risk.
         {
             let mut retry = self.retry_queue.lock().unwrap();
+            // Gap micro-chunks (H,H) beat full stall-recovery chunks — fetch one block from
+            // another peer instead of re-downloading 128 blocks.
+            let gap_micro = retry
+                .iter()
+                .enumerate()
+                .filter(|(_, (s, e, ex))| {
+                    *s == *e
+                        && *s >= next_needed
+                        && ex.as_ref() != Some(&peer_id.to_string())
+                        && allow_chunk(*s)
+                })
+                .min_by_key(|(_, (s, _, _))| *s);
+            if let Some((i, _)) = gap_micro {
+                let (start, end, ex) = retry.remove(i).unwrap();
+                if Self::chunk_range_in_flight(&guard, start, end) {
+                    retry.push_back((start, end, ex));
+                    return None;
+                }
+                guard.insert(peer_id.to_string(), (start, end));
+                return Some((start, end));
+            }
             let critical = retry.iter().enumerate().find(|(_, (s, e, ex))| {
                 *s <= next_needed
                     && next_needed <= *e
+                    && *s != *e
                     && ex.as_ref() != Some(&peer_id.to_string())
                     && allow_chunk(*s)
             });
@@ -308,10 +347,43 @@ impl ChunkAssigner {
             .push_back((start, end, exclude_peer));
     }
 
-    /// When validation/coordinator stalls on a missing height, workers may have no in-flight chunk
-    /// covering that height (chunk was already marked complete after a bad download). Re-queue the
-    /// static chunk that contains `height` so a worker can re-fetch it. Idempotent if already queued.
-    pub(crate) fn requeue_chunk_containing_height(&self, height: u64) {
+    pub(crate) fn next_needed_height(&self) -> u64 {
+        self.validation_height.load(Ordering::Relaxed) + 1
+    }
+
+    /// Enqueue single-height micro-chunks at the front of the retry queue so multiple peers can
+    /// race missing blocks without re-downloading entire 128-block chunks.
+    pub(crate) fn requeue_gap_heights(&self, from: u64, count: u64) {
+        let count = count.clamp(1, 32);
+        let mut rq = self.retry_queue.lock().unwrap();
+        let mut added = 0u64;
+        for h in from..from.saturating_add(count) {
+            if rq.iter().any(|(s, e, _)| *s == h && *e == h) {
+                continue;
+            }
+            rq.push_front((h, h, None));
+            added += 1;
+        }
+        if added > 0 {
+            tracing::warn!(
+                "stall recovery: gap micro-chunks {}-{} ({} new, up to {} fetchers/height)",
+                from,
+                from.saturating_add(count).saturating_sub(1),
+                added,
+                Self::MAX_GAP_FETCHERS_PER_HEIGHT
+            );
+        }
+    }
+
+    pub(crate) fn requeue_gap_height(&self, height: u64) {
+        self.requeue_gap_heights(height, 1);
+    }
+
+    /// Coordinator stall recovery: batch micro-chunks for `height` and clear exclude on an
+    /// existing full-chunk retry entry if present. Does not enqueue a new full chunk — micro-chunks
+    /// target the exact missing block(s) without redundant 128-block re-downloads.
+    pub(crate) fn requeue_stall_gaps(&self, height: u64) {
+        self.requeue_gap_heights(height, Self::GAP_MICRO_CHUNK_BATCH);
         let Some(&(start, end)) = self
             .chunks
             .iter()
@@ -326,8 +398,6 @@ impl ChunkAssigner {
         };
         let mut rq = self.retry_queue.lock().unwrap();
         if let Some(entry) = rq.iter_mut().find(|(s, e, _)| *s == start && *e == end) {
-            // Already queued (e.g. after peer failure with exclude=). Clear exclude so a live
-            // worker can retry — with one chunk, other workers often already exited.
             if entry.2.is_some() {
                 entry.2 = None;
                 tracing::warn!(
@@ -337,15 +407,13 @@ impl ChunkAssigner {
                     height
                 );
             }
-            return;
         }
-        rq.push_back((start, end, None));
-        tracing::warn!(
-            "stall recovery: requeued chunk {}-{} for missing height {}",
-            start,
-            end,
-            height
-        );
+    }
+
+    /// When validation/coordinator stalls on a missing height, workers may have no in-flight chunk
+    /// covering that height (chunk was already marked complete after a bad download).
+    pub(crate) fn requeue_chunk_containing_height(&self, height: u64) {
+        self.requeue_stall_gaps(height);
     }
 
     pub(crate) fn is_done(&self) -> bool {
@@ -470,24 +538,60 @@ mod tests {
     }
 
     #[test]
+    fn requeue_gap_height_push_front_micro_chunk() {
+        let chunks = vec![(100, 199)];
+        let vh = Arc::new(AtomicU64::new(149));
+        let assigner = ChunkAssigner::new(chunks, vec!["p1".into()], vh, 100, true);
+        assigner.requeue_gap_height(150);
+        assert_eq!(assigner.get_work("p1", 1000), Some((150, 150)));
+    }
+
+    #[test]
+    fn requeue_gap_heights_batches_micro_chunks() {
+        let chunks = vec![(100, 199)];
+        let vh = Arc::new(AtomicU64::new(149));
+        let assigner = ChunkAssigner::new(chunks, vec!["p1".into()], vh, 100, true);
+        assigner.requeue_gap_heights(150, 4);
+        assert_eq!(assigner.get_work("p1", 1000), Some((150, 150)));
+        assigner.on_chunk_complete("p1");
+        assert_eq!(assigner.get_work("p2", 1000), Some((151, 151)));
+    }
+
+    #[test]
     fn requeue_chunk_containing_height_is_idempotent() {
         let chunks = vec![(100, 199)];
         let assigner = assigner_for_heights(&chunks, &["p1"], 100, false);
         assigner.requeue_chunk_containing_height(150);
+        let after_first = assigner.remaining_count();
         assigner.requeue_chunk_containing_height(150);
-        assert_eq!(assigner.remaining_count(), 2);
+        assert_eq!(
+            assigner.remaining_count(),
+            after_first,
+            "second stall recovery must not duplicate micro-chunks"
+        );
+        assert_eq!(
+            after_first, 9,
+            "main chunk + 8-height micro-chunk batch (no full-chunk requeue)"
+        );
     }
 
     #[test]
     fn stall_recovery_clears_exclude_on_existing_retry_entry() {
         let chunks = vec![(100, 199)];
-        let assigner = assigner_for_heights(&chunks, &["p1", "p2"], 100, true);
+        let vh = Arc::new(AtomicU64::new(149));
+        let assigner = ChunkAssigner::new(chunks, vec!["p1".into()], vh, 100, true);
         assigner.requeue(100, 199, Some("p1".into()));
-        assigner.requeue_chunk_containing_height(150);
+        assigner.requeue_stall_gaps(150);
+        assert_eq!(assigner.get_work("p1", 1000), Some((150, 150)));
+        for h in 151..=157 {
+            let peer = format!("p{}", h);
+            assert_eq!(assigner.get_work(&peer, 1000), Some((h, h)));
+            assigner.on_chunk_complete(&peer);
+        }
         assert_eq!(
-            assigner.get_work("p1", 1000),
+            assigner.get_work("p2", 1000),
             Some((100, 199)),
-            "exclude must be cleared so the only live worker can retry"
+            "exclude must be cleared so another peer can retry the containing chunk"
         );
     }
 
