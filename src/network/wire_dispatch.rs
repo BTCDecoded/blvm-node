@@ -7,14 +7,80 @@ use blvm_spec_lock::spec_locked;
 
 use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
-use crate::network::protocol::{HeadersMessage, ProtocolMessage, ProtocolParser, VersionMessage};
+use crate::network::protocol::{
+    BlockMessage, HeadersMessage, ProtocolMessage, ProtocolParser, VersionMessage,
+};
 use crate::network::transport::TransportAddr;
 use anyhow::Result;
+use blvm_protocol::BlockHeader;
 use blvm_protocol::ProtocolVersion;
 use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 
+fn block_hash_from_header(header: &BlockHeader) -> [u8; 32] {
+    use crate::storage::hashing::double_sha256;
+    let mut header_bytes = [0u8; 80];
+    header_bytes[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+    header_bytes[4..36].copy_from_slice(&header.prev_block_hash);
+    header_bytes[36..68].copy_from_slice(&header.merkle_root);
+    header_bytes[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+    header_bytes[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+    header_bytes[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
+    double_sha256(&header_bytes)
+}
+
 impl NetworkManager {
+    /// Handle an incoming `block` wire message (IBD GetData response or relay).
+    ///
+    /// Moves `block` + `witnesses` into pending IBD requests — no clone after parse.
+    /// Unmatched blocks queue raw payload bytes from `data` for the main loop (relay path).
+    pub(crate) async fn handle_block_wire_message(
+        &self,
+        peer_addr: SocketAddr,
+        block_msg: BlockMessage,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        info!(
+            "Block message received from {} ({} bytes)",
+            peer_addr,
+            data.len()
+        );
+        let block_hash = block_hash_from_header(&block_msg.block.header);
+        if self.complete_block_request(peer_addr, block_hash, block_msg.block, block_msg.witnesses)
+        {
+            info!(
+                "Block routed to pending request from {} (hash {})",
+                peer_addr,
+                hex::encode(block_hash)
+            );
+            return Ok(());
+        }
+        // Relay / post-IBD: queue the P2P block payload for the main loop.
+        let payload_len = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+        if data.len() < 24 + payload_len {
+            warn!(
+                "Block from {} truncated (frame {} bytes, payload {} bytes)",
+                peer_addr,
+                data.len(),
+                payload_len
+            );
+            return Ok(());
+        }
+        let payload = data[24..24 + payload_len].to_vec();
+        let payload_bytes = payload.len();
+        self.queue_block(payload);
+        if let Ok(mut inv) = self.inventory().lock() {
+            inv.mark_fulfilled(&block_hash);
+        }
+        debug!(
+            "Block from {} (hash {}) queued for main loop ({} payload bytes)",
+            peer_addr,
+            hex::encode(block_hash),
+            payload_bytes
+        );
+        Ok(())
+    }
+
     /// Handle Version message: update peer state and send VerAck (handshake).
     /// Orange Paper 10.2.1: On Version received, send VerAck. VerAck never sent before Version.
     ///
@@ -81,6 +147,29 @@ impl NetworkManager {
         let mut pm = self.peer_manager_mutex().lock().await;
         let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
         let transport_addr_for_verack = transport_addr.clone();
+
+        if let Some(ref transport) = transport_addr {
+            if super::reduced_data_p2p::should_reject_non_rdts_outbound(
+                &self.reduced_data_config,
+                &pm,
+                transport,
+                version_msg.services,
+            ) {
+                drop(pm);
+                warn!(
+                    "Peer {} lacks NODE_REDUCED_DATA and non-RDTS outbound cap ({}) reached — disconnecting",
+                    peer_addr, self.reduced_data_config.max_non_rdts_outbound
+                );
+                return self
+                    .disconnect_for_protocol_violation(
+                        peer_addr,
+                        "non-RDTS outbound peer cap exceeded",
+                        false,
+                    )
+                    .await;
+            }
+        }
+
         if let Some(transport_addr) = transport_addr {
             if let Some(peer) = pm.get_peer_mut(&transport_addr) {
                 peer.set_version(version_msg.version as u32);
@@ -510,60 +599,10 @@ impl NetworkManager {
                     )
                     .await;
             }
-            ProtocolMessage::Block(block_msg) => {
-                info!(
-                    "Block message received from {} ({} bytes)",
-                    peer_addr,
-                    data.len()
-                );
-                use crate::storage::hashing::double_sha256;
-                let header = &block_msg.block.header;
-                let mut header_bytes = Vec::with_capacity(80);
-                header_bytes.extend_from_slice(&(header.version as i32).to_le_bytes());
-                header_bytes.extend_from_slice(&header.prev_block_hash);
-                header_bytes.extend_from_slice(&header.merkle_root);
-                header_bytes.extend_from_slice(&(header.timestamp as u32).to_le_bytes());
-                header_bytes.extend_from_slice(&(header.bits as u32).to_le_bytes());
-                header_bytes.extend_from_slice(&(header.nonce as u32).to_le_bytes());
-                let block_hash = double_sha256(&header_bytes);
-                if self.complete_block_request(
-                    peer_addr,
-                    block_hash,
-                    block_msg.block.clone(),
-                    block_msg.witnesses.clone(),
-                ) {
-                    info!(
-                        "Block routed to pending request from {} (hash {})",
-                        peer_addr,
-                        hex::encode(block_hash)
-                    );
-                    return Ok(());
-                }
-                // Relay / post-IBD: queue the P2P block payload for the main loop.
-                // Do not re-serialize with serialize_block_with_witnesses — that round-trip is
-                // lossy on segwit mainnet blocks and breaks parse_block_from_wire.
-                let payload_len =
-                    u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
-                if data.len() < 24 + payload_len {
-                    warn!(
-                        "Block from {} truncated (frame {} bytes, payload {} bytes)",
-                        peer_addr,
-                        data.len(),
-                        payload_len
-                    );
-                    return Ok(());
-                }
-                let payload = data[24..24 + payload_len].to_vec();
-                let payload_bytes = payload.len();
-                self.queue_block(payload);
-                if let Ok(mut inv) = self.inventory().lock() {
-                    inv.mark_fulfilled(&block_hash);
-                }
-                debug!(
-                    "Block from {} (hash {}) queued for main loop ({} payload bytes)",
-                    peer_addr,
-                    hex::encode(block_hash),
-                    payload_bytes
+            ProtocolMessage::Block(_) => {
+                warn!(
+                    "Block message reached generic dispatch from {} — should use handle_block_wire_message",
+                    peer_addr
                 );
                 return Ok(());
             }

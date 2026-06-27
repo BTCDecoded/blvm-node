@@ -1067,9 +1067,7 @@ fn run_validation_worker_shared(
 /// `last_adapt_ms`). Adjusting more often produces oscillation when pressure flicks
 /// between bands every few blocks.
 ///
-/// **Disabled when `nominal == 0`.** That's the ≥32 GiB tier where backpressure is off
-/// outright; never re-engage it adaptively, because the host class is sized to absorb
-/// the full pipeline by configuration.
+/// **Policy.**
 fn adapt_max_pending_ops_tick(
     cap: &AtomicUsize,
     nominal: usize,
@@ -1077,9 +1075,6 @@ fn adapt_max_pending_ops_tick(
     pending_len: usize,
     last_adapt_ms: &AtomicU64,
 ) {
-    if nominal == 0 {
-        return;
-    }
     const TICK_INTERVAL_MS: u64 = 500;
     let now_ms = crate::utils::time::current_timestamp_millis();
     let last = last_adapt_ms.load(Ordering::Relaxed);
@@ -1234,6 +1229,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let validation_height = params.validation_height;
     let mem_guard = params.mem_guard;
     let system_total_ram_mb = mem_guard.system_total_ram_mb();
+    let max_pending_ops_nominal = mem_guard.nominal_max_pending_ops_for_guard();
     // Extract the spec_adds_bytes Arc before the guard goes behind a Mutex so the coordinator
     // can update it lock-free. MemoryGuard::memory_snapshot() reads it via Relaxed load.
     let spec_adds_bytes = Arc::clone(&mem_guard.spec_adds_bytes);
@@ -1532,77 +1528,21 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // Pending-ops backpressure: cap entries in `pending_shards` at a RAM-tier-derived limit.
     // The retire thread drains pending one height at a time; without a cap, validation races
     // ahead and accumulates millions of pending UTXO ops in RAM (~200 B/entry). At h=200 k on
-    // a 16 GiB host we observed 22.5 M ops (~4.6 GB) → OOM.
+    // a 16 GiB host we observed 22.5 M ops (~4.6 GB) → OOM; at h=605 k on a 92 GiB shared
+    // workstation pending hit 98 M with cap disabled — see docs/IBD_MEMORY_ENVELOPE_FIX.md.
     //
-    // Why entries instead of block-lag: ops/block varies wildly by chain era (150/block early,
-    // 8 000/block late), so a fixed block-lag cap is either useless or devastating depending on
-    // height. Entries map directly to memory.
-    //
-    // Defaults without `BLVM_IBD_MAX_PENDING_OPS` (GiB from [`MemoryGuard::total_gb_rounded`]):
-    //   under 16 GiB: 1 M
-    //   16–23 GiB: 1.5 M
-    //   24–31 GiB: 3 M
-    //   ≥32 GiB: 0 (backpressure disabled for this knob)
-    // Nominal cap = tier default or env override. The adaptive controller treats
-    // this as the **anchor**: pressure pushes the live cap below nominal, calm pushes it
-    // back up, never higher than `1.1 × nominal` (a 10% buffer above the budgeted RAM
-    // class to absorb transient bursts without letting workers run arbitrarily far ahead).
-    let max_pending_ops_nominal: usize = std::env::var("BLVM_IBD_MAX_PENDING_OPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
-            if total_gb >= 32 {
-                0
-            } else if total_gb >= 24 {
-                3_000_000
-            } else if total_gb >= 16 {
-                // 1.5M cap × ~300 B/entry ≈ 450 MB peak. Sized so the full pipeline (cache
-                // ≤1.1 GB + pending ≤450 MB + inflight ≤150 MB + RocksDB ≤700 MB + mimalloc
-                // retention) stays inside the 6.5 GB RSS budget on a 16 GiB host shared with
-                // a typical desktop workload (~5 GB).
-                //
-                // History — DO NOT lower further on 16 GiB hosts without retesting both ends:
-                //   8M → 1.5M (h≈195k OOM, in_flight_insertions leak compounded with cache):
-                //     fixed by the in_flight_insertions removal in `IbdUtxoStore::remove`.
-                //   1.5M → 600k (h≈187k swap-thrash hypothesis): WRONG. Smaller cap forced
-                //     retire into 1-block-at-a-time mode while a single backlog drain still
-                //     packaged ~660k ops (workers race to fill cap on every release). Each
-                //     drain still overflowed the 64 MB memtable, but now happened *every*
-                //     block instead of every 1.5M ops. Net effect: 1 block per 30 s vs the
-                //     ~3000 BPS we get with the cap doing its actual job.
-                //   1.5M → 0 (cap disabled): IBD ran at ~3000 BPS to h=201k, then validation
-                //     stalled on a download issue. With no cap, valres_rx + staged BTreeMap +
-                //     pending_blocks grew unbounded, anon-rss hit 10.6 GB, kernel OOM-killed
-                //     blvm. Cap is also a pipeline throttle, not just memory throttle.
-                //
-                // The safety valve in `run_validation_worker_shared` (30 s spin ceiling)
-                // protects us from an absolute deadlock if retire ever goes truly wedged
-                // (e.g. RocksDB compaction stall). A backpressure-release does temporarily
-                // overshoot the cap, but the next retire iteration drains it within seconds
-                // under normal pressure.
-                1_500_000
-            } else {
-                1_000_000
-            }
-        });
-    // Live cap that the validation workers read on every backpressure check. The retire
-    // loop's `adapt_max_pending_ops_tick` mutates this atomic at most every ~500 ms based
-    // on observed RSS pressure (`memory::ibd_pressure_*`) and drain headroom
-    // (`pending_len` vs cap).  When `nominal == 0` (≥32 GiB hosts), backpressure is off
-    // and adaptation is a no-op.
+    // Nominal cap is derived from the RSS envelope ([`MemoryGuard::nominal_max_pending_ops`]);
+    // the adaptive controller shrinks the live cap under pressure and grows up to ~1.1× nominal
+    // when retire keeps up.
+    // Live cap that the validation workers read on every backpressure check.
     let max_pending_ops: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(max_pending_ops_nominal));
     let max_pending_ops_last_adapt_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    if max_pending_ops_nominal > 0 {
-        info!(
-            "IBD: pending-ops backpressure active (max_pending_ops={}, adaptive: shrinks under \
-             RSS pressure; calm growth up to ~1.1× nominal, Emergency floor max(nominal/16, 100k) — \
-             see adapt_max_pending_ops_tick)",
-            max_pending_ops_nominal
-        );
-    } else {
-        info!("IBD: pending-ops backpressure disabled (32 GiB+ tier — full pipeline fits in RAM)");
-    }
+    info!(
+        "IBD: pending-ops backpressure active (max_pending_ops={}, adaptive: shrinks under \
+         RSS pressure; calm growth up to ~1.1× nominal, Emergency floor max(nominal/16, 100k) — \
+         see adapt_max_pending_ops_tick)",
+        max_pending_ops_nominal
+    );
 
     // Background retire dispatcher: 1..N retire threads, sharded by `height % N`.
     // Each shard runs the same retire loop body as before; only the cursor wiring
@@ -3646,21 +3586,13 @@ mod tests {
         Arc::new(AtomicU64::new(0))
     }
 
-    /// Nominal=0 is the "backpressure off" tier (≥32 GiB). The controller must NEVER
-    /// re-engage backpressure adaptively, regardless of pressure level.
+    /// Nominal cap is always positive; adaptation runs at every pressure level.
     #[test]
-    fn adapt_nominal_zero_is_inert() {
-        let cap = fresh_cap(0);
+    fn adapt_always_runs_with_positive_nominal() {
+        let cap = fresh_cap(5_000_000);
         let last = fresh_last_adapt_zero();
-        for level in [
-            PressureLevel::None,
-            PressureLevel::Elevated,
-            PressureLevel::Critical,
-            PressureLevel::Emergency,
-        ] {
-            adapt_max_pending_ops_tick(&cap, 0, level, 1_000_000, &last);
-            assert_eq!(cap.load(Ordering::Relaxed), 0);
-        }
+        adapt_max_pending_ops_tick(&cap, 5_000_000, PressureLevel::Emergency, 5_000_000, &last);
+        assert!(cap.load(Ordering::Relaxed) < 5_000_000);
     }
 
     /// Emergency must aggressively shrink the cap (but respect floors).

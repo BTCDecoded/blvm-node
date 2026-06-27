@@ -1269,13 +1269,25 @@ impl IbdUtxoStore {
             del_scratch.push(key);
         }
         add_scratch.clear();
-        add_scratch.reserve(delta.additions.len());
         if additions_already_in_cache {
-            for (op, arc) in delta.additions.iter() {
-                let key = outpoint_to_key(op);
-                add_scratch.push((key, Arc::clone(arc)));
-            }
+            let bounded = self.max_entries_effective() != usize::MAX;
+            self.push_to_pending_shards(
+                del_scratch
+                    .iter()
+                    .map(|&k| (k, None))
+                    .chain(delta.additions.iter().map(|(op, arc)| {
+                        let key = outpoint_to_key(op);
+                        if bounded {
+                            self.in_flight_insertions
+                                .entry(key)
+                                .or_insert_with(|| Arc::clone(arc));
+                        }
+                        (key, Some(Arc::clone(arc)))
+                    })),
+                block_height,
+            );
         } else {
+            add_scratch.reserve(delta.additions.len());
             let h = block_height as u32;
             if !delta.additions.is_empty() {
                 self.protected_heights.insert(h);
@@ -1285,32 +1297,22 @@ impl IbdUtxoStore {
                 self.cache_put(key, Arc::clone(arc), h);
                 add_scratch.push((key, Arc::clone(arc)));
             }
-        }
-        // Route ops to the sharded pending log. Each op goes to its own shard
-        // chosen by `pending_shard_idx`, so N parallel workers pushing concurrently rarely
-        // contend on the same mutex (they did before, when there was a single global mutex).
-        // Eagerly register additions into in_flight_insertions: covers the race where a
-        // pending-shard drain takes *part* of height H's ops into the first flush batch,
-        // that batch commits and calls release_protected_heights(H), but H's remaining ops
-        // are still in pending_shards awaiting the second batch. Between first-batch-commit
-        // and second-batch-commit those cache entries are unprotected *and* not yet on disk.
-        // in_flight_insertions is now a DashMap (sharded, no global lock) so concurrent
-        // workers each take a shard lock — no single bottleneck, no BPS regression.
-        if self.max_entries_effective() != usize::MAX && !add_scratch.is_empty() {
-            for (key, arc) in add_scratch.iter() {
-                self.in_flight_insertions
-                    .entry(*key)
-                    .or_insert_with(|| Arc::clone(arc));
+            if self.max_entries_effective() != usize::MAX && !add_scratch.is_empty() {
+                for (key, arc) in add_scratch.iter() {
+                    self.in_flight_insertions
+                        .entry(*key)
+                        .or_insert_with(|| Arc::clone(arc));
+                }
             }
+            self.push_to_pending_shards(
+                del_scratch.iter().map(|&k| (k, None)).chain(
+                    add_scratch
+                        .iter()
+                        .map(|(k, arc)| (*k, Some(Arc::clone(arc)))),
+                ),
+                block_height,
+            );
         }
-        self.push_to_pending_shards(
-            del_scratch.iter().map(|&k| (k, None)).chain(
-                add_scratch
-                    .iter()
-                    .map(|(k, arc)| (*k, Some(Arc::clone(arc)))),
-            ),
-            block_height,
-        );
         // Batch the recently_accessed updates: previously locked once per addition.
         // At h=300k+ blocks have ~8000 outputs → 8000 mutex acquires per block; the
         // ibd-retire thread spent 96% CPU on these lock churns alone, capping BPS.

@@ -329,6 +329,18 @@ pub(crate) struct FeederScaleSnapshot {
     pub feeder_buffer_bytes_limit: usize,
 }
 
+/// Host workload at IBD boot — drives RSS envelope caps, not throughput knobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkloadClass {
+    /// Desktop / IDE / other services already consuming RAM (`MemAvailable` ≪ `MemTotal`).
+    Shared,
+    /// Headless or lightly loaded node (`MemAvailable` ≈ `MemTotal`). Override: `BLVM_DEDICATED_NODE=1`.
+    Dedicated,
+}
+
+/// Flat RocksDB block-cache + WBM headroom subtracted from the pipeline slice of the envelope.
+pub(crate) const ROCKSDB_PIPELINE_RESERVE_MB: u64 = 2048;
+
 impl MemoryGuard {
     /// Laptops marketed as “16 GiB” often report ~17 GiB `MemTotal`; keep one MB cutoff so they
     /// stay on tight tiers (OOM fixes) instead of the 17–31 GiB workstation path.
@@ -339,6 +351,101 @@ impl MemoryGuard {
     #[inline]
     pub(crate) fn total_gb_rounded(total_mb: u64) -> u64 {
         crate::utils::ram_tier::total_gb_rounded(total_mb)
+    }
+
+    /// Classify shared vs dedicated from boot-time `/proc` snapshot.
+    pub(crate) fn detect_workload_class(total_mb: u64, avail_mb: u64) -> WorkloadClass {
+        if std::env::var("BLVM_DEDICATED_NODE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return WorkloadClass::Dedicated;
+        }
+        if total_mb == 0 || avail_mb * 100 / total_mb >= 70 {
+            WorkloadClass::Dedicated
+        } else {
+            WorkloadClass::Shared
+        }
+    }
+
+    /// Process RSS envelope (MiB). Spare-first on large hosts; legacy clamps preserved on ≤18 GiB.
+    pub(crate) fn compute_rss_budget_mb(
+        total_mb: u64,
+        avail_mb: u64,
+        workload: WorkloadClass,
+    ) -> u64 {
+        if let Some(v) = std::env::var("BLVM_RSS_BUDGET_MB")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n >= 1024)
+        {
+            return v;
+        }
+        if total_mb <= 8 * 1024 {
+            let from_total = total_mb * 65 / 100;
+            let from_avail = avail_mb * 75 / 100;
+            return from_total
+                .max(from_avail)
+                .min(total_mb * 80 / 100)
+                .max(2048);
+        }
+        if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
+            let from_avail = (avail_mb * 60 / 100).clamp(3000, 7000);
+            return from_avail.max(2048);
+        }
+        let os_reserve = (total_mb * 22 / 100).max(2816);
+        let from_spare = avail_mb.saturating_sub(os_reserve);
+        let cap_pct = match workload {
+            WorkloadClass::Shared => 35,
+            WorkloadClass::Dedicated => 50,
+        };
+        from_spare.min(total_mb * cap_pct / 100).max(2048)
+    }
+
+    /// Nominal pending-ops cap — **always > 0**. Pipeline throttle, not optional on large hosts.
+    pub(crate) fn nominal_max_pending_ops(
+        total_mb: u64,
+        rss_budget_mb: u64,
+        utxo_cache_mb: usize,
+        utxo_flush_threshold: usize,
+    ) -> usize {
+        if let Some(v) = std::env::var("BLVM_IBD_MAX_PENDING_OPS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            return v.max(100_000);
+        }
+        const BYTES_PER_OP: usize = 160;
+        const PIPELINE_FRAC_PCT: usize = 6;
+        let total_gb = Self::total_gb_rounded(total_mb);
+        let tier_ceiling = if total_gb >= 64 {
+            8_000_000
+        } else if total_gb >= 32 {
+            5_000_000
+        } else if total_gb >= 24 {
+            3_000_000
+        } else if total_gb >= 16 {
+            1_500_000
+        } else {
+            1_000_000
+        };
+        let pipeline_mb = rss_budget_mb
+            .saturating_sub(utxo_cache_mb as u64)
+            .saturating_sub(ROCKSDB_PIPELINE_RESERVE_MB);
+        let from_envelope =
+            pipeline_mb as usize * 1024 * 1024 * PIPELINE_FRAC_PCT / 100 / BYTES_PER_OP;
+        let floor = 400_000_usize.max(utxo_flush_threshold.saturating_mul(4));
+        from_envelope.clamp(floor, tier_ceiling)
+    }
+
+    /// Nominal cap from this guard's boot-time sizing.
+    pub(crate) fn nominal_max_pending_ops_for_guard(&self) -> usize {
+        Self::nominal_max_pending_ops(
+            self.total_mb,
+            self.rss_budget_mb,
+            self.utxo_cache_mb,
+            self.utxo_flush_threshold,
+        )
     }
 
     pub(crate) fn new() -> Self {
@@ -423,16 +530,19 @@ impl MemoryGuard {
         let os_reserve_mb = (total_mb * 22 / 100).max(2816);
         let spare_mb = effective_avail.saturating_sub(os_reserve_mb).max(256);
 
-        // UTXO cache: this is the dominant factor in post-200k BPS. Each entry ≈ 560 B.
-        //   2 GB ≈ 3.7M entries (cap hit at h≈220k, then every miss = disk read)
-        //   4 GB ≈ 7.5M entries (covers UTXO churn deep into 500k+)
-        //   6 GB ≈ 11M entries  (covers near 800k)
-        // We size from `available_mb` (real free RAM at boot), not `budget_mb`, because the cache
-        // IS the budget in steady state; everything else (RocksDB caches, write buffers,
-        // validation thread stacks) is bounded and small relative to the cache.
-        // BLVM_UTXO_CACHE_MAX_MB still caps when set (e.g. shared/memory-constrained hosts).
+        let workload = Self::detect_workload_class(total_mb, available_mb);
+        let rss_budget_mb = Self::compute_rss_budget_mb(total_mb, available_mb, workload);
+
+        // UTXO cache: dominant post-200k BPS factor. Sized from the RSS **envelope**, not raw
+        // MemAvailable×60% (which assumed blvm owns the machine — caused 16 GiB cache + 66 GiB
+        // budget on a shared 92 GiB workstation; see docs/IBD_MEMORY_ENVELOPE_FIX.md).
+        let envelope_cache_cap_mb = (rss_budget_mb * 45 / 100) as usize;
         let mut utxo_cache_mb = if total_gb >= 32 {
-            ((available_mb * 60 / 100) as usize).clamp(4096, 16384)
+            let tier_max = match workload {
+                WorkloadClass::Shared => 8192,
+                WorkloadClass::Dedicated => 16384,
+            };
+            envelope_cache_cap_mb.min(tier_max)
         } else if total_gb >= 17 && total_mb > Self::EXTENDED_SIXTEEN_CLASS_MB {
             // Clearly above ~18 GiB physical — larger baseline for mid-tier workstations.
             ((available_mb * 50 / 100) as usize).clamp(2048, 4096)
@@ -465,6 +575,7 @@ impl MemoryGuard {
                 utxo_cache_mb = utxo_cache_mb.min(mb);
             }
         }
+        utxo_cache_mb = utxo_cache_mb.min(envelope_cache_cap_mb.max(128));
         // Empirical ~1600 B/entry actual cost (DashMap table + Arc<UTXO> heap + mimalloc
         // fragmented arena + RocksDB compaction/cache growth). The old 560 B/entry estimate was
         // the *marginal* cost per entry in isolation, which underestimated:
@@ -645,14 +756,16 @@ impl MemoryGuard {
             .unwrap_or(max_block_flushes_auto);
 
         tracing::info!(
-            "MemoryGuard: total={}MB available={}MB spare≈{}MB budget={}MB (live /proc pressure) \
-             utxo_cache={}MB ({}entries) flush_threshold={} defer_flush={} defer_checkpoint={} \
-             buffer={} prefetch={} prefetch_queue={} max_ahead={} storage_flush={} feeder_bytes={}MB \
-             max_utxo_flush={} max_block_flush={}",
+            "MemoryGuard: total={}MB available={}MB workload={:?} spare≈{}MB budget={}MB \
+             rss_budget={}MB (live /proc pressure) utxo_cache={}MB ({}entries) flush_threshold={} \
+             defer_flush={} defer_checkpoint={} buffer={} prefetch={} prefetch_queue={} \
+             max_ahead={} storage_flush={} feeder_bytes={}MB max_utxo_flush={} max_block_flush={}",
             total_mb,
             available_mb,
+            workload,
             spare_mb,
             budget_mb,
+            rss_budget_mb,
             utxo_cache_mb,
             utxo_max_entries,
             utxo_flush_threshold,
@@ -666,53 +779,6 @@ impl MemoryGuard {
             feeder_buffer_bytes_limit / (1024 * 1024),
             max_utxo_flushes,
             max_block_flushes,
-        );
-
-        // RSS budget: the binary self-shrinks the UTXO cache when actual process RSS
-        // approaches this number. ≈50% of total RAM by default leaves ample headroom for
-        // the OS, the IDE, and any other apps. Override via BLVM_RSS_BUDGET_MB only if you
-        // know exactly what other RAM consumers exist on the host.
-        let rss_budget_mb = std::env::var("BLVM_RSS_BUDGET_MB")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&v| v >= 1024)
-            .unwrap_or_else(|| {
-                let pct = if total_mb >= 64 * 1024 {
-                    70
-                } else if total_mb >= 32 * 1024 {
-                    60
-                } else if total_mb >= 24 * 1024 {
-                    57
-                } else if total_mb <= 8 * 1024 {
-                    // ≤8 GiB: small dedicated node (Raspberry Pi 5, etc.).
-                    // On a headless node the OS uses ≤1–2 GB; blvm can use the rest.
-                    // Base on total_mb × 60% (= 4915 MB for 8 GB) so a lightly-loaded Pi 5
-                    // doesn’t trip EMERGENCY during normal IBD.
-                    // Also respect available_mb × 75% so a genuinely-loaded machine still adapts.
-                    let from_total = total_mb * 65 / 100;
-                    let from_avail = available_mb * 75 / 100;
-                    return from_total
-                        .max(from_avail)
-                        .min(total_mb * 80 / 100)
-                        .max(2048);
-                } else if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
-                    // 8–18 GiB physical. Budget from available_mb (not total_mb): a desktop
-                    // workload already consumes ~6 GB, so total_mb×54% = 8.6 GB on a 15.9 GB
-                    // machine left only ~1.4 GB system headroom → OOM at h≈64k (swap-full).
-                    // available_mb×60% accounts for what the OS can actually spare at boot.
-                    let from_avail = (available_mb * 60 / 100).clamp(3000, 7000);
-                    return from_avail.max(2048);
-                } else {
-                    // ~17–23 GiB
-                    60
-                };
-                (total_mb * pct / 100).max(2048)
-            });
-        tracing::info!(
-            "MemoryGuard: rss_budget={}MB ({}% of {}MB) — adaptive cache cap shrinks when RSS exceeds this",
-            rss_budget_mb,
-            rss_budget_mb * 100 / total_mb.max(1),
-            total_mb,
         );
 
         Self {
@@ -1537,7 +1603,38 @@ impl MemoryGuard {
 
 #[cfg(test)]
 mod memory_tier_tests {
-    use super::MemoryGuard;
+    use super::{MemoryGuard, WorkloadClass};
+
+    /// zeus OOM replay: 92 GiB box, 56% MemAvailable → shared envelope ~31 GiB, pending cap > 0.
+    #[test]
+    fn shared_ninety_two_gb_envelope_and_pending_cap() {
+        let total = 94_162_u64;
+        let avail = 52_449_u64;
+        let workload = MemoryGuard::detect_workload_class(total, avail);
+        assert_eq!(workload, WorkloadClass::Shared);
+        let rss = MemoryGuard::compute_rss_budget_mb(total, avail, workload);
+        assert!(rss >= 30_000 && rss <= 33_000, "rss_budget={rss}");
+        let utxo_cache = ((rss * 45 / 100) as usize).min(8192);
+        assert_eq!(utxo_cache, 8192);
+        let pending = MemoryGuard::nominal_max_pending_ops(total, rss, utxo_cache, 2_000_000);
+        assert!(
+            pending >= 4_000_000 && pending <= 8_000_000,
+            "pending={pending}"
+        );
+    }
+
+    #[test]
+    fn dedicated_workload_gets_higher_envelope_than_shared() {
+        let total = 94_162_u64;
+        let rss_shared = MemoryGuard::compute_rss_budget_mb(total, 52_449, WorkloadClass::Shared);
+        let rss_dedicated =
+            MemoryGuard::compute_rss_budget_mb(total, 90_000, WorkloadClass::Dedicated);
+        assert!(rss_dedicated > rss_shared);
+        assert_eq!(
+            MemoryGuard::detect_workload_class(total, 90_000),
+            WorkloadClass::Dedicated
+        );
+    }
 
     #[test]
     fn extended_sixteen_class_gets_tight_download_ahead_cap() {

@@ -269,6 +269,9 @@ pub struct NetworkManager {
     /// When false, P2P Stratum TLV demux is skipped (requires `stratum-v2` feature).
     #[cfg(feature = "stratum-v2")]
     p2p_stratum_demux_enabled: bool,
+
+    /// BIP-110 reduced-data P2P policy (advertise + outbound peer cap).
+    pub(crate) reduced_data_config: blvm_protocol::ReducedDataConfig,
 }
 
 /// Pending request metadata (pub(crate) for utxo_commitments_client)
@@ -498,6 +501,7 @@ impl NetworkManager {
             getaddr_responded: Arc::new(std::sync::Mutex::new(HashSet::new())),
             #[cfg(feature = "stratum-v2")]
             p2p_stratum_demux_enabled,
+            reduced_data_config: config.map(|c| c.reduced_data.clone()).unwrap_or_default(),
         }
     }
 
@@ -1931,6 +1935,12 @@ impl NetworkManager {
             }
         }
 
+        if let ProtocolMessage::Block(block_msg) = parsed {
+            return self
+                .handle_block_wire_message(peer_addr, block_msg, data)
+                .await;
+        }
+
         self.dispatch_protocol_message(peer_addr, &parsed, data)
             .await
     }
@@ -2737,6 +2747,10 @@ impl NetworkManager {
 
         // FIBRE - always enabled
         services_with_filters |= crate::network::protocol::NODE_FIBRE;
+
+        if self.reduced_data_config.advertise_service {
+            services_with_filters |= standard::NODE_REDUCED_DATA;
+        }
 
         crate::network::protocol::VersionMessage {
             version,
