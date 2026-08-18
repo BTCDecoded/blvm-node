@@ -16,7 +16,11 @@
 //! eliminates the periodic stalls caused by large tail accumulation.
 
 use super::file_io;
-use super::types::{IdCodec, OutputDetail, OutputHeader, OutputId, OutputKV, OutputKey};
+use super::types::{
+    IdCodec, OutputDetail, OutputHeader, OutputId, OutputKV, OutputKey, output_detail_from_parts,
+};
+use blvm_protocol::types::SharedByteString;
+use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -27,6 +31,10 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 // brief read-lock; no data is copied.  Writers replace the inner `Arc<Vec<…>>` atomically.
 type TailSnap = Arc<Vec<Arc<BlockOutputs>>>;
 
+/// Live Arc<BlockOutputs> count (each tail entry = one Arc). If this is much larger than
+/// `mutable_window` (512), old tail snapshots are being retained.
+pub static BLOCK_OUTPUTS_LIVE: AtomicU64 = AtomicU64::new(0);
+
 // ─── BlockOutputs ─────────────────────────────────────────────────────────────
 
 /// In-memory block output buffer: raw `{OutputHeader || script_bytes}` for one block.
@@ -35,6 +43,12 @@ pub(super) struct BlockOutputs {
     pub begin_offset: u64,
     pub height: i32,
     pub data: Vec<u8>,
+}
+
+impl Drop for BlockOutputs {
+    fn drop(&mut self) {
+        BLOCK_OUTPUTS_LIVE.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl BlockOutputs {
@@ -58,6 +72,13 @@ struct DiskRead {
     slot: usize,
     offset: u64,
     length: usize,
+}
+
+thread_local! {
+    static FETCH_RESULT_SLOTS: RefCell<Vec<Option<OutputDetail>>> = RefCell::new(Vec::new());
+    static FETCH_DISK_READS: RefCell<Vec<DiskRead>> = RefCell::new(Vec::new());
+    static FETCH_STAGING: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static FETCH_STAGE_OFFS: RefCell<Vec<usize>> = RefCell::new(Vec::new());
 }
 
 // ─── UtxoTable ────────────────────────────────────────────────────────────────
@@ -138,6 +159,20 @@ impl UtxoTable {
         Ok(table)
     }
 
+    /// Approximate bytes held in the in-memory tail (script bytes for recent blocks).
+    pub fn tail_bytes(&self) -> usize {
+        self.tail
+            .read()
+            .iter()
+            .map(|b| b.data.capacity())
+            .sum()
+    }
+
+    /// Total bytes written to the on-disk flat file (not in RAM — pread64 path).
+    pub fn file_size_bytes(&self) -> u64 {
+        self.committed_fence.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Append a block's outputs to the tail.
     pub fn append_outputs(
         &self,
@@ -196,16 +231,14 @@ impl UtxoTable {
         }
 
         {
+            BLOCK_OUTPUTS_LIVE.fetch_add(1, Ordering::Relaxed);
             let new_block = Arc::new(BlockOutputs {
                 begin_offset: block_base,
                 height,
                 data: local_buf,
             });
             let mut w = self.tail.write();
-            // Append to the snapshot: clone the inner Vec (cheap: Vec of Arc), push, replace.
-            let mut new_vec: Vec<Arc<BlockOutputs>> = (**w).clone();
-            new_vec.push(new_block);
-            *w = Arc::new(new_vec);
+            Arc::make_mut(&mut *w).push(new_block);
         }
         self.max_height_seen.fetch_max(height, Ordering::Relaxed);
 
@@ -256,15 +289,14 @@ impl UtxoTable {
         }
 
         {
+            BLOCK_OUTPUTS_LIVE.fetch_add(1, Ordering::Relaxed);
             let new_block = Arc::new(BlockOutputs {
                 begin_offset: block_base,
                 height: tag_height,
                 data: local_buf,
             });
             let mut w = self.tail.write();
-            let mut new_vec: Vec<Arc<BlockOutputs>> = (**w).clone();
-            new_vec.push(new_block);
-            *w = Arc::new(new_vec);
+            Arc::make_mut(&mut *w).push(new_block);
         }
         self.max_height_seen
             .fetch_max(tag_height, Ordering::Relaxed);
@@ -285,78 +317,85 @@ impl UtxoTable {
         }
 
         let fence = self.committed_fence.load(Ordering::Acquire);
-        // RCU snapshot: one atomic refcount increment, no Vec clone, no exclusive lock.
         let tail_snap: TailSnap = Arc::clone(&*self.tail.read());
-
         let n = ids.len();
-        let mut result_slots: Vec<Option<OutputDetail>> = vec![None; n];
-        let mut disk: Vec<DiskRead> = Vec::new();
 
-        for (slot, &id) in ids.iter().enumerate() {
-            let (offset, length) = IdCodec::decode(id);
+        FETCH_RESULT_SLOTS.with(|slots_cell| {
+            FETCH_DISK_READS.with(|disk_cell| {
+                FETCH_STAGING.with(|staging_cell| {
+                    FETCH_STAGE_OFFS.with(|offs_cell| {
+                        let mut result_slots = slots_cell.borrow_mut();
+                        let mut disk = disk_cell.borrow_mut();
+                        let mut staging = staging_cell.borrow_mut();
+                        let mut stage_offs = offs_cell.borrow_mut();
 
-            // Check tail first.
-            if offset >= fence && !tail_snap.is_empty() {
-                let pos = tail_snap.partition_point(|b| b.begin_offset <= offset);
-                if pos > 0 {
-                    if let Some((hdr, script)) = tail_snap[pos - 1].get(offset, length) {
-                        result_slots[slot] = Some(OutputDetail {
-                            header: hdr,
-                            script: script.to_vec(),
-                        });
-                        continue;
-                    }
-                }
-            }
+                        result_slots.clear();
+                        result_slots.resize(n, None);
+                        disk.clear();
 
-            disk.push(DiskRead {
-                slot,
-                offset,
-                length,
-            });
-        }
+                        for (slot, &id) in ids.iter().enumerate() {
+                            let (offset, length) = IdCodec::decode(id);
+                            if offset >= fence && !tail_snap.is_empty() {
+                                let pos =
+                                    tail_snap.partition_point(|b| b.begin_offset <= offset);
+                                if pos > 0 {
+                                    if let Some((hdr, script)) =
+                                        tail_snap[pos - 1].get(offset, length)
+                                    {
+                                        result_slots[slot] = Some(output_detail_from_parts(
+                                            hdr,
+                                            SharedByteString::from(script),
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
+                            disk.push(DiskRead {
+                                slot,
+                                offset,
+                                length,
+                            });
+                        }
 
-        if !disk.is_empty() {
-            // Sort by file offset for sequential / io_uring-friendly access.
-            disk.sort_unstable_by_key(|e| e.offset);
+                        if !disk.is_empty() {
+                            disk.sort_unstable_by_key(|e| e.offset);
+                            let total_bytes: usize = disk.iter().map(|e| e.length).sum();
+                            staging.clear();
+                            staging.resize(total_bytes, 0);
+                            stage_offs.clear();
+                            stage_offs.reserve(disk.len());
+                            let mut cursor = 0usize;
+                            for e in &*disk {
+                                stage_offs.push(cursor);
+                                cursor += e.length;
+                            }
+                            read_disk_batch(&self.read_file, &disk, &stage_offs, &mut staging)?;
+                            for (e, &soff) in disk.iter().zip(stage_offs.iter()) {
+                                let data = &staging[soff..soff + e.length];
+                                if data.len() >= OutputHeader::SIZE {
+                                    let hdr = unsafe {
+                                        std::ptr::read_unaligned(
+                                            data.as_ptr() as *const OutputHeader,
+                                        )
+                                    };
+                                    result_slots[e.slot] = Some(output_detail_from_parts(
+                                        hdr,
+                                        SharedByteString::from(&data[OutputHeader::SIZE..]),
+                                    ));
+                                }
+                            }
+                        }
 
-            // Allocate one contiguous staging buffer for all reads.
-            let total_bytes: usize = disk.iter().map(|e| e.length).sum();
-            let mut staging = vec![0u8; total_bytes];
-
-            // Pre-compute each read's region in the staging buffer.
-            let mut stage_offs: Vec<usize> = Vec::with_capacity(disk.len());
-            {
-                let mut cursor = 0usize;
-                for e in &disk {
-                    stage_offs.push(cursor);
-                    cursor += e.length;
-                }
-            }
-
-            // Perform all reads in one batch.
-            read_disk_batch(&self.read_file, &disk, &stage_offs, &mut staging)?;
-
-            // Unpack staging into result slots.
-            for (e, &soff) in disk.iter().zip(stage_offs.iter()) {
-                let data = &staging[soff..soff + e.length];
-                if data.len() >= OutputHeader::SIZE {
-                    let hdr =
-                        unsafe { std::ptr::read_unaligned(data.as_ptr() as *const OutputHeader) };
-                    result_slots[e.slot] = Some(OutputDetail {
-                        header: hdr,
-                        script: data[OutputHeader::SIZE..].to_vec(),
-                    });
-                }
-            }
-        }
-
-        let mut resolved = 0;
-        for d in result_slots.into_iter().flatten() {
-            details.push(d);
-            resolved += 1;
-        }
-        Ok(resolved)
+                        let mut resolved = 0usize;
+                        for d in result_slots.drain(..).flatten() {
+                            details.push(d);
+                            resolved += 1;
+                        }
+                        Ok(resolved)
+                    })
+                })
+            })
+        })
     }
 
     /// Flush tail blocks with `height < limit` to disk.
@@ -442,13 +481,59 @@ impl Drop for UtxoTable {
 
 // ─── Batch disk read ──────────────────────────────────────────────────────────
 
+/// E3: max gap (bytes) between sorted flat-file reads to coalesce into one `pread`.
+/// `0` / unset = legacy per-entry io_uring (default). Set e.g. `16384` for export soaks.
+fn fetch_coalesce_gap_bytes() -> u64 {
+    std::env::var("BLVM_IBD_UTXO_FETCH_COALESCE_GAP")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// E3b: io_uring submission queue depth for flat-table fetch.
+/// Default `1024`. Clamp to `[64, 16384]`. Process-lifetime (ring created once).
+fn fetch_uring_depth() -> u32 {
+    std::env::var("BLVM_IBD_UTXO_FETCH_URING_DEPTH")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1024)
+        .clamp(64, 16384)
+}
+
+#[cfg(target_os = "linux")]
+fn fadvise_willneed(file: &File, offset: u64, len: u64) {
+    use std::os::unix::io::AsRawFd;
+    if len == 0 {
+        return;
+    }
+    // SAFETY: posix_fadvise on a valid fd; failure is non-fatal.
+    let _ = unsafe {
+        libc::posix_fadvise(
+            file.as_raw_fd(),
+            offset as libc::off_t,
+            len.min(i64::MAX as u64) as libc::off_t,
+            libc::POSIX_FADV_WILLNEED,
+        )
+    };
+}
+
 /// Read all `entries` into `staging` using io_uring (Linux) or sequential `pread64`.
+///
+/// When `BLVM_IBD_UTXO_FETCH_COALESCE_GAP>0` and entries are already offset-sorted,
+/// nearby reads are merged into fewer large `pread`s (E3). Sparse batches fall back
+/// to the legacy io_uring path automatically.
 fn read_disk_batch(
     file: &File,
     entries: &[DiskRead],
     stage_offs: &[usize],
     staging: &mut Vec<u8>,
 ) -> anyhow::Result<()> {
+    let gap = fetch_coalesce_gap_bytes();
+    if gap > 0 && entries.len() >= 2 && read_disk_batch_coalesced(file, entries, stage_offs, staging, gap)?
+    {
+        return Ok(());
+    }
+
     #[cfg(target_os = "linux")]
     {
         if uring::read_batch(file, entries, stage_offs, staging).is_ok() {
@@ -466,6 +551,78 @@ fn read_disk_batch(
     Ok(())
 }
 
+/// Coalesce sorted `DiskRead`s within `gap` into large `pread`s.
+///
+/// Returns `Ok(false)` when the batch is too sparse (prefer io_uring).
+fn read_disk_batch_coalesced(
+    file: &File,
+    entries: &[DiskRead],
+    stage_offs: &[usize],
+    staging: &mut Vec<u8>,
+    gap: u64,
+) -> anyhow::Result<bool> {
+    // Estimate span count: if >50% would be singleton spans, keep io_uring.
+    let mut spans = 0usize;
+    let mut i = 0usize;
+    while i < entries.len() {
+        let mut end = entries[i].offset + entries[i].length as u64;
+        let mut j = i + 1;
+        while j < entries.len() {
+            let e = &entries[j];
+            let e_end = e.offset + e.length as u64;
+            if e.offset <= end.saturating_add(gap) {
+                end = end.max(e_end);
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        spans += 1;
+        i = j;
+    }
+    if spans * 2 > entries.len() {
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let (Some(first), Some(last)) = (entries.first(), entries.last()) {
+            let start = first.offset;
+            let end = last.offset + last.length as u64;
+            fadvise_willneed(file, start, end.saturating_sub(start));
+        }
+    }
+
+    let mut span_buf = Vec::new();
+    i = 0;
+    while i < entries.len() {
+        let start_off = entries[i].offset;
+        let mut end_off = start_off + entries[i].length as u64;
+        let mut j = i + 1;
+        while j < entries.len() {
+            let e = &entries[j];
+            let e_end = e.offset + e.length as u64;
+            if e.offset <= end_off.saturating_add(gap) {
+                end_off = end_off.max(e_end);
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        let span_len = (end_off - start_off) as usize;
+        span_buf.resize(span_len, 0u8);
+        file_io::read_at(file, &mut span_buf, start_off)?;
+        for k in i..j {
+            let e = &entries[k];
+            let rel = (e.offset - start_off) as usize;
+            let soff = stage_offs[k];
+            staging[soff..soff + e.length].copy_from_slice(&span_buf[rel..rel + e.length]);
+        }
+        i = j;
+    }
+    Ok(true)
+}
+
 // ─── io_uring (Linux only) ───────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -474,10 +631,9 @@ mod uring {
     use std::cell::RefCell;
     use std::os::unix::io::AsRawFd;
 
-    const QUEUE_DEPTH: u32 = 1024;
-
     thread_local! {
-        static RING: RefCell<Option<IoUring>> = const { RefCell::new(None) };
+        // (actual SQ depth, ring) — env read once at first create (process-lifetime).
+        static RING: RefCell<Option<(u32, IoUring)>> = const { RefCell::new(None) };
     }
 
     /// Submit all `entries` as a single io_uring read batch.
@@ -485,7 +641,7 @@ mod uring {
     /// Each entry `i` is read from `file` at `entries[i].offset` (length `entries[i].length`)
     /// into `staging[stage_offs[i]..stage_offs[i]+length]`.
     ///
-    /// Processes in chunks of `QUEUE_DEPTH` so the submission queue never overflows.
+    /// Processes in chunks of `BLVM_IBD_UTXO_FETCH_URING_DEPTH` (default 1024).
     pub fn read_batch(
         file: &std::fs::File,
         entries: &[super::DiskRead],
@@ -503,11 +659,22 @@ mod uring {
         RING.with(|cell| -> anyhow::Result<()> {
             let mut opt = cell.borrow_mut();
             if opt.is_none() {
-                *opt = Some(IoUring::new(QUEUE_DEPTH)?);
+                let want = super::fetch_uring_depth();
+                let (actual, ring) = match IoUring::new(want) {
+                    Ok(r) => (want, r),
+                    Err(e) if want > 1024 => {
+                        tracing::warn!(
+                            "io_uring depth={} init failed ({e}); falling back to 1024",
+                            want
+                        );
+                        (1024u32, IoUring::new(1024)?)
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                *opt = Some((actual, ring));
             }
-            let ring = opt.as_mut().unwrap();
-
-            let chunk = QUEUE_DEPTH as usize;
+            let (actual_depth, ring) = opt.as_mut().unwrap();
+            let chunk = *actual_depth as usize;
             let mut i = 0;
             while i < entries.len() {
                 let end = (i + chunk).min(entries.len());

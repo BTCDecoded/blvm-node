@@ -71,6 +71,47 @@ impl BlockIndex {
         Ok(())
     }
 
+    /// Batch-insert many blocks during IBD in a single write transaction.
+    ///
+    /// Unlike [`insert`], this method:
+    /// - Allocates sequence IDs monotonically without a per-block DB read
+    /// - Writes all entries in ONE batch (one LMDB write transaction) instead of N
+    /// - Assumes all blocks are new (no existing entry lookup) — safe during IBD because
+    ///   only validated, accepted blocks reach this path
+    pub fn insert_ibd_batch(
+        &self,
+        entries: &[(&Hash, u64, &Hash)],  // (hash, height, prev_hash); status always Valid
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        // Read current counter once (one read txn).
+        let base_seq = match self.entries.get(SEQUENCE_COUNTER_KEY)? {
+            Some(bytes) if bytes.len() >= 8 => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes[..8]);
+                u64::from_be_bytes(arr)
+            }
+            _ => 0,
+        };
+        let mut batch = self.entries.batch()?;
+        for (i, (hash, height, prev_hash)) in entries.iter().enumerate() {
+            let entry = BlockIndexEntry {
+                height: *height,
+                prev_hash: **prev_hash,
+                status: BlockIndexStatus::Valid,
+                sequence_id: base_seq.saturating_add(i as u64 + 1),
+            };
+            let data = bincode::serialize(&entry)?;
+            batch.put(hash.as_slice(), &data);
+        }
+        // Update sequence counter in the same batch (same write txn).
+        let next_seq = base_seq.saturating_add(entries.len() as u64);
+        batch.put(SEQUENCE_COUNTER_KEY, &next_seq.to_be_bytes());
+        batch.commit()?;
+        Ok(())
+    }
+
     fn next_sequence_id(&self) -> Result<u64> {
         let current = match self.entries.get(SEQUENCE_COUNTER_KEY)? {
             Some(bytes) if bytes.len() >= 8 => {

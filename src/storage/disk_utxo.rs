@@ -293,6 +293,16 @@ pub fn block_input_keys_into_filtered_with_tx_ids(
     keys_out.clear();
     keys_out.reserve(est);
 
+    // Build a rolling set of non-coinbase txids seen so far to detect intra-block spends.
+    // Previously used `(1..spending_idx).any(|j| tx_ids[j] == h)` — O(txs) per input,
+    // O(txs² × inputs) total. With 2000-txn blocks at h=470k that is ~4M comparisons per
+    // block just for filtering. A FxHashSet reduces this to O(txs + inputs) overall.
+    let mut prior_non_cb_txids: rustc_hash::FxHashSet<Hash> =
+        rustc_hash::FxHashSet::with_capacity_and_hasher(
+            block.transactions.len(),
+            Default::default(),
+        );
+
     let mut filtered = 0usize;
     for (spending_idx, tx) in block.transactions.iter().enumerate() {
         if is_coinbase(tx) {
@@ -300,12 +310,16 @@ pub fn block_input_keys_into_filtered_with_tx_ids(
         }
         for input in tx.inputs.iter() {
             let h = input.prevout.hash;
-            let funded_by_prior_non_cb = (1..spending_idx).any(|j| tx_ids[j] == h);
-            if funded_by_prior_non_cb {
+            if prior_non_cb_txids.contains(&h) {
                 filtered += 1;
             } else {
                 keys_out.push(outpoint_to_key(&input.prevout));
             }
+        }
+        // Add this tx's id AFTER processing its inputs so it can't filter itself.
+        // tx_ids is 1-indexed non-coinbase (index 0 = coinbase); map via spending_idx.
+        if spending_idx < tx_ids.len() {
+            prior_non_cb_txids.insert(tx_ids[spending_idx]);
         }
     }
     filtered

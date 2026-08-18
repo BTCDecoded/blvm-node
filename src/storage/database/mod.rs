@@ -6,9 +6,9 @@
 //! All backends must support the same set of tree names.
 //! Module storage has been removed; modules use their own DB at {data_dir}/db/.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::any::Any;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod known_trees;
@@ -27,12 +27,50 @@ pub trait Database: Send + Sync {
     /// Open a named tree/table
     fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>>;
 
+    /// Return the filesystem root of this database, if it is file-backed.
+    ///
+    /// For Heed3/LMDB this is the directory that contains the `heed3/` subdirectory (i.e. the
+    /// parent of `<root>/heed3/`). Used by callers that need to place ancillary data (e.g. a
+    /// separate IBD UTXO store) alongside the main database.
+    ///
+    /// Returns `None` for in-memory or non-file-backed backends.
+    fn storage_root_path(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// Flush all pending writes
     fn flush(&self) -> Result<()>;
 
     /// Optional: reduce RocksDB background work / shrink caches when IBD reports memory pressure.
     /// `level_u8` is `PressureLevel` as `u8` (see `parallel_ibd::memory`).
     fn ibd_memory_pressure_tick(&self, _level_u8: u8) {}
+
+    /// Estimated MiB of file-backed database pages that may be resident in the process RSS.
+    ///
+    /// For Heed3/LMDB this is the size of `data.mdb` on disk: those pages show up in
+    /// `VmRSS` as file-backed resident memory and cannot be freed by UTXO cache eviction.
+    /// `MemoryGuard` uses this value to deduct expected file-backed pages from the anonymous
+    /// RSS budget so the adaptive cache cap doesn't chase a phantom target.
+    ///
+    /// Returns 0 for backends without a single-file layout or on I/O error.
+    fn db_file_size_mb(&self) -> u64 {
+        0
+    }
+
+    /// Enable or disable IBD write-optimisation (e.g. `MDB_NOSYNC` for Heed3/LMDB).
+    ///
+    /// When `enable=true` (IBD start), per-commit `fdatasync` is skipped so that block-data
+    /// writes — which can issue hundreds of commits per flush cycle — complete in milliseconds
+    /// instead of 30–90 s. Durability is provided by `flush()` calls at UTXO watermark
+    /// boundaries; block data can be re-downloaded on crash.
+    ///
+    /// When `enable=false` (IBD end), the backend returns to its normal sync policy. Callers
+    /// **must** call `flush()` after disabling to ensure all in-flight writes are durable.
+    ///
+    /// Default implementation is a no-op (safe for backends that do not support this).
+    fn set_ibd_nosync(&self, _enable: bool) -> Result<()> {
+        Ok(())
+    }
 
     /// For backend-specific fast paths (e.g. cross-column-family RocksDB `WriteBatch`).
     fn as_any(&self) -> &dyn Any;
@@ -346,6 +384,87 @@ pub fn create_database<P: AsRef<Path>>(
     }
 }
 
+/// Create a database instance optimised for parallel IBD.
+///
+/// For single-writer backends (Heed3/LMDB) this enables `MDB_NOSYNC` so every commit skips
+/// `fdatasync`. Block storage does not need per-commit durability during IBD; blocks can be
+/// re-downloaded on crash. The UTXO watermark path uses an explicit `flush_disk()` call
+/// (→ `force_sync()`) for correctness — that is unaffected by `MDB_NOSYNC`.
+///
+/// For all other backends, falls back to `create_database`.
+pub fn create_database_for_ibd<P: AsRef<Path>>(
+    data_dir: P,
+    backend: DatabaseBackend,
+    storage_config: Option<&crate::config::StorageConfig>,
+) -> Result<Box<dyn Database>> {
+    #[cfg(feature = "heed3")]
+    if backend == DatabaseBackend::Heed3 {
+        return Ok(Box::new(heed3_impl::Heed3Database::new_for_ibd(
+            data_dir,
+            storage_config,
+        )?));
+    }
+    create_database(data_dir, backend, storage_config)
+}
+
+/// Subdirectory name used for the standalone IBD UTXO LMDB (relative to the node data dir).
+///
+/// Keeping the IBD UTXO store in a SEPARATE, fresh LMDB environment prevents the free-list
+/// bloat problem that occurs when `ibd_utxos.clear()` frees millions of pages scattered
+/// throughout the main 400+ GB block-store LMDB. Reusing those freed pages requires random
+/// disk reads (page faults at ~89% miss rate), making each 200k-op write transaction take
+/// 40+ seconds. A separate file allocates pages sequentially → fast writes (~1s per batch).
+pub const IBD_UTXO_STORE_SUBDIR: &str = "ibd_utxo_store";
+
+/// Whether legacy standalone `ibd_utxo_store/data.mdb` exists with non-trivial size.
+///
+/// Does not open the LMDB environment (avoids 128 GiB mmap reservation on engine-mode startup).
+pub fn legacy_ibd_utxo_standalone_has_data(data_dir: &Path) -> bool {
+    let mdb = data_dir.join(IBD_UTXO_STORE_SUBDIR).join("data.mdb");
+    mdb.metadata().map(|m| m.len() > 4096).unwrap_or(false)
+}
+
+/// Create a standalone Heed3/LMDB database for IBD UTXO storage only.
+///
+/// Opens the database at `utxo_dir` (typically `<data_dir>/ibd_utxo_store/`) with IBD write
+/// optimizations (`MDB_NOSYNC`) and a map size suitable for the UTXO set only (no block data).
+/// At h=956k the live UTXO set is ~12 GB; 32 GB provides comfortable headroom.
+///
+/// Falls back to a no-op stub on non-Heed3 builds.
+pub fn create_ibd_utxo_standalone_db<P: AsRef<Path>>(
+    utxo_dir: P,
+) -> Result<Box<dyn Database>> {
+    std::fs::create_dir_all(utxo_dir.as_ref()).with_context(|| {
+        format!(
+            "create_ibd_utxo_standalone_db: failed to create directory {:?}",
+            utxo_dir.as_ref()
+        )
+    })?;
+    #[cfg(feature = "heed3")]
+    {
+        use heed3_impl::Heed3Database;
+        // Use IBD mode (MDB_NOSYNC) but with a 32 GB map ceiling — enough for the full UTXO set
+        // through the end of IBD without the hundreds of GBs reserved for block data.
+        // BLVM_IBD_UTXO_MAP_SIZE_MB lets operators override this on constrained hardware.
+        const IBD_UTXO_MAP_SIZE_MB_DEFAULT: usize = 32_768; // 32 GB
+        let map_size_mb: usize = std::env::var("BLVM_IBD_UTXO_MAP_SIZE_MB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(IBD_UTXO_MAP_SIZE_MB_DEFAULT);
+        let result = Heed3Database::new_for_ibd_with_map_size_mb(utxo_dir, None, map_size_mb);
+        return Ok(Box::new(result?));
+    }
+    #[cfg(not(feature = "heed3"))]
+    {
+        // Non-Heed3 builds: fall back to the default backend (if any).
+        // In practice blvm-node always builds with heed3 for IBD.
+        Err(anyhow::anyhow!(
+            "create_ibd_utxo_standalone_db: heed3 feature not enabled; \
+             standalone IBD UTXO LMDB requires Heed3"
+        ))
+    }
+}
+
 /// Try to open a **module-process** KV store (dynamic `open_tree()` names).
 ///
 /// Attempts backends in order among those **compiled into** this `blvm-node` build:
@@ -435,6 +554,53 @@ pub fn try_create_module_kv_database_with_preference<P: AsRef<Path>>(
         Err(last_err
             .unwrap_or_else(|| anyhow::anyhow!("Failed to open module KV store at {:?}", db_path)))
     }
+}
+
+/// Detect the active backend from a live [`Database`] handle (downcast on `as_any`).
+pub fn detect_backend_from_db(db: &dyn Database) -> DatabaseBackend {
+    #[cfg(feature = "rocksdb")]
+    {
+        if db.as_any()
+            .downcast_ref::<rocksdb_impl::RocksDBDatabase>()
+            .is_some()
+        {
+            return DatabaseBackend::RocksDB;
+        }
+    }
+    #[cfg(feature = "heed3")]
+    {
+        if db.as_any().downcast_ref::<Heed3Database>().is_some() {
+            return DatabaseBackend::Heed3;
+        }
+    }
+    #[cfg(feature = "tidesdb")]
+    {
+        if db.as_any()
+            .downcast_ref::<tidesdb_impl::TidesDBDatabase>()
+            .is_some()
+        {
+            return DatabaseBackend::TidesDB;
+        }
+    }
+    #[cfg(feature = "redb")]
+    {
+        if db.as_any()
+            .downcast_ref::<redb_impl::RedbDatabase>()
+            .is_some()
+        {
+            return DatabaseBackend::Redb;
+        }
+    }
+    #[cfg(feature = "sled")]
+    {
+        if db.as_any()
+            .downcast_ref::<sled_impl::SledDatabase>()
+            .is_some()
+        {
+            return DatabaseBackend::Sled;
+        }
+    }
+    default_backend()
 }
 
 /// Get default database backend

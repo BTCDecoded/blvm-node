@@ -307,7 +307,9 @@ fn default_rocksdb_level0_trigger() -> i32 {
 /// heed3 / LMDB tuning (config > ENV > defaults).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Heed3Config {
-    /// LMDB map size in megabytes (default: max(65536, dbcache_mb * 128)).
+    /// LMDB map size in megabytes. When unset, auto-tuned from free disk (70%, clamped
+    /// 48 GiB–4 TiB) plus `data.mdb + 128 GiB` headroom on resume. Override via this
+    /// field or `BLVM_HEED3_MAP_SIZE_MB` only when operator policy requires a fixed cap.
     #[serde(default)]
     pub map_size_mb: Option<usize>,
 

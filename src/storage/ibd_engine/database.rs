@@ -15,20 +15,23 @@
 //! ## Reorg flow
 //! `erase_since(height)` — removes from mutable ages and rolls back table tail.
 
+use super::disk_index::DiskIndex;
 use super::index::UtxoIndex;
 use super::memory_age::Pin;
+use super::meta;
 use super::table::UtxoTable;
 use super::types::{
     IdCodec, OutputDetail, OutputHeader, OutputId, OutputKV, OutputKey, outpoint_to_output_key,
     to_output_key,
 };
 use blvm_protocol::{Block, transaction::is_coinbase};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct UtxoDatabase {
     pub(super) table: Arc<UtxoTable>,
     pub(super) index: UtxoIndex,
+    table_path: PathBuf,
 }
 
 impl UtxoDatabase {
@@ -45,21 +48,121 @@ impl UtxoDatabase {
         self.index.memory_pressure_tick(level_u8);
     }
 
+    /// Approximate resident engine memory in bytes:
+    /// - `index_bytes`: in-memory age tier entries + bloom filters + disk-segment blooms
+    /// - `compacter_inflight_bytes`: transient merge Vecs held by compacter threads
+    ///   (NOT reflected in index_bytes during the merge window; visible as UNEXPLAINED_ANON)
+    /// - `tail_bytes`: in-memory tail of UtxoTable (recent block scripts)
+    pub fn mem_usage_bytes(&self) -> (usize, usize, usize) {
+        let index_bytes = self.index.mem_bytes();
+        let compacter_inflight_bytes =
+            super::index::COMPACTER_INFLIGHT_BYTES.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let tail_bytes = self.table.tail_bytes();
+        (index_bytes, compacter_inflight_bytes, tail_bytes)
+    }
+
+    /// Per-age run-count and memory breakdown for MEM_REPORT diagnostics.
+    pub fn age_detail(&self) -> (Vec<(usize, u64)>, (usize, u64)) {
+        self.index.age_detail()
+    }
+
+    /// Run count for age tier `age_idx` (0 = mutable tip, 2 = compacter bottleneck tier).
+    ///
+    /// Lightweight — just one `runs.read().len()` call. Used by the dispatch loop to detect
+    /// compacter backlog and apply backpressure before RSS grows unbounded.
+    pub fn age_run_count(&self, age_idx: usize) -> usize {
+        self.index.age_run_count(age_idx)
+    }
+
+    /// Whether age `age_idx` holds `is_merging` (gate / stall diagnostics).
+    pub fn age_is_merging(&self, age_idx: usize) -> bool {
+        self.index.age_is_merging(age_idx)
+    }
+
+    /// Whether disk-segment compaction is in progress.
+    pub fn disk_is_compacting(&self) -> bool {
+        self.index.disk_is_compacting()
+    }
+
+    /// Whether a DiskIndex spill segment file write is in progress (`SPILL_IO_GATE`).
+    pub fn spill_io_busy(&self) -> bool {
+        self.index.spill_io_busy()
+    }
+
+    /// On-disk UTXO segment count.
+    pub fn disk_segment_count(&self) -> usize {
+        self.index.disk_segment_count()
+    }
+
+    /// Live disk-eviction age (spill tier is `eviction_age - 1`).
+    pub fn eviction_age_live(&self) -> usize {
+        self.index.eviction_age_live()
+    }
+
+    /// Table file size on disk in bytes (not in RAM — read via pread64).
+    pub fn table_file_bytes(&self) -> u64 {
+        self.table.file_size_bytes()
+    }
+
     pub fn open(table_path: impl AsRef<Path>, avail_mb: u64) -> anyhow::Result<Self> {
+        Self::open_impl(table_path, avail_mb, true)
+    }
+
+    /// Open without loading on-disk segments (fast path before checkpoint re-seed).
+    pub fn open_skip_segments(table_path: impl AsRef<Path>, avail_mb: u64) -> anyhow::Result<Self> {
+        Self::open_impl(table_path, avail_mb, false)
+    }
+
+    fn open_impl(
+        table_path: impl AsRef<Path>,
+        avail_mb: u64,
+        load_segments: bool,
+    ) -> anyhow::Result<Self> {
         let avail_mb = if avail_mb > 0 {
             avail_mb
         } else {
             crate::utils::ram_tier::probe_avail_ram_mib()
         };
-        let table_path = table_path.as_ref();
+        let table_path = table_path.as_ref().to_path_buf();
         let seg_dir = {
             let mut p = table_path.as_os_str().to_owned();
             p.push(".segs");
             std::path::PathBuf::from(p)
         };
-        let table = UtxoTable::open(table_path)?;
-        let index = UtxoIndex::open(&seg_dir, avail_mb)?;
-        Ok(Self { table, index })
+        let table = UtxoTable::open(&table_path)?;
+        let (disk_index, restored_cl) = if load_segments {
+            DiskIndex::new(&seg_dir)?
+        } else {
+            DiskIndex::new_empty(&seg_dir)?
+        };
+        let index = UtxoIndex::open_with_disk(
+            Arc::new(disk_index),
+            avail_mb,
+            restored_cl,
+            Some(&table_path),
+        )?;
+        Ok(Self {
+            table,
+            index,
+            table_path,
+        })
+    }
+
+    fn persist_contiguous_length(&self) {
+        let cl = self.index.contiguous_length();
+        // Sidecar is a resume hint only (checkpoint export is authoritative). Writing every
+        // block was ~1 fs write/block on the serial dispatch path and capped early BPS.
+        if cl >= 0 && (cl < 1000 || cl % 1000 == 0) {
+            let _ = meta::write_contiguous_length_sidecar(&self.table_path, cl);
+        }
+    }
+
+    /// Force-write the contiguous_length sidecar (graceful shutdown resume hint).
+    pub fn flush_contiguous_length_sidecar(&self) {
+        let cl = self.index.contiguous_length();
+        if cl >= 0 {
+            let _ = meta::write_contiguous_length_sidecar(&self.table_path, cl);
+        }
     }
 
     /// Pre-append all outputs and record all spends for a block.
@@ -120,16 +223,11 @@ impl UtxoDatabase {
         }
 
         // Sort + dedup external keys for Phase-2 batch_query (binary search).
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            external_keys.par_sort_unstable();
-        }
-        #[cfg(not(feature = "rayon"))]
-        external_keys.sort_unstable();
+        super::memory_run::sort_external_keys(&mut external_keys);
         external_keys.dedup();
 
         let pin = self.index.append(entries, height);
+        self.persist_contiguous_length();
         Ok((pin, external_keys, intra_block_keys))
     }
 
@@ -170,6 +268,7 @@ impl UtxoDatabase {
     pub fn erase_since(&self, since: i32) {
         self.index.erase_since(since);
         let _ = self.table.commit_before(since); // flush tail before erase
+        self.persist_contiguous_length();
     }
 
     /// Iterate all live (non-spent) entries across all ages. For watermark export.
@@ -191,8 +290,24 @@ impl UtxoDatabase {
     pub fn iter_live_at_height(
         &self,
         max_height: i32,
-    ) -> anyhow::Result<super::index::CheckpointStream> {
+    ) -> anyhow::Result<(super::index::CheckpointStream, u64, u64)> {
         self.index.iter_live_at_height(max_height)
+    }
+
+    pub fn compact_for_checkpoint_sync_with_sink<F>(
+        &self,
+        checkpoint_height: i32,
+        on_live: Option<F>,
+    ) -> anyhow::Result<u64>
+    where
+        F: FnMut(OutputKV) -> anyhow::Result<()>,
+    {
+        self.index
+            .compact_for_checkpoint_sync_with_sink(checkpoint_height, on_live)
+    }
+
+    pub fn collect_memory_entries_at_or_below(&self, max_height: i32) -> Vec<OutputKV> {
+        self.index.collect_memory_entries_at_or_below(max_height)
     }
 
     /// Bulk-import UTXOs from `ibd_utxos` checkpoint (resume path). Writes table bytes and
@@ -210,6 +325,7 @@ impl UtxoDatabase {
     pub fn commit_seed_batch(&self, entries: &mut Vec<OutputKV>, checkpoint_height: i32) {
         self.index
             .seed_checkpoint(std::mem::take(entries), checkpoint_height);
+        self.persist_contiguous_length();
     }
 
     /// Allocate a disk-segment slot for the streaming seed writer thread.
@@ -221,6 +337,7 @@ impl UtxoDatabase {
     /// Register the streaming-seed segment and commit the checkpoint watermark.
     pub fn finalize_seed(&self, seg: super::disk_segment::DiskSegment, checkpoint_height: i32) {
         self.index.finalize_seed(seg, checkpoint_height);
+        self.persist_contiguous_length();
     }
 
     /// Flush all buffered table tail entries to disk.
@@ -338,6 +455,24 @@ mod tests {
         assert_eq!(resolved, 1);
         assert_eq!(details[0].header.amount, 5_000_000_000);
         assert!(details[0].header.is_coinbase());
+    }
+
+    #[test]
+    fn test_contiguous_length_sidecar_roundtrip() {
+        let tmp = NamedTempFile::new().unwrap();
+        let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        assert_eq!(db.contiguous_length(), -1);
+        let block = make_block(vec![dummy_coinbase_tx(1_000)]);
+        let txid = make_txid(1);
+        db.append(&block, &[txid], 50).unwrap();
+        assert_eq!(db.contiguous_length(), 50);
+        drop(db);
+        assert_eq!(
+            meta::read_contiguous_length_sidecar(tmp.path()),
+            Some(50)
+        );
+        let db2 = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        assert_eq!(db2.contiguous_length(), 50);
     }
 
     #[test]

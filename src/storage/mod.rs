@@ -40,7 +40,7 @@ pub mod utxostore;
 pub mod wal;
 
 use crate::config::PruningConfig;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use database::{Database, DatabaseBackend, create_database, default_backend, fallback_backend};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -812,39 +812,112 @@ impl Storage {
         Ok(())
     }
 
-    /// If `chain_info` is missing but the block index has blocks (e.g. crash before metadata
-    /// flush, or legacy parallel IBD that never wrote `chain_info`), rebuild tip from the
-    /// highest stored height so `get_height()` and IBD resume match on-disk state.
+    /// Advance `chain_info` to `target_height` when the block index already has that block
+    /// (e.g. UTXO watermark persisted ahead of a block-storage metadata flush).
+    ///
+    /// Tries the full block body first (needed for chainwork computation from scratch).
+    /// If the body was pruned or lost in a crash, falls back to the stored block header
+    /// (which is retained independently of the body in the `recent_headers` index).
+    /// This allows IBD to resume from the watermark even when incremental pruning has
+    /// removed the intervening block bodies.
+    pub fn sync_chain_info_to_height(&self, target_height: u64) -> Result<()> {
+        let current = self.chain().get_height()?.unwrap_or(0);
+        if target_height <= current {
+            return Ok(());
+        }
+        let Some(tip_hash) = self.blockstore.get_hash_by_height(target_height)? else {
+            anyhow::bail!(
+                "cannot sync chain_info to height {target_height}: block not in blockstore"
+            );
+        };
+        // Try full block body first (provides header + validates body is intact).
+        let header_opt = if let Some(block) = self.blockstore.get_block(&tip_hash)? {
+            Some(block.header)
+        } else {
+            // Body was pruned or lost — try the separately-stored recent header index.
+            // IBD stores headers independently so this is available even after pruning.
+            self.blockstore.get_header_at_height(target_height)?
+        };
+        let header = match header_opt {
+            Some(h) => {
+                if h.prev_block_hash != [0u8; 32] {
+                    info!(
+                        "[IBD_RESUME] using stored header at height {target_height} for chain_info catch-up"
+                    );
+                }
+                h
+            }
+            None => {
+                // Do not synthesize a zeroed header. A fake merkle/bits/nonce at
+                // `target_height` poisons prevhash for height+1 and stalls the feeder
+                // (see node/mod.rs IBD_RESUME watermark>tip notes). Fail closed; caller
+                // may wipe+replay or wait for a real header.
+                anyhow::bail!(
+                    "cannot sync chain_info to height {target_height}: \
+                     block body and header both missing (refusing synthetic header)"
+                );
+            }
+        };
+        self.chain().update_tip(&tip_hash, &header, target_height)?;
+        info!(
+            "[IBD_RESUME] advanced chain_info height {current} → {target_height} (UTXO watermark catch-up)"
+        );
+        Ok(())
+    }
+
+    /// Rebuild or advance `chain_info` tip from the highest height present in the block index.
+    ///
+    /// Covers two cases:
+    /// 1. `chain_info` missing (crash before metadata flush / legacy IBD).
+    /// 2. `chain_info.height` **stale** below `highest_stored_height` — e.g. async block
+    ///    flushes wrote bodies + height index but `update_tip` lagged, or a prior session
+    ///    left tip at the local-replay boundary while later bodies were flushed.
+    ///
+    /// Without (2), resume sees `watermark > chain_tip` and resets UTXO state to h=0 even
+    /// when block bodies for the gap are already on disk.
     pub fn recover_chain_tip_from_blockstore(&self) -> Result<()> {
         use crate::storage::chainstate::{ChainInfo, ChainParams};
 
-        if self.chain().load_chain_info()?.is_some() {
-            return Ok(());
-        }
         let Some(max_h) = self.blockstore.highest_stored_height()? else {
             return Ok(());
         };
+        let current = self.chain().get_height()?.unwrap_or(0);
+        if current >= max_h && self.chain().load_chain_info()?.is_some() {
+            return Ok(());
+        }
         let Some(tip_hash) = self.blockstore.get_hash_by_height(max_h)? else {
             return Ok(());
         };
         let Some(block) = self.blockstore.get_block(&tip_hash)? else {
             return Ok(());
         };
-        let genesis_hash = self.blockstore.get_hash_by_height(0)?.unwrap_or_default();
-        let mut params = ChainParams::default();
-        params.genesis_hash = genesis_hash;
-        let info = ChainInfo {
-            tip_hash,
-            tip_header: block.header.clone(),
-            height: max_h,
-            total_work: 0,
-            chain_params: params,
-        };
-        self.chainstate.store_chain_info(&info)?;
-        info!(
-            "Recovered chain_info from block index (tip_height={}, tip_hash prefix {:02x}{:02x}{:02x}{:02x})",
-            max_h, tip_hash[0], tip_hash[1], tip_hash[2], tip_hash[3]
-        );
+        if let Some(mut info) = self.chain().load_chain_info()? {
+            info.tip_hash = tip_hash;
+            info.tip_header = block.header.clone();
+            info.height = max_h;
+            self.chainstate.store_chain_info(&info)?;
+            info!(
+                "Advanced chain_info tip {current} → {max_h} from block index \
+                 (tip_hash prefix {:02x}{:02x}{:02x}{:02x})",
+                tip_hash[0], tip_hash[1], tip_hash[2], tip_hash[3]
+            );
+        } else {
+            let genesis_hash = self.blockstore.get_hash_by_height(0)?.unwrap_or_default();
+            let mut params = ChainParams::default();
+            params.genesis_hash = genesis_hash;
+            let info = ChainInfo {
+                tip_hash,
+                tip_header: block.header.clone(),
+                height: max_h,
+                total_work: 0,
+                chain_params: params,
+            };
+            self.chainstate.store_chain_info(&info)?;
+            info!(
+                "Recovered chain_info from block index (tip_height={}, tip_hash prefix {:02x}{:02x}{:02x}{:02x})",
+                max_h, tip_hash[0], tip_hash[1], tip_hash[2], tip_hash[3]
+            );
+        }
         Ok(())
     }
 
@@ -861,9 +934,123 @@ impl Storage {
         Ok(Arc::from(self.db.open_tree(name)?))
     }
 
+    /// Return the filesystem root that this storage was opened from, if it is file-backed.
+    ///
+    /// For Heed3/LMDB this is the directory passed to `Storage::new()` / `Storage::with_backend()`
+    /// (the parent of the internal `heed3/` subdirectory). Returns `None` for in-memory backends.
+    pub fn data_dir(&self) -> Option<std::path::PathBuf> {
+        self.db.storage_root_path()
+    }
+
     /// UTXO row encoding for this store (rkyv on heed3/LMDB, bincode otherwise).
     pub fn utxo_value_codec(&self) -> utxo_value_codec::ValueCodec {
         utxo_value_codec::ValueCodec::for_database(self.db.as_ref())
+    }
+
+    /// Active chain database backend — used by IBD [`MemoryGuard`] for backend-aware tuning.
+    pub fn database_backend(&self) -> DatabaseBackend {
+        database::detect_backend_from_db(self.db.as_ref())
+    }
+
+    /// Open the canonical IBD UTXO snapshot tree (may be a ckpt tree after Phase 3 promote).
+    pub fn open_ibd_utxo_tree(&self) -> Result<std::sync::Arc<dyn database::Tree>> {
+        let name = self.chain().get_ibd_utxo_canonical_tree()?;
+        self.open_tree(&name)
+            .with_context(|| format!("open canonical IBD UTXO tree {name}"))
+    }
+
+    /// Ensure LMDB map headroom for Phase 3 without destroying the active checkpoint.
+    ///
+    /// Clears only the **inactive** ping-pong ckpt (and empty/stale `ibd_utxos` when unused)
+    /// so freelist can absorb a tip catch-up export. The active ckpt is the promote source.
+    pub fn prepare_heed3_for_phase3_promote(&self) -> Result<()> {
+        let active = self.chain().get_engine_ckpt_slot().unwrap_or(0);
+        let inactive = crate::storage::ibd_engine::ckpt_inactive_slot(active);
+        let inactive_name = crate::storage::ibd_engine::ckpt_tree_for_slot(inactive);
+        match self.open_tree(inactive_name) {
+            Ok(tree) => {
+                if let Err(e) = tree.clear() {
+                    warn!("prepare phase3 promote: clear {inactive_name} failed: {e:#}");
+                } else {
+                    info!(
+                        "[HEED3] cleared inactive {inactive_name} before Phase 3 (keep active ckpt)"
+                    );
+                }
+            }
+            Err(e) => warn!("prepare phase3 promote: open {inactive_name} failed: {e:#}"),
+        }
+        // Clear legacy production tree only when canonical is not pointing at it — reclaim space.
+        let canonical = self.chain().get_ibd_utxo_canonical_tree().unwrap_or_else(|_| {
+            crate::storage::ibd_engine::IBD_UTXOS_TREE.to_string()
+        });
+        if canonical == crate::storage::ibd_engine::IBD_UTXOS_TREE {
+            // Still using ibd_utxos as canonical — leave it; catchup/full path will clear+rewrite.
+        } else if let Ok(tree) = self.open_tree(crate::storage::ibd_engine::IBD_UTXOS_TREE) {
+            if let Err(e) = tree.clear() {
+                warn!("prepare phase3 promote: clear ibd_utxos failed: {e:#}");
+            } else {
+                info!("[HEED3] cleared unused ibd_utxos before Phase 3 promote (canonical={canonical})");
+            }
+        }
+        if let Err(e) = self.flush() {
+            warn!("prepare phase3 promote: flush failed: {e:#}");
+        }
+        #[cfg(feature = "heed3")]
+        {
+            let headroom_mb: usize = std::env::var("BLVM_HEED3_PHASE3_HEADROOM_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(128 * 1024);
+            if let Some(heed) = self.db.as_any().downcast_ref::<database::Heed3Database>() {
+                heed.ensure_map_headroom_mb(headroom_mb)
+                    .context("ensure LMDB map headroom before Phase 3")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Prepare main LMDB for tip-scale Phase 3 / checkpoint export into `ibd_utxos`.
+    ///
+    /// 1. Clear ping-pong ckpt trees so freelist pages can be reused (same env as blocks;
+    ///    engine segments remain the source of truth for a failed Phase 3).
+    /// 2. Grow the LMDB map when `data.mdb` is near the map limit (default +128 GiB headroom).
+    ///
+    /// Prefer [`Self::prepare_heed3_for_phase3_promote`] when promoting an existing tip ckpt
+    /// (do not wipe the active snapshot).
+    ///
+    /// Live 2026-07-13: Phase 3 hit `MDB_MAP_FULL` at map=1 TiB / file=99.998% with ckpt
+    /// trees still holding a full UTXO snapshot alongside blocks.
+    pub fn prepare_heed3_for_tip_utxo_export(&self) -> Result<()> {
+        for name in ["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
+            match self.open_tree(name) {
+                Ok(tree) => {
+                    if let Err(e) = tree.clear() {
+                        warn!("prepare tip export: clear {name} failed: {e:#}");
+                    } else {
+                        info!(
+                            "[HEED3] cleared {name} before tip UTXO export (reclaim freelist)"
+                        );
+                    }
+                }
+                Err(e) => warn!("prepare tip export: open {name} failed: {e:#}"),
+            }
+        }
+        // Force freelist visibility before grow/write.
+        if let Err(e) = self.flush() {
+            warn!("prepare tip export: flush after ckpt clear failed: {e:#}");
+        }
+        #[cfg(feature = "heed3")]
+        {
+            let headroom_mb: usize = std::env::var("BLVM_HEED3_PHASE3_HEADROOM_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(128 * 1024); // 128 GiB
+            if let Some(heed) = self.db.as_any().downcast_ref::<database::Heed3Database>() {
+                heed.ensure_map_headroom_mb(headroom_mb)
+                    .context("ensure LMDB map headroom before tip UTXO export")?;
+            }
+        }
+        Ok(())
     }
 
     /// Flush all pending writes to disk
@@ -875,6 +1062,27 @@ impl Storage {
     #[inline]
     pub fn ibd_memory_pressure_tick(&self, level_u8: u8) {
         self.db.ibd_memory_pressure_tick(level_u8);
+    }
+
+    /// Estimated MiB of file-backed database pages that may be resident in our process RSS.
+    ///
+    /// For Heed3/LMDB: returns the size of `data.mdb` on disk. These pages are counted in
+    /// `VmRSS` when accessed and cannot be freed by UTXO cache eviction — the OS must write
+    /// them back under memory pressure. Used by `MemoryGuard` to deduct expected file-backed
+    /// resident pages from the anonymous RSS budget.
+    ///
+    /// Returns 0 on any error or for backends without a known single-file layout.
+    pub fn db_file_size_mb(&self) -> u64 {
+        self.db.db_file_size_mb()
+    }
+
+    /// Enable (`true`) or disable (`false`) write-optimised IBD mode on the underlying database.
+    ///
+    /// For Heed3/LMDB this toggles `MDB_NOSYNC`: commits skip `fdatasync`, cutting flush time
+    /// by 10–100× on rotating/NVMe storage. When disabling, `flush()` is called automatically
+    /// to ensure all in-flight writes are durable before returning.
+    pub fn set_ibd_nosync(&self, enable: bool) -> anyhow::Result<()> {
+        self.db.set_ibd_nosync(enable)
     }
 
     /// Get approximate disk size used by storage (in bytes)

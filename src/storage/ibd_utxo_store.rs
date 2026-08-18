@@ -22,12 +22,12 @@ use blvm_protocol::transaction::is_coinbase;
 use blvm_protocol::types::{OutPoint, UTXO, UtxoSet};
 use dashmap::{DashMap, DashSet};
 use hex;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 #[cfg(feature = "production")]
 use std::str::FromStr;
 use std::sync::atomic::{AtomicIsize, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 /// Per-op MuHash during IBD flush is **off by default**. Each delete previously required a
 /// synchronous `disk.get(key)` for correctness vs create+spend folding — a serial disk read
@@ -39,7 +39,7 @@ use tracing::debug;
 /// Set `BLVM_IBD_ENABLE_PER_OP_MUHASH=1` to restore running per-op MuHash updates (e.g. for
 /// checkpoint consistency debugging). `BLVM_IBD_SKIP_PER_OP_MUHASH=1` is now a no-op (already
 /// the default) but kept for backwards compatibility.
-fn ibd_per_op_muhash_enabled() -> bool {
+pub(crate) fn ibd_per_op_muhash_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         // Explicit opt-in overrides the default-off.
@@ -95,10 +95,10 @@ pub type PendingFlushBatch = Vec<(OutPointKey, PendingValue)>;
 pub struct PendingFlushPackage {
     pub ops: Arc<PendingFlushBatch>,
     pub max_block_height: u64,
-    /// The set of block heights whose ops are fully included in this batch. The flush worker
-    /// calls `IbdUtxoStore::release_protected_heights` with this set after the disk write
-    /// completes, removing those heights from `protected_heights` and making their cache
-    /// entries eligible for eviction.
+    /// The set of block heights whose ADD ops are fully drained from `add_shards` (no
+    /// remaining pending ADDs for that height). The flush worker calls
+    /// `IbdUtxoStore::release_protected_heights` with this set after the disk write
+    /// completes. Partial capped drains must omit heights that still have ADDs pending.
     pub heights: Arc<FxHashSet<u32>>,
 }
 
@@ -155,7 +155,10 @@ type PendingLogEntry = (OutPointKey, PendingValue, u64);
 /// Eviction protection that previously lived in `PendingState.key_set` is now provided by
 /// `worker_preinserted` (lock-free DashSet) extended to cover the full worker→pending→flush
 /// lifetime, so there is no per-shard key_set anymore.
-pub(crate) const PENDING_SHARDS: usize = 16;
+// 32 shards: with 24 validation workers each appending to add_shards[key[0] & mask],
+// P(collision on same shard) ≈ 24/32 = 0.75 workers per shard vs 24/16 = 1.5 before.
+// Halving contention here is free — the shard Vecs are tiny until flush time.
+pub(crate) const PENDING_SHARDS: usize = 32;
 const PENDING_SHARD_MASK: usize = PENDING_SHARDS - 1;
 
 #[inline]
@@ -172,9 +175,11 @@ fn dedupe_pending_triples_in_place(v: &mut Vec<PendingLogEntry>) {
         return;
     }
     #[cfg(feature = "rayon")]
-    {
+    if v.len() >= 8192 {
         use blvm_protocol::rayon::prelude::*;
         v.par_sort_unstable_by_key(|(k, _, h)| (*k, *h));
+    } else {
+        v.sort_unstable_by_key(|(k, _, h)| (*k, *h));
     }
     #[cfg(not(feature = "rayon"))]
     v.sort_unstable_by_key(|(k, _, h)| (*k, *h));
@@ -196,18 +201,100 @@ fn dedupe_pending_triples_in_place(v: &mut Vec<PendingLogEntry>) {
     v.truncate(write);
 }
 
-fn pack_flush_package(raw: Vec<PendingLogEntry>) -> Option<PendingFlushPackage> {
+fn pack_flush_package(
+    store: &IbdUtxoStore,
+    raw: Vec<PendingLogEntry>,
+) -> Option<PendingFlushPackage> {
     if raw.is_empty() {
         return None;
     }
     let (batch, max_h, heights) = dedupe_to_batch_and_max(raw);
-    // Always return Some even when batch is empty (all ops cancelled by dedup). We still
-    // need the heights set so the flush worker can call release_protected_heights — otherwise
-    // those heights stay stuck forever, falsely protecting unrelated cache entries.
+    // Only release heights with zero remaining ADDs in `add_shards` (see
+    // `pending_add_count_by_height`). Partial capped drains must not unprotect a height
+    // while sibling ADDs from the same block are still pending.
+    let releasable = store.filter_heights_fully_pending_drained(heights);
     Some(PendingFlushPackage {
         ops: Arc::new(batch),
         max_block_height: max_h,
-        heights: Arc::new(heights),
+        heights: Arc::new(releasable),
+    })
+}
+
+/// Optimized pack for the adds-only drain path (split add_shards only).
+///
+/// Since `drain_pending_adds_only` returns only ADD entries from `add_shards` and Bitcoin
+/// prevents creating the same UTXO twice without an intervening spend (BIP-30 / height>91880),
+/// there are no duplicates to resolve. Skips `dedupe_pending_triples_in_place` entirely and
+/// sorts by key directly — one sort instead of one sort + dedup pass + second sort (previously
+/// present before the redundant-sort fix). This is the dominant pack code path during IBD
+/// `ibd_defer_flush` mode where adds-only flushes fire every ~2M ops.
+fn pack_flush_package_adds_only(
+    store: &IbdUtxoStore,
+    raw: Vec<PendingLogEntry>,
+) -> Option<PendingFlushPackage> {
+    if raw.is_empty() {
+        return None;
+    }
+    let mut candidate_heights: FxHashSet<u32> = FxHashSet::default();
+    let mut max_h = 0u64;
+    let mut batch: PendingFlushBatch = Vec::with_capacity(raw.len());
+    for (k, val, h) in raw {
+        if h != 0 {
+            candidate_heights.insert(h as u32);
+        }
+        max_h = max_h.max(h);
+        batch.push((k, val));
+    }
+    let all_heights = store.filter_heights_fully_pending_drained(candidate_heights);
+    #[cfg(feature = "rayon")]
+    if batch.len() >= 8192 {
+        use blvm_protocol::rayon::prelude::*;
+        batch.par_sort_unstable_by_key(|(k, _)| *k);
+    } else {
+        batch.sort_unstable_by_key(|(k, _)| *k);
+    }
+    #[cfg(not(feature = "rayon"))]
+    batch.sort_unstable_by_key(|(k, _)| *k);
+    Some(PendingFlushPackage {
+        ops: Arc::new(batch),
+        max_block_height: max_h,
+        heights: Arc::new(all_heights),
+    })
+}
+
+/// Optimized pack for the del-only backlog drain (tombstones only).
+fn pack_flush_package_dels_only(
+    store: &IbdUtxoStore,
+    raw: Vec<PendingLogEntry>,
+) -> Option<PendingFlushPackage> {
+    if raw.is_empty() {
+        return None;
+    }
+    let mut candidate_heights: FxHashSet<u32> = FxHashSet::default();
+    let mut max_h = 0u64;
+    let mut batch: PendingFlushBatch = Vec::with_capacity(raw.len());
+    for (k, val, h) in raw {
+        debug_assert!(val.is_none(), "del-only pack received an ADD entry");
+        if h != 0 {
+            candidate_heights.insert(h as u32);
+        }
+        max_h = max_h.max(h);
+        batch.push((k, None));
+    }
+    let releasable = store.filter_heights_fully_pending_drained(candidate_heights);
+    #[cfg(feature = "rayon")]
+    if batch.len() >= 8192 {
+        use blvm_protocol::rayon::prelude::*;
+        batch.par_sort_unstable_by_key(|(k, _)| *k);
+    } else {
+        batch.sort_unstable_by_key(|(k, _)| *k);
+    }
+    #[cfg(not(feature = "rayon"))]
+    batch.sort_unstable_by_key(|(k, _)| *k);
+    Some(PendingFlushPackage {
+        ops: Arc::new(batch),
+        max_block_height: max_h,
+        heights: Arc::new(releasable),
     })
 }
 
@@ -227,6 +314,9 @@ fn dedupe_to_batch_and_max(
             all_heights.insert(*h as u32);
         }
     }
+    // dedupe_pending_triples_in_place sorts by (k, h) and deduplicates; the surviving entries
+    // are already in ascending-key order. The second sort below (previously present) was
+    // redundant and wasted ~20% retire CPU at h=300k+ on 320k-op batches.
     dedupe_pending_triples_in_place(&mut v);
     let mut max_h = 0u64;
     let mut batch = Vec::with_capacity(v.len());
@@ -234,13 +324,7 @@ fn dedupe_to_batch_and_max(
         max_h = max_h.max(h);
         batch.push((k, val));
     }
-    #[cfg(feature = "rayon")]
-    {
-        use blvm_protocol::rayon::prelude::*;
-        batch.par_sort_unstable_by_key(|(k, _)| *k);
-    }
-    #[cfg(not(feature = "rayon"))]
-    batch.sort_unstable_by_key(|(k, _)| *k);
+    // batch is already sorted by k (dedupe_pending_triples_in_place guarantees it).
     (batch, max_h, all_heights)
 }
 
@@ -248,6 +332,57 @@ fn dedupe_to_batch_and_max(
 impl PendingFlushPackage {
     /// Encode UTXO inserts for the flush worker (disk I/O runs on the committer thread only).
     pub fn prepare_for_disk(&self, codec: ValueCodec) -> Result<PreparedFlushPackage> {
+        // For large batches, encode UTXO values in parallel (rayon) then assemble the slab
+        // sequentially (just memcpys). At 500k ops this cuts serialization from ~120ms to
+        // ~15ms on a 16-core host (encoding is CPU-bound and embarrassingly parallel).
+        //
+        // For small batches the per-task rayon overhead exceeds the encoding cost, so we
+        // fall through to the sequential path.
+        #[cfg(feature = "rayon")]
+        if self.ops.len() >= 4096 {
+            use blvm_protocol::rayon::prelude::*;
+            // Phase 1: parallel encode — each op produces Option<Vec<u8>>.
+            let encoded: Vec<(OutPointKey, Option<Vec<u8>>)> = self
+                .ops
+                .par_iter()
+                .map(|(key, value_opt)| -> Result<(OutPointKey, Option<Vec<u8>>)> {
+                    let bytes = match value_opt {
+                        Some(arc) => Some(
+                            crate::storage::utxo_value_codec::encode_utxo_with_codec(
+                                codec,
+                                arc.as_ref(),
+                            )?,
+                        ),
+                        None => None,
+                    };
+                    Ok((*key, bytes))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            // Phase 2: sequential slab assembly (pure memcpy, very fast).
+            let n_adds = encoded.iter().filter(|(_, v)| v.is_some()).count();
+            let mut slab: Vec<u8> = Vec::with_capacity(n_adds * 100);
+            let rows: Vec<(OutPointKey, Option<(u32, u32)>)> = encoded
+                .into_iter()
+                .map(|(key, opt_bytes)| {
+                    let offsets = opt_bytes.map(|bytes| {
+                        let start = slab.len() as u32;
+                        let len = bytes.len() as u32;
+                        slab.extend_from_slice(&bytes);
+                        (start, len)
+                    });
+                    (key, offsets)
+                })
+                .collect();
+
+            return Ok(PreparedFlushPackage {
+                rows: Arc::new(rows),
+                slab: Arc::new(slab),
+                max_block_height: self.max_block_height,
+            });
+        }
+
+        // Sequential path for small batches or when rayon is unavailable.
         // Single slab: all serialized UTXO bytes packed contiguously. Rows store (start, len)
         // offsets into the slab. Eliminates one Vec<u8> heap allocation per add operation
         // (previously `ser_buf.clone()` = 250k allocs × ~80 B = ~20 MB per 500k-op flush).
@@ -323,20 +458,35 @@ const EVICT_SCAN_CAP: usize = 16_384;
 /// IBD v2 concurrent UTXO store. No RwLock on the hot map.
 #[cfg(feature = "production")]
 pub struct IbdUtxoStore {
-    cache: DashMap<OutPointKey, UtxoCacheSlot>,
+    cache: DashMap<OutPointKey, UtxoCacheSlot, FxBuildHasher>,
     disk: Arc<dyn Tree>,
     total_utxo_count: AtomicIsize,
     flush_threshold: usize,
-    /// Sharded pending log: workers push ops to one of `PENDING_SHARDS` independent mutexes
-    /// chosen by `pending_shard_idx(key)`. Eliminates the single-mutex contention that
-    /// dominated retire-thread CPU at h=300k+ (workers were serialized through one lock
-    /// while the queue grew to >1M entries). Each shard is a plain `Vec<PendingLogEntry>`;
-    /// dedupe runs once at flush time when shard logs are merged.
-    pending_shards: Vec<Mutex<Vec<PendingLogEntry>>>,
-    /// Approximate total size of `pending_shards`. Read lock-free from `maybe_take_flush_batch_through`
+    /// Sharded pending log for ADD (insert) ops only.
+    ///
+    /// Split from `del_shards` so that `drain_pending_adds_only()` (the hot path during
+    /// `ibd_defer_flush`) is O(N_adds) rather than O(N_adds + N_dels). Without the split,
+    /// DELs accumulate to ~2M entries over the ~667-block inter-checkpoint window and every
+    /// adds_only drain must scan all of them — pinning the retire thread near 100% CPU at
+    /// h=500k+. Each shard is a plain `Vec<PendingLogEntry>` (always ADD ops); dedupe runs
+    /// once at flush time when shard logs are merged.
+    add_shards: Vec<Mutex<Vec<PendingLogEntry>>>,
+    /// Sharded pending log for DEL (spend/delete) ops only. Same PENDING_SHARDS layout as
+    /// `add_shards`. DELs accumulate here until the next durable checkpoint (two-phase
+    /// crash-safe commit), never touching `drain_pending_adds_only`.
+    del_shards: Vec<Mutex<Vec<PendingLogEntry>>>,
+    /// Approximate total size of `add_shards` + `del_shards` combined. Read lock-free from
+    /// `maybe_take_flush_batch_through`
     /// and `pending_len`; writes happen on the `apply_*`/`take_*` paths. Slightly racy with
     /// in-flight pushes, but correctness only requires the flush trigger to fire eventually.
     pending_log_size: AtomicUsize,
+    /// Count of ADD ops still in `add_shards` per block height. Used to gate
+    /// `release_protected_heights`: a height is releasable only when its counter is zero
+    /// (all ADDs for that height have been drained from the pending log). Without this,
+    /// capped partial drains (`drain_pending_adds_only`) release protection for heights that
+    /// still have ADDs in other shards → FIFO eviction drops cache entries before LMDB flush
+    /// → UTXO_TOTAL_MISS during IBD.
+    pending_add_count_by_height: DashMap<u32, AtomicUsize, FxBuildHasher>,
     memory_only: bool,
     /// Effective UTXO cache entry cap (may be tuned down under memory pressure during IBD).
     max_entries_cap: AtomicUsize,
@@ -354,7 +504,7 @@ pub struct IbdUtxoStore {
     /// concurrent disk read in the in-flight window can still see the value.
     /// DashMap (sharded, no global lock) so worker threads can insert concurrently without
     /// serialising against each other or the flush path.
-    in_flight_insertions: DashMap<OutPointKey, Arc<UTXO>>,
+    in_flight_insertions: DashMap<OutPointKey, Arc<UTXO>, FxBuildHasher>,
     /// Lock-free DashSet of block heights that are currently protected from cache eviction.
     /// Contains at most `pipeline_depth + max_utxo_flushes_in_flight` entries (~36 u32s)
     /// instead of one entry per UTXO key (which reached 6M entries at h=300k+). A cache entry
@@ -364,7 +514,7 @@ pub struct IbdUtxoStore {
     /// Lifetime: a height H is inserted by `worker_cache_put_protected` (or the non-worker
     /// `apply_utxo_delta` path) when the first UTXO from H enters the cache. It is removed
     /// by `release_protected_heights` after the flush batch covering H is committed to disk.
-    protected_heights: DashSet<u32>,
+    protected_heights: DashSet<u32, FxBuildHasher>,
     stats_disk_loads: AtomicU64,
     stats_cache_hits: AtomicU64,
     stats_evictions: AtomicU64,
@@ -452,14 +602,18 @@ impl IbdUtxoStore {
         value_codec: ValueCodec,
     ) -> Self {
         Self {
-            cache: DashMap::with_shard_amount(128),
+            cache: DashMap::with_hasher_and_shard_amount(FxBuildHasher::default(), 128),
             disk,
             total_utxo_count: AtomicIsize::new(0),
             flush_threshold,
-            pending_shards: (0..PENDING_SHARDS)
+            add_shards: (0..PENDING_SHARDS)
+                .map(|_| Mutex::new(Vec::new()))
+                .collect(),
+            del_shards: (0..PENDING_SHARDS)
                 .map(|_| Mutex::new(Vec::new()))
                 .collect(),
             pending_log_size: AtomicUsize::new(0),
+            pending_add_count_by_height: DashMap::with_hasher(FxBuildHasher::default()),
             memory_only,
             max_entries_cap: AtomicUsize::new(max_entries),
             eviction_strategy,
@@ -468,8 +622,8 @@ impl IbdUtxoStore {
             utxo_disk_commit_height: AtomicU64::new(utxo_disk_commit_through),
             utxo_barrier_mu: Mutex::new(()),
             utxo_barrier_cv: Condvar::new(),
-            in_flight_insertions: DashMap::default(),
-            protected_heights: DashSet::new(),
+            in_flight_insertions: DashMap::with_hasher(FxBuildHasher::default()),
+            protected_heights: DashSet::with_hasher(FxBuildHasher::default()),
             stats_disk_loads: AtomicU64::new(0),
             stats_cache_hits: AtomicU64::new(0),
             stats_evictions: AtomicU64::new(0),
@@ -532,6 +686,148 @@ impl IbdUtxoStore {
         }
     }
 
+    #[inline]
+    fn note_pending_add_pushed(&self, block_height: u64) {
+        if block_height == 0 {
+            return;
+        }
+        self.pending_add_count_by_height
+            .entry(block_height as u32)
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn note_add_shards_drained(&self, entries: &[PendingLogEntry]) {
+        for (_, _, h) in entries {
+            if *h == 0 {
+                continue;
+            }
+            let height = *h as u32;
+            if let Some(entry) = self.pending_add_count_by_height.get(&height) {
+                let prev = entry.fetch_sub(1, Ordering::Relaxed);
+                if prev == 1 {
+                    drop(entry);
+                    self.pending_add_count_by_height.remove(&height);
+                }
+            }
+        }
+    }
+
+    /// Subset of `candidate_heights` with no remaining ADD ops in `add_shards`.
+    fn filter_heights_fully_pending_drained(
+        &self,
+        candidate_heights: FxHashSet<u32>,
+    ) -> FxHashSet<u32> {
+        candidate_heights
+            .into_iter()
+            .filter(|h| {
+                self.pending_add_count_by_height
+                    .get(h)
+                    .map(|c| c.load(Ordering::Relaxed) == 0)
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
+    /// Pending ADD count for height `h` still in `add_shards` (test/diagnostic hook).
+    #[doc(hidden)]
+    pub fn pending_add_count_for_height(&self, height: u32) -> usize {
+        self.pending_add_count_by_height
+            .get(&height)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Disable cache eviction for the duration of the no-LMDB local-replay phase.
+    ///
+    /// In this mode LMDB is empty so any evicted UTXO would be permanently lost (future lookups
+    /// would miss in cache, miss in in_flight, and miss in LMDB). Setting the cap to `usize::MAX`
+    /// (the "eviction disabled" sentinel) also causes `apply_utxo_delta` to skip populating
+    /// `in_flight_insertions`, eliminating the eager-registration memory leak.
+    pub fn set_no_evict_for_local_replay(&self) {
+        self.max_entries_cap.store(usize::MAX, Ordering::Relaxed);
+    }
+
+    /// Re-enable eviction after the local-replay→download transition. Sets the cap to the
+    /// provided value so MemoryGuard's pressure-based tuning can take over immediately.
+    pub fn restore_evict_after_local_replay(&self, cap: usize) {
+        // All UTXOs are now on disk (bulk hydration just ran), so in_flight_insertions
+        // entries from local replay are stale — disk is the source of truth. Clear them
+        // before re-enabling eviction so the inflight DashMap doesn't accumulate millions
+        // of entries that can never be drained (drain_in_flight_for_batch skips when
+        // max_entries == usize::MAX, which was the case during no-LMDB replay).
+        let inflight_count = self.in_flight_insertions.len();
+        if inflight_count > 0 {
+            self.in_flight_insertions.clear();
+            tracing::info!(
+                "[IBD_UTXO_STORE] restore_evict_after_local_replay: cleared {} stale \
+                 in_flight_insertions (all now on disk after bulk hydration)",
+                inflight_count
+            );
+        }
+        self.max_entries_cap.store(cap.max(4_096), Ordering::Relaxed);
+
+        // Compact DashMap backing arrays after the local-replay peak.
+        //
+        // During local replay the UTXO cache grows to 15–20M entries (no eviction cap).
+        // DashMap's hashbrown shards allocate capacity for the peak but never auto-shrink.
+        // After capping at 8M, the 128 shard HashMaps each hold 3–8× their needed capacity,
+        // wasting ~700 MB of table memory and keeping ~10+ GB of Arc<UTXO> mimalloc pages
+        // resident (fragmented pages with freed slots can't be reclaimed until all live
+        // objects in the page are gone — shrink_to_fit compacts live entries into fewer
+        // pages, allowing the rest to be decommitted by mi_collect).
+        //
+        // This is a one-time cost of ~1–2s at the transition (128 shard rehashes of 100k
+        // entries each). The RSS reduction is typically 1–3 GB from table alone, plus
+        // additional mimalloc page decommit from the mi_collect below.
+        let cache_cap_before = self.cache.capacity();
+        let cache_len = self.cache.len();
+        self.cache.shrink_to_fit();
+        let inflight_cap_before = self.in_flight_insertions.capacity();
+        self.in_flight_insertions.shrink_to_fit();
+        tracing::info!(
+            "[IBD_UTXO_STORE] restore_evict_after_local_replay: shrink_to_fit complete \
+             cache cap {} → {} (len={}), inflight cap {} → {}",
+            cache_cap_before,
+            self.cache.capacity(),
+            cache_len,
+            inflight_cap_before,
+            self.in_flight_insertions.capacity(),
+        );
+
+        // Return freed mimalloc pages to the OS immediately. Without this, the freed
+        // DashMap slot memory stays in mimalloc thread-local freelists and the kernel
+        // sees no RSS drop. mi_collect(true) forces a global heap scan and decommits
+        // empty segments via madvise(MADV_DONTNEED) (MIMALLOC_PURGE_DECOMMITS=1).
+        #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
+        unsafe {
+            libmimalloc_sys::mi_collect(true);
+        }
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+
+    /// Remove all keys in `batch` from `in_flight_insertions`.
+    ///
+    /// In the no-LMDB local-replay mode the retire loop discards `PendingFlushPackage`s without
+    /// writing to disk, so the normal LMDB-write path that clears `in_flight_insertions` never
+    /// runs. Without this call, workers eagerly inserting into `in_flight_insertions` (in
+    /// `apply_utxo_delta`) would cause unbounded growth — ~20 M entries / 5 GB by h=390k.
+    ///
+    /// NOTE: We must NOT skip this when `max_entries_effective() == usize::MAX`. That case is
+    /// exactly no-LMDB local replay, where the flush path never runs and draining here is the
+    /// only mechanism preventing unbounded `in_flight_insertions` growth.
+    pub fn drain_in_flight_for_batch(&self, batch: &PendingFlushBatch) {
+        if self.in_flight_insertions.is_empty() {
+            return;
+        }
+        for (key, _) in batch {
+            self.in_flight_insertions.remove(key);
+        }
+    }
+
     /// Shrink or grow the in-memory UTXO cache cap while IBD runs (pressure-driven).
     /// No-op when eviction is disabled (`usize::MAX`) or store is memory-only test stub.
     pub fn tune_max_entries_for_pressure(&self, new_cap: usize, current_height: u64) {
@@ -543,7 +839,68 @@ impl IbdUtxoStore {
             return;
         }
         let new_cap = new_cap.max(4_096);
+
+        // ── Unconditional physical-overalloc sweep ───────────────────────────────
+        // Rate-limited to once per 1 000 heights (O(N) rehash is ~50 ms at 8 M entries
+        // — negligible at 300+ BPS, but firing every block would be ~15 ms/s of wasted
+        // CPU in the retire hot path).
+        //
+        // Catches the scenario where MemoryGuard nudges the logical cap by small
+        // increments on every call (so new_cap != old is always true and the stable-cap
+        // overalloc check below is never reached) while the physical DashMap capacity
+        // sits 3-4× above the live entry count from a past burst insertion.  At h=447k
+        // in prior sessions cache_cap jumped to 30 M with only 8 M live entries and
+        // never shrank, wasting ~14 GB of backing DashMap structure.
+        if current_height % 1_000 == 0 {
+            let physical_cap = self.cache.capacity();
+            let live_len = self.cache.len();
+            if physical_cap > live_len.saturating_mul(4)
+                && physical_cap.saturating_sub(live_len) > 10_000_000
+            {
+                tracing::info!(
+                    "[IBD_UTXO_STORE] shrink_to_fit (unconditional overalloc): \
+                     cap={} len={} logical_max={}",
+                    physical_cap, live_len, new_cap
+                );
+                self.cache.shrink_to_fit();
+            }
+        }
+
         if new_cap == old {
+            // Even if the logical cap hasn't changed, the physical DashMap backing
+            // may be severely over-allocated (cap >> len) from a past peak. Check
+            // and shrink if so. This fires on every call where cap is stable, so
+            // guard with a 2M-slot gap to avoid shrink_to_fit on every iteration.
+            let cache_cap = self.cache.capacity();
+            let cache_len = self.cache.len();
+            if cache_cap > cache_len.saturating_mul(2)
+                && cache_cap.saturating_sub(cache_len) > 2_000_000
+            {
+                tracing::info!(
+                    "[IBD_UTXO_STORE] shrink_to_fit (overalloc/stable): cap={} len={} max={}",
+                    cache_cap, cache_len, old
+                );
+                self.cache.shrink_to_fit();
+            }
+            // `in_flight_insertions` peaks under near-eviction pressure then stays at that
+            // capacity forever (it is only shrunk at local-replay end). At h=420k+ the map
+            // can balloon to 7M+ capacity with only ~800k live entries — ~6 GB wasted DashMap
+            // structure that mimalloc cannot return to the OS while the backing arrays are held.
+            // Use a 4× overalloc threshold (looser than the 2× for cache, because inflight
+            // turnover is high and frequent shrink_to_fit during active insertion spikes would
+            // cause excessive rehash churn). Guard with 1M-slot minimum gap.
+            let inflight_cap = self.in_flight_insertions.capacity();
+            let inflight_len = self.in_flight_insertions.len();
+            if inflight_cap > inflight_len.saturating_mul(4)
+                && inflight_cap.saturating_sub(inflight_len) > 1_000_000
+            {
+                tracing::info!(
+                    "[IBD_UTXO_STORE] shrink_to_fit (inflight overalloc/stable): \
+                     cap={} len={} max={}",
+                    inflight_cap, inflight_len, old
+                );
+                self.in_flight_insertions.shrink_to_fit();
+            }
             return;
         }
         self.max_entries_cap.store(new_cap, Ordering::Relaxed);
@@ -570,10 +927,30 @@ impl IbdUtxoStore {
             // condition, so the DashMap kept capacity for the peak entry count indefinitely —
             // wasting 100–200 MB of RSS even after the logical cache shrank substantially.
             let cache_len = self.cache.len();
+            let cache_cap = self.cache.capacity();
             let large_cut = new_cap < old * 8 / 10;
-            let live_below_cap = new_cap < old && cache_len < new_cap * 7 / 10;
+            let live_below_cap = cache_len < new_cap * 7 / 10;
             if large_cut || live_below_cap {
+                tracing::info!(
+                    "[IBD_UTXO_STORE] shrink_to_fit (cap-driven): cap={} len={} new_max={} \
+                     (large_cut={} live_below_cap={})",
+                    cache_cap, cache_len, new_cap, large_cut, live_below_cap
+                );
                 self.cache.shrink_to_fit();
+            }
+            // Shrink inflight whenever the logical cap drops — lower cap means fewer entries
+            // will be protected, so prior inflight capacity is no longer needed.
+            let inflight_cap = self.in_flight_insertions.capacity();
+            let inflight_len = self.in_flight_insertions.len();
+            if inflight_cap > inflight_len.saturating_mul(4)
+                && inflight_cap.saturating_sub(inflight_len) > 500_000
+            {
+                tracing::info!(
+                    "[IBD_UTXO_STORE] shrink_to_fit (inflight cap-driven): \
+                     cap={} len={} new_max={}",
+                    inflight_cap, inflight_len, new_cap
+                );
+                self.in_flight_insertions.shrink_to_fit();
             }
         }
     }
@@ -581,6 +958,14 @@ impl IbdUtxoStore {
     #[inline]
     fn next_cache_generation(&self) -> u64 {
         self.cache_generation.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Claim `count` consecutive generation values in a single atomic operation.
+    /// Returns the first value; caller assigns [base, base+count) to individual entries.
+    /// Reduces contention from N atomic fetch_adds (one per UTXO) to 1 per block.
+    #[inline]
+    fn claim_cache_generations(&self, count: usize) -> u64 {
+        self.cache_generation.fetch_add(count as u64, Ordering::Relaxed)
     }
 
     #[inline]
@@ -594,6 +979,33 @@ impl IbdUtxoStore {
                 block_height,
             },
         );
+    }
+
+    /// Insert all entries in `additions` into the cache with a single atomic generation bump.
+    /// Entries within the same block share a generation range, which is fine for eviction
+    /// (granularity is block-level, not per-UTXO). Reduces worker-path atomic traffic
+    /// from O(outputs) to O(1) per block per worker.
+    #[inline]
+    fn cache_put_batch(
+        &self,
+        additions: &rustc_hash::FxHashMap<blvm_protocol::OutPoint, Arc<UTXO>>,
+        block_height: u32,
+    ) {
+        if additions.is_empty() {
+            return;
+        }
+        let base_gen = self.claim_cache_generations(additions.len());
+        for (i, (op, arc)) in additions.iter().enumerate() {
+            let key = outpoint_to_key(op);
+            self.cache.insert(
+                key,
+                UtxoCacheSlot {
+                    generation: base_gen + i as u64,
+                    utxo: Arc::clone(arc),
+                    block_height,
+                },
+            );
+        }
     }
 
     /// Called by the dedicated flush worker after a successful `flush_pending_batch`.
@@ -660,6 +1072,12 @@ impl IbdUtxoStore {
 
     pub fn pending_len(&self) -> usize {
         self.pending_log_size.load(Ordering::Relaxed)
+    }
+
+    /// Number of entries currently resident in the in-memory UTXO cache.
+    /// Each entry costs ~216B on average (40B key + Arc<UTXO> ~176B).
+    pub fn cache_len(&self) -> usize {
+        self.cache.len()
     }
 
     /// Pending-log flush threshold (ops) before retire considers a batch due.
@@ -969,8 +1387,17 @@ impl IbdUtxoStore {
         if pairs.is_empty() {
             return;
         }
-        for &(key, ref arc) in pairs {
-            self.cache_put(key, Arc::clone(arc), UNPROTECTED_HEIGHT);
+        // Claim all generations in one atomic fetch_add instead of one per entry.
+        let base_gen = self.claim_cache_generations(pairs.len());
+        for (i, &(key, ref arc)) in pairs.iter().enumerate() {
+            self.cache.insert(
+                key,
+                UtxoCacheSlot {
+                    generation: base_gen + i as u64,
+                    utxo: Arc::clone(arc),
+                    block_height: UNPROTECTED_HEIGHT,
+                },
+            );
         }
         self.maybe_evict_tl();
     }
@@ -1186,10 +1613,9 @@ impl IbdUtxoStore {
         // Register the height as protected BEFORE inserting into the cache so that eviction
         // scans never observe a cache entry at height H without H being in protected_heights.
         self.protected_heights.insert(h);
-        for (op, arc) in additions.iter() {
-            let key = outpoint_to_key(op);
-            self.cache_put(key, Arc::clone(arc), h);
-        }
+        // Use batch generation claim: one atomic fetch_add for all outputs in this block
+        // instead of one per UTXO. Eviction granularity stays at block level.
+        self.cache_put_batch(additions, h);
     }
 
     pub fn apply_sync_batch(&self, batch: &SyncBatch, block_height: u64) {
@@ -1270,14 +1696,28 @@ impl IbdUtxoStore {
         }
         add_scratch.clear();
         if additions_already_in_cache {
-            let bounded = self.max_entries_effective() != usize::MAX;
+            let max_eff = self.max_entries_effective();
+            let bounded = max_eff != usize::MAX;
+            // Only populate in_flight_insertions when the cache is near its eviction threshold.
+            // in_flight_insertions is only needed as a fallback for cache misses during the
+            // pending→flush window — if the cache is well below capacity, eviction cannot fire
+            // and every pending UTXO is already reachable via the cache. Populating inflight
+            // unconditionally duplicates 8-16 M entries in memory (one Arc per UTXO in both
+            // cache and inflight), adding GBs of DashMap overhead and causing OOM at higher
+            // block heights where checkpoint stalls let retire threads race ahead.
+            let near_eviction = bounded && {
+                let cache_len = self.cache.len();
+                // Trigger inflight population only when within 20% of the cap; below that,
+                // no eviction can occur so inflight lookups will never be needed.
+                cache_len.saturating_add(cache_len / 4) >= max_eff
+            };
             self.push_to_pending_shards(
                 del_scratch
                     .iter()
                     .map(|&k| (k, None))
                     .chain(delta.additions.iter().map(|(op, arc)| {
                         let key = outpoint_to_key(op);
-                        if bounded {
+                        if near_eviction {
                             self.in_flight_insertions
                                 .entry(key)
                                 .or_insert_with(|| Arc::clone(arc));
@@ -1297,11 +1737,16 @@ impl IbdUtxoStore {
                 self.cache_put(key, Arc::clone(arc), h);
                 add_scratch.push((key, Arc::clone(arc)));
             }
-            if self.max_entries_effective() != usize::MAX && !add_scratch.is_empty() {
-                for (key, arc) in add_scratch.iter() {
-                    self.in_flight_insertions
-                        .entry(*key)
-                        .or_insert_with(|| Arc::clone(arc));
+            let max_eff2 = self.max_entries_effective();
+            if max_eff2 != usize::MAX && !add_scratch.is_empty() {
+                let cache_len2 = self.cache.len();
+                let near_eviction2 = cache_len2.saturating_add(cache_len2 / 4) >= max_eff2;
+                if near_eviction2 {
+                    for (key, arc) in add_scratch.iter() {
+                        self.in_flight_insertions
+                            .entry(*key)
+                            .or_insert_with(|| Arc::clone(arc));
+                    }
                 }
             }
             self.push_to_pending_shards(
@@ -1328,43 +1773,58 @@ impl IbdUtxoStore {
         }
     }
 
-    /// Push (key, value) pairs to the sharded pending log. Items are bucketed by
-    /// `pending_shard_idx(key)` so each worker contends only on its target shards.
-    /// `pending_log_size` is updated once at the end with the total count.
+    /// Push (key, value) pairs to the sharded pending log. ADDs go to `add_shards`, DELs to
+    /// `del_shards`, so `drain_pending_adds_only` can drain in O(N_adds) without scanning
+    /// accumulated DEL entries. Items are bucketed by `pending_shard_idx(key)`.
     fn push_to_pending_shards<I>(&self, items: I, block_height: u64)
     where
         I: IntoIterator<Item = (OutPointKey, PendingValue)>,
     {
-        // Stack-allocated fixed-size array of small Vecs avoids a heap alloc when the bucket
-        // count is small (most blocks have <16k ops total → ~1k per shard).
-        let mut buckets: [Vec<PendingLogEntry>; PENDING_SHARDS] = Default::default();
+        // Stack-allocated buckets: one set for adds, one for dels. Vec::new() is zero-cost
+        // (no heap alloc until first push), and most blocks need <16k ops total.
+        let mut add_buckets: [Vec<PendingLogEntry>; PENDING_SHARDS] = Default::default();
+        let mut del_buckets: [Vec<PendingLogEntry>; PENDING_SHARDS] = Default::default();
         let mut total = 0usize;
         for (key, val) in items {
             let s = pending_shard_idx(&key);
-            buckets[s].push((key, val, block_height));
+            if val.is_some() {
+                add_buckets[s].push((key, val, block_height));
+                self.note_pending_add_pushed(block_height);
+            } else {
+                del_buckets[s].push((key, val, block_height));
+            }
             total += 1;
         }
         if total == 0 {
             return;
         }
-        for (i, bucket) in buckets.iter_mut().enumerate() {
-            if bucket.is_empty() {
-                continue;
+        for i in 0..PENDING_SHARDS {
+            if !add_buckets[i].is_empty() {
+                self.add_shards[i].lock().expect("add shard lock").append(&mut add_buckets[i]);
             }
-            let mut shard = self.pending_shards[i].lock().expect("pending shard lock");
-            // append() moves elements; bucket becomes empty afterwards.
-            shard.append(bucket);
+            if !del_buckets[i].is_empty() {
+                self.del_shards[i].lock().expect("del shard lock").append(&mut del_buckets[i]);
+            }
         }
         self.pending_log_size.fetch_add(total, Ordering::Relaxed);
     }
 
-    /// Drain all pending shards into a single Vec, briefly locking each shard. Used by
+    /// Drain all pending shards (both add_shards and del_shards) into a single Vec. Used by
     /// shutdown final drain only (`take_remaining_flush_package`).
     fn drain_all_pending_shards(&self) -> Vec<PendingLogEntry> {
         let approx = self.pending_log_size.load(Ordering::Relaxed);
         let mut all = Vec::with_capacity(approx);
-        for shard in self.pending_shards.iter() {
-            let mut s = shard.lock().expect("pending shard lock");
+        let mut add_drained: Vec<PendingLogEntry> = Vec::new();
+        for shard in self.add_shards.iter() {
+            let mut s = shard.lock().expect("add shard lock");
+            if !s.is_empty() {
+                add_drained.append(&mut *s);
+            }
+        }
+        self.note_add_shards_drained(&add_drained);
+        all.append(&mut add_drained);
+        for shard in self.del_shards.iter() {
+            let mut s = shard.lock().expect("del shard lock");
             if !s.is_empty() {
                 all.append(&mut *s);
             }
@@ -1385,8 +1845,8 @@ impl IbdUtxoStore {
     /// pipeline that is *not* strictly height-ordered before `apply_utxo_delta`).
     ///
     /// **Parallel IBD:** the feeder applies [`Self::apply_utxo_delta`] in **strict ascending
-    /// block height** (`OrderedReadyBridge`), so ops are appended to `pending_shards` in consensus
-    /// order. Production retire therefore uses [`Self::maybe_take_flush_batch`] /
+    /// block height** (`OrderedReadyBridge`), so ops are appended to `add_shards`/`del_shards`
+    /// in consensus order. Production retire therefore uses [`Self::maybe_take_flush_batch`] /
     /// [`Self::take_flush_batch_force`] (`max_block_height_inclusive = u64::MAX`): draining the
     /// full log is safe and avoids scanning retained “future-height” rows on every tick when
     /// retire lags validation.
@@ -1401,6 +1861,7 @@ impl IbdUtxoStore {
         // right order-of-magnitude for the expected drain count.
         let mut all = Vec::with_capacity(approx);
         let mut drained = 0usize;
+        let mut add_drained: Vec<PendingLogEntry> = Vec::new();
         // Fast path when validation is far ahead of retire (workers fill shards with
         // entries for heights far above `max_block_height_inclusive`). The previous
         // implementation called `s.drain(..)` to empty the shard and then rebuilt the
@@ -1413,8 +1874,28 @@ impl IbdUtxoStore {
         // unavoidable (we must inspect every entry's height). No realloc, no second `Vec`.
         // Eviction order is disrupted but `pack_flush_package` re-sorts by key + height
         // anyway, so order doesn't matter to correctness.
-        for shard in self.pending_shards.iter() {
-            let mut s = shard.lock().expect("pending shard lock");
+        // Drain add_shards first (track for pending_add_count_by_height), then del_shards.
+        for shard in self.add_shards.iter() {
+            let mut s = shard.lock().expect("add shard lock");
+            if s.is_empty() {
+                continue;
+            }
+            let mut i = 0;
+            while i < s.len() {
+                if s[i].2 <= max_block_height_inclusive {
+                    add_drained.push(s.swap_remove(i));
+                    drained += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if !add_drained.is_empty() {
+            self.note_add_shards_drained(&add_drained);
+            all.extend(add_drained);
+        }
+        for shard in self.del_shards.iter() {
+            let mut s = shard.lock().expect("del shard lock");
             if s.is_empty() {
                 continue;
             }
@@ -1431,7 +1912,125 @@ impl IbdUtxoStore {
         let prev = self.pending_log_size.load(Ordering::Relaxed);
         self.pending_log_size
             .store(prev.saturating_sub(drained), Ordering::Relaxed);
+        if drained > 0 {
+            tracing::warn!(
+                "[DRAIN_FORCE] drain_pending_through_height(max_h={max_block_height_inclusive}): \
+                 drained={drained} (add+del combined, NO CAP)",
+            );
+        }
         all
+    }
+
+    /// Capped variant of `take_flush_batch_force_through`: drains at most `max_entries` ops
+    /// with block height <= `max_block_height_inclusive` from both add_shards and del_shards.
+    /// Call in a loop until it returns None to fully drain the backlog without one huge batch.
+    pub fn take_flush_batch_force_through_capped(
+        &self,
+        max_block_height_inclusive: u64,
+        max_entries: usize,
+    ) -> Option<PendingFlushPackage> {
+        if self.all_pending_shards_empty() {
+            return None;
+        }
+        let raw = self.drain_pending_through_height_capped(max_block_height_inclusive, max_entries);
+        let pkg = pack_flush_package(self, raw)?;
+        self.register_in_flight(&pkg);
+        Some(pkg)
+    }
+
+    fn drain_pending_through_height_capped(
+        &self,
+        max_block_height_inclusive: u64,
+        max_entries: usize,
+    ) -> Vec<PendingLogEntry> {
+        let mut all = Vec::with_capacity(max_entries.min(65_536));
+        let mut drained = 0usize;
+        let mut add_drained: Vec<PendingLogEntry> = Vec::new();
+        for shard in self.add_shards.iter() {
+            if drained >= max_entries {
+                break;
+            }
+            let mut s = shard.lock().expect("add shard lock");
+            if s.is_empty() {
+                continue;
+            }
+            let mut i = 0;
+            while i < s.len() && drained < max_entries {
+                if s[i].2 <= max_block_height_inclusive {
+                    add_drained.push(s.swap_remove(i));
+                    drained += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if !add_drained.is_empty() {
+            self.note_add_shards_drained(&add_drained);
+            all.extend(add_drained);
+        }
+        for shard in self.del_shards.iter() {
+            if drained >= max_entries {
+                break;
+            }
+            let mut s = shard.lock().expect("del shard lock");
+            if s.is_empty() {
+                continue;
+            }
+            let mut i = 0;
+            while i < s.len() && drained < max_entries {
+                if s[i].2 <= max_block_height_inclusive {
+                    all.push(s.swap_remove(i));
+                    drained += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if drained > 0 {
+            self.pending_log_size
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+                    Some(prev.saturating_sub(drained))
+                })
+                .ok();
+            tracing::debug!(
+                "[DRAIN_FORCE_CAPPED] max_h={max_block_height_inclusive} max_entries={max_entries} drained={drained} cap_hit={}",
+                drained >= max_entries
+            );
+        }
+        all
+    }
+
+    /// Discard all DEL tombstones with `block_height <= max_block_height_inclusive` from
+    /// `del_shards` WITHOUT writing them to LMDB. Used when `BLVM_IBD_SKIP_DEL_LMDB=1`:
+    /// DEL tombstones serve only as in-memory cache invalidation signals, but they
+    /// accumulate in `del_shards` indefinitely since `ibd_flush_del_backlog_through_watermark`
+    /// is skipped. Without this purge, `pending_len()` grows to millions of entries,
+    /// causing `idle_flush_A/B` spam and wasting ~400MB+ of RAM.
+    pub fn discard_del_backlog_through_watermark(&self, max_block_height_inclusive: u64) -> usize {
+        let mut discarded = 0usize;
+        for shard in self.del_shards.iter() {
+            let mut s = shard.lock().expect("del shard lock");
+            if s.is_empty() {
+                continue;
+            }
+            let mut i = 0;
+            while i < s.len() {
+                if s[i].2 <= max_block_height_inclusive {
+                    s.swap_remove(i);
+                    discarded += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if discarded > 0 {
+            self.pending_log_size
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+                    Some(prev.saturating_sub(discarded))
+                })
+                .ok();
+        }
+        discarded
     }
 
     /// True iff every shard log is empty AND the global counter is zero. Used by final-drain
@@ -1481,7 +2080,7 @@ impl IbdUtxoStore {
             return None;
         }
         let raw = self.drain_pending_through_height(max_block_height_inclusive);
-        let pkg = pack_flush_package(raw)?;
+        let pkg = pack_flush_package(self, raw)?;
         self.register_in_flight(&pkg);
         Some(pkg)
     }
@@ -1500,7 +2099,9 @@ impl IbdUtxoStore {
             return None;
         }
         let raw = self.drain_pending_adds_only();
-        let pkg = pack_flush_package(raw)?;
+        // ADDs are duplicate-free by Bitcoin consensus; use the optimized adds-only packer
+        // (skips dedupe pass, sorts by key only — saves ~20% retire CPU vs pack_flush_package).
+        let pkg = pack_flush_package_adds_only(self, raw)?;
         self.register_in_flight(&pkg);
         Some(pkg)
     }
@@ -1518,7 +2119,7 @@ impl IbdUtxoStore {
             return None;
         }
         let raw = self.drain_pending_through_height(max_block_height_inclusive);
-        let pkg = pack_flush_package(raw)?;
+        let pkg = pack_flush_package(self, raw)?;
         self.register_in_flight(&pkg);
         Some(pkg)
     }
@@ -1534,18 +2135,116 @@ impl IbdUtxoStore {
     /// until the next durable checkpoint (Phase 3) guarantees they are only persisted after
     /// `persist_ibd_utxo_flush_checkpoint` has advanced the watermark past their spend height.
     fn drain_pending_adds_only(&self) -> Vec<PendingLogEntry> {
-        let approx = self.pending_log_size.load(Ordering::Relaxed);
-        let mut all = Vec::with_capacity(approx);
+        // With split add_shards/del_shards, all entries in add_shards are ADDs by construction.
+        // No per-entry filtering needed — drain the add_shards content directly.
+        // This is O(N_adds) rather than O(N_adds + N_dels_accumulated), eliminating the
+        // growing scan cost that pinned the retire thread at ~88% CPU at h=500k+.
+        //
+        // BATCH CAP: at SegWit heights (~h=600k+) the LMDB B-tree is 25+ GB on disk.
+        // Unbounded drain causes packages of 1.2-1.4M ops which take 15-20 seconds each
+        // to write to LMDB. While the durability thread is busy, the channel fills (4 slots),
+        // the retire loop blocks, and workers keep inserting — causing the pending log to
+        // accumulate 9M+ entries and pushing anon-RSS to 75 GB → OOM.
+        // Capping at 100k entries keeps each package to ~20 MB, checkpoints to ~1-2 seconds,
+        // and channel-full blocks short enough that the pending log stays bounded.
+        //
+        // Adaptive cap: scale with pending queue depth so the durability thread catches up
+        // faster during BPS bursts that temporarily outpace the fixed 100k drain.
+        // Hard ceiling is 400k (~2-3s per transaction on a 15 GB LMDB) to avoid starving
+        // the retirement channel.  Env override is treated as a hard ceiling, not a floor.
+        let pending_depth = self.pending_log_size.load(Ordering::Relaxed);
+        let max_drain = Self::adaptive_drain_cap_for_pending(pending_depth);
+        let mut all = Vec::new();
         let mut drained = 0usize;
-        for shard in self.pending_shards.iter() {
-            let mut s = shard.lock().expect("pending shard lock");
+        'outer: for shard in self.add_shards.iter() {
+            if drained >= max_drain {
+                break;
+            }
+            let mut s = shard.lock().expect("add shard lock");
+            if s.is_empty() {
+                continue;
+            }
+            let remaining_budget = max_drain - drained;
+            if s.len() <= remaining_budget {
+                drained += s.len();
+                all.append(&mut *s);
+            } else {
+                // Partial drain: take first `remaining_budget` entries, leave the rest.
+                let taken: Vec<PendingLogEntry> = s.drain(..remaining_budget).collect();
+                drained += taken.len();
+                all.extend(taken);
+                break 'outer;
+            }
+        }
+        if drained > 0 {
+            self.note_add_shards_drained(&all);
+            self.pending_log_size
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+                    Some(prev.saturating_sub(drained))
+                })
+                .ok();
+        }
+        let remaining = self.pending_log_size.load(std::sync::atomic::Ordering::Relaxed);
+        if drained > 0 {
+            tracing::debug!(
+                "[DRAIN_ADDS] drained={drained} cap_hit={} remaining_pending={remaining}",
+                drained >= max_drain
+            );
+        }
+        all
+    }
+
+    /// Adaptive 100k–400k by pending depth; `BLVM_IBD_DRAIN_CAP` is a hard ceiling (min), not replacement.
+    pub fn adaptive_drain_cap(&self) -> usize {
+        Self::adaptive_drain_cap_for_pending(self.pending_log_size.load(Ordering::Relaxed))
+    }
+
+    fn adaptive_drain_cap_for_pending(pending_depth: usize) -> usize {
+        let adaptive = if pending_depth > 2_000_000 {
+            400_000
+        } else if pending_depth > 1_000_000 {
+            300_000
+        } else if pending_depth > 500_000 {
+            200_000
+        } else {
+            100_000
+        };
+        std::env::var("BLVM_IBD_DRAIN_CAP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(|env_cap| adaptive.min(env_cap))
+            .unwrap_or(adaptive)
+    }
+
+    /// True when any ADD in `add_shards` has block height `<= max_h`.
+    pub fn has_pending_adds_at_or_below(&self, max_h: u64) -> bool {
+        for shard in self.add_shards.iter() {
+            let s = shard.lock().expect("add shard lock");
+            if s.iter().any(|(_, _, h)| *h <= max_h) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn drain_add_shards_through_height_capped(
+        &self,
+        max_block_height_inclusive: u64,
+        max_entries: usize,
+    ) -> Vec<PendingLogEntry> {
+        let mut all = Vec::with_capacity(max_entries.min(65_536));
+        let mut drained = 0usize;
+        for shard in self.add_shards.iter() {
+            if drained >= max_entries {
+                break;
+            }
+            let mut s = shard.lock().expect("add shard lock");
             if s.is_empty() {
                 continue;
             }
             let mut i = 0;
-            while i < s.len() {
-                // PendingValue = Option<Arc<UTXO>>; Some = ADD, None = DEL
-                if s[i].1.is_some() {
+            while i < s.len() && drained < max_entries {
+                if s[i].2 <= max_block_height_inclusive {
                     all.push(s.swap_remove(i));
                     drained += 1;
                 } else {
@@ -1553,10 +2252,85 @@ impl IbdUtxoStore {
                 }
             }
         }
-        let prev = self.pending_log_size.load(Ordering::Relaxed);
-        self.pending_log_size
-            .store(prev.saturating_sub(drained), Ordering::Relaxed);
+        if drained > 0 {
+            self.note_add_shards_drained(&all);
+            self.pending_log_size
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+                    Some(prev.saturating_sub(drained))
+                })
+                .ok();
+        }
         all
+    }
+
+    fn drain_del_shards_through_height_capped(
+        &self,
+        max_block_height_inclusive: u64,
+        max_entries: usize,
+    ) -> Vec<PendingLogEntry> {
+        let mut all = Vec::with_capacity(max_entries.min(65_536));
+        let mut drained = 0usize;
+        for shard in self.del_shards.iter() {
+            if drained >= max_entries {
+                break;
+            }
+            let mut s = shard.lock().expect("del shard lock");
+            if s.is_empty() {
+                continue;
+            }
+            let mut i = 0;
+            while i < s.len() && drained < max_entries {
+                if s[i].2 <= max_block_height_inclusive {
+                    all.push(s.swap_remove(i));
+                    drained += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if drained > 0 {
+            self.pending_log_size
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+                    Some(prev.saturating_sub(drained))
+                })
+                .ok();
+        }
+        all
+    }
+
+    /// Capped adds-only drain for heights `<= max_h` (A1 leftover-add sync before del_backlog).
+    pub fn take_flush_batch_adds_only_through_capped(
+        &self,
+        max_block_height_inclusive: u64,
+        max_entries: usize,
+    ) -> Option<PendingFlushPackage> {
+        let raw =
+            self.drain_add_shards_through_height_capped(max_block_height_inclusive, max_entries);
+        if raw.is_empty() {
+            return None;
+        }
+        let pkg = pack_flush_package_adds_only(self, raw)?;
+        self.register_in_flight(&pkg);
+        Some(pkg)
+    }
+
+    /// Capped del-only drain for heights `<= max_h` (del_backlog loop).
+    pub fn take_flush_batch_dels_only_through_capped(
+        &self,
+        max_block_height_inclusive: u64,
+        max_entries: usize,
+    ) -> Option<PendingFlushPackage> {
+        if self.pending_log_size.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let raw =
+            self.drain_del_shards_through_height_capped(max_block_height_inclusive, max_entries);
+        if raw.is_empty() {
+            return None;
+        }
+        let pkg = pack_flush_package_dels_only(self, raw)?;
+        self.register_in_flight(&pkg);
+        Some(pkg)
     }
 
     /// Force-flush only ADD ops, leaving DEL (spend) ops in the pending log for the next
@@ -1567,7 +2341,7 @@ impl IbdUtxoStore {
             return None;
         }
         let raw = self.drain_pending_adds_only();
-        let pkg = pack_flush_package(raw)?;
+        let pkg = pack_flush_package_adds_only(self, raw)?;
         self.register_in_flight(&pkg);
         Some(pkg)
     }
@@ -1578,7 +2352,7 @@ impl IbdUtxoStore {
             return None;
         }
         let raw = self.drain_all_pending_shards();
-        let pkg = pack_flush_package(raw)?;
+        let pkg = pack_flush_package(self, raw)?;
         self.register_in_flight(&pkg);
         Some(pkg)
     }
@@ -1846,27 +2620,70 @@ impl IbdUtxoStore {
                     }
                 }
             }
-            let mut b = self.disk.batch()?;
-            let mut ops_in_batch = 0usize;
-            for (key, value_opt) in chunk {
-                match value_opt {
-                    Some((start, len)) => {
-                        if filter != FlushFilter::DelsOnly {
-                            b.put(key.as_slice(), &slab[*start as usize..][..*len as usize]);
-                            ops_in_batch += 1;
+            // Fast path: when the underlying tree is Heed3, write directly into one write
+            // transaction per chunk without the intermediate Vec<(Vec<u8>, Option<Vec<u8>>)>
+            // buffer that BatchWriter::put allocates. At 200k ops/chunk this removes ~50-100 MB
+            // of redundant heap copies per batch, reducing GC pressure and flush latency.
+            #[cfg(feature = "heed3")]
+            let ops_in_batch = if let Some(heed3_tree) = self.disk.as_heed3_tree() {
+                let iter = chunk.iter().filter_map(|(key, value_opt)| {
+                    match value_opt {
+                        Some((start, len)) => {
+                            if filter == FlushFilter::DelsOnly { return None; }
+                            Some((key.as_slice(), Some(&slab[*start as usize..][..*len as usize])))
+                        }
+                        None => {
+                            if filter == FlushFilter::AddsOnly { return None; }
+                            Some((key.as_slice(), None))
                         }
                     }
-                    None => {
-                        if filter != FlushFilter::AddsOnly {
-                            b.delete(key.as_slice());
-                            ops_in_batch += 1;
+                });
+                heed3_tree.write_slice_batch(iter)?
+            } else {
+                let mut b = self.disk.batch()?;
+                let mut n = 0usize;
+                for (key, value_opt) in chunk {
+                    match value_opt {
+                        Some((start, len)) => {
+                            if filter != FlushFilter::DelsOnly {
+                                b.put(key.as_slice(), &slab[*start as usize..][..*len as usize]);
+                                n += 1;
+                            }
+                        }
+                        None => {
+                            if filter != FlushFilter::AddsOnly {
+                                b.delete(key.as_slice());
+                                n += 1;
+                            }
                         }
                     }
                 }
-            }
-            if ops_in_batch > 0 {
-                b.commit_no_wal()?;
-            }
+                if n > 0 { b.commit_no_wal()?; }
+                n
+            };
+            #[cfg(not(feature = "heed3"))]
+            let ops_in_batch = {
+                let mut b = self.disk.batch()?;
+                let mut n = 0usize;
+                for (key, value_opt) in chunk {
+                    match value_opt {
+                        Some((start, len)) => {
+                            if filter != FlushFilter::DelsOnly {
+                                b.put(key.as_slice(), &slab[*start as usize..][..*len as usize]);
+                                n += 1;
+                            }
+                        }
+                        None => {
+                            if filter != FlushFilter::AddsOnly {
+                                b.delete(key.as_slice());
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+                if n > 0 { b.commit_no_wal()?; }
+                n
+            };
             total_flushed += ops_in_batch;
         }
         if total_flushed == 0 {
@@ -1889,25 +2706,32 @@ impl IbdUtxoStore {
             }
         }
 
-        if self.max_entries_effective() != usize::MAX
-            && self.cache.len() > self.max_entries_effective()
-        {
-            let mut evicted = 0;
-            for (key, value_opt) in pkg.rows.iter() {
-                if value_opt.is_some() {
-                    if self.cache.remove(key).is_some() {
-                        evicted += 1;
-                    }
-                    if self.cache.len() <= self.max_entries_effective() {
+        let max_eff = self.max_entries_effective();
+        if max_eff != usize::MAX {
+            let cache_len = self.cache.len();
+            if cache_len > max_eff {
+                // Use a local countdown to avoid calling DashMap::len() (O(shards)) in the
+                // inner loop. cache_len is a snapshot; actual count may be slightly off due
+                // to concurrent inserts, but the eviction target is approximate anyway.
+                let mut to_evict = cache_len.saturating_sub(max_eff);
+                let mut evicted = 0usize;
+                for (key, value_opt) in pkg.rows.iter() {
+                    if to_evict == 0 {
                         break;
                     }
+                    if value_opt.is_some() {
+                        if self.cache.remove(key).is_some() {
+                            evicted += 1;
+                            to_evict = to_evict.saturating_sub(1);
+                        }
+                    }
                 }
-            }
-            if evicted > 0 {
-                debug!(
-                    "IbdUtxoStore: evicted {} flushed entries (cache over limit)",
-                    evicted
-                );
+                if evicted > 0 {
+                    debug!(
+                        "IbdUtxoStore: evicted {} flushed entries (cache over limit)",
+                        evicted
+                    );
+                }
             }
         }
         Ok(total_flushed)
@@ -1915,6 +2739,19 @@ impl IbdUtxoStore {
 
     pub fn len(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Total capacity (across all shards) of the backing hashbrown tables.
+    /// After peak-then-eviction phases, this stays at the high-water-mark until process exit
+    /// (DashMap tables do not shrink). Each slot costs sizeof(K)+sizeof(V) = 40+24 = 64 bytes
+    /// plus 1 byte of control metadata, so: capacity × 65 ≈ bytes allocated in DashMap tables.
+    pub fn cache_capacity(&self) -> usize {
+        self.cache.capacity()
+    }
+
+    /// Total capacity of in_flight_insertions DashMap (same caveat: does not shrink).
+    pub fn inflight_capacity(&self) -> usize {
+        self.in_flight_insertions.capacity()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1952,6 +2789,93 @@ impl IbdUtxoStore {
         self.disk.flush_to_disk()
     }
 
+    /// Flush (fdatasync) without the post-sync madvise(MADV_DONTNEED).
+    /// Use for the DEL-phase sync inside `ibd_flush_del_backlog_through_watermark`
+    /// where the preceding ADD-phase `flush_disk()` already evicted the pages.
+    /// Skipping the duplicate madvise avoids re-evicting freshly written DEL
+    /// tombstones that LMDB will immediately re-fault on the next B-tree access.
+    pub fn flush_disk_sync_only(&self) -> Result<()> {
+        #[cfg(feature = "heed3")]
+        if let Some(tree) = self.disk.as_heed3_tree() {
+            tree.force_sync_only()?;
+            return Ok(());
+        }
+        // Fallback for non-Heed3 backends: full flush (includes madvise equivalent).
+        self.disk.flush_to_disk()
+    }
+
+    /// Write every live UTXO currently in the in-memory cache to LMDB as a one-shot bulk
+    /// insert.  Called once at the local-replay → download transition after an IBD genesis
+    /// restart (the LMDB store was empty during local replay because all pending-log drains
+    /// were discarded in-memory).
+    ///
+    /// The resulting LMDB state is equivalent to what would have been written by N sequential
+    /// checkpoint flushes, but without the LMDB write overhead during hot local replay.
+    ///
+    /// Safety: must only be called when the LMDB store is **empty** (fresh after wipe) so
+    /// there are no stale entries to worry about.  After this returns the store reflects the
+    /// live UTXO set and normal incremental durability can resume.
+    pub fn flush_full_cache_to_lmdb(&self) -> Result<usize> {
+        use crate::storage::utxo_value_codec::encode_utxo_with_codec;
+        let codec = self.value_codec;
+        let len = self.cache.len();
+        info!(
+            "[IBD_UTXO_STORE] flush_full_cache_to_lmdb: streaming {len} cache entries to LMDB \
+             in chunks of {MAX_BATCH_OPS} (no full-Vec collection to avoid OOM)"
+        );
+        // Stream directly from the DashMap in fixed-size chunks — do NOT collect all entries
+        // into a Vec first.  At 76 M UTXOs that Vec would be ~6–15 GB depending on encoded
+        // size, which reliably triggers OOM on 90 GB machines when added to the existing RSS.
+        // Without a global sort we lose MDB_APPEND locality, but random B-tree inserts are
+        // acceptable here (this is a one-shot write, not the hot incremental path).
+        let mut batch: Vec<(OutPointKey, Vec<u8>)> = Vec::with_capacity(MAX_BATCH_OPS);
+        let mut total = 0usize;
+        let mut encode_errors = 0usize;
+
+        let flush_batch = |batch: &[(OutPointKey, Vec<u8>)]| -> Result<usize> {
+            #[cfg(feature = "heed3")]
+            if let Some(heed3_tree) = self.disk.as_heed3_tree() {
+                let iter = batch.iter().map(|(k, v)| (k.as_slice(), Some(v.as_slice())));
+                return heed3_tree.write_slice_batch(iter);
+            }
+            let mut b = self.disk.batch()?;
+            for (k, v) in batch {
+                b.put(k.as_slice(), v.as_slice());
+            }
+            b.commit_no_wal()?;
+            Ok(batch.len())
+        };
+
+        for entry in self.cache.iter() {
+            let key = *entry.key();
+            match encode_utxo_with_codec(codec, entry.value().utxo.as_ref()) {
+                Ok(bytes) => batch.push((key, bytes)),
+                Err(e) => {
+                    encode_errors += 1;
+                    warn!("[IBD_UTXO_STORE] flush_full_cache_to_lmdb: encode error key {:?}: {e}", &key[..4]);
+                }
+            }
+            if batch.len() >= MAX_BATCH_OPS {
+                total += flush_batch(&batch)?;
+                batch.clear();
+                if total % (MAX_BATCH_OPS * 50) == 0 {
+                    info!("[IBD_UTXO_STORE] flush_full_cache_to_lmdb: {total}/{len} written…");
+                }
+            }
+        }
+        if !batch.is_empty() {
+            total += flush_batch(&batch)?;
+        }
+        if let Err(e) = self.disk.flush_to_disk() {
+            warn!("[IBD_UTXO_STORE] flush_full_cache_to_lmdb: flush_to_disk failed: {e}");
+        }
+        info!(
+            "[IBD_UTXO_STORE] flush_full_cache_to_lmdb: complete \
+             ({total} written, {encode_errors} encode errors)"
+        );
+        Ok(total)
+    }
+
     pub fn stats(&self) -> (u64, u64, u64, u64) {
         (
             self.stats_disk_loads.load(Ordering::Relaxed),
@@ -1959,5 +2883,22 @@ impl IbdUtxoStore {
             self.stats_evictions.load(Ordering::Relaxed),
             self.stats_pending_hits.load(Ordering::Relaxed),
         )
+    }
+}
+
+#[cfg(test)]
+mod del_backlog_unit_tests {
+    use super::IbdUtxoStore;
+
+    #[test]
+    fn adaptive_drain_cap_respects_env_ceiling() {
+        unsafe {
+            std::env::set_var("BLVM_IBD_DRAIN_CAP", "150000");
+        }
+        assert_eq!(IbdUtxoStore::adaptive_drain_cap_for_pending(3_000_000), 150_000);
+        assert_eq!(IbdUtxoStore::adaptive_drain_cap_for_pending(100_000), 100_000);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DRAIN_CAP");
+        }
     }
 }

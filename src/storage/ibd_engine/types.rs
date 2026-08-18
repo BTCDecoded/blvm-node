@@ -8,6 +8,15 @@
 //!   are separate fields rather than bit-packed into the key.
 //! - `IdCodec` packs `{offset: 44 bits, length: 20 bits}` into a single `u64` table id.
 
+use blvm_protocol::types::SharedByteString;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Cumulative count of `output_detail_from_parts` calls = total Arc<UTXO> ever created.
+/// Divide by elapsed blocks to get Arc<UTXO> creation rate per block.
+pub static OUTPUT_DETAIL_CREATED: AtomicU64 = AtomicU64::new(0);
+/// Currently live `OutputDetail` instances (incremented at construction, decremented at Drop).
+pub static OUTPUT_DETAIL_LIVE: AtomicU64 = AtomicU64::new(0);
+
 /// 36-byte UTXO key: txid (32 bytes) || vout (u32 big-endian, 4 bytes).
 ///
 /// Big-endian vout means the key is lexicographically sortable and maps to `OutPoint` ordering.
@@ -125,8 +134,34 @@ impl PartialOrd for OutputKV {
 #[derive(Debug, Clone)]
 pub struct OutputDetail {
     pub header: OutputHeader,
-    /// Raw script bytes. Consumed to build `SharedByteString` for consensus.
-    pub script: Vec<u8>,
+    /// Script bytes retained for export/debug; consensus view uses `utxo`.
+    pub script: SharedByteString,
+    /// Built once at fetch; `session_fill_utxo_set` clones this `Arc` into `UtxoSet`.
+    pub utxo: std::sync::Arc<blvm_protocol::UTXO>,
+}
+
+impl Drop for OutputDetail {
+    fn drop(&mut self) {
+        OUTPUT_DETAIL_LIVE.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Build `OutputDetail` with a single script copy into the consensus `UTXO`.
+pub fn output_detail_from_parts(header: OutputHeader, script: SharedByteString) -> OutputDetail {
+    use blvm_protocol::UTXO;
+    OUTPUT_DETAIL_CREATED.fetch_add(1, Ordering::Relaxed);
+    OUTPUT_DETAIL_LIVE.fetch_add(1, Ordering::Relaxed);
+    let utxo = std::sync::Arc::new(UTXO {
+        value: header.amount,
+        script_pubkey: script.clone(),
+        height: header.height as u64,
+        is_coinbase: header.is_coinbase(),
+    });
+    OutputDetail {
+        header,
+        script,
+        utxo,
+    }
 }
 
 /// Encodes/decodes `{offset, length}` pairs into a single `OutputId` (`u64`).

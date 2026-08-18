@@ -19,6 +19,37 @@ pub struct BlockMetadata {
     // Could add more metadata here: size, weight, etc.
 }
 
+/// W5/N1: LMDB `blocks` value magic for original P2P `block` message payload.
+/// Layout: `BLVW` ++ u32_le(len) ++ payload. Coexists with legacy bincode bodies.
+pub const WIRE_BODY_MAGIC: &[u8; 4] = b"BLVW";
+
+/// True when `data` is a W5 wire-bytes body blob (not bincode / not zstd).
+#[inline]
+pub fn is_wire_body_blob(data: &[u8]) -> bool {
+    data.len() >= 8 && data[..4] == WIRE_BODY_MAGIC[..]
+}
+
+/// Tag a P2P block payload for LMDB storage.
+pub fn encode_wire_body_blob(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + payload.len());
+    out.extend_from_slice(WIRE_BODY_MAGIC);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Slice the P2P payload out of a W5 wire-bytes blob.
+pub fn decode_wire_body_blob(data: &[u8]) -> Option<&[u8]> {
+    if !is_wire_body_blob(data) {
+        return None;
+    }
+    let len = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
+    if data.len() < 8 + len {
+        return None;
+    }
+    Some(&data[8..8 + len])
+}
+
 /// Row key length when block body / header / witness / metadata are stored with a known height.
 /// Prefix is big-endian height so IBD batch writes are sorted for LSM backends.
 pub const BLOCK_HEIGHT_ROW_KEY_LEN: usize = 40;
@@ -247,6 +278,35 @@ impl BlockStore {
         Ok(())
     }
 
+    /// W5/N1: store original P2P `block` payload (includes witnesses) under height row key.
+    ///
+    /// Does **not** write a separate witness tree row — inject loads witnesses from the blob.
+    /// Header/metadata indexes stay bincode for cheap lookups.
+    pub fn store_block_wire_bytes(
+        &self,
+        block: &Block,
+        height: u64,
+        wire_payload: &[u8],
+    ) -> Result<()> {
+        let block_hash = self.block_hash(block);
+        let row_key = block_height_row_key(height, &block_hash);
+        let data_to_store = encode_wire_body_blob(wire_payload);
+        self.blocks.insert(row_key.as_slice(), &data_to_store)?;
+
+        let header_data = bincode::serialize(&block.header)?;
+        self.headers.insert(row_key.as_slice(), &header_data)?;
+
+        let metadata = BlockMetadata {
+            n_tx: block.transactions.len() as u32,
+        };
+        let metadata_data = bincode::serialize(&metadata)?;
+        self.block_metadata
+            .insert(row_key.as_slice(), &metadata_data)?;
+
+        self.store_recent_header(height, &block.header)?;
+        Ok(())
+    }
+
     /// Store a block with witness data and height
     pub fn store_block_with_witness(
         &self,
@@ -270,23 +330,16 @@ impl BlockStore {
         #[cfg(not(feature = "block-compression"))]
         let data_to_store = block_data;
 
-        self.blocks.insert(row_key.as_slice(), &data_to_store)?;
-
         let header_data = bincode::serialize(&block.header)?;
-        self.headers.insert(row_key.as_slice(), &header_data)?;
-
         let metadata = BlockMetadata {
             n_tx: block.transactions.len() as u32,
         };
         let metadata_data = bincode::serialize(&metadata)?;
-        self.block_metadata
-            .insert(row_key.as_slice(), &metadata_data)?;
-
-        if !witnesses.is_empty() {
+        let witness_blob = if !witnesses.is_empty() {
             let witness_data = bincode::serialize(witnesses)?;
 
             #[cfg(feature = "witness-compression")]
-            let witness_blob = if self.witness_compression_enabled {
+            let blob = if self.witness_compression_enabled {
                 zstd::encode_all(&witness_data[..], self.witness_compression_level as i32)
                     .map_err(|e| anyhow::anyhow!("Witness compression failed: {}", e))?
             } else {
@@ -294,13 +347,77 @@ impl BlockStore {
             };
 
             #[cfg(not(feature = "witness-compression"))]
-            let witness_blob = witness_data;
+            let blob = witness_data;
 
-            self.witnesses.insert(row_key.as_slice(), &witness_blob)?;
+            Some(blob)
+        } else {
+            None
+        };
+
+        // S0: one LMDB txn (blocks+headers+meta+witness+recent) instead of 5
+        // Tree::insert commits. Select-loop GAP_PERSIST was ~200ms/block on cold home LVM.
+        #[cfg(feature = "heed3")]
+        {
+            let _ = "IBD_S0_PERSIST_ONE_TXN";
+            if self.try_ibd_flush_heed3_unified(
+                &[0],
+                &[height],
+                &[block_hash],
+                &[data_to_store.clone()],
+                &[Arc::new(header_data.clone())],
+                &[witness_blob.clone()],
+                &[metadata_data.clone()],
+                &[(height, header_data.clone())],
+            )? {
+                return Ok(());
+            }
         }
 
+        self.blocks.insert(row_key.as_slice(), &data_to_store)?;
+        self.headers.insert(row_key.as_slice(), &header_data)?;
+        self.block_metadata
+            .insert(row_key.as_slice(), &metadata_data)?;
+        if let Some(ref witness_blob) = witness_blob {
+            self.witnesses.insert(row_key.as_slice(), witness_blob)?;
+        }
         self.store_recent_header(height, &block.header)?;
 
+        Ok(())
+    }
+
+    /// True when a witness blob exists at the height row key or legacy hash-only key.
+    pub fn has_witness_blob(&self, block_hash: &Hash) -> Result<bool> {
+        if let Some(h) = self.get_height_by_hash(block_hash)? {
+            let k = block_height_row_key(h, block_hash);
+            if self.witnesses.get(&k)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(self.witnesses.get(block_hash.as_slice())?.is_some())
+    }
+
+    /// Store witness at the IBD row key (`height || hash`). Prefer this when height is known.
+    pub fn store_witness_at_height(
+        &self,
+        block_hash: &Hash,
+        height: u64,
+        witness: &[Vec<Witness>],
+    ) -> Result<()> {
+        let row_key = block_height_row_key(height, block_hash);
+        let witness_data = bincode::serialize(witness)?;
+
+        #[cfg(feature = "witness-compression")]
+        let data_to_store = if self.witness_compression_enabled {
+            zstd::encode_all(&witness_data[..], self.witness_compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("Witness compression failed: {}", e))?
+        } else {
+            witness_data
+        };
+
+        #[cfg(not(feature = "witness-compression"))]
+        let data_to_store = witness_data;
+
+        self.witnesses.insert(row_key.as_slice(), &data_to_store)?;
         Ok(())
     }
 
@@ -330,6 +447,9 @@ impl BlockStore {
 
     /// Get witness data for a block
     // CRITICAL FIX: Changed return type from Option<Vec<Witness>> to Option<Vec<Vec<Witness>>>
+    ///
+    /// W5: when no witness tree row exists but the body is a wire blob, return witnesses
+    /// parsed from that payload (single wire deser).
     pub fn get_witness(&self, block_hash: &Hash) -> Result<Option<Vec<Vec<Witness>>>> {
         if let Some(h) = self.get_height_by_hash(block_hash)? {
             let k = block_height_row_key(h, block_hash);
@@ -347,6 +467,15 @@ impl BlockStore {
 
                 let witnesses: Vec<Vec<Witness>> = bincode::deserialize(&witness_data)?;
                 return Ok(Some(witnesses));
+            }
+            // W5 wire body embeds witnesses — no separate tree row.
+            if let Some(body) = self.blocks.get(&k)? {
+                if let Some(payload) = decode_wire_body_blob(&body) {
+                    let (_, witnesses) =
+                        blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                            .map_err(|e| anyhow::anyhow!("wire witness deserialize: {e}"))?;
+                    return Ok(Some(witnesses));
+                }
             }
         }
         if let Some(data) = self.witnesses.get(block_hash.as_slice())? {
@@ -571,14 +700,97 @@ impl BlockStore {
         Ok(headers)
     }
 
-    /// Get a stored header by block height (from the recent-headers index).
+    /// Get a stored header by block height.
+    ///
+    /// Resolves via the durable height index → headers tree. Do **not** use the
+    /// `recent_headers` sliding window here: that only retains ~12 tip heights, so
+    /// gap-resume MTP seeding (e.g. start at 880001 with tip at 957k) would miss
+    /// parents and fall back to tip timestamps → H05 "Invalid block header"
+    /// (live 2026-07-13: Seeded 4 recent headers before 880001, then fail).
     pub fn get_header_at_height(&self, height: u64) -> Result<Option<BlockHeader>> {
-        let height_bytes = height.to_be_bytes();
-        if let Some(data) = self.recent_headers.get(&height_bytes)? {
-            Ok(Some(bincode::deserialize(&data)?))
-        } else {
-            Ok(None)
+        let Some(hash) = self.get_hash_by_height(height)? else {
+            return Ok(None);
+        };
+        self.get_header(&hash)
+    }
+
+    /// Headers for BIP113 MTP immediately before `before_height` (oldest→newest, ≤11).
+    ///
+    /// Prefer this over [`get_recent_headers`] when validating at a height far below tip.
+    pub fn headers_before_height_for_mtp(&self, before_height: u64) -> Result<Vec<BlockHeader>> {
+        if before_height == 0 {
+            return Ok(Vec::new());
         }
+        let lo = before_height.saturating_sub(11);
+        let mut headers = Vec::with_capacity(11);
+        for h in lo..before_height {
+            if let Some(header) = self.get_header_at_height(h)? {
+                headers.push(header);
+            }
+        }
+        Ok(headers)
+    }
+
+    /// Decode a `blocks` tree value: W5 wire blob, optional zstd, or legacy bincode.
+    pub(crate) fn decode_block_blob(data: &[u8]) -> Result<Block> {
+        if let Some(payload) = decode_wire_body_blob(data) {
+            let (block, _) =
+                blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                    .map_err(|e| anyhow::anyhow!("wire body deserialize: {e}"))?;
+            return Ok(block);
+        }
+        #[cfg(feature = "block-compression")]
+        let block_data = if Self::is_compressed(data) {
+            zstd::decode_all(data)
+                .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?
+        } else {
+            data.to_vec()
+        };
+        #[cfg(not(feature = "block-compression"))]
+        let block_data = data;
+        // `block-compression` yields `Vec<u8>`; otherwise `&[u8]` — both AsRef<[u8]>.
+        let block: Block = bincode::deserialize(block_data.as_ref())?;
+        Ok(block)
+    }
+
+    /// Fetch raw `blocks` tree bytes for `hash` (height row preferred).
+    /// `pub(crate)` for getdata W5 zero-copy framing (Mode T tip serve).
+    pub(crate) fn load_block_blob(&self, hash: &Hash) -> Result<Option<Vec<u8>>> {
+        if let Some(h) = self.get_height_by_hash(hash)? {
+            let k = block_height_row_key(h, hash);
+            if let Some(data) = self.blocks.get(&k)? {
+                return Ok(Some(data));
+            }
+        }
+        Ok(self.blocks.get(hash.as_slice())?)
+    }
+
+    /// W5: one wire deser when body is a wire blob; else bincode body + witness tree.
+    pub fn get_block_and_witnesses(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<(Block, Vec<Vec<Witness>>)>> {
+        let Some(data) = self.load_block_blob(hash)? else {
+            #[cfg(feature = "rocksdb")]
+            {
+                if let Some(reader) = &self.bitcoin_core_reader {
+                    if let Some(block) = reader.read_block(hash)? {
+                        let w = self.get_witness(hash)?.unwrap_or_default();
+                        return Ok(Some((block, w)));
+                    }
+                }
+            }
+            return Ok(None);
+        };
+        if let Some(payload) = decode_wire_body_blob(&data) {
+            let (block, witnesses) =
+                blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                    .map_err(|e| anyhow::anyhow!("wire body deserialize: {e}"))?;
+            return Ok(Some((block, witnesses)));
+        }
+        let block = Self::decode_block_blob(&data)?;
+        let witnesses = self.get_witness(hash)?.unwrap_or_default();
+        Ok(Some((block, witnesses)))
     }
 
     /// Get a block by hash
@@ -586,49 +798,17 @@ impl BlockStore {
     /// First tries to get the block from the database.
     /// If not found and block files are available, falls back to reading from files.
     pub fn get_block(&self, hash: &Hash) -> Result<Option<Block>> {
-        if let Some(h) = self.get_height_by_hash(hash)? {
-            let k = block_height_row_key(h, hash);
-            if let Some(data) = self.blocks.get(&k)? {
-                #[cfg(feature = "block-compression")]
-                let block_data = if Self::is_compressed(&data) {
-                    zstd::decode_all(&data[..])
-                        .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?
-                } else {
-                    data
-                };
-
-                #[cfg(not(feature = "block-compression"))]
-                let block_data = data;
-
-                let block: Block = bincode::deserialize(&block_data)?;
-                return Ok(Some(block));
+        if let Some(data) = self.load_block_blob(hash)? {
+            return Ok(Some(Self::decode_block_blob(&data)?));
+        }
+        // Block not in database, try block files if available
+        #[cfg(feature = "rocksdb")]
+        {
+            if let Some(reader) = &self.bitcoin_core_reader {
+                return reader.read_block(hash);
             }
         }
-        if let Some(data) = self.blocks.get(hash.as_slice())? {
-            // Decompress if data is compressed (auto-detect via zstd magic bytes)
-            #[cfg(feature = "block-compression")]
-            let block_data = if Self::is_compressed(&data) {
-                zstd::decode_all(&data[..])
-                    .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?
-            } else {
-                data
-            };
-
-            #[cfg(not(feature = "block-compression"))]
-            let block_data = data;
-
-            let block: Block = bincode::deserialize(&block_data)?;
-            Ok(Some(block))
-        } else {
-            // Block not in database, try block files if available
-            #[cfg(feature = "rocksdb")]
-            {
-                if let Some(reader) = &self.bitcoin_core_reader {
-                    return reader.read_block(hash);
-                }
-            }
-            Ok(None)
-        }
+        Ok(None)
     }
 
     /// Check if data is compressed (zstd magic bytes: 0x28, 0xB5, 0x2F, 0xFD)
@@ -980,6 +1160,32 @@ impl BlockStore {
     ) -> Result<()> {
         let data = bincode::serialize(undo)?;
         self.block_undo.insert(hash.as_slice(), &data)?;
+        Ok(())
+    }
+
+    /// Write all undo logs for a chunk in a single batched write transaction.
+    ///
+    /// Each `Tree::insert` opens its own write transaction and calls `fdatasync` on commit.
+    /// Calling `store_undo_log` in a per-block loop produces N fdatasyncs per chunk (N = chunk
+    /// size, typically 50). On single-writer backends (LMDB/Heed3) this serialises with every
+    /// other IBD writer and dominates block-flush latency: 50 fsyncs × 8 chunks × 2 threads
+    /// ≈ 800 fsyncs per flush cycle at ~50–200 ms each = 40–160 s stall.
+    ///
+    /// Batching all chunk entries into one `commit_no_wal` reduces that to 1 fsync per chunk.
+    #[cfg(feature = "production")]
+    pub fn store_undo_logs_batch(
+        &self,
+        entries: &[(&Hash, &blvm_consensus::reorganization::BlockUndoLog)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.block_undo.batch()?;
+        for (hash, undo) in entries {
+            let data = bincode::serialize(undo)?;
+            batch.put(hash.as_slice(), &data);
+        }
+        batch.commit_no_wal()?;
         Ok(())
     }
 

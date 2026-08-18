@@ -305,18 +305,84 @@ impl ChainState {
     ///
     /// Uses one `chain_info` batch so we never advance the watermark without matching MuHash bytes
     /// (or vice versa) surviving the same WAL sync.
+    ///
+    /// **Invariant:** refuse to advance watermark past durable `chain_info.height`. Do **not**
+    /// clamp the label while keeping a higher-height flush — that poisons resume the same way
+    /// as a clamped engine export.
     pub fn persist_ibd_utxo_flush_checkpoint(
         &self,
         flush_height: u64,
         muhash_running: &[u8; MUHASH_RUNNING_STATE_BYTES],
     ) -> Result<()> {
         let current_wm = self.get_utxo_watermark()?.unwrap_or(0);
+        let block_tip = self.get_height()?.unwrap_or(0);
         let mut batch = self.chain_info.batch()?;
+        if flush_height > block_tip {
+            tracing::warn!(
+                "refusing ibd_utxo_watermark advance to {flush_height} \
+                 (block store tip={block_tip}; async block flush lag) — MuHash only"
+            );
+            batch.put(b"ibd_utxo_muhash_running", muhash_running.as_slice());
+            batch.commit()?;
+            return Ok(());
+        }
         if flush_height > current_wm {
             batch.put(b"ibd_utxo_watermark", &flush_height.to_be_bytes());
         }
         batch.put(b"ibd_utxo_muhash_running", muhash_running.as_slice());
         batch.commit()?;
+        Ok(())
+    }
+
+    /// Persist rolling MuHash state without advancing `ibd_utxo_watermark` or engine export height.
+    ///
+    /// Used during engine IBD between full checkpoint exports so `BLVM_VERIFY_IBD_UTXO_MUHASH`
+    /// and crash diagnostics see fresh MuHash bytes while resume still seeds from the last export.
+    pub fn persist_ibd_utxo_muhash_running_only(
+        &self,
+        muhash_running: &[u8; MUHASH_RUNNING_STATE_BYTES],
+    ) -> Result<()> {
+        self.chain_info
+            .insert(b"ibd_utxo_muhash_running", muhash_running.as_slice())?;
+        Ok(())
+    }
+
+    /// Highest block height validated by the engine path since the last completed export.
+    /// Informational for resume logging; durable resume still uses [`Self::get_engine_export_height`].
+    pub fn get_engine_validation_tip(&self) -> Result<Option<u64>> {
+        if let Some(data) = self.chain_info.get(b"ibd_engine_validation_tip")? {
+            if data.len() < 8 {
+                return Ok(None);
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[..8]);
+            Ok(Some(u64::from_be_bytes(bytes)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Record engine validation progress (monotonic).
+    pub fn persist_engine_validation_tip(&self, height: u64) -> Result<()> {
+        let current = self.get_engine_validation_tip()?.unwrap_or(0);
+        if height > current {
+            self.chain_info
+                .insert(b"ibd_engine_validation_tip", &height.to_be_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Set engine validation tip unconditionally (local-replay hybrid restore).
+    pub fn force_set_engine_validation_tip(&self, height: u64) -> Result<()> {
+        self.chain_info
+            .insert(b"ibd_engine_validation_tip", &height.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Set engine export height unconditionally (soft autorepair rollback).
+    pub fn force_set_engine_export_height(&self, height: u64) -> Result<()> {
+        self.chain_info
+            .insert(b"ibd_engine_export_height", &height.to_be_bytes())?;
         Ok(())
     }
 
@@ -338,7 +404,19 @@ impl ChainState {
     }
 
     /// Record a completed engine checkpoint export (monotonic).
+    ///
+    /// F-C3: refuse to advance past durable block tip (same invariant as watermark /
+    /// `persist_engine_checkpoint_complete`). Live risk: Phase 3 labeled export_h at
+    /// effective_end while chain tip lagged → resume UTXO miss.
     pub fn persist_engine_export_height(&self, height: u64) -> Result<()> {
+        let block_tip = self.get_height()?.unwrap_or(0);
+        if height > block_tip {
+            tracing::warn!(
+                "refusing ibd_engine_export_height advance to {height} \
+                 (block store tip={block_tip})"
+            );
+            return Ok(());
+        }
         let current = self.get_engine_export_height()?.unwrap_or(0);
         if height > current {
             self.chain_info
@@ -355,6 +433,88 @@ impl ChainState {
         })
     }
 
+    /// Canonical post-IBD UTXO tree name (`ibd_utxos` or an active `ibd_utxos_ckpt_*`).
+    ///
+    /// Phase 3 promote sets this to the tip checkpoint tree so we do not re-copy ~640M
+    /// UTXOs into a separate `ibd_utxos` tree (monolithic step eliminated).
+    pub fn get_ibd_utxo_canonical_tree(&self) -> Result<String> {
+        Ok(match self.chain_info.get(b"ibd_utxo_canonical_tree")? {
+            Some(data) if !data.is_empty() => {
+                let s = String::from_utf8_lossy(&data).into_owned();
+                if crate::storage::ibd_engine::is_ibd_utxo_tree_name(&s) {
+                    s
+                } else {
+                    "ibd_utxos".to_string()
+                }
+            }
+            _ => "ibd_utxos".to_string(),
+        })
+    }
+
+    /// Record which named tree holds the tip UTXO set after Phase 3 promote.
+    pub fn set_ibd_utxo_canonical_tree(&self, name: &str) -> Result<()> {
+        anyhow::ensure!(
+            crate::storage::ibd_engine::is_ibd_utxo_tree_name(name),
+            "invalid ibd utxo canonical tree name: {name}"
+        );
+        self.chain_info
+            .insert(b"ibd_utxo_canonical_tree", name.as_bytes())?;
+        Ok(())
+    }
+
+    /// Height recorded for a ping-pong slot's last successful export (0 = unknown/empty).
+    pub fn get_engine_ckpt_slot_height(&self, slot: u8) -> Result<u64> {
+        let key: &[u8] = if slot & 1 == 0 {
+            b"ibd_engine_ckpt_height_0"
+        } else {
+            b"ibd_engine_ckpt_height_1"
+        };
+        if let Some(data) = self.chain_info.get(key)? {
+            if data.len() < 8 {
+                return Ok(0);
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[..8]);
+            Ok(u64::from_be_bytes(bytes))
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub fn set_engine_ckpt_slot_height(&self, slot: u8, height: u64) -> Result<()> {
+        let key: &[u8] = if slot & 1 == 0 {
+            b"ibd_engine_ckpt_height_0"
+        } else {
+            b"ibd_engine_ckpt_height_1"
+        };
+        self.chain_info.insert(key, &height.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Force-select the active ping-pong checkpoint slot (soft repair rollback).
+    pub fn force_set_engine_ckpt_slot(&self, slot: u8) -> Result<()> {
+        self.chain_info
+            .insert(b"ibd_engine_ckpt_slot", &[slot & 1])?;
+        Ok(())
+    }
+
+    /// Wall-clock seconds of the last completed engine checkpoint export.
+    ///
+    /// Used by the adaptive export interval so a restart does not forget that recent exports
+    /// took minutes at high UTXO counts (avoids firing another export every ~2k blocks).
+    pub fn get_engine_export_wall_secs(&self) -> Result<Option<u64>> {
+        if let Some(data) = self.chain_info.get(b"ibd_engine_export_wall_secs")? {
+            if data.len() < 8 {
+                return Ok(None);
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[..8]);
+            Ok(Some(u64::from_be_bytes(bytes)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// UTXO count in the last completed engine checkpoint export.
     pub fn get_engine_export_utxo_count(&self) -> Result<Option<u64>> {
         if let Some(data) = self.chain_info.get(b"ibd_engine_export_utxo_count")? {
@@ -369,20 +529,81 @@ impl ChainState {
         }
     }
 
+    /// Test/repair helper: set export UTXO count without a full checkpoint persist.
+    pub fn force_set_engine_export_utxo_count(&self, count: u64) -> Result<()> {
+        self.chain_info
+            .insert(b"ibd_engine_export_utxo_count", &count.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// MuHash running state at the last completed engine checkpoint export height.
+    /// Used on resume to reset incremental running bytes before gap replay (avoids double-fold
+    /// when `engine_validation_tip` is ahead of `engine_export_height`).
+    pub fn get_engine_export_muhash(&self) -> Result<Option<[u8; MUHASH_RUNNING_STATE_BYTES]>> {
+        if let Some(data) = self.chain_info.get(b"ibd_engine_export_muhash")? {
+            if data.len() != MUHASH_RUNNING_STATE_BYTES {
+                return Ok(None);
+            }
+            let mut out = [0u8; MUHASH_RUNNING_STATE_BYTES];
+            out.copy_from_slice(&data);
+            Ok(Some(out))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Persist export-height MuHash snapshot without advancing export height or flipping ckpt slot.
+    pub fn persist_engine_export_muhash_snapshot(
+        &self,
+        muhash_running: &[u8; MUHASH_RUNNING_STATE_BYTES],
+    ) -> Result<()> {
+        self.chain_info
+            .insert(b"ibd_engine_export_muhash", muhash_running.as_slice())?;
+        Ok(())
+    }
+
     /// Atomically record a completed engine checkpoint: height, active slot, UTXO count, MuHash.
+    ///
+    /// Refuses to advance export/watermark when `height > durable block tip`. Clamping the
+    /// *label* while keeping a scan taken at a higher height poisons resume (UTXO set from
+    /// h≈450k labeled as tip 236160 → immediate `UTXO not found` at tip+1).
     pub fn persist_engine_checkpoint_complete(
         &self,
         height: u64,
         slot: u8,
         utxo_count: u64,
+        export_wall_secs: u64,
         muhash_running: &[u8; MUHASH_RUNNING_STATE_BYTES],
     ) -> Result<()> {
+        let current = self.get_engine_export_height()?.unwrap_or(0);
+        let block_tip = self.get_height()?.unwrap_or(0);
+        if height > block_tip {
+            tracing::warn!(
+                "refusing engine checkpoint at height {height} (block store tip={block_tip}) — \
+                 snapshot must not be labeled below the scan height"
+            );
+            // Refresh MuHash only; do not advance export/watermark or flip ckpt slot.
+            self.persist_ibd_utxo_muhash_running_only(muhash_running)?;
+            return Ok(());
+        }
+        if height <= current {
+            tracing::warn!(
+                "engine checkpoint complete ignored at height {height} (durable export is {current})"
+            );
+            self.persist_ibd_utxo_muhash_running_only(muhash_running)?;
+            return Ok(());
+        }
         self.persist_ibd_utxo_flush_checkpoint(height, muhash_running)?;
         self.persist_engine_export_height(height)?;
         self.chain_info
             .insert(b"ibd_engine_ckpt_slot", &[slot & 1])?;
+        self.set_engine_ckpt_slot_height(slot, height)?;
         self.chain_info
             .insert(b"ibd_engine_export_utxo_count", &utxo_count.to_be_bytes())?;
+        self.chain_info
+            .insert(b"ibd_engine_export_wall_secs", &export_wall_secs.to_be_bytes())?;
+        self.chain_info
+            .insert(b"ibd_engine_export_muhash", muhash_running.as_slice())?;
         Ok(())
     }
 
@@ -398,6 +619,10 @@ impl ChainState {
         self.chain_info.insert(b"ibd_engine_ckpt_slot", &[0u8])?;
         self.chain_info
             .insert(b"ibd_engine_export_utxo_count", &0u64.to_be_bytes())?;
+        let _ = self.chain_info.remove(b"ibd_engine_export_muhash");
+        let _ = self
+            .chain_info
+            .remove(b"ibd_engine_validation_tip");
         Ok(())
     }
 
@@ -700,6 +925,70 @@ impl ChainState {
     ) -> Result<()> {
         self.record_connected_block(hash, height, &header.prev_block_hash)?;
         self.cache_block_chainwork(hash, header, height)?;
+        Ok(())
+    }
+
+    /// Batch version of [`index_connected_block`] optimised for IBD flush paths.
+    ///
+    /// For N blocks this replaces N×3 individual LMDB write transactions with 3 bulk
+    /// write transactions (one per tree).  Chainwork is computed incrementally in memory
+    /// after a single read for the predecessor of `entries[0]`, so the read count also
+    /// drops from N to 1.
+    ///
+    /// `entries` must be in ascending height order (the same order they were validated).
+    pub fn index_connected_blocks_batch(
+        &self,
+        entries: &[(&Hash, &BlockHeader, u64)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // ── Compute all chainworks in memory ──────────────────────────────────────────
+        let (_, first_header, first_height) = entries[0];
+        let mut prev_chainwork = if first_height > 0 {
+            self.get_chainwork(&first_header.prev_block_hash)?
+                .unwrap_or_else(blvm_consensus::pow::U256::zero)
+        } else {
+            blvm_consensus::pow::U256::zero()
+        };
+
+        // Pre-allocate: each entry produces a work value and a cumulative chainwork.
+        let mut work_values: Vec<blvm_consensus::pow::U256> = Vec::with_capacity(entries.len());
+        let mut chainworks: Vec<blvm_consensus::pow::U256> = Vec::with_capacity(entries.len());
+        for (_, header, _) in entries {
+            let block_work = Self::calculate_work_from_bits(header.bits);
+            let cw = prev_chainwork.saturating_add(block_work);
+            work_values.push(block_work);
+            chainworks.push(cw);
+            prev_chainwork = cw;
+        }
+
+        // ── Batch-write work_cache (1 write transaction) ──────────────────────────────
+        {
+            let mut batch = self.work_cache.batch()?;
+            for (i, (hash, _, _)) in entries.iter().enumerate() {
+                batch.put(hash.as_slice(), &work_values[i].to_be_bytes());
+            }
+            batch.commit()?;
+        }
+
+        // ── Batch-write chainwork_cache (1 write transaction) ─────────────────────────
+        {
+            let mut batch = self.chainwork_cache.batch()?;
+            for (i, (hash, _, _)) in entries.iter().enumerate() {
+                batch.put(hash.as_slice(), &chainworks[i].to_be_bytes());
+            }
+            batch.commit()?;
+        }
+
+        // ── Batch-write block_index (1 write transaction) ─────────────────────────────
+        let idx_entries: Vec<(&Hash, u64, &Hash)> = entries
+            .iter()
+            .map(|(hash, header, height)| (*hash, *height, &header.prev_block_hash as &Hash))
+            .collect();
+        self.block_index.insert_ibd_batch(&idx_entries)?;
+
         Ok(())
     }
 

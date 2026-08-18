@@ -7,12 +7,52 @@
 //! - **`BloomFilter`**: blocked bloom, 7 probes, ~12 bits/entry, ~1% FPR.
 //!
 //! ## Parallelism
-//! `query` is parallelized with rayon (8 sub-ranges when `rayon` feature is enabled).
-//! When rayon is absent the loop runs single-threaded — correctness unaffected.
+//! `batch_lookup` uses rayon only when `keys.len() >= RAYON_BATCH_THRESHOLD`. Below that,
+//! pool steal/pin overhead dominated early-height IBD (~300 BPS); sequential is faster.
 
-use super::types::{OUTPUT_ID_DELETED, OutputId, OutputKV};
+use super::types::{OutputKey, OUTPUT_ID_DELETED, OutputId, OutputKV};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicUsize, Ordering};
+
+/// Live MemoryRun instance count (including the mutable tip). Counts the MemoryRun struct itself,
+/// NOT the Arc wrapper. Incremented in build/build_presorted/new_mutable, decremented in Drop.
+/// Using AtomicI64 so underflow is visible as a negative number (previous AtomicUsize wrapped).
+pub static MEMORY_RUN_LIVE: AtomicI64 = AtomicI64::new(0);
+/// Cumulative MemoryRun builds (for rate logging). Never decremented.
+pub static MEMORY_RUN_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+/// Below this key count, `batch_lookup` runs sequentially (rayon overhead >> work).
+pub(super) const RAYON_BATCH_THRESHOLD: usize = 64;
+/// Below this length, external-key sorts use `sort_unstable` instead of `par_sort_unstable`.
+pub(super) const RAYON_SORT_THRESHOLD: usize = 128;
+
+/// Default on. `BLVM_IBD_QUERY_RAYON=0` forces serial `batch_lookup` (findings bisect).
+fn query_rayon_enabled() -> bool {
+    match std::env::var("BLVM_IBD_QUERY_RAYON")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("0") | Some("false") | Some("no") | Some("off") => false,
+        _ => true,
+    }
+}
+
+/// Sort output keys for batch_query; parallel only when the slice is large enough.
+#[inline]
+pub(super) fn sort_external_keys(keys: &mut [OutputKey]) {
+    #[cfg(feature = "rayon")]
+    {
+        if keys.len() >= RAYON_SORT_THRESHOLD {
+            use rayon::prelude::*;
+            keys.par_sort_unstable();
+        } else {
+            keys.sort_unstable();
+        }
+    }
+    #[cfg(not(feature = "rayon"))]
+    keys.sort_unstable();
+}
 
 /// GC fence for cross-checkpoint Add+Delete pair cancellation.
 ///
@@ -51,6 +91,26 @@ pub fn set_gc_fence(checkpoint_height: i32) {
         checkpoint_height,
         checkpoint_height
     );
+}
+
+/// Monotonically advance the GC fence during gap replay (export deferred to tip).
+///
+/// Without this, `CHECKPOINT_GC_FENCE` stays at the last export height while validation
+/// runs millions of blocks ahead — disk compactions merge Add-only segments with `GC'd 0`
+/// (15–30 s stalls, no space benefit). Advancing the fence lets compactions cancel spent
+/// pairs for validated heights. Safe on SIGKILL: resume still re-seeds from last export.
+pub fn advance_gc_fence_to(height: i32) {
+    if height <= 0 {
+        return;
+    }
+    let prev = CHECKPOINT_GC_FENCE.fetch_max(height, Ordering::AcqRel);
+    if height > prev {
+        tracing::info!(
+            "IBD engine GC fence advanced {} → {} (gap replay — disk/memory compaction may GC spent pairs)",
+            prev,
+            height
+        );
+    }
 }
 
 /// Read the current GC fence value. Used by disk-level compaction to apply the
@@ -122,6 +182,11 @@ impl Directory {
         }
     }
 
+    /// Approximate bytes occupied by this directory in RAM.
+    pub(super) fn mem_bytes(&self) -> usize {
+        self.buckets.capacity() * 4
+    }
+
     /// Returns `(lo, hi)` index range in `entries` that may contain `key`.
     /// Caller does binary search within `entries[lo..hi]`.
     #[inline]
@@ -188,6 +253,9 @@ fn key_prefix(key: &[u8; 36], bits: u32) -> u32 {
 /// - 64-byte cache-aligned blocks, 7 probes per key, ~12 bits/entry → ~1% FPR.
 /// - Hash: `block_idx` from txid[0..4], `bit_pattern` from txid[4..12] XOR (vout × GOLDEN_RATIO).
 /// - `may_contain` returns `false` only when the key is definitely absent (no false negatives).
+///
+/// Note: F2 tried 16 bits/entry on DiskSegment only — no tip BPS win (HOLD/slight
+/// regress vs 12-bit); kept at 12. Hot path cost is cold mega-segment I/O, not FPR.
 #[derive(Debug, Clone)]
 pub struct BloomFilter {
     /// Raw bits. Length = num_blocks × 64 bytes. Always a multiple of 64.
@@ -270,6 +338,11 @@ impl BloomFilter {
     }
 
     #[inline]
+    /// Approximate bytes occupied by this bloom filter in RAM.
+    pub(super) fn mem_bytes(&self) -> usize {
+        self.data.capacity() * 8
+    }
+
     fn hash_key(key: &[u8; 36], num_blocks: usize) -> (usize, u64) {
         // Mix the full key into two independent 64-bit hashes using a Murmur3/xxHash-style
         // finalizer. This gives good distribution even for degenerate keys (e.g., only the
@@ -322,7 +395,7 @@ pub struct QueryResult {
 /// Sorted, immutable-once-built collection of `OutputKV` entries with bloom + directory.
 ///
 /// Built by `MemoryAge::append`. Queried by `MemoryIndex::query`. Merged by `Compacter`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MemoryRun {
     pub(super) entries: Vec<OutputKV>,
     pub(super) height_range: (i32, i32),
@@ -332,6 +405,28 @@ pub struct MemoryRun {
     pub(super) is_mutable: bool,
 }
 
+impl Clone for MemoryRun {
+    fn clone(&self) -> Self {
+        // Derived Clone skipped Drop/build counters → MEMORY_RUN_LIVE went deeply negative
+        // (observed −193k) while total kept climbing. Count clones as live instances.
+        MEMORY_RUN_LIVE.fetch_add(1, Ordering::Relaxed);
+        MEMORY_RUN_TOTAL.fetch_add(1, Ordering::Relaxed);
+        Self {
+            entries: self.entries.clone(),
+            height_range: self.height_range,
+            directory: self.directory.clone(),
+            filter: self.filter.clone(),
+            is_mutable: self.is_mutable,
+        }
+    }
+}
+
+impl Drop for MemoryRun {
+    fn drop(&mut self) {
+        MEMORY_RUN_LIVE.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl MemoryRun {
     /// Build a new `MemoryRun` from entries that may not be sorted.
     pub fn build(mut entries: Vec<OutputKV>) -> Self {
@@ -339,6 +434,8 @@ impl MemoryRun {
         let height_range = height_range_of(&entries);
         let directory = Directory::build(&entries);
         let filter = BloomFilter::build(&entries);
+        MEMORY_RUN_LIVE.fetch_add(1, Ordering::Relaxed);
+        MEMORY_RUN_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
             entries,
             height_range,
@@ -360,6 +457,8 @@ impl MemoryRun {
         let height_range = height_range_of(&entries);
         let directory = Directory::build(&entries);
         let filter = BloomFilter::build(&entries);
+        MEMORY_RUN_LIVE.fetch_add(1, Ordering::Relaxed);
+        MEMORY_RUN_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
             entries,
             height_range,
@@ -371,6 +470,8 @@ impl MemoryRun {
 
     /// Build an empty mutable run for the tip age (block-by-block append target).
     pub fn new_mutable() -> Self {
+        MEMORY_RUN_LIVE.fetch_add(1, Ordering::Relaxed);
+        MEMORY_RUN_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
             entries: Vec::new(),
             height_range: (i32::MAX, i32::MIN),
@@ -392,21 +493,36 @@ impl MemoryRun {
         self.height_range
     }
 
+    /// Approximate resident memory in bytes: entries Vec + bloom filter + directory.
+    pub fn mem_bytes(&self) -> usize {
+        let entries_bytes = self.entries.capacity() * super::types::OutputKV::SIZE;
+        entries_bytes + self.filter.mem_bytes() + self.directory.mem_bytes()
+    }
+
     /// Append entries (for the mutable tip run only). Sorts in place and rebuilds acceleration structures.
     ///
     /// Called from `MemoryAge::append` while holding the write lock.
     pub fn append_and_rebuild(&mut self, new_entries: &[OutputKV]) {
         debug_assert!(self.is_mutable, "cannot append to frozen run");
-        self.entries.extend_from_slice(new_entries);
-        self.entries.sort_unstable();
+        if new_entries.is_empty() {
+            return;
+        }
+        if self.entries.is_empty() {
+            self.entries.extend_from_slice(new_entries);
+            self.entries.sort_unstable();
+        } else {
+            merge_sorted_output_kvs(&mut self.entries, new_entries);
+        }
         self.height_range = height_range_of(&self.entries);
-        self.directory = Directory::build(&self.entries);
-        self.filter = BloomFilter::build(&self.entries);
+        // Mutable tip: skip directory/bloom rebuild every block — lookup uses direct
+        // binary search on sorted entries. Structures are built once on freeze().
     }
 
     /// Freeze the mutable run (called by `MemoryAge` before creating a new mutable run).
     pub fn freeze(&mut self) {
         self.is_mutable = false;
+        self.directory = Directory::build(&self.entries);
+        self.filter = BloomFilter::build(&self.entries);
     }
 
     /// Look up `key` in this run within `[since, before)` height window.
@@ -418,15 +534,20 @@ impl MemoryRun {
         if self.height_range.1 < since || self.height_range.0 >= before {
             return None;
         }
-        if !self.filter.may_contain(key) {
-            return None;
-        }
-        let (lo, hi) = self.directory.lookup_range(key);
-        if lo >= hi {
-            return None;
-        }
+        let slice = if self.is_mutable {
+            // Mutable tip: entries are sorted; bloom/dir are stale until freeze().
+            &self.entries
+        } else {
+            if !self.filter.may_contain(key) {
+                return None;
+            }
+            let (lo, hi) = self.directory.lookup_range(key);
+            if lo >= hi {
+                return None;
+            }
+            &self.entries[lo..hi]
+        };
         // Binary search for first entry with key >= target.
-        let slice = &self.entries[lo..hi];
         let pos = slice.partition_point(|e| e.key < *key);
         // Scan entries with matching key, newest-to-oldest.
         // Sort order: (key, height desc, Add before Delete at same height).
@@ -472,34 +593,37 @@ impl MemoryRun {
     /// Batch lookup for a sorted slice of keys. Fills `ids[i]` with the Add id for `keys[i]`,
     /// or leaves it as `OutputId::MAX` (sentinel for "not found in this run").
     ///
-    /// When the `rayon` feature is enabled this splits the key range across 8 rayon workers.
-    pub fn batch_lookup(&self, keys: &[[u8; 36]], ids: &mut [OutputId], since: i32, before: i32) {
+    /// Parallel when `keys.len() >= RAYON_BATCH_THRESHOLD` and rayon is enabled.
+    /// `OUTPUT_ID_DELETED` is treated as resolved (same as a real id ≠ MAX).
+    ///
+    /// N22 `remaining` counter REVERT on synth dens (S10 floor ~189 vs champ 197.9) —
+    /// callers early-exit with short-circuit `any(MAX)` instead.
+    pub fn batch_lookup(
+        &self,
+        keys: &[[u8; 36]],
+        ids: &mut [OutputId],
+        since: i32,
+        before: i32,
+    ) {
         debug_assert_eq!(keys.len(), ids.len());
+        let lookup_one = |key: &[u8; 36], id: &mut OutputId| {
+            if *id == OutputId::MAX {
+                if let Some(found) = self.lookup_key(key, since, before) {
+                    *id = found; // real id or OUTPUT_ID_DELETED
+                }
+            }
+        };
+        // Opt out: `BLVM_IBD_QUERY_RAYON=0` — serial lookup.
         #[cfg(feature = "rayon")]
-        {
+        if keys.len() >= RAYON_BATCH_THRESHOLD && query_rayon_enabled() {
             use rayon::prelude::*;
             keys.par_iter()
                 .zip(ids.par_iter_mut())
-                .for_each(|(key, id)| {
-                    if *id == OutputId::MAX {
-                        if let Some(found) = self.lookup_key(key, since, before) {
-                            *id = found;
-                        }
-                    }
-                    // OUTPUT_ID_DELETED is treated as "resolved — skip" (same as real id != MAX)
-                });
+                .for_each(|(key, id)| lookup_one(key, id));
+            return;
         }
-        #[cfg(not(feature = "rayon"))]
-        {
-            for (key, id) in keys.iter().zip(ids.iter_mut()) {
-                // Skip keys already resolved (real id) or confirmed deleted.
-                // Only MAX means "not yet found anywhere".
-                if *id == OutputId::MAX {
-                    if let Some(found) = self.lookup_key(key, since, before) {
-                        *id = found; // either a real id or OUTPUT_ID_DELETED
-                    }
-                }
-            }
+        for (key, id) in keys.iter().zip(ids.iter_mut()) {
+            lookup_one(key, id);
         }
     }
 
@@ -654,6 +778,11 @@ impl MemoryRun {
             gc.push(d); // dangling Delete — keep to shadow disk Add
         }
 
+        // GC often cancels a large fraction of entries; without shrink, capacity stays at
+        // sum(source lengths) and inflates ENGINE_MEM / jemalloc large bins for the life of
+        // the frozen run (and any slow-path tip clones that copy that Vec).
+        gc.shrink_to_fit();
+
         // gc is sorted (GC only removes pairs, preserving relative order).
         Self::build_presorted(gc)
     }
@@ -668,6 +797,37 @@ impl MemoryRun {
         self.directory = Directory::build(&self.entries);
         self.filter = BloomFilter::build(&self.entries);
     }
+}
+
+/// Merge `new_entries` into sorted `base` without a full re-sort of `base`.
+fn merge_sorted_output_kvs(base: &mut Vec<OutputKV>, new_entries: &[OutputKV]) {
+    if new_entries.is_empty() {
+        return;
+    }
+    let mut batch: Vec<OutputKV> = new_entries.to_vec();
+    batch.sort_unstable();
+    if base.is_empty() {
+        *base = batch;
+        return;
+    }
+    let mut merged = Vec::with_capacity(base.len() + batch.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < base.len() && j < batch.len() {
+        if base[i] <= batch[j] {
+            merged.push(base[i]);
+            i += 1;
+        } else {
+            merged.push(batch[j]);
+            j += 1;
+        }
+    }
+    if i < base.len() {
+        merged.extend_from_slice(&base[i..]);
+    }
+    if j < batch.len() {
+        merged.extend_from_slice(&batch[j..]);
+    }
+    *base = merged;
 }
 
 fn height_range_of(entries: &[OutputKV]) -> (i32, i32) {
@@ -687,6 +847,17 @@ mod tests {
         let mut k = [0u8; 36];
         k[0] = n;
         k
+    }
+
+    #[test]
+    fn test_advance_gc_fence_monotonic() {
+        set_gc_fence(260_000);
+        advance_gc_fence_to(250_000);
+        assert_eq!(gc_fence_snapshot(), 260_000);
+        advance_gc_fence_to(270_000);
+        assert_eq!(gc_fence_snapshot(), 270_000);
+        advance_gc_fence_to(265_000);
+        assert_eq!(gc_fence_snapshot(), 270_000);
     }
 
     #[test]
