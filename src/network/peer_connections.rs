@@ -12,6 +12,36 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// Check once at runtime whether global (routable) IPv6 is available.
+///
+/// Many servers have link-local (fe80::) IPv6 only. Attempting to connect to
+/// global IPv6 peers fails immediately with "Network is unreachable" (os error 101),
+/// wasting 10s per attempt when connection timeout applies.  Cache the answer with
+/// a `std::sync::OnceLock` so we pay the detection cost only once per process.
+fn has_global_ipv6() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        // Probe by attempting to bind a UDP socket to a global IPv6 address.
+        // Uses a non-blocking probe so it doesn't require root or interface enumeration.
+        use std::net::UdpSocket;
+        // Try to connect to a well-known global IPv6 address (Google DNS).
+        // `connect` on UDP doesn't send packets — it just routes the socket.
+        match UdpSocket::bind("[::]:0") {
+            Ok(sock) => {
+                let result = sock.connect("[2001:4860:4860::8888]:53").is_ok();
+                if !result {
+                    debug!("IPv6: no global routing (UDP connect failed) — skipping IPv6 peers");
+                }
+                result
+            }
+            Err(_) => {
+                debug!("IPv6: cannot bind IPv6 socket — skipping IPv6 peers");
+                false
+            }
+        }
+    })
+}
+
 impl NetworkManager {
     /// Discover peers from DNS seeds and add to address database
     pub async fn discover_peers_from_dns(
@@ -44,12 +74,35 @@ impl NetworkManager {
         {
             let mut db = self.address_database().write().await;
             for addr in addresses {
-                db.add_address(addr, 0);
+                // Use add_address_from_dns_seed: clears any stale NODE_NETWORK_LIMITED flag
+                // so peers get a fresh classification on the next version handshake.
+                db.add_address_from_dns_seed(addr);
             }
         }
 
         info!("Discovered {} addresses from DNS seeds", address_count);
         Ok(())
+    }
+
+    /// Discover full-history (archive) peers using service-bit-filtered DNS seeds.
+    ///
+    /// Uses the `x1.` subdomain prefix to request only `NODE_NETWORK` peers — nodes that
+    /// keep the complete blockchain and can serve historical blocks for IBD.  Call this when
+    /// the standard seed returns mostly pruned peers that cannot serve historical blocks.
+    pub async fn discover_archive_peers_from_dns(&self) -> Result<usize> {
+        use crate::network::dns_seeds;
+        let seeds = dns_seeds::MAINNET_ARCHIVE_DNS_SEEDS;
+        info!("IBD: seeding full-history (archive) peers from {} filtered DNS seeds", seeds.len());
+        let addresses = dns_seeds::resolve_dns_seeds(seeds, 8333, 1000).await;
+        let count = addresses.len();
+        {
+            let mut db = self.address_database().write().await;
+            for addr in addresses {
+                db.add_address_from_dns_seed(addr);
+            }
+        }
+        info!("IBD: discovered {} archive-node addresses from x1-filtered DNS seeds", count);
+        Ok(count)
     }
 
     /// Connect to persistent peers from config
@@ -185,9 +238,38 @@ impl NetworkManager {
             pm.peer_socket_addresses()
         };
 
+        // Check how many fresh non-limited addresses exist before pulling the list.
+        // If the address DB has been drained of full-history peers (all marked
+        // NODE_NETWORK_LIMITED from previous evictions), trigger DNS re-discovery to
+        // replenish with fresh, unclassified addresses before attempting to connect.
+        {
+            let db = self.address_database().read().await;
+            if db.count_fresh_non_limited() < needed {
+                drop(db);
+                warn!(
+                    "IBD: address DB has fewer than {} non-limited addresses — \
+                     running DNS seed re-discovery to find full-history peers",
+                    needed
+                );
+                // Use archive seeds (x1. prefix = NODE_NETWORK filter) first; they return only
+                // full-history nodes. Fall back to regular seeds only if archive seeds fail or
+                // return nothing — regular seeds return mostly pruned nodes which get immediately
+                // evicted as NODE_NETWORK_LIMITED, draining the DB in a tight loop.
+                let archive_count = self.discover_archive_peers_from_dns().await.unwrap_or(0);
+                if archive_count == 0 {
+                    let (net_name, port) =
+                        crate::network::protocol::ProtocolParser::dns_seed_network();
+                    let _ = self
+                        .discover_peers_from_dns(net_name, port, &Default::default())
+                        .await;
+                }
+            }
+        }
+
         let addresses: Vec<_> = {
             let db = self.address_database().read().await;
-            let fresh = db.get_fresh_addresses(needed * 3);
+            // IBD-biased ordering: full-history peers first, unknown second, pruned last.
+            let fresh = db.get_fresh_ibd_addresses(needed * 3);
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
 
@@ -205,17 +287,34 @@ impl NetworkManager {
                 .collect()
         };
 
-        let mut connected = 0;
+        // Connect to multiple candidates simultaneously to avoid serializing 10s timeouts.
+        // Use FuturesUnordered so each candidate races concurrently; we collect results as
+        // they arrive and stop early once `needed` connections succeed.
+        use futures::StreamExt as _;
+        let mut stream = futures::stream::FuturesUnordered::new();
         for socket in sockets {
-            if let Err(e) = self.connect_to_peer(socket).await {
-                debug!("Failed to connect to {}: {}", socket, e);
-            } else {
-                connected += 1;
-                if connected >= needed {
-                    break;
+            stream.push(async move {
+                (socket, self.connect_to_peer(socket).await)
+            });
+        }
+
+        let mut connected = 0;
+        while let Some((socket, result)) = stream.next().await {
+            match result {
+                Ok(()) => {
+                    connected += 1;
+                    if connected >= needed {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    debug!("Failed to connect to {}: {}", socket, e);
                 }
             }
         }
+        // Remaining in-progress connection futures are dropped here, but the underlying
+        // TCP SYN packets may already be in flight. That is harmless: if they connect,
+        // `PeerConnected` will be processed normally; if they fail, no resources are held.
 
         info!("Connected to {} new peers from address database", connected);
 
@@ -330,6 +429,23 @@ impl NetworkManager {
     /// Connect to a peer at the given address
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
         let ip = addr.ip();
+
+        // Fast-reject global IPv6 peers when this host has no global IPv6 routing.
+        // Link-local (fe80::/10) and loopback (::1) are still allowed.
+        if ip.is_ipv6() {
+            use std::net::IpAddr;
+            if let IpAddr::V6(v6) = ip {
+                let is_link_local = (v6.segments()[0] & 0xffc0) == 0xfe80;
+                let is_loopback = v6.is_loopback();
+                if !is_link_local && !is_loopback && !has_global_ipv6() {
+                    return Err(anyhow::anyhow!(
+                        "Skipping IPv6 peer {} — no global IPv6 routing on this host",
+                        addr
+                    ));
+                }
+            }
+        }
+
         if !self.dos_protection().check_connection(ip).await {
             warn!(
                 "Connection rate limit exceeded for IP {}, rejecting outgoing connection",
@@ -402,10 +518,26 @@ impl NetworkManager {
 
     /// Fire-and-forget TCP reconnect when a peer is no longer in the peer map (e.g. IBD GetData).
     /// Uses the full `connect_to_peer` path (stream split, DoS checks, handshake via PeerConnected).
+    ///
+    /// Will not reconnect to peers whose IP is in `ibd_evicted_ips` — they were evicted because
+    /// they proved unable to serve historical IBD blocks (NODE_NETWORK_LIMITED / pruned).
     pub fn spawn_outbound_reconnect_attempt(self: Arc<Self>, addr: SocketAddr) {
         let reconnection_queue = Arc::clone(self.peer_reconnection_queue());
         let nm = self;
         tokio::spawn(async move {
+            // Skip reconnect if this IP was evicted from IBD.
+            // Use a block to drop the guard before any await.
+            let is_evicted = {
+                let evicted = nm.ibd_evicted_ips.read().unwrap();
+                evicted.contains(&addr.ip())
+            };
+            if is_evicted {
+                debug!(
+                    "IBD: skipping reconnect to {} — IP evicted (NODE_NETWORK_LIMITED)",
+                    addr
+                );
+                return;
+            }
             {
                 let pm = nm.peer_manager_mutex().lock().await;
                 if let Some(p) = pm.get_peer(&TransportAddr::Tcp(addr)) {

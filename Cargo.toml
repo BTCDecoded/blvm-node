@@ -181,6 +181,11 @@ io-uring = "0.7"
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 mimalloc = { version = "=0.1", default-features = false, optional = true }
 libmimalloc-sys = { version = "=0.1", features = ["extended"], optional = true }
+# jemalloc: background purge threads return cross-thread freed pages to OS automatically.
+# Better than mimalloc v3 for IBD: handles the download-thread→validator cross-thread
+# free pattern (Arc<Block> allocated by download, freed by validator) without accumulating
+# abandoned pages. Set MALLOC_CONF=background_thread:true,dirty_decay_ms:500.
+tikv-jemallocator = { version = "0.5", features = ["background_threads", "profiling"], optional = true }
 
 # System calls for process sandboxing (Unix)
 nix = { version = "=0.28", features = ["process", "resource"], optional = true }
@@ -244,7 +249,9 @@ libc = ["dep:libc"]
 # `dep:rayon` is the actual crate; `rayon = []` enables parallel paths in blvm-consensus.
 rayon = ["dep:rayon"]
 # Production optimizations (parallel block validation, etc.)
-production = ["blvm-protocol/production", "dep:blvm-consensus", "rayon", "mimalloc"]
+production = ["blvm-protocol/production", "dep:blvm-consensus", "rayon", "jemalloc"]
+# Optional in-tree CUDA ECDSA/Schnorr batch (blvm-secp256k1/gpu). Requires nvcc + CUDA runtime.
+secp-gpu = ["blvm-consensus/secp-gpu"]
 # Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
 profile = ["blvm-protocol/profile", "dep:blvm-consensus"]
 # Privacy relay (Dandelion++); enabled in default release builds.
@@ -259,6 +266,9 @@ governance = ["dep:reqwest"]
 # Memory allocator optimization (mimalloc) - faster than default allocator
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
+# jemalloc: preferred for IBD; background purge threads handle cross-thread freed pages.
+# Build with: --features jemalloc (and without --features mimalloc).
+jemalloc = ["dep:tikv-jemallocator"]
 # JSON logging format for structured logging (production/monitoring)
 json-logging = []
 # Modern REST API (runs alongside JSON-RPC)
@@ -372,6 +382,56 @@ path = "examples/wallet-integration.rs"
 name = "verify_heed3"
 path = "examples/verify_heed3.rs"
 required-features = ["heed3"]
+
+[[example]]
+name = "set_ibd_watermark"
+path = "examples/set_ibd_watermark.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "backfill_engine_export_muhash"
+path = "examples/backfill_engine_export_muhash.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "copy_ibd_ckpt"
+path = "examples/copy_ibd_ckpt.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "fill_empty_ckpt_slot"
+path = "examples/fill_empty_ckpt_slot.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "inspect_local_block"
+path = "examples/inspect_local_block.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "strip_bodies_above"
+path = "examples/strip_bodies_above.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "strip_bodies_range"
+path = "examples/strip_bodies_range.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "recover_ckpt_slot"
+path = "examples/recover_ckpt_slot.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "clear_ckpt_slot"
+path = "examples/clear_ckpt_slot.rs"
+required-features = ["production", "heed3"]
+
+[[example]]
+name = "probe_ckpt_utxo"
+path = "examples/probe_ckpt_utxo.rs"
+required-features = ["production", "heed3"]
 
 # Tools
 [[bin]]

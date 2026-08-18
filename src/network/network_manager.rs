@@ -208,14 +208,30 @@ pub struct NetworkManager {
     >,
     /// Pending Block requests (for IBD)
     /// Key: (peer_ip, block_hash) - uses IpAddr to match regardless of port (inbound vs outbound)
+    ///
+    /// Value is a `Vec` of senders, not a single sender: during IBD the coordinator's stall
+    /// recovery legitimately issues several overlapping requests for the *same* (peer, block)
+    /// (e.g. "up to 3 fetchers/height" plus periodic requeues). A single-sender map made each
+    /// new registration `insert`-overwrite (and drop) the previous request's sender, killing an
+    /// in-flight download's receiver; worse, `complete_block_request` would then deliver the
+    /// arriving block to whichever lone sender survived — frequently one whose receiver had
+    /// already been dropped — silently losing the block (`let _ = sender.send(..)`). With the
+    /// relentless requeue storm this trapped a needed height forever (observed: h=575630 routed
+    /// every ~600ms yet timing out for 30s, validation frozen). Keeping every sender and
+    /// delivering to the first *live* one guarantees the currently-waiting download receives it.
+    /// IBD GetData delivery: `(block, witnesses, optional original P2P payload)`.
+    /// Third field is W5/N1 wire-bytes store input (`data[24..]` from the frame).
     pending_block_requests: Arc<
         Mutex<
             HashMap<
                 (IpAddr, blvm_protocol::Hash),
-                tokio::sync::oneshot::Sender<(
-                    blvm_protocol::Block,
-                    Vec<Vec<blvm_protocol::segwit::Witness>>,
-                )>,
+                Vec<
+                    tokio::sync::oneshot::Sender<(
+                        blvm_protocol::Block,
+                        Vec<Vec<blvm_protocol::segwit::Witness>>,
+                        Option<Vec<u8>>,
+                    )>,
+                >,
             >,
         >,
     >,
@@ -260,6 +276,11 @@ pub struct NetworkManager {
     /// When true, refuse all full-block answers on `getdata` (operational maintenance).
     block_serve_maintenance: Arc<AtomicBool>,
 
+    /// IPs evicted from IBD because they consistently failed to serve historical blocks
+    /// (NODE_NETWORK_LIMITED / pruned).  `spawn_outbound_reconnect_attempt` will not
+    /// re-connect to any address whose IP is in this set.
+    pub(crate) ibd_evicted_ips: Arc<std::sync::RwLock<HashSet<std::net::IpAddr>>>,
+
     /// Nonces we placed in our own outbound Version messages.
     /// Any incoming Version that echoes one of these nonces is a self-connection.
     pub(crate) local_version_nonces: Arc<std::sync::Mutex<HashSet<u64>>>,
@@ -269,9 +290,6 @@ pub struct NetworkManager {
     /// When false, P2P Stratum TLV demux is skipped (requires `stratum-v2` feature).
     #[cfg(feature = "stratum-v2")]
     p2p_stratum_demux_enabled: bool,
-
-    /// BIP-110 reduced-data P2P policy (advertise + outbound peer cap).
-    pub(crate) reduced_data_config: blvm_protocol::ReducedDataConfig,
 }
 
 /// Pending request metadata (pub(crate) for utxo_commitments_client)
@@ -497,11 +515,11 @@ impl NetworkManager {
             block_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             tx_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             block_serve_maintenance: Arc::new(AtomicBool::new(false)),
+            ibd_evicted_ips: Arc::new(std::sync::RwLock::new(HashSet::new())),
             local_version_nonces: Arc::new(std::sync::Mutex::new(HashSet::new())),
             getaddr_responded: Arc::new(std::sync::Mutex::new(HashSet::new())),
             #[cfg(feature = "stratum-v2")]
             p2p_stratum_demux_enabled,
-            reduced_data_config: config.map(|c| c.reduced_data.clone()).unwrap_or_default(),
         }
     }
 
@@ -1122,6 +1140,27 @@ impl NetworkManager {
             .is_some_and(|p| p.is_connected())
     }
 
+    /// P0-A A7: transport up and Bitcoin handshake complete (VerAck received).
+    pub async fn peer_ibd_ready(&self, addr: SocketAddr) -> bool {
+        if !self.is_peer_connected(addr).await {
+            return false;
+        }
+        self.peer_states()
+            .read()
+            .await
+            .get(&addr)
+            .is_some_and(|s| s.handshake_complete)
+    }
+
+    /// Returns the service flags of a connected peer, or 0 if not connected / not yet received.
+    pub async fn peer_services(&self, addr: SocketAddr) -> u64 {
+        let pm = self.peer_manager.lock().await;
+        let ta = pm
+            .find_transport_addr_by_socket(addr)
+            .unwrap_or(TransportAddr::Tcp(addr));
+        pm.get_peer(&ta).map(|p| p.services()).unwrap_or(0)
+    }
+
     /// Register a pending Block request
     /// Returns a receiver that will receive the Block response
     pub fn register_block_request(
@@ -1131,28 +1170,85 @@ impl NetworkManager {
     ) -> tokio::sync::oneshot::Receiver<(
         blvm_protocol::Block,
         Vec<Vec<blvm_protocol::segwit::Witness>>,
+        Option<Vec<u8>>,
     )> {
         let key = (Self::block_request_key(peer_addr), block_hash);
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                self.pending_block_requests.lock().await.insert(key, tx);
+                // Append (do not overwrite): concurrent same-(peer,block) requests must each
+                // keep their own sender so an in-flight download's receiver is never dropped.
+                self.pending_block_requests
+                    .lock()
+                    .await
+                    .entry(key)
+                    .or_default()
+                    .push(tx);
             })
         });
         rx
     }
 
-    /// Drop a pending block request (e.g. GetData failed after register).
+    /// Register multiple block download requests in a single mutex acquisition.
+    ///
+    /// Equivalent to calling [`register_block_request`] N times but acquires
+    /// `pending_block_requests` only once, reducing lock overhead for batched `getdata`
+    /// messages. Returns one oneshot receiver per hash in the same order.
+    pub fn register_block_requests_batch(
+        &self,
+        peer_addr: SocketAddr,
+        block_hashes: &[blvm_protocol::Hash],
+    ) -> Vec<
+        tokio::sync::oneshot::Receiver<(
+            blvm_protocol::Block,
+            Vec<Vec<blvm_protocol::segwit::Witness>>,
+            Option<Vec<u8>>,
+        )>,
+    > {
+        let key_prefix = Self::block_request_key(peer_addr);
+        let mut rxs = Vec::with_capacity(block_hashes.len());
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut pending = self.pending_block_requests.lock().await;
+                for &hash in block_hashes {
+                    let key = (key_prefix, hash);
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    // Append (do not overwrite): see `register_block_request` / the
+                    // `pending_block_requests` field doc for why concurrent same-key requests
+                    // must coexist instead of clobbering each other.
+                    pending.entry(key).or_default().push(tx);
+                    rxs.push(rx);
+                }
+            })
+        });
+        rxs
+    }
+
+    /// Drop a pending block request (e.g. GetData failed, timed out, or chunk aborted).
+    ///
+    /// Prunes only senders whose receiver has already been dropped (`is_closed()`) — i.e. the
+    /// caller's own abandoned request — and never a *live* sibling. During IBD the coordinator's
+    /// stall recovery routinely has several overlapping requests for the same (peer, block) in
+    /// flight; removing the whole key here (as a single-value map would) would drop a concurrently
+    /// waiting download's receiver, so the block then arrives to no live receiver and is lost —
+    /// exactly the deterministic stall observed (block "routed" repeatedly yet the gap height never
+    /// reaches validation). Keeping live siblings guarantees the still-waiting download gets it.
     pub fn cancel_block_request(&self, peer_addr: SocketAddr, block_hash: blvm_protocol::Hash) {
         let key = (Self::block_request_key(peer_addr), block_hash);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                self.pending_block_requests.lock().await.remove(&key);
+                let mut pending = self.pending_block_requests.lock().await;
+                if let Some(senders) = pending.get_mut(&key) {
+                    senders.retain(|s| !s.is_closed());
+                    if senders.is_empty() {
+                        pending.remove(&key);
+                    }
+                }
             })
         });
     }
 
-    /// Complete a pending Block request
+    /// Complete a pending Block request (no original wire payload).
     pub fn complete_block_request(
         &self,
         peer_addr: SocketAddr,
@@ -1160,16 +1256,41 @@ impl NetworkManager {
         block: blvm_protocol::Block,
         witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
     ) -> bool {
+        self.complete_block_request_with_wire(peer_addr, block_hash, block, witnesses, None)
+    }
+
+    /// Complete a pending Block request, optionally attaching the original P2P payload (W5/N1).
+    pub fn complete_block_request_with_wire(
+        &self,
+        peer_addr: SocketAddr,
+        block_hash: blvm_protocol::Hash,
+        block: blvm_protocol::Block,
+        witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
+        wire_payload: Option<Vec<u8>>,
+    ) -> bool {
         let key = (Self::block_request_key(peer_addr), block_hash);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut pending = self.pending_block_requests.lock().await;
-                if let Some(sender) = pending.remove(&key) {
-                    let _ = sender.send((block, witnesses));
-                    true
-                } else {
-                    false
+                let Some(senders) = pending.remove(&key) else {
+                    return false;
+                };
+                // Deliver to the first sender whose receiver is still alive. `oneshot::Sender::send`
+                // returns the payload back on `Err` when the receiver was dropped, so we can hand it
+                // to the next candidate without cloning. Senders from already-abandoned overlapping
+                // requests are skipped (their downloads timed out / aborted); the currently-waiting
+                // download's receiver is the live one and gets the block.
+                let mut payload = (block, witnesses, wire_payload);
+                for sender in senders {
+                    match sender.send(payload) {
+                        Ok(()) => return true,
+                        Err(returned) => payload = returned,
+                    }
                 }
+                // The key existed (this was an IBD response) but every receiver had been dropped.
+                // Report handled so the block is not re-routed onto the relay/main-loop path; a
+                // still-needed height will be requested again by the coordinator.
+                true
             })
         })
     }
@@ -1217,6 +1338,274 @@ impl NetworkManager {
                 pm.peer_socket_addresses()
             })
         })
+    }
+
+    /// Get peer addresses suitable for IBD full-history block download.
+    ///
+    /// Excludes peers advertising `NODE_NETWORK_LIMITED` (BIP159 pruned nodes), which
+    /// cannot serve historical blocks from years ago. Falls back to all peers if none
+    /// qualify, so IBD never stalls due to missing full-history peers.
+    pub fn peer_addresses_for_ibd(&self) -> Vec<SocketAddr> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                use blvm_protocol::service_flags::standard::{NODE_NETWORK, NODE_NETWORK_LIMITED};
+
+                // Fast path: at least one full-history peer already connected.
+                // A peer is full-history if it advertises NODE_NETWORK (0x1) — the flag that
+                // means "I have the complete blockchain".  Modern Bitcoin Core 25+ sets both
+                // NODE_NETWORK and NODE_NETWORK_LIMITED; filtering on LIMITED alone incorrectly
+                // excludes all such peers. Only peers with NODE_NETWORK_LIMITED but no
+                // NODE_NETWORK are genuinely pruned (serve recent blocks only).
+                {
+                    let pm = self.peer_manager.lock().await;
+                    let addrs = pm.peer_socket_addresses_for_ibd();
+                    // Empty set: `Iterator::all` is vacuously true — do NOT treat that as
+                    // "all peers are pruned" and burn ~10s on DNS/connect expansion.
+                    // Local-disk / sequential IBD often has zero TCP peers; the coordinator
+                    // ready-refresh used to call this every ~1s and stall tip crawl at ~10 BPS.
+                    if pm.peers().is_empty() {
+                        return addrs;
+                    }
+                    // "all limited" = no peer has NODE_NETWORK set.
+                    let all_limited = pm.peers().iter().all(|(_, p)| {
+                        let s = p.services();
+                        s != 0 && (s & NODE_NETWORK) == 0
+                    });
+                    if !all_limited {
+                        return addrs;
+                    }
+                }
+
+                // All connected peers are NODE_NETWORK_LIMITED (pruned).  Try to expand
+                // the peer set with fresh addresses from the database, then wait briefly
+                // for handshakes to complete so we can pick full-history peers.
+                warn!(
+                    "IBD: all connected peers are NODE_NETWORK_LIMITED; \
+                     connecting to more peers from address database"
+                );
+                let current: Vec<std::net::SocketAddr> = {
+                    let pm = self.peer_manager.lock().await;
+                    pm.peer_socket_addresses()
+                };
+                let ban_list = self.ban_list().read().await.clone();
+
+                // Check how many non-limited candidates exist.  If all candidates in the DB are
+                // already marked limited, use the archive-node DNS seeds (x1. prefix = NODE_NETWORK
+                // service-bit filter) to populate specifically full-history peers.  Regular seeds
+                // return mostly pruned nodes; archive seeds return only archival nodes that keep the
+                // complete blockchain and can serve historical IBD blocks.
+                let fresh_non_limited = {
+                    let db = self.address_database().read().await;
+                    db.count_fresh_non_limited()
+                };
+                if fresh_non_limited < 4 {
+                    warn!(
+                        "IBD: only {} non-limited addresses in DB — seeding from archive (x1-filtered) DNS seeds",
+                        fresh_non_limited
+                    );
+                    // Prefer archive seeds; fall back to standard seeds if archive seeds fail.
+                    if let Ok(n) = self.discover_archive_peers_from_dns().await {
+                        if n == 0 {
+                            let (net_name, port) =
+                                crate::network::protocol::ProtocolParser::dns_seed_network();
+                            let _ = self
+                                .discover_peers_from_dns(net_name, port, &Default::default())
+                                .await;
+                        }
+                    } else {
+                        let (net_name, port) =
+                            crate::network::protocol::ProtocolParser::dns_seed_network();
+                        let _ = self
+                            .discover_peers_from_dns(net_name, port, &Default::default())
+                            .await;
+                    }
+                }
+
+                let candidates: Vec<std::net::SocketAddr> = {
+                    let db = self.address_database().read().await;
+                    // Use IBD-biased ordering (full-history first, then unknown, then limited).
+                    let fresh = db.get_fresh_ibd_addresses(128);
+                    let filtered = db.filter_addresses(fresh, &ban_list, &current);
+                    filtered
+                        .iter()
+                        .map(|a| db.network_addr_to_socket(a))
+                        .collect()
+                };
+                // Connect in parallel so we don't block shutdown on sequential 10-s timeouts.
+                use futures::StreamExt as _;
+                let mut stream = futures::stream::FuturesUnordered::new();
+                for sock in candidates.into_iter().take(16) {
+                    stream.push(async move { (sock, self.connect_to_peer(sock).await) });
+                }
+                let mut connected = 0usize;
+                while let Some((sock, result)) = stream.next().await {
+                    match result {
+                        Ok(()) => {
+                            connected += 1;
+                            if connected >= 8 {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            debug!("IBD peer expansion: failed to connect to {}: {}", sock, e);
+                        }
+                    }
+                }
+                if connected > 0 {
+                    // Give new connections time to complete version/verack handshake.
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+                // Re-check — if we found full-history peers, use them; else fall back.
+                let pm = self.peer_manager.lock().await;
+                pm.peer_socket_addresses_for_ibd()
+            })
+        })
+    }
+
+    /// Evict a peer that has proven it cannot serve historical IBD blocks (e.g. consistent
+    /// block-timeout failures indicating `NODE_NETWORK_LIMITED`/pruned).
+    ///
+    /// This:
+    /// 1. Writes `NODE_NETWORK_LIMITED` into the address-database entry so the peer is skipped
+    ///    on future `peer_addresses_for_ibd` and `get_fresh_addresses` calls.
+    /// 2. Disconnects the peer, freeing its connection slot.
+    /// 3. Attempts to connect a replacement from the address database, preferring addresses that
+    ///    do not have `NODE_NETWORK_LIMITED` set.
+    ///
+    /// Clear the IBD evicted-IP set so a fresh IBD session can try all peers again.
+    ///
+    /// Must be called at the start of each IBD attempt (e.g. in `try_catch_up_ibd`).
+    /// Without this, a failed IBD run permanently poisons the eviction set, preventing
+    /// the reconnection task from ever re-establishing connections to those peers, even
+    /// though they may have recovered or the node may be connecting from a different
+    /// perspective.  The address database already durably records `NODE_NETWORK_LIMITED`
+    /// for confirmed pruned peers, so clearing the in-memory set is safe.
+    pub fn clear_ibd_evicted_ips(&self) {
+        let mut evicted = self.ibd_evicted_ips.write().unwrap();
+        let prev_count = evicted.len();
+        evicted.clear();
+        if prev_count > 0 {
+            info!(
+                "IBD: cleared {} evicted-IP entries for new session (they remain NODE_NETWORK_LIMITED in address DB)",
+                prev_count
+            );
+        }
+    }
+
+    /// Called from the IBD download worker when `MAX_CONSECUTIVE_FAILURES` are all block-timeouts.
+    pub fn evict_ibd_peer(&self, peer_addr: SocketAddr) {
+        use blvm_protocol::service_flags::standard::NODE_NETWORK_LIMITED;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                // 1. Mark as NODE_NETWORK_LIMITED in the address database.
+                {
+                    let mut db = self.address_database().write().await;
+                    db.set_services_by_socket(peer_addr, NODE_NETWORK_LIMITED);
+                }
+                // 2. Record this IP in the eviction set so spawn_outbound_reconnect_attempt
+                //    does not reconnect to it for the remainder of this IBD session.
+                {
+                    let mut evicted = self.ibd_evicted_ips.write().unwrap();
+                    evicted.insert(peer_addr.ip());
+                }
+                // 3. Disconnect the peer (fires PeerDisconnected → cancel pending block reqs).
+                let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                    TransportAddr::Tcp(peer_addr),
+                ));
+                warn!(
+                    "IBD: evicted peer {} (marked NODE_NETWORK_LIMITED, slot freed for replacement)",
+                    peer_addr
+                );
+                // 3. Brief pause so the disconnect propagates before we count current peers.
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+                // 4. Connect a replacement. Prefer entries that don't have NODE_NETWORK_LIMITED.
+                let current: Vec<SocketAddr> = {
+                    let pm = self.peer_manager.lock().await;
+                    pm.peer_socket_addresses()
+                };
+                let ban_list = self.ban_list().read().await.clone();
+                let candidates: Vec<SocketAddr> = {
+                    let db = self.address_database().read().await;
+                    // IBD-ordered: full-history first, unknown second, limited last.
+                    let fresh = db.get_fresh_ibd_addresses(128);
+                    let filtered = db.filter_addresses(fresh, &ban_list, &current);
+                    // Split into non-limited (preferred) and limited (fallback).
+                    let mut preferred = Vec::new();
+                    let mut fallback = Vec::new();
+                    for a in &filtered {
+                        let sock = db.network_addr_to_socket(a);
+                        // services==0 means we don't know yet — include optimistically.
+                        // services with LIMITED bit set → skip if we have alternatives.
+                        let entry_services = db.services_for_socket(sock);
+                        if entry_services != 0 && (entry_services & NODE_NETWORK_LIMITED) != 0 {
+                            fallback.push(sock);
+                        } else {
+                            preferred.push(sock);
+                        }
+                    }
+                    let mut out = preferred;
+                    out.extend(fallback);
+                    out
+                };
+                // If no candidates, trigger archive DNS re-seed (x1. prefix = NODE_NETWORK filter)
+                // and recompute from the freshly seeded address database.
+                let candidates = if candidates.is_empty() {
+                    warn!(
+                        "IBD: no replacement candidates after evicting {} — seeding from archive DNS seeds",
+                        peer_addr
+                    );
+                    // Use archive seeds first (full-history nodes); fall back to standard seeds.
+                    if self.discover_archive_peers_from_dns().await.unwrap_or(0) == 0 {
+                        let (net_name, port) =
+                            crate::network::protocol::ProtocolParser::dns_seed_network();
+                        let _ = self
+                            .discover_peers_from_dns(net_name, port, &Default::default())
+                            .await;
+                    }
+                    // Recompute candidates from the freshly seeded address database.
+                    let current_after: Vec<SocketAddr> = {
+                        let pm = self.peer_manager.lock().await;
+                        pm.peer_socket_addresses()
+                    };
+                    let ban_list2 = self.ban_list().read().await.clone();
+                    let db = self.address_database().read().await;
+                    let fresh2 = db.get_fresh_ibd_addresses(128);
+                    let filtered2 = db.filter_addresses(fresh2, &ban_list2, &current_after);
+                    let evicted2 = self.ibd_evicted_ips.read().unwrap();
+                    let mut preferred2 = Vec::new();
+                    let mut fallback2 = Vec::new();
+                    for a in &filtered2 {
+                        let sock = db.network_addr_to_socket(a);
+                        if evicted2.contains(&sock.ip()) {
+                            continue;
+                        }
+                        let svc = db.services_for_socket(sock);
+                        if svc != 0 && (svc & NODE_NETWORK_LIMITED) != 0 {
+                            fallback2.push(sock);
+                        } else {
+                            preferred2.push(sock);
+                        }
+                    }
+                    let mut out2 = preferred2;
+                    out2.extend(fallback2);
+                    out2
+                } else {
+                    candidates
+                };
+                for sock in candidates.into_iter().take(3) {
+                    match self.connect_to_peer(sock).await {
+                        Ok(()) => {
+                            info!("IBD: replacement peer connected: {}", sock);
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("IBD: replacement candidate {} failed: {}", sock, e);
+                        }
+                    }
+                }
+            })
+        });
     }
 
     /// Get all peer addresses (as TransportAddr)
@@ -1502,7 +1891,7 @@ impl NetworkManager {
         Ok(())
     }
 
-    /// Send ping message to all connected peers
+
     pub async fn ping_all_peers(&self) -> Result<()> {
         use crate::network::protocol::{PingMessage, ProtocolMessage, ProtocolParser};
         // Generate nonce for ping
@@ -1734,6 +2123,19 @@ impl NetworkManager {
                 pm.remove_peer(&addr);
                 drop(pm);
 
+                // Cancel all in-flight block requests for this peer so their
+                // oneshot receivers resolve immediately with RecvError rather
+                // than waiting for the 30 s download timeout.  Each 30 s wait
+                // blocks the ordered pipeline; at ~13 disconnects/minute this
+                // was wasting ~6× as much wall-clock time as real block work.
+                if let TransportAddr::Tcp(sa) = addr {
+                    let peer_ip = Self::block_request_key(sa);
+                    let mut pending = self.pending_block_requests.lock().await;
+                    pending.retain(|(ip, _), _| *ip != peer_ip);
+                    // Dropping the removed Vec<Sender> values closes the
+                    // channels, waking the timeout(…, rx) futures with Ok(Err).
+                }
+
                 let event_publisher_guard = self.event_publisher.lock().await;
                 if let Some(ref event_publisher) = *event_publisher_guard {
                     let addr_str = addr.to_string();
@@ -1759,7 +2161,7 @@ impl NetworkManager {
     }
 
     /// Process incoming network messages
-    pub async fn process_messages(&self) -> Result<()> {
+    pub async fn process_messages(self: &Arc<Self>) -> Result<()> {
         // Track message queue size manually (unbounded channel doesn't have len())
         let mut message_count = 0u64;
         let mut last_metrics_update = std::time::SystemTime::now();
@@ -1835,6 +2237,8 @@ impl NetworkManager {
                 message_count = 0; // Reset after update for next period
             }
 
+            // Process getdata inline (KEEP tc220 path). Spawn+SEM was forensics-only and
+            // coincided with tip30 collapse; parallel W5 serve_getdata_request remains.
             super::network_message_dispatch::handle_network_message(self, message).await?;
         }
         Ok(())
@@ -2595,10 +2999,13 @@ impl NetworkManager {
         Mutex<
             HashMap<
                 (IpAddr, blvm_protocol::Hash),
-                tokio::sync::oneshot::Sender<(
-                    blvm_protocol::Block,
-                    Vec<Vec<blvm_protocol::segwit::Witness>>,
-                )>,
+                Vec<
+                    tokio::sync::oneshot::Sender<(
+                        blvm_protocol::Block,
+                        Vec<Vec<blvm_protocol::segwit::Witness>>,
+                        Option<Vec<u8>>,
+                    )>,
+                >,
             >,
         >,
     > {
@@ -2747,10 +3154,6 @@ impl NetworkManager {
 
         // FIBRE - always enabled
         services_with_filters |= crate::network::protocol::NODE_FIBRE;
-
-        if self.reduced_data_config.advertise_service {
-            services_with_filters |= standard::NODE_REDUCED_DATA;
-        }
 
         crate::network::protocol::VersionMessage {
             version,

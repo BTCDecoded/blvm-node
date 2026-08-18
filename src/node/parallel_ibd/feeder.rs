@@ -8,10 +8,12 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 // Static buffer limits passed at startup; no dynamic recalculation needed.
 use super::types::{
@@ -63,12 +65,42 @@ impl FeederBuffer {
         self.len() == 0
     }
 
+    /// Sum `estimate_block_bytes` across all shards for accurate MEM_REPORT accounting.
+    /// The fixed 400 KB/block estimate underestimates post-SegWit blocks by 4–10×.
+    pub(crate) fn total_bytes_estimate(&self) -> usize {
+        use crate::node::parallel_ibd::types::estimate_block_bytes;
+        self.shards.iter()
+            .flat_map(|m| m.values())
+            .map(|(blk, wit, ..)| estimate_block_bytes(blk, wit))
+            .sum()
+    }
+
     /// Minimum height currently buffered (any shard). Used for backpressure when the buffer is full.
     pub(crate) fn min_buffered_height(&self) -> Option<u64> {
         self.shards
             .iter()
             .filter_map(|m| m.keys().next().copied())
             .min()
+    }
+
+    /// Drop heights strictly below `floor` (already validated). Returns (count, bytes_freed).
+    ///
+    /// W26d: try_emit direct-feeds the tip while flush pushes ahead onto the ready channel;
+    /// validation can race ahead of the channel, then late channel deliveries refill the feeder
+    /// with stale heights and backpressure-block the real tip (live: min=640009 need=642564).
+    pub(crate) fn prune_below(&mut self, floor: u64) -> (usize, usize) {
+        // N14: split_off keeps h >= floor without allocating a stale-key Vec under the Mutex.
+        let mut n = 0usize;
+        let mut bytes = 0usize;
+        for shard in &mut self.shards {
+            let keep = shard.split_off(&floor);
+            let stale = std::mem::replace(shard, keep);
+            n = n.saturating_add(stale.len());
+            for v in stale.into_values() {
+                bytes = bytes.saturating_add(v.6);
+            }
+        }
+        (n, bytes)
     }
 }
 
@@ -95,16 +127,38 @@ pub(crate) fn new_feeder_state() -> FeederState {
 
 /// Run the feeder thread. Drains ready_rx into feeder_state.
 /// Returns the JoinHandle so the caller can join when IBD completes.
+///
+/// `shutdown`: set by the IBD teardown path (`ibd_pipeline_shutdown`) when validation has exited
+/// (normally on error). Without it the feeder can wedge teardown forever: when validation stops
+/// consuming, the feeder fills its buffer and parks on the backpressure condvar, and its blocking
+/// `ready_rx.recv()` never returns because the detached coordinator task still holds prefetch-channel
+/// clones that keep the workers — and thus the bridge → `ready` senders — alive. `feeder_handle.join()`
+/// would then block indefinitely, swallowing the real validation error (observed as the node hanging
+/// with the coordinator spamming "Coordinator stall" while no progress is made). Polling the flag (via
+/// `recv_timeout`) and bailing out of the backpressure wait lets the feeder exit promptly so the error
+/// surfaces.
 pub(crate) fn run_feeder_thread(
     ready_rx: Receiver<ReadyItem>,
     feeder_state: FeederState,
     feeder_buffer_limit: usize,
     feeder_buffer_bytes_limit: usize,
+    shutdown: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // `b: SharedBlock = Arc<Block>` and `w: SharedWitnesses = Arc<Vec<Vec<Witness>>>` —
         // block bytes were allocated once at download; all pipeline stages share this Arc.
-        while let Ok((h, b, w, keys, u, tx_ids, spec_adds)) = ready_rx.recv() {
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            // Bounded wait so the feeder periodically re-checks `shutdown` even when no items
+            // arrive (channel still open because the coordinator holds sender clones).
+            let (h, b, w, keys, u, tx_ids, spec_adds) =
+                match ready_rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(item) => item,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
             let est_bytes = estimate_block_bytes(b.as_ref(), w.as_ref());
             let mut guard = feeder_state.0.lock();
             while (guard.0.len() >= feeder_buffer_limit
@@ -113,14 +167,26 @@ pub(crate) fn run_feeder_thread(
                     .0
                     .min_buffered_height()
                     .is_some_and(|min_h| h >= min_h)
+                && !shutdown.load(Ordering::Acquire)
             {
-                feeder_state.1.wait(&mut guard);
+                // Time-bounded so a teardown `notify` is never missed even if it races the wait.
+                feeder_state
+                    .1
+                    .wait_for(&mut guard, Duration::from_millis(250));
+            }
+            if shutdown.load(Ordering::Acquire) {
+                break;
             }
             let buffer_was_empty = guard.0.is_empty();
             guard
                 .0
                 .insert(h, (b, w, keys, u, tx_ids, spec_adds, est_bytes));
             guard.2 += est_bytes;
+            // W26: keep TIP_CRAWL / gap_in_pipeline metrics honest — channel-path inserts
+            // previously left IBD_FEEDER_BUFFER_BLOCKS stale at 0 while the buffer held tip.
+            crate::node::parallel_ibd::IBD_FEEDER_BUFFER_BLOCKS
+                .store(guard.0.len(), std::sync::atomic::Ordering::Relaxed);
+            crate::node::parallel_ibd::tip_stage::mark_feeder(h);
             #[cfg(feature = "profile")]
             if buffer_was_empty {
                 let ts_ms = crate::utils::time::current_timestamp_millis();
@@ -130,11 +196,17 @@ pub(crate) fn run_feeder_thread(
                     ts_ms
                 );
             }
-            feeder_state.1.notify_one();
+            // N13: tip-aware notify — ahead-only inserts skip wake (flush storms).
+            // Synth bisect always-notify did not recover S10 champ (still ~189); keep N13.
+            let wait_tip = crate::node::parallel_ibd::IBD_FEEDER_WAIT_TIP
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if buffer_was_empty || h == wait_tip || wait_tip == 0 {
+                feeder_state.1.notify_one();
+            }
         }
         let mut guard = feeder_state.0.lock();
         guard.1 = true; // channel_closed
-        feeder_state.1.notify_one();
+        feeder_state.1.notify_all();
     })
 }
 
@@ -159,7 +231,7 @@ mod tests {
             block,
             Arc::new(Vec::new()),
             Vec::new(),
-            rustc_hash::FxHashMap::default(),
+            Arc::new(rustc_hash::FxHashMap::default()),
             Vec::new(),
             Arc::new(blvm_consensus::types::UtxoSet::default()),
             100,
@@ -188,6 +260,22 @@ mod tests {
         assert!(!buf.is_empty());
         buf.remove(5);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn feeder_buffer_prune_below_drops_stale_keeps_tip_and_ahead() {
+        let mut buf = FeederBuffer::new(2);
+        for h in [10, 11, 12, 13] {
+            buf.insert(h, dummy_feeder_value(h));
+        }
+        let (n, bytes) = buf.prune_below(12);
+        assert_eq!(n, 2);
+        assert_eq!(bytes, 200);
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.min_buffered_height(), Some(12));
+        assert!(buf.get(11).is_none());
+        assert!(buf.get(12).is_some());
+        assert!(buf.get(13).is_some());
     }
 
     #[test]

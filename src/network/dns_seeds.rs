@@ -22,6 +22,23 @@ pub const MAINNET_DNS_SEEDS: &[&str] = &[
     "seed.bitcoin.wiz.biz",
 ];
 
+/// Bitcoin DNS seeds filtered for full-history (archive) nodes only.
+///
+/// These use the `x1.` subdomain prefix which instructs the DNS seeder to return
+/// only peers advertising `NODE_NETWORK` (service bit 0, value 1) — i.e. full archival
+/// nodes that keep the complete blockchain.  Pruned nodes advertise `NODE_NETWORK_LIMITED`
+/// (bit 10) instead and are excluded from these results.
+///
+/// Use these seeds specifically for IBD peer discovery when the standard seeds return
+/// only pruned peers that cannot serve historical blocks.
+pub const MAINNET_ARCHIVE_DNS_SEEDS: &[&str] = &[
+    "x1.seed.bitcoin.sipa.be",
+    "x1.dnsseed.bluematt.me",
+    "x1.seed.bitcoin.sprovoost.nl",
+    "x1.dnsseed.emzy.de",
+    "x1.seed.bitcoin.wiz.biz",
+];
+
 /// Testnet DNS seeds
 pub const TESTNET_DNS_SEEDS: &[&str] = &[
     "testnet-seed.bitcoin.jonasschnelli.ch",

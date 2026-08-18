@@ -956,6 +956,20 @@ impl ProtocolParser {
         );
     }
 
+    /// DNS seed name + default P2P port for the magic set at startup.
+    pub fn dns_seed_network() -> (&'static str, u16) {
+        let magic = ACTIVE_MAGIC
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .to_le_bytes();
+        if magic == BITCOIN_MAGIC_TESTNET {
+            ("testnet", 18333)
+        } else if magic == BITCOIN_MAGIC_REGTEST {
+            ("regtest", 18444)
+        } else {
+            ("mainnet", 8333)
+        }
+    }
+
     /// Parse a raw message into a protocol message
     /// Orange Paper 10.1.1: ParseMessage, size bounds, checksum rejection
     #[cfg_attr(feature = "protocol-verification", spec_locked("10.1.1"))]
@@ -1252,6 +1266,25 @@ impl ProtocolParser {
     }
 
     /// Serialize a protocol message to bytes
+    /// Frame an already-encoded P2P payload as a full TCP message (magic+cmd+len+checksum+payload).
+    /// Mode T W5 path: LMDB stores the `block` payload bytes — skip deserialize/re-serialize.
+    pub fn serialize_command_payload(command: &str, payload: &[u8]) -> Result<Vec<u8>> {
+        if command.len() > 12 {
+            return Err(anyhow::anyhow!("command too long: {command}"));
+        }
+        let mut message = Vec::with_capacity(24 + payload.len());
+        let active_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+        message.extend_from_slice(&active_magic.to_le_bytes());
+        let mut command_bytes = [0u8; 12];
+        command_bytes[..command.len()].copy_from_slice(command.as_bytes());
+        message.extend_from_slice(&command_bytes);
+        message.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        let checksum = Self::calculate_checksum(payload);
+        message.extend_from_slice(&checksum);
+        message.extend_from_slice(payload);
+        Ok(message)
+    }
+
     pub fn serialize_message(message: &ProtocolMessage) -> Result<Vec<u8>> {
         let (command, payload) = match message {
             ProtocolMessage::Version(msg) => {

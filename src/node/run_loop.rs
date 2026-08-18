@@ -45,8 +45,13 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
             info!("Shutdown signal received, stopping node gracefully...");
             break;
         }
-        // Process any received blocks (non-blocking)
-        while let Some(block_data) = node.network.try_recv_block() {
+        // Process any received blocks (non-blocking). Skip while parallel IBD owns sync —
+        // accepting inv blocks advances chain_info without UTXO watermark and triggers
+        // `[IBD_RESUME]` replay from the watermark (see ibd.log 2026-07-06T06:01:32Z).
+        while !crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE
+            .load(std::sync::atomic::Ordering::Acquire)
+            && let Some(block_data) = node.network.try_recv_block()
+        {
             if let Ok(Some(h)) = node.storage.chain().get_height() {
                 current_height = h.saturating_add(1);
             }

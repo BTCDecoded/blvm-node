@@ -198,22 +198,42 @@ impl GlobalProgressPublisher {
             self.global.store(m, Ordering::Release);
         }
     }
+
+    /// Contiguous retired floor (`min` across shard cursors).
+    pub(crate) fn global_floor(&self) -> u64 {
+        self.global.load(Ordering::Acquire)
+    }
 }
 
-/// Read `BLVM_IBD_RETIRE_SHARDS`. Defaults to 1 (= original single-threaded retire);
-/// values are clamped to `[1, available_parallelism / 2]` so every shard has at least
-/// one validation worker behind it. `0` and unparseable values map to 1.
+/// Read `BLVM_IBD_RETIRE_SHARDS`. When not set, auto-selects based on CPU count:
+///   ≤8 cores  → 1 shard (original single-threaded)
+///   9–15      → 2 shards
+///   16–23     → 3 shards
+///   ≥24       → 4 shards (sweet-spot; marginal gains beyond 4 due to mem_mtx contention)
+///
+/// Values are clamped to `[1, available_parallelism / 2]` so every shard has at least
+/// two validation workers behind it. `0` and unparseable values map to the auto default.
 pub(crate) fn configured_retire_shards() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    // Auto default: scale up on machines that actually have the cores to support parallel retire.
+    // Each shard grabs mem_mtx once per block (~150 µs held) and contends on `staged` mutex.
+    // Beyond 4 shards the mem_mtx serialisation removes the benefit; 4 is the practical cap.
+    let auto_default: usize = match cpus {
+        0..=8 => 1,
+        9..=15 => 2,
+        16..=23 => 3,
+        _ => 4,
+    };
     let raw: usize = std::env::var("BLVM_IBD_RETIRE_SHARDS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+        .unwrap_or(auto_default);
     if raw <= 1 {
         return 1;
     }
-    let cap = std::thread::available_parallelism()
-        .map(|p| (p.get() / 2).max(1))
-        .unwrap_or(1);
+    let cap = (cpus / 2).max(1);
     raw.min(cap).max(1)
 }
 
@@ -270,8 +290,8 @@ mod tests {
         }
     }
 
-    /// `configured_retire_shards()` must default to 1 with no env var, and must clamp
-    /// to `available_parallelism / 2` for sane values.
+    /// `configured_retire_shards()` must auto-scale with CPU count when no env var is set,
+    /// and must clamp to `available_parallelism / 2` for sane values.
     #[test]
     fn configured_retire_shards_defaults_and_clamps() {
         // Each test that mutates BLVM_IBD_RETIRE_SHARDS must serialize on this lock so
@@ -279,10 +299,24 @@ mod tests {
         // happen inside this lock too, since cargo runs tests in parallel by default.
         let _guard = ENV_LOCK.lock();
 
+        let cpus = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1);
+        let expected_default: usize = match cpus {
+            0..=8 => 1,
+            9..=15 => 2,
+            16..=23 => 3,
+            _ => 4,
+        };
+
         unsafe {
             std::env::remove_var("BLVM_IBD_RETIRE_SHARDS");
         }
-        assert_eq!(configured_retire_shards(), 1, "default must be 1");
+        assert_eq!(
+            configured_retire_shards(),
+            expected_default,
+            "default must be auto-scaled ({cpus} cpus → {expected_default} shards)"
+        );
 
         unsafe {
             std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "0");
@@ -297,7 +331,11 @@ mod tests {
         unsafe {
             std::env::set_var("BLVM_IBD_RETIRE_SHARDS", "garbage");
         }
-        assert_eq!(configured_retire_shards(), 1, "unparseable must clamp to 1");
+        assert_eq!(
+            configured_retire_shards(),
+            expected_default,
+            "unparseable must fall back to auto default ({expected_default} shards)"
+        );
 
         // For values >=2, exact clamp depends on host's available_parallelism, but the
         // result must always be in [1, available_parallelism / 2] and >= 1.
@@ -352,7 +390,7 @@ mod tests {
             let work = IbdRetireWork {
                 height,
                 blocks_buf: vec![Arc::clone(&dummy_block)],
-                block: Arc::clone(&dummy_block),
+                block: Some(Arc::clone(&dummy_block)),
             };
             dispatcher.send(work).unwrap();
         }

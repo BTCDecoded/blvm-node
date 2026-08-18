@@ -277,6 +277,29 @@ impl PeerScorer {
             })
     }
 
+    /// Tip-owner ranking score for WAN IBD assigner refresh.
+    ///
+    /// Live A6e: `get_score` for peers with `blocks_received==0` stays ~1.0 (latency default),
+    /// while tip owners that actually download floor at **0.1**. That inverted ranking caused
+    /// 13/13 `[IBD_TIP_UPGRADE]` events to promote unproven peers over delivering sticky
+    /// (assign interval ~13s vs breakthrough ~6.5s).
+    ///
+    /// Unproven peers keep a demoted latency hint so first-assign still prefers low-RTT;
+    /// proven downloaders keep their bandwidth score (even at the 0.1 floor).
+    pub fn tip_owner_score(&self, peer: &SocketAddr) -> f64 {
+        match self.get_stats(peer) {
+            Some(s) if s.blocks_received > 0 => s.score,
+            Some(s) => (s.score * 0.001).min(0.05),
+            None => {
+                if is_lan_peer(peer) {
+                    0.05
+                } else {
+                    0.001
+                }
+            }
+        }
+    }
+
     /// Get stats for a peer
     pub fn get_stats(&self, peer: &SocketAddr) -> Option<PeerStats> {
         self.stats
@@ -284,6 +307,19 @@ impl PeerScorer {
             .unwrap_or_else(|e| e.into_inner())
             .get(peer)
             .cloned()
+    }
+
+    /// Measured block delivery rate (blocks/s) from connection duration and blocks received.
+    /// Used by A6m sticky rotation — avoids tip_owner_score's 0.1 WAN cluster.
+    pub fn delivery_blocks_per_sec(&self, peer: &SocketAddr) -> f64 {
+        let Some(stats) = self.get_stats(peer) else {
+            return 0.0;
+        };
+        if stats.blocks_received == 0 {
+            return 0.0;
+        }
+        let secs = stats.connection_duration_secs.max(1.0);
+        stats.blocks_received as f64 / secs
     }
 
     /// Get all peer scores sorted by score (highest first)
@@ -419,6 +455,49 @@ mod tests {
         assert!(
             score1 > score2,
             "Peer1 score {score1} should be > Peer2 score {score2}"
+        );
+    }
+
+    #[test]
+    fn delivery_blocks_per_sec_uses_connection_duration() {
+        let scorer = PeerScorer::new();
+        let peer: SocketAddr = "9.9.9.9:8333".parse().unwrap();
+        scorer.record_block(peer, 100_000, 100.0);
+        scorer.record_block(peer, 100_000, 100.0);
+        let bps = scorer.delivery_blocks_per_sec(&peer);
+        assert!(
+            bps > 0.0,
+            "two blocks over connection lifetime should yield positive BPS, got {bps}"
+        );
+    }
+
+    #[test]
+    fn tip_owner_score_demotes_unproven_below_proven_floor() {
+        let scorer = PeerScorer::new();
+        let proven: SocketAddr = "8.8.8.8:8333".parse().unwrap();
+        let unproven: SocketAddr = "1.1.1.1:8333".parse().unwrap();
+
+        scorer.record_latency_sample(unproven, 200.0); // default-ish ~1.0 get_score
+        scorer.record_block(proven, 100_000, 5000.0); // slow → floors near 0.1
+
+        let u = scorer.tip_owner_score(&unproven);
+        let p = scorer.tip_owner_score(&proven);
+        assert!(
+            u < 0.05,
+            "unproven tip_owner_score must be demoted, got {u}"
+        );
+        assert!(
+            p >= 0.1,
+            "proven tip_owner_score keeps bandwidth floor, got {p}"
+        );
+        assert!(
+            p > u,
+            "proven floor must beat demoted unproven ({p} vs {u})"
+        );
+        assert!(
+            scorer.get_score(&unproven) >= 0.5,
+            "raw unproven get_score stays latency-default-ish, got {}",
+            scorer.get_score(&unproven)
         );
     }
 

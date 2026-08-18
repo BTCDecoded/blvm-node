@@ -40,15 +40,27 @@ impl NetworkManager {
         block_msg: BlockMessage,
         data: Vec<u8>,
     ) -> Result<()> {
-        info!(
+        debug!(
             "Block message received from {} ({} bytes)",
             peer_addr,
             data.len()
         );
         let block_hash = block_hash_from_header(&block_msg.block.header);
-        if self.complete_block_request(peer_addr, block_hash, block_msg.block, block_msg.witnesses)
-        {
-            info!(
+        // Extract P2P payload once — IBD path keeps it for W5 wire-bytes store; relay queues it.
+        let payload_len = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+        let wire_payload = if data.len() >= 24 + payload_len {
+            Some(data[24..24 + payload_len].to_vec())
+        } else {
+            None
+        };
+        if self.complete_block_request_with_wire(
+            peer_addr,
+            block_hash,
+            block_msg.block,
+            block_msg.witnesses,
+            wire_payload.clone(),
+        ) {
+            debug!(
                 "Block routed to pending request from {} (hash {})",
                 peer_addr,
                 hex::encode(block_hash)
@@ -56,8 +68,7 @@ impl NetworkManager {
             return Ok(());
         }
         // Relay / post-IBD: queue the P2P block payload for the main loop.
-        let payload_len = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
-        if data.len() < 24 + payload_len {
+        let Some(payload) = wire_payload else {
             warn!(
                 "Block from {} truncated (frame {} bytes, payload {} bytes)",
                 peer_addr,
@@ -65,8 +76,7 @@ impl NetworkManager {
                 payload_len
             );
             return Ok(());
-        }
-        let payload = data[24..24 + payload_len].to_vec();
+        };
         let payload_bytes = payload.len();
         self.queue_block(payload);
         if let Ok(mut inv) = self.inventory().lock() {
@@ -148,28 +158,6 @@ impl NetworkManager {
         let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
         let transport_addr_for_verack = transport_addr.clone();
 
-        if let Some(ref transport) = transport_addr {
-            if super::reduced_data_p2p::should_reject_non_rdts_outbound(
-                &self.reduced_data_config,
-                &pm,
-                transport,
-                version_msg.services,
-            ) {
-                drop(pm);
-                warn!(
-                    "Peer {} lacks NODE_REDUCED_DATA and non-RDTS outbound cap ({}) reached — disconnecting",
-                    peer_addr, self.reduced_data_config.max_non_rdts_outbound
-                );
-                return self
-                    .disconnect_for_protocol_violation(
-                        peer_addr,
-                        "non-RDTS outbound peer cap exceeded",
-                        false,
-                    )
-                    .await;
-            }
-        }
-
         if let Some(transport_addr) = transport_addr {
             if let Some(peer) = pm.get_peer_mut(&transport_addr) {
                 peer.set_version(version_msg.version as u32);
@@ -249,11 +237,13 @@ impl NetworkManager {
                 ProtocolMessage::Verack => {
                     // A Verack before we've received the peer's Version is a
                     // protocol violation; drop it silently.
-                    warn!("Peer {} sent Verack before Version — ignoring", peer_addr);
+                    debug!("Peer {} sent Verack before Version — ignoring", peer_addr);
                     return Ok(());
                 }
                 _ => {
-                    warn!(
+                    // Common during fast reconnects (e.g. Inv sent before our Version
+                    // was processed). Not a serious violation — log at debug.
+                    debug!(
                         "Peer {} sent {:?} before Version — ignoring",
                         peer_addr,
                         std::mem::discriminant(parsed)
@@ -312,7 +302,7 @@ impl NetworkManager {
                 if let Some(addr) = transport_addr {
                     if let Some(peer) = pm.get_peer_mut(&addr) {
                         if !peer.record_pong_received(pong_msg.nonce) {
-                            warn!("Received pong with non-matching nonce from {}", peer_addr);
+                            debug!("Received pong with non-matching nonce from {}", peer_addr);
                         } else {
                             debug!(
                                 "Received valid pong from {} (nonce={})",
@@ -462,10 +452,15 @@ impl NetworkManager {
                     .map(|e| e.get_protocol_version())
                     .unwrap_or(ProtocolVersion::BitcoinV1);
 
-                if let Err(e) = self
+                let serve_result = self
                     .serve_getdata_request(peer_addr, getdata, protocol_version)
-                    .await
-                {
+                    .await;
+                if has_block_requests {
+                    // Pair start_ibd_serving — without this, concurrent count leaks to the cap
+                    // and Mode T / archive getdata is rejected mid-soak.
+                    self.ibd_protection().stop_ibd_serving(peer_addr).await;
+                }
+                if let Err(e) = serve_result {
                     warn!("getdata: failed to serve peer {}: {}", peer_addr, e);
                 }
                 return Ok(());
@@ -584,20 +579,14 @@ impl NetworkManager {
                     );
                     return Ok(());
                 }
-                // No pending getheaders request matched this peer — unsolicited headers.
-                // Penalize the peer to deter flooding; do not ban (might be a race).
-                warn!(
-                    "Unsolicited headers message from {} ({} headers) — penalizing peer",
+                // No pending getheaders request — could be a late response after our timeout.
+                // Just discard; do NOT disconnect (would break peers that respond slowly).
+                debug!(
+                    "Discarding late/unsolicited headers from {} ({} headers)",
                     peer_addr,
                     headers_msg.headers.len()
                 );
-                return self
-                    .disconnect_for_protocol_violation(
-                        peer_addr,
-                        "unsolicited headers message",
-                        false, // don't ban — could be a race with a legitimate request
-                    )
-                    .await;
+                return Ok(());
             }
             ProtocolMessage::Block(_) => {
                 warn!(
@@ -736,6 +725,21 @@ impl NetworkManager {
                     state.handshake_complete = true;
                 }
                 drop(peer_states);
+
+                // Send GetAddr immediately after handshake to populate the address DB
+                // with peers known to this node — including potentially full-history
+                // archival nodes that aren't in the DNS seeds.
+                match ProtocolParser::serialize_message(&ProtocolMessage::GetAddr) {
+                    Ok(wire) => {
+                        if let Err(e) = self.send_to_peer(peer_addr, wire).await {
+                            tracing::debug!("GetAddr to {} failed: {}", peer_addr, e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to serialize GetAddr: {}", e);
+                    }
+                }
+
                 return Ok(());
             }
             _ => {}

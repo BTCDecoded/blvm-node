@@ -485,3 +485,93 @@ fn adds_only_flush_accumulates_del_tombstone_backlog() {
         "full drain must clear DEL backlog (had {pending_before} pending)"
     );
 }
+
+/// Capped adds-only drain must not release height protection until every ADD for that
+/// height leaves `add_shards` (regression for h=236800 UTXO_TOTAL_MISS).
+#[test]
+fn capped_adds_only_drain_defers_height_release_until_fully_drained() {
+    let disk: Arc<dyn Tree> = Arc::new(MemTree::default());
+    let store = Arc::new(IbdUtxoStore::new_with_options(
+        Arc::clone(&disk),
+        1,
+        false,
+        /* max_entries = */ 50,
+        EvictionStrategy::Fifo,
+        0,
+        ValueCodec::Bincode,
+    ));
+    let mut del_scratch = Vec::new();
+    let mut add_scratch = Vec::new();
+
+    const HEIGHT: u64 = 42;
+    const N_OUTS: usize = 80;
+    let mut additions: Vec<(OutPoint, UTXO)> = Vec::with_capacity(N_OUTS);
+    for i in 0..N_OUTS {
+        let op = synth_outpoint(HEIGHT, i as u32);
+        additions.push((op, synth_utxo(1000 + i as i64, HEIGHT)));
+    }
+    let delta = build_delta(additions, vec![]);
+    store.worker_cache_put_protected(&delta.additions, HEIGHT);
+    store.apply_utxo_delta(&delta, HEIGHT, &mut del_scratch, &mut add_scratch, true);
+
+    assert_eq!(store.pending_add_count_for_height(HEIGHT as u32), N_OUTS);
+    assert!(store.protected_len() >= 1);
+
+    unsafe {
+        std::env::set_var("BLVM_IBD_DRAIN_CAP", "32");
+    }
+    let pkg1 = store
+        .take_flush_batch_adds_only()
+        .expect("first capped drain");
+    assert_eq!(pkg1.ops.len(), 32);
+    assert!(
+        pkg1.heights.is_empty(),
+        "partial drain must not release height {HEIGHT} yet"
+    );
+    assert_eq!(
+        store.pending_add_count_for_height(HEIGHT as u32),
+        N_OUTS - 32
+    );
+
+    // Simulate durability: flush ADDs but do not release (heights set empty).
+    let prepared = pkg1
+        .prepare_for_disk(ValueCodec::Bincode)
+        .expect("prepare");
+    store
+        .flush_prepared_package_adds_only(&prepared)
+        .expect("flush adds");
+    store.release_protected_heights(&pkg1.heights);
+
+    // Force eviction pressure: protected height must keep cache entries alive.
+    store.maybe_evict(&mut Vec::new());
+    let keys: Vec<OutPointKey> = delta
+        .additions
+        .keys()
+        .map(|op| outpoint_to_key(op))
+        .collect();
+    let mut map = UtxoSet::default();
+    let mut buf = Vec::new();
+    store.supplement_utxo_map_with_buf(&mut map, &keys, &mut buf);
+    assert_eq!(
+        map.len(),
+        N_OUTS,
+        "cache entries must survive partial flush + eviction sweep"
+    );
+
+    while store.pending_add_count_for_height(HEIGHT as u32) > 0 {
+        let Some(pkg) = store.take_flush_batch_adds_only() else {
+            break;
+        };
+        let heights = Arc::clone(&pkg.heights);
+        let prepared = pkg.prepare_for_disk(ValueCodec::Bincode).expect("prepare");
+        store
+            .flush_prepared_package_adds_only(&prepared)
+            .expect("flush");
+        store.release_protected_heights(&heights);
+    }
+    assert_eq!(store.pending_add_count_for_height(HEIGHT as u32), 0);
+
+    unsafe {
+        std::env::remove_var("BLVM_IBD_DRAIN_CAP");
+    }
+}

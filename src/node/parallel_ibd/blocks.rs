@@ -8,12 +8,15 @@ use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use blvm_protocol::{
-    BitcoinProtocolEngine, Block, Hash, UtxoSet, ValidationResult, segwit::Witness,
+    BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult, segwit::Witness,
 };
 use std::sync::Arc;
 use tracing::debug;
 
 /// Record block-index entries and chainwork for blocks flushed during parallel IBD.
+///
+/// Uses [`ChainState::index_connected_blocks_batch`] to reduce N×3 individual LMDB
+/// write transactions to 3 batch write transactions for the entire chunk.
 pub(crate) fn index_ibd_flushed_blocks(
     storage: &Storage,
     block_hashes: &[Hash],
@@ -27,13 +30,13 @@ pub(crate) fn index_ibd_flushed_blocks(
 ) -> Result<()> {
     debug_assert_eq!(block_hashes.len(), chunk.len());
     debug_assert_eq!(block_hashes.len(), heights.len());
-    for i in 0..block_hashes.len() {
-        let (block, _, _, _) = &chunk[i];
-        storage
-            .chain()
-            .index_connected_block(&block_hashes[i], &block.header, heights[i])?;
-    }
-    Ok(())
+    let entries: Vec<(&Hash, &BlockHeader, u64)> = (0..block_hashes.len())
+        .map(|i| {
+            let (block, _, _, _) = &chunk[i];
+            (&block_hashes[i], &block.header, heights[i])
+        })
+        .collect();
+    storage.chain().index_connected_blocks_batch(&entries)
 }
 
 /// Validate and store a block.

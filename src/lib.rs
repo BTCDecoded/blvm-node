@@ -35,9 +35,20 @@
 // `cargo test` uses the default allocator: mimalloc arenas can retain RSS during heavy
 // IBD, and some integration tests have faulted under mimalloc while passing with the
 // system allocator and in `blvm-protocol` tests.
-#[cfg(all(not(target_os = "windows"), feature = "mimalloc", not(test)))]
+#[cfg(all(not(target_os = "windows"), feature = "mimalloc", not(test), not(feature = "jemalloc")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// jemalloc: preferred for IBD over mimalloc v3. Background purge threads return cross-thread
+// freed pages to the OS automatically — specifically addressing the Arc<Block> pattern where
+// the download thread allocates block data and validator threads free it. With mimalloc v3,
+// these cross-thread frees create "abandoned" pages that accumulate and get cold-swapped by
+// the kernel (filling the 32 GB swap by h=450k). jemalloc's background_threads option runs
+// a dedicated purge thread that calls MADV_DONTNEED on dirty pages after dirty_decay_ms ms.
+// Set env: MALLOC_CONF=background_thread:true,dirty_decay_ms:500,muzzy_decay_ms:5000
+#[cfg(all(not(target_os = "windows"), feature = "jemalloc", not(test)))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub mod bip21;
 pub mod cli;

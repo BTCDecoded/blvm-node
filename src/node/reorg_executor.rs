@@ -179,6 +179,18 @@ pub fn try_activate_heavier_fork(
         })
     };
 
+    let mut connect_context = move |_height: u64,
+                                    recent_headers: Option<&[blvm_consensus::types::BlockHeader]>,
+                                    network_time: u64,
+                                    net: Network|
+          -> blvm_consensus::block::BlockValidationContext {
+        blvm_consensus::block::block_validation_context_for_connect_ibd(
+            recent_headers,
+            network_time,
+            net,
+        )
+    };
+
     let result = reorganize_chain_with_witnesses(
         &new_chain,
         &new_witnesses,
@@ -192,6 +204,7 @@ pub fn try_activate_heavier_fork(
         Some(put_undo),
         current_timestamp(),
         network,
+        Some(&mut connect_context),
     )
     .map_err(|e| {
         *utxo_set = utxo_backup;

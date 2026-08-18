@@ -75,6 +75,59 @@ impl PeerManager {
             .collect()
     }
 
+    /// Get peer addresses suitable for IBD full-history block download.
+    ///
+    /// Bitcoin Core 25+ sets NODE_NETWORK_LIMITED (0x400) alongside NODE_NETWORK (0x1) even
+    /// on non-pruned archive nodes as a BIP159 capability advertisement. Filtering on
+    /// NODE_NETWORK_LIMITED alone therefore excludes all modern full-history peers.
+    ///
+    /// Correct logic: a peer is "full-history" if it explicitly advertises NODE_NETWORK (0x1)
+    /// — the flag that means "I have the complete blockchain". NODE_NETWORK_LIMITED without
+    /// NODE_NETWORK means a genuinely pruned node (serves only recent blocks).
+    /// Peers with services == 0 (version not yet received) are included optimistically.
+    /// Falls back to all peers if no full-history peers are known.
+    pub fn peer_socket_addresses_for_ibd(&self) -> Vec<SocketAddr> {
+        use blvm_protocol::service_flags::standard::{NODE_NETWORK, NODE_NETWORK_LIMITED};
+        let full_history: Vec<SocketAddr> = self
+            .peers
+            .iter()
+            .filter_map(|(addr, peer)| {
+                let services = peer.services();
+                // Unknown services (version not yet received): include optimistically.
+                if services != 0 {
+                    let has_full_network = (services & NODE_NETWORK) != 0;
+                    let has_limited_only = !has_full_network && (services & NODE_NETWORK_LIMITED) != 0;
+                    // Exclude only genuinely pruned-only peers (LIMITED without NETWORK).
+                    // Nodes advertising both NODE_NETWORK and NODE_NETWORK_LIMITED are treated
+                    // as archive: NODE_NETWORK is the authoritative "full blockchain" claim.
+                    if has_limited_only {
+                        return None;
+                    }
+                }
+                match addr {
+                    TransportAddr::Tcp(sock) => Some(*sock),
+                    #[cfg(feature = "quinn")]
+                    TransportAddr::Quinn(sock) => Some(*sock),
+                    #[cfg(feature = "iroh")]
+                    TransportAddr::Iroh(_) => None,
+                }
+            })
+            .collect();
+        if full_history.is_empty() {
+            // No confirmed full-history peers. Fall back to ALL peers so IBD can
+            // make progress on networks where archival nodes are hard to reach.
+            // The download workers will detect inability to serve old blocks via timeout
+            // and eventually evict those peers through MAX_CONSECUTIVE_TIMEOUT_FAILURES.
+            tracing::warn!(
+                "IBD: no full-history peers found (all {} peer(s) may be pruned); using all peers as fallback",
+                self.peers.len()
+            );
+            self.peer_socket_addresses()
+        } else {
+            full_history
+        }
+    }
+
     /// Get governance-enabled peers (peers with NODE_GOVERNANCE service flag)
     #[cfg(feature = "governance")]
     pub fn get_governance_peers(&self) -> Vec<(TransportAddr, SocketAddr)> {

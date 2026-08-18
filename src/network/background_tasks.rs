@@ -354,6 +354,7 @@ impl NetworkManager {
         let tcp_transport = self.tcp_transport().clone();
         let ban_list = Arc::clone(self.ban_list());
         let persistent_peers = Arc::clone(self.persistent_peers_lock());
+        let ibd_evicted_ips = Arc::clone(&self.ibd_evicted_ips);
         let secs = self
             .background_task_config()
             .peer_reconnection_interval_secs;
@@ -426,6 +427,16 @@ impl NetworkManager {
                     .collect();
 
                 for (addr, attempts, quality) in peers_to_reconnect.iter() {
+                    // Skip evicted IBD peers while IBD is active (NODE_NETWORK_LIMITED / pruned).
+                    // Do NOT remove them from the queue: the eviction set is cleared when IBD
+                    // restarts, so removing here would prevent reconnection after a failed IBD run.
+                    let is_evicted = {
+                        let evicted = ibd_evicted_ips.read().unwrap();
+                        evicted.contains(&addr.ip())
+                    };
+                    if is_evicted {
+                        continue;
+                    }
                     {
                         let ban_list_guard = ban_list.read().await;
                         if let Some(unban_timestamp) = ban_list_guard.get(addr) {

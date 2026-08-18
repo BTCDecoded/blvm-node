@@ -549,17 +549,30 @@ impl Node {
         }
 
         // Initialize peer connections automatically
-        info!("[START_COMPONENTS] Initializing peer connections...");
-        self.initialize_peer_connections().await?;
-        info!("[START_COMPONENTS] Peer connections initialized");
+        let serve_only = crate::config::ibd_serve_only();
+        if serve_only {
+            info!(
+                "[START_COMPONENTS] BLVM_SERVE_ONLY=1 — skip outbound discovery (listen+getdata only)"
+            );
+        } else {
+            info!("[START_COMPONENTS] Initializing peer connections...");
+            self.initialize_peer_connections().await?;
+            info!("[START_COMPONENTS] Peer connections initialized");
+        }
 
         // Wait for peer handshakes to complete (Version/VerAck exchange)
         // Process network messages during this time to handle Version/VerAck exchange
-        info!("[START_COMPONENTS] Waiting for peer handshakes to complete...");
-        let handshake_secs = self
-            .config_sub(|c| c.request_timeouts.as_ref())
-            .map(|t| t.handshake_timeout_secs)
-            .unwrap_or(10);
+        // Serve-only: no outbound peers — skip the fixed handshake wait.
+        let handshake_secs = if serve_only {
+            0
+        } else {
+            self.config_sub(|c| c.request_timeouts.as_ref())
+                .map(|t| t.handshake_timeout_secs)
+                .unwrap_or(10)
+        };
+        if handshake_secs > 0 {
+            info!("[START_COMPONENTS] Waiting for peer handshakes to complete...");
+        }
         let handshake_timeout = tokio::time::Duration::from_secs(handshake_secs);
         let handshake_start = std::time::Instant::now();
         let mut total_processed = 0usize;
@@ -718,10 +731,12 @@ impl Node {
                 }
             }
         }
-        // Get target height and peer addresses for IBD decision
+        // Get target height and peer addresses for IBD decision.
+        // Use IBD-filtered list: excludes NODE_NETWORK_LIMITED (pruned) peers that cannot serve
+        // historical blocks. Falls back to all peers if no full-history peers are found.
         let peer_addresses: Vec<String> = self
             .network
-            .peer_addresses()
+            .peer_addresses_for_ibd()
             .iter()
             .map(|addr| addr.to_string())
             .collect();
@@ -756,7 +771,7 @@ impl Node {
         }
 
         #[cfg(feature = "production")]
-        {
+        if !serve_only {
             let data_dir = self.data_dir.as_path();
             if let Err(e) = crate::storage::ibd_autorepair::apply_ibd_utxo_autorepair_if_needed(
                 self.storage.as_ref(),
@@ -769,17 +784,117 @@ impl Node {
             }
         }
 
+        // Local-replay hybrid: newer heed3 (bodies + both ping-pong ckpts) + pin resume
+        // to a prior-rung export so validation restarts at N with bodies ahead.
+        // Also select the ckpt slot that still holds height `h` (inactive slot after a
+        // later export) — otherwise seed loads the active tip ckpt and skips the band.
+        // Serve-only archives must not rewrite watermarks / export pins.
+        if !serve_only {
+        if let Ok(v) = std::env::var("BLVM_IBD_FORCE_RESUME_HEIGHT") {
+            if let Ok(h) = v.trim().parse::<u64>() {
+                if h > 0 {
+                    let mut slot_note = String::new();
+                    let active = self.storage.chain().get_engine_ckpt_slot().unwrap_or(0);
+                    let mut chosen: Option<u8> = None;
+                    for slot in [0u8, 1u8] {
+                        if self
+                            .storage
+                            .chain()
+                            .get_engine_ckpt_slot_height(slot)
+                            .ok()
+                            == Some(h)
+                        {
+                            chosen = Some(slot);
+                            break;
+                        }
+                    }
+                    if chosen.is_none() {
+                        // Slot-height metadata may be missing on the inactive tree; if the
+                        // active export is ahead of `h`, prefer the other non-empty slot.
+                        let active_export = self
+                            .storage
+                            .chain()
+                            .get_engine_export_height()
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0);
+                        if active_export > h {
+                            let other = active ^ 1;
+                            let other_name =
+                                crate::storage::ibd_engine::ckpt_tree_for_slot(other);
+                            if let Ok(tree) = self.storage.open_tree(other_name) {
+                                if !tree.is_empty().unwrap_or(true) {
+                                    chosen = Some(other);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(slot) = chosen {
+                        if let Err(e) = self.storage.chain().force_set_engine_ckpt_slot(slot) {
+                            warn!("[IBD_FORCE_RESUME] force_set_engine_ckpt_slot({slot}): {e:#}");
+                        } else {
+                            let _ = self.storage.chain().set_engine_ckpt_slot_height(slot, h);
+                            // Tip export left chain_info.utxo_count at the *newer* rung;
+                            // seed refuses unless expected count matches the prior-rung tree.
+                            let tree_name =
+                                crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
+                            if let Ok(tree) = self.storage.open_tree(tree_name) {
+                                if let Ok(n) = tree.len() {
+                                    if n > 0 {
+                                        let _ = self
+                                            .storage
+                                            .chain()
+                                            .force_set_engine_export_utxo_count(n as u64);
+                                        slot_note = format!(
+                                            " ckpt_slot={slot} (was {active}) utxo_count={n}"
+                                        );
+                                    } else {
+                                        slot_note =
+                                            format!(" ckpt_slot={slot} (was {active})");
+                                    }
+                                } else {
+                                    slot_note = format!(" ckpt_slot={slot} (was {active})");
+                                }
+                            } else {
+                                slot_note = format!(" ckpt_slot={slot} (was {active})");
+                            }
+                        }
+                    }
+                    match (
+                        self.storage.chain().force_set_ibd_utxo_watermark(h),
+                        self.storage.chain().force_set_engine_export_height(h),
+                        self.storage.chain().force_set_engine_validation_tip(h),
+                    ) {
+                        (Ok(()), Ok(()), Ok(())) => {
+                            warn!(
+                                "[IBD_FORCE_RESUME] pinned watermark/export/validation_tip → {} \
+                                 (BLVM_IBD_FORCE_RESUME_HEIGHT){}",
+                                h, slot_note
+                            );
+                        }
+                        (e1, e2, e3) => {
+                            warn!(
+                                "[IBD_FORCE_RESUME] failed to pin height {}: wm={:?} export={:?} tip={:?}",
+                                h, e1.err(), e2.err(), e3.err()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        } // !serve_only — skip FORCE_RESUME watermark rewrite
+
         // Determine the effective resume point. Two heights matter:
         //   chain_tip      — the last block index height written (chain_info.height)
         //   utxo_watermark — the last height at which ALL UTXOs were guaranteed flushed to disk
         //
-        // After a clean shutdown they are equal. After an unclean shutdown the watermark may lag
-        // the chain tip. We restart from watermark so the UTXO store matches the height told to
-        // validation. Blocks watermark+1..chain_tip are already on disk and re-fetched from a
-        // local peer quickly.
+        // After a clean shutdown they are equal. After an unclean shutdown either may lag:
+        //   watermark < chain_tip — UTXO flush incomplete; replay watermark+1..chain_tip.
+        //   watermark > chain_tip — block metadata flush incomplete; resume at watermark.
         //
         // Fresh DB: get_height() returns None → start from genesis (synced_tip=0, first_block=0).
-        // Existing DB: get_height() returns Some(H) → effective_tip = min(H, watermark).
+        // Existing DB: effective_tip = min(chain_tip, watermark), except watermark > chain_tip
+        // uses watermark (UTXO durable through that height; blocks assumed on disk).
         let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
 
         // One-line resume summary (post-reconcile reads reflect disk). Helps verify we are not
@@ -792,16 +907,28 @@ impl Node {
             .get_engine_export_height()
             .ok()
             .flatten();
+        let validation_tip_for_log = self
+            .storage
+            .chain()
+            .get_engine_validation_tip()
+            .ok()
+            .flatten();
         if chain_tip_for_log.is_some_and(|h| h > 0) || synced_tip > 0 {
             info!(
                 "Resuming sync from existing data in this data directory — keep the same --data-dir between runs (do not delete rocksdb/)"
             );
         }
         info!(
-            "[IBD_RESUME] chain_tip={:?} ibd_utxo_watermark={:?} engine_export_height={:?} effective_validated_tip={} next_block_height={}",
-            chain_tip_for_log, wm_for_log, export_for_log, synced_tip, ibd_first_block_height
+            "[IBD_RESUME] chain_tip={:?} ibd_utxo_watermark={:?} engine_export_height={:?} \
+             engine_validation_tip={:?} effective_validated_tip={} next_block_height={}",
+            chain_tip_for_log,
+            wm_for_log,
+            export_for_log,
+            validation_tip_for_log,
+            synced_tip,
+            ibd_first_block_height
         );
-        if chain_tip_for_log.is_some_and(|h| h > 0) && synced_tip == 0 {
+        if !serve_only && chain_tip_for_log.is_some_and(|h| h > 0) && synced_tip == 0 {
             warn!(
                 "[IBD_RESUME] Chain tip is {:?} but durable UTXO watermark is still 0 — validation reconnects from block 1 until the first flush persists `ibd_utxo_watermark`. \
                  After that, restarts resume at min(chain_tip, watermark). Use the same --data-dir and omit BLVM_CLEAN=1 between runs.",
@@ -809,16 +936,50 @@ impl Node {
             );
         }
 
-        let target_height = match self.network.get_highest_peer_start_height() {
+        // Wait for the archive Version start_height before the +1e6 fallback.
+        // Immediate fallback (synced_tip+1000000 → 1400287) starts IBD before
+        // handshake lands and poisons Mode T rematch (FAIL_TARGET / cold tip30).
+        let mut target_height = match self.network.get_highest_peer_start_height_async().await {
             Some(peer_height) => peer_height.max(synced_tip),
-            None => synced_tip.saturating_add(1_000_000),
+            None => 0,
         };
-        let is_ibd = synced_tip < target_height;
+        if !serve_only && target_height <= synced_tip {
+            let wait_ms: u64 = std::env::var("BLVM_IBD_PEER_HEIGHT_WAIT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30_000);
+            let deadline =
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(wait_ms);
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                if let Some(h) = self.network.get_highest_peer_start_height_async().await {
+                    if h > synced_tip {
+                        target_height = h.max(synced_tip);
+                        info!(
+                            "[START_COMPONENTS] peer start_height={h} after Version wait"
+                        );
+                        break;
+                    }
+                }
+            }
+            if target_height <= synced_tip {
+                target_height = synced_tip.saturating_add(1_000_000);
+                warn!(
+                    "[START_COMPONENTS] no peer start_height after {wait_ms}ms — fallback target={target_height}"
+                );
+            }
+        }
+        let is_ibd = !serve_only && synced_tip < target_height;
 
         info!(
-            "[START_COMPONENTS] IBD check: synced_tip={}, ibd_first_block_height={}, target_height={}, is_ibd={}",
-            synced_tip, ibd_first_block_height, target_height, is_ibd
+            "[START_COMPONENTS] IBD check: synced_tip={}, ibd_first_block_height={}, target_height={}, is_ibd={} serve_only={}",
+            synced_tip, ibd_first_block_height, target_height, is_ibd, serve_only
         );
+        if serve_only {
+            info!(
+                "[START_COMPONENTS] BLVM_SERVE_ONLY=1 — skip parallel IBD (archive/getdata serve)"
+            );
+        }
 
         if is_ibd {
             info!(
@@ -1593,8 +1754,12 @@ impl Node {
                         }
                     };
 
+                let engine_enabled = crate::config::ibd::ibd_engine_enabled(
+                    self.config.as_ref().and_then(|c| c.ibd.as_ref()),
+                );
                 #[cfg(feature = "production")]
                 if watermark_val > 0
+                    && !engine_enabled
                     && std::env::var("BLVM_VERIFY_IBD_UTXO_MUHASH")
                         .map(|v| v == "1")
                         .unwrap_or(false)
@@ -1604,26 +1769,56 @@ impl Node {
                     )?;
                 }
 
-                let engine_enabled = std::env::var("BLVM_IBD_ENGINE")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                let export_height = if engine_enabled {
-                    std::env::var("BLVM_IBD_EXPORT_HEIGHT_OVERRIDE")
+                #[cfg(feature = "production")]
+                let export_override = crate::config::ibd::export_height_override_from_env();
+                #[cfg(feature = "production")]
+                let stored_export = if engine_enabled {
+                    self.storage
+                        .chain()
+                        .get_engine_export_height()
                         .ok()
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .or_else(|| {
-                            self.storage
-                                .chain()
-                                .get_engine_export_height()
-                                .ok()
-                                .flatten()
-                        })
+                        .flatten()
                 } else {
                     None
                 };
+                #[cfg(feature = "production")]
+                let (export_height, ignored_override) = if engine_enabled {
+                    let (resolved, ignored) = crate::config::ibd::resolve_engine_export_height(
+                        stored_export,
+                        export_override,
+                    );
+                    if let Some(oh) = ignored {
+                        warn!(
+                            "[IBD_RESUME] ignoring BLVM_IBD_EXPORT_HEIGHT_OVERRIDE={oh} \
+                             (< stored export_h={}) — active checkpoint is a UTXO snapshot \
+                             at the stored height; resuming earlier causes UTXO misses",
+                            stored_export.unwrap_or(0)
+                        );
+                    }
+                    (resolved, ignored)
+                } else {
+                    (None, None)
+                };
+                #[cfg(not(feature = "production"))]
+                let export_height: Option<u64> = None;
+                #[cfg(not(feature = "production"))]
+                let export_override: Option<u64> = None;
+                #[cfg(feature = "production")]
+                let _ = ignored_override;
                 let durable_watermark = match export_height {
                     Some(eh) if eh > 0 => {
-                        if watermark_val > eh {
+                        // Override is only applied when it resolves to `eh` (at/above stored
+                        // export). Below-stored overrides are discarded by
+                        // `resolve_engine_export_height` — never resume below ckpt content.
+                        if export_override == Some(eh) {
+                            if watermark_val != eh {
+                                warn!(
+                                    "[IBD_RESUME] BLVM_IBD_EXPORT_HEIGHT_OVERRIDE={eh} \
+                                     (stored wm={watermark_val}) — using override as resume tip"
+                                );
+                            }
+                            eh
+                        } else if watermark_val > eh {
                             warn!(
                                 "[IBD_RESUME] ibd_utxo_watermark ({}) > last engine export \
                                  ({}) — clamping durable resume to export height (re-validate {} \
@@ -1632,8 +1827,19 @@ impl Node {
                                 eh,
                                 watermark_val.saturating_sub(eh),
                             );
-                        }
-                        if watermark_val == 0 {
+                            eh
+                        } else if watermark_val == 0 {
+                            eh
+                        } else if watermark_val < eh {
+                            // Live 2026-07-15: soft autorepair rolled wm 543250→542500 while
+                            // export_h stayed 543250 → resume at 542501 with engine seed at
+                            // 543250 → UTXO-miss storm. Engine seed is a complete snapshot at
+                            // export_h; never start below it.
+                            warn!(
+                                "[IBD_RESUME] ibd_utxo_watermark ({watermark_val}) < engine export_h \
+                                 ({eh}) — clamping durable resume UP to export (was soft-repair \
+                                 below-export trap)"
+                            );
                             eh
                         } else {
                             watermark_val.min(eh)
@@ -1642,17 +1848,187 @@ impl Node {
                     _ => watermark_val,
                 };
 
-                let effective_tip = chain_tip.min(durable_watermark);
-                if effective_tip < chain_tip {
-                    warn!(
-                        "[IBD_RESUME] UTXO watermark ({}) < chain tip ({}); \
-                         IBD will re-validate {} block(s) from height {} to restore UTXO consistency",
-                        durable_watermark,
-                        chain_tip,
-                        chain_tip - effective_tip,
-                        effective_tip + 1,
-                    );
+                // Engine contiguous_length / segment_max are NOT a complete durable UTXO set:
+                // age tiers live in RAM and are lost on every process exit (clean or dirty).
+                // Never advance resume past export_h from sidecar/segment_max — live 2026-07-11:
+                // clean cl=698719 skip-reseed → Invalid inputs at 699221 → autorepair to 640k.
+                let resume_tip = durable_watermark;
+                if engine_enabled {
+                    if let Some(data_dir) = self.storage.data_dir() {
+                        let engine_path =
+                            crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                        let dirty = crate::storage::ibd_engine::engine_dirty_flag_path(
+                            &engine_path,
+                        )
+                        .exists();
+                        if dirty {
+                            info!(
+                                "[IBD_RESUME] engine .dirty set — resume from export_h={} \
+                                 (will re-seed; segment_max is not a complete UTXO set)",
+                                durable_watermark
+                            );
+                        } else {
+                            let sidecar_cl =
+                                crate::storage::ibd_engine::read_contiguous_length_sidecar(
+                                    &engine_path,
+                                );
+                            if let Some(cl) = sidecar_cl.filter(|&c| c as u64 > durable_watermark) {
+                                info!(
+                                    "[IBD_RESUME] clean shutdown sidecar_cl={cl} > export_h={} — \
+                                     still resume from export_h (ages are RAM-only; will re-seed)",
+                                    durable_watermark
+                                );
+                            }
+                        }
+                    }
                 }
+
+                // Poisoned checkpoint: export/watermark labeled at chain_tip but validation
+                // raced far ahead and a clamped persist wrote a mid-IBD UTXO snapshot under
+                // the tip label → UTXO miss at tip+1. Detect via validation_tip ≫ tip.
+                let validation_tip = self
+                    .storage
+                    .chain()
+                    .get_engine_validation_tip()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                let poisoned_ckpt = durable_watermark > 0
+                    && durable_watermark == chain_tip
+                    && validation_tip > chain_tip.saturating_add(10_000);
+
+                let effective_tip = if poisoned_ckpt {
+                    warn!(
+                        "[IBD_RESUME] poisoned UTXO checkpoint: watermark/export={wm} equals \
+                         chain_tip but engine_validation_tip={vt} is far ahead — checkpoint \
+                         content is from a higher height (clamped label). Resetting UTXO state \
+                         for local replay from genesis through tip.",
+                        wm = durable_watermark,
+                        vt = validation_tip,
+                    );
+                    // Same wipe path as watermark > tip, plus engine files / ckpt trees.
+                    if let Some(data_dir) = self.storage.data_dir() {
+                        let utxo_store_dir = data_dir.join(
+                            crate::storage::database::IBD_UTXO_STORE_SUBDIR,
+                        );
+                        if utxo_store_dir.exists() {
+                            let _ = std::fs::remove_dir_all(&utxo_store_dir);
+                        }
+                        // Default engine lives under `$data_dir/ibd_engine/` — wipe the tree.
+                        let engine_dir = data_dir.join("ibd_engine");
+                        if engine_dir.exists() {
+                            let _ = std::fs::remove_dir_all(&engine_dir);
+                        }
+                        let engine_path =
+                            crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                        if engine_path.exists() {
+                            let _ = std::fs::remove_file(&engine_path);
+                            crate::storage::ibd_engine::remove_contiguous_length_sidecar(
+                                &engine_path,
+                            );
+                            let mut segs = engine_path.as_os_str().to_owned();
+                            segs.push(".segs");
+                            let _ = std::fs::remove_dir_all(std::path::PathBuf::from(segs));
+                        }
+                    }
+                    if let Ok(tree) = self.storage.open_tree("ibd_utxos") {
+                        let _ = tree.clear();
+                    }
+                    if let Ok(tree) = self.storage.open_tree("ibd_utxos_ckpt_a") {
+                        let _ = tree.clear();
+                    }
+                    if let Ok(tree) = self.storage.open_tree("ibd_utxos_ckpt_b") {
+                        let _ = tree.clear();
+                    }
+                    let _ = self.storage.chain().force_set_ibd_utxo_watermark(0);
+                    let _ = self.storage.chain().force_reset_engine_checkpoint_metadata();
+                    let _ = self.storage.flush();
+                    0
+                } else if durable_watermark > chain_tip {
+                    // The UTXO watermark is ahead of the block store tip. This happens when
+                    // MDB_NOSYNC + SIGKILL (or an abrupt process exit) persisted UTXO checkpoints
+                    // for blocks that were never durably written to the block store (heed3/).
+                    //
+                    // We cannot safely resume at `durable_watermark` because:
+                    //   1. Block bodies for h=(chain_tip+1)..=durable_watermark are missing.
+                    //   2. sync_chain_info_to_height used to synthesize a *fake* header with a
+                    //      wrong hash for `durable_watermark` (now refuses; still do not call it).
+                    //   3. The next block (durable_watermark+1) has a prevhash that references
+                    //      the REAL durable_watermark hash — validation rejects it immediately,
+                    //      causing an infinite feeder-stall freeze.
+                    //
+                    // The safe recovery: wipe the standalone UTXO store and reset the watermark
+                    // to 0. The block store (heed3/) is preserved, so the IBD performs a fast
+                    // local-replay (typically 5–10 min) to rebuild UTXO state from the on-disk
+                    // blocks, then continues downloading from chain_tip+1.
+                    //
+                    // Root cause prevention: watermark advances are clamped to durable
+                    // chain_tip; SIGTERM drains pending block flushes before watermark.
+                    // Abrupt SIGKILL can still leave watermark ahead of tip — this path
+                    // recovers safely via local replay.
+                    warn!(
+                        "[IBD_RESUME] UTXO watermark ({wm}) > block store tip ({tip}): \
+                         block bodies for h={tip1}..={wm} are missing (MDB_NOSYNC + abrupt exit). \
+                         Synthesising a fake header would corrupt the prevhash chain — \
+                         resetting UTXO state to 0 and rebuilding via local replay \
+                         (block store h=0..={tip} is intact; replay will be fast). \
+                         Prefer SIGTERM so pending block flushes complete before exit.",
+                        wm = durable_watermark,
+                        tip = chain_tip,
+                        tip1 = chain_tip + 1,
+                    );
+                    // Wipe the standalone ibd_utxo_store directory (contains UTXOs that are
+                    // inconsistent above chain_tip). The main heed3/ block store is untouched.
+                    if let Some(data_dir) = self.storage.data_dir() {
+                        let utxo_store_dir = data_dir.join(
+                            crate::storage::database::IBD_UTXO_STORE_SUBDIR,
+                        );
+                        if utxo_store_dir.exists() {
+                            if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
+                                warn!(
+                                    "[IBD_RESUME] failed to remove {}: {} — continuing anyway",
+                                    utxo_store_dir.display(), e
+                                );
+                            } else {
+                                info!(
+                                    "[IBD_RESUME] removed {} (UTXO state reset for safe replay)",
+                                    utxo_store_dir.display()
+                                );
+                            }
+                        }
+                    }
+                    // Clear main-storage ibd_utxos tree and reset watermark to 0.
+                    if let Ok(tree) = self.storage.open_tree("ibd_utxos") {
+                        let _ = tree.clear();
+                    }
+                    if let Err(e) = self.storage.chain().force_set_ibd_utxo_watermark(0) {
+                        warn!("[IBD_RESUME] force_set_ibd_utxo_watermark(0) failed: {e}");
+                    }
+                    // Stale engine export height (e.g. 460k) would otherwise claim a checkpoint
+                    // that no longer matches the wiped UTXO state / block tip.
+                    if let Err(e) = self.storage.chain().force_reset_engine_checkpoint_metadata() {
+                        warn!("[IBD_RESUME] force_reset_engine_checkpoint_metadata failed: {e}");
+                    }
+                    let _ = self.storage.flush();
+                    // UTXO store is now empty → must start from genesis (h=0) so the
+                    // validation loop rebuilds UTXO state from scratch.  The block store
+                    // (heed3/) is intact, so h=1..=chain_tip will be served via local
+                    // replay (fast) and only h=chain_tip+1 onward needs downloading.
+                    0
+                } else {
+                    let tip = chain_tip.min(resume_tip);
+                    if tip < chain_tip && !crate::config::ibd_serve_only() {
+                        warn!(
+                            "[IBD_RESUME] UTXO resume tip ({}) < chain tip ({}); \
+                             IBD will re-validate {} block(s) from height {} to restore UTXO consistency",
+                            resume_tip,
+                            chain_tip,
+                            chain_tip - tip,
+                            tip + 1,
+                        );
+                    }
+                    tip
+                };
                 Ok((effective_tip, effective_tip.saturating_add(1)))
             }
             Err(e) => {
@@ -1672,10 +2048,40 @@ impl Node {
         utxo_set: &mut blvm_protocol::UtxoSet,
     ) -> Result<()> {
         use crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE;
-        use std::sync::atomic::Ordering;
+        use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+        static CATCH_UP_LAST_FAIL_SECS: AtomicU64 = AtomicU64::new(0);
+        static CATCH_UP_FAIL_STREAK: AtomicU32 = AtomicU32::new(0);
+
+        // Mode T archive: never catch-up IBD / DNS reseed while serving getdata.
+        if crate::config::ibd_serve_only() {
+            return Ok(());
+        }
 
         if PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire) {
             return Ok(());
+        }
+
+        // Live 2026-07-16: failed seed/IBD catch-up was retried every few seconds for hours.
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = CATCH_UP_LAST_FAIL_SECS.load(Ordering::Relaxed);
+            let streak = CATCH_UP_FAIL_STREAK.load(Ordering::Relaxed);
+            if last > 0 && streak > 0 {
+                let backoff = (30u64 << streak.min(4)).min(600);
+                if now.saturating_sub(last) < backoff {
+                    debug!(
+                        "[CATCH_UP] skip — fail streak={} backoff {}s ({}s left)",
+                        streak,
+                        backoff,
+                        backoff.saturating_sub(now.saturating_sub(last))
+                    );
+                    return Ok(());
+                }
+            }
         }
 
         let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
@@ -1710,9 +2116,40 @@ impl Node {
             return Ok(());
         }
 
+        // Clear evicted-IP set BEFORE checking peer count.
+        // Chicken-and-egg fix: after a failed IBD run all peers end up in ibd_evicted_ips,
+        // which causes the reconnection task to skip them, leaving us with 0 connected peers.
+        // Without clearing first, `peer_addresses_for_ibd()` returns empty → min_peers check
+        // fails → IBD never restarts → stuck indefinitely.
+        // Clearing here lets the reconnection task re-try those peers before the next call.
+        // The address DB still marks confirmed pruned peers NODE_NETWORK_LIMITED (low-priority).
+        self.network.clear_ibd_evicted_ips();
+
+        // Proactively seed archive (full-history) peers before checking the peer list.
+        // Skip when BLVM_IBD_PEERS is pinned (archive tip-now) — public DNS pollutes tip/GetData.
+        {
+            static LAST_ARCHIVE_SEED_SECS: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = LAST_ARCHIVE_SEED_SECS.load(std::sync::atomic::Ordering::Relaxed);
+            // Re-seed at most once every 5 minutes.
+            if now.saturating_sub(last) >= 300
+                && !crate::node::parallel_ibd::skip_ibd_archive_dns_seed()
+            {
+                LAST_ARCHIVE_SEED_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
+                let net = Arc::clone(&self.network);
+                tokio::spawn(async move {
+                    let _ = net.discover_archive_peers_from_dns().await;
+                });
+            }
+        }
+
         let peer_addresses: Vec<String> = self
             .network
-            .peer_addresses()
+            .peer_addresses_for_ibd()
             .iter()
             .map(|addr| addr.to_string())
             .collect();
@@ -1725,13 +2162,25 @@ impl Node {
         );
         let min_peers = ibd_session_config.min_peers_for_ibd();
         if peer_addresses.len() < min_peers {
+            // Too few IBD-capable peers — trigger background reconnection.
+            // This covers the case where a previous IBD run evicted all peers and the
+            // `clear_ibd_evicted_ips` call above just unblocked reconnection but no peers
+            // have connected yet (reconnection is async).  Proactively seed new addresses
+            // from DNS and connect so the next `try_catch_up_ibd` call (in ~5 s) finds
+            // enough peers to start IBD.
+            let peer_count = peer_addresses.len();
+            let needed = min_peers.saturating_sub(peer_count).max(8);
             debug!(
-                "[CATCH_UP] Behind peers (synced_tip={} < target={}) but only {} peers connected (need {})",
-                synced_tip,
-                target_height,
-                peer_addresses.len(),
-                min_peers
+                "[CATCH_UP] Behind peers (synced_tip={} < target={}) but only {} peers connected (need {}); triggering peer re-discovery (need {})",
+                synced_tip, target_height, peer_count, min_peers, needed
             );
+            // Spawn to avoid blocking the main run loop; errors are logged inside.
+            let net = Arc::clone(&self.network);
+            tokio::spawn(async move {
+                if let Err(e) = net.connect_peers_from_database(needed).await {
+                    debug!("[CATCH_UP] Peer re-discovery failed: {}", e);
+                }
+            });
             return Ok(());
         }
 
@@ -1763,6 +2212,7 @@ impl Node {
             .await
         {
             Ok(true) => {
+                CATCH_UP_FAIL_STREAK.store(0, Ordering::Relaxed);
                 if let Err(e) = crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
                     self.data_dir.as_path(),
                 ) {
@@ -1780,7 +2230,20 @@ impl Node {
                 );
             }
             Err(e) => {
-                warn!("[CATCH_UP] Parallel IBD failed: {}", e);
+                // Live 2026-07-16: seed-from-ckpt failures under memory pressure retried every
+                // ~5–12s for hours (629 dirty wipe+reseed loops) — burn RAM + hide root cause.
+                warn!("[CATCH_UP] Parallel IBD failed: {:#}", e);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                CATCH_UP_LAST_FAIL_SECS.store(now, Ordering::Relaxed);
+                let streak = CATCH_UP_FAIL_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+                let backoff = (30u64 << streak.min(4)).min(600);
+                warn!(
+                    "[CATCH_UP] next retry after ≥{}s (fail streak={})",
+                    backoff, streak
+                );
             }
         }
 
@@ -1815,7 +2278,19 @@ impl Node {
         // Check peer count (non-blocking, always succeeds)
         let peer_count = self.network.peer_count();
         if peer_count == 0 {
-            warn!("No peers connected");
+            // Throttle: emit at most once every 10 seconds to avoid log spam
+            // during reconnection (health check runs every 100 ms).
+            static LAST_NO_PEERS_WARN: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = LAST_NO_PEERS_WARN.load(std::sync::atomic::Ordering::Relaxed);
+            if now_secs.saturating_sub(last) >= 10 {
+                LAST_NO_PEERS_WARN.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                warn!("No peers connected");
+            }
         }
 
         // Check storage with timeout and graceful degradation

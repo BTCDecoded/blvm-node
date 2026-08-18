@@ -149,12 +149,15 @@ fn test_utxo_and_engine_watermarks() {
             512,
             1,
             10_000,
+            0,
             &[0u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES],
         )
         .unwrap();
     assert_eq!(chain.get_engine_export_utxo_count().unwrap(), Some(10_000));
+    assert!(chain.get_engine_export_muhash().unwrap().is_some());
     chain.force_reset_engine_checkpoint_metadata().unwrap();
     assert_eq!(chain.get_engine_export_height().unwrap(), Some(0));
+    assert!(chain.get_engine_export_muhash().unwrap().is_none());
 }
 
 #[test]

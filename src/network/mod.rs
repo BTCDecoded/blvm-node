@@ -438,7 +438,7 @@ mod tests {
             "complete_block_request should find matching pending request"
         );
 
-        let (received, witnesses) =
+        let (received, witnesses, _) =
             tokio::time::timeout(std::time::Duration::from_secs(1), block_rx)
                 .await
                 .expect("block rx should complete within 1s")
@@ -446,5 +446,98 @@ mod tests {
 
         assert_eq!(received.header.merkle_root, genesis.header.merkle_root);
         assert_eq!(witnesses.len(), genesis.transactions.len());
+    }
+
+    /// Regression for the h=575630 IBD stall: the coordinator's stall recovery issues several
+    /// overlapping requests for the *same* (peer, block). The old single-sender map made each new
+    /// registration overwrite the previous sender and `complete_block_request` then delivered to a
+    /// lone (often dead) sender, silently losing the block. A still-waiting download must receive
+    /// the block even when an earlier overlapping request for the same key was abandoned.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_block_request_concurrent_same_key_delivers_to_live_receiver() {
+        use crate::storage::hashing::double_sha256;
+        use blvm_protocol::genesis;
+
+        let genesis = genesis::mainnet_genesis();
+        let mut header_bytes = Vec::with_capacity(80);
+        header_bytes.extend_from_slice(&(genesis.header.version as i32).to_le_bytes());
+        header_bytes.extend_from_slice(&genesis.header.prev_block_hash);
+        header_bytes.extend_from_slice(&genesis.header.merkle_root);
+        header_bytes.extend_from_slice(&(genesis.header.timestamp as u32).to_le_bytes());
+        header_bytes.extend_from_slice(&(genesis.header.bits as u32).to_le_bytes());
+        header_bytes.extend_from_slice(&(genesis.header.nonce as u32).to_le_bytes());
+        let block_hash = double_sha256(&header_bytes);
+        let mut hash_array = [0u8; 32];
+        hash_array.copy_from_slice(&block_hash);
+
+        let addr: std::net::SocketAddr = "127.0.0.1:8081".parse().unwrap();
+        let network = NetworkManager::with_config(addr, 5, TransportPreference::TCP_ONLY, None);
+        let peer_addr: std::net::SocketAddr = "127.0.0.1:18444".parse().unwrap();
+
+        // First request is abandoned (receiver dropped, as a timed-out download would).
+        let abandoned_rx = network.register_block_request(peer_addr, hash_array);
+        // Second, overlapping request for the same (peer, block) is still waiting.
+        let live_rx = network.register_block_request(peer_addr, hash_array);
+        drop(abandoned_rx);
+
+        let empty_witnesses: Vec<Vec<blvm_protocol::segwit::Witness>> =
+            (0..genesis.transactions.len()).map(|_| vec![]).collect();
+        let ok =
+            network.complete_block_request(peer_addr, hash_array, genesis.clone(), empty_witnesses);
+        assert!(ok, "completion should report the IBD response handled");
+
+        let (received, _witnesses, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), live_rx)
+                .await
+                .expect("live receiver should get the block within 1s despite the abandoned one")
+                .expect("live channel should not be closed");
+        assert_eq!(received.header.merkle_root, genesis.header.merkle_root);
+    }
+
+    /// `cancel_block_request` (fired constantly by the coordinator's stall recovery on chunk
+    /// abort/timeout) must prune only the caller's own dead sender, never a live sibling's. A
+    /// whole-key removal would drop a concurrently-waiting download's receiver, losing the block.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cancel_block_request_preserves_live_sibling() {
+        use crate::storage::hashing::double_sha256;
+        use blvm_protocol::genesis;
+
+        let genesis = genesis::mainnet_genesis();
+        let mut header_bytes = Vec::with_capacity(80);
+        header_bytes.extend_from_slice(&(genesis.header.version as i32).to_le_bytes());
+        header_bytes.extend_from_slice(&genesis.header.prev_block_hash);
+        header_bytes.extend_from_slice(&genesis.header.merkle_root);
+        header_bytes.extend_from_slice(&(genesis.header.timestamp as u32).to_le_bytes());
+        header_bytes.extend_from_slice(&(genesis.header.bits as u32).to_le_bytes());
+        header_bytes.extend_from_slice(&(genesis.header.nonce as u32).to_le_bytes());
+        let block_hash = double_sha256(&header_bytes);
+        let mut hash_array = [0u8; 32];
+        hash_array.copy_from_slice(&block_hash);
+
+        let addr: std::net::SocketAddr = "127.0.0.1:8082".parse().unwrap();
+        let network = NetworkManager::with_config(addr, 5, TransportPreference::TCP_ONLY, None);
+        let peer_addr: std::net::SocketAddr = "127.0.0.1:18444".parse().unwrap();
+
+        let abandoned_rx = network.register_block_request(peer_addr, hash_array);
+        let live_rx = network.register_block_request(peer_addr, hash_array);
+        // The abandoned download drops its receiver, then calls cancel (as the timeout path does).
+        drop(abandoned_rx);
+        network.cancel_block_request(peer_addr, hash_array);
+
+        let empty_witnesses: Vec<Vec<blvm_protocol::segwit::Witness>> =
+            (0..genesis.transactions.len()).map(|_| vec![]).collect();
+        let ok =
+            network.complete_block_request(peer_addr, hash_array, genesis.clone(), empty_witnesses);
+        assert!(
+            ok,
+            "block should still be delivered to the live sibling after cancel pruned the dead one"
+        );
+
+        let (received, _witnesses, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), live_rx)
+                .await
+                .expect("live sibling should receive the block within 1s")
+                .expect("live channel should not be closed");
+        assert_eq!(received.header.merkle_root, genesis.header.merkle_root);
     }
 }

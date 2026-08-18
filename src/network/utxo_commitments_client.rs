@@ -675,7 +675,7 @@ impl UtxoCommitmentsNetworkClient for UtxoCommitmentsClient {
             tokio::select! {
                 result = block_rx => {
                     match result {
-                        Ok((block, witnesses)) => {
+                        Ok((block, witnesses, _wire)) => {
                             // Return full block with witnesses
                             // Commitment will be computed after validation
                             Ok(FullBlock {

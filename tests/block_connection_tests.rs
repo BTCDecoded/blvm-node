@@ -109,7 +109,7 @@ async fn test_block_request_completion_first_connection() -> Result<()> {
         .await?;
 
     // Await the oneshot; should complete with the genesis block.
-    let (received_block, witnesses) =
+    let (received_block, witnesses, _wire) =
         tokio::time::timeout(std::time::Duration::from_secs(5), block_rx)
             .await
             .map_err(|_| anyhow::anyhow!("Block response timeout"))?
