@@ -78,18 +78,15 @@ impl NetworkManager {
             return Err(anyhow::anyhow!("addr message size exceeded"));
         }
 
-        let peer_services = {
-            let peer_states = self.peer_states().read().await;
-            peer_states
-                .get(&peer_addr)
-                .map(|state| state.services)
-                .unwrap_or(0)
-        };
-
         {
             let mut db = self.address_database().write().await;
             for addr in &msg.addresses {
-                db.add_address(addr.clone(), peer_services);
+                // Use the services field FROM the addr entry itself — each NetworkAddress
+                // includes the services that the sending peer reports for that address.
+                // Previously we used `peer_services` (the sender's own services), which
+                // was wrong and caused NODE_NETWORK_LIMITED to contaminate addresses
+                // received from pruned peers, poisoning the address DB.
+                db.add_address(addr.clone(), addr.services);
             }
         }
 

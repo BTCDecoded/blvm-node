@@ -101,9 +101,14 @@ impl AddressDatabase {
 
         match self.addresses.get_mut(&socket_addr) {
             Some(entry) => {
-                // Update existing entry
+                // Update existing entry.
                 entry.update_seen();
-                entry.services |= services; // Merge service flags
+                if services != 0 {
+                    // Only OR-merge when the caller has concrete service information.
+                    entry.services |= services;
+                }
+                // When services==0 (e.g. from DNS seed re-discovery), do NOT merge:
+                // keep the existing value so previously-learned flags survive.
             }
             None => {
                 // Add new entry (evict old if needed)
@@ -113,6 +118,29 @@ impl AddressDatabase {
                 }
                 self.addresses
                     .insert(socket_addr, AddressEntry::new(addr, services));
+            }
+        }
+    }
+
+    /// Add an address from a DNS seed, resetting any persisted `NODE_NETWORK_LIMITED` flag
+    /// so that the peer gets a clean re-classification on next version handshake.
+    /// DNS seeds frequently return IPs that may have changed their prune state, and we
+    /// should not permanently bar them based on a single previous IBD session.
+    pub fn add_address_from_dns_seed(&mut self, addr: NetworkAddress) {
+        use blvm_protocol::service_flags::standard::NODE_NETWORK_LIMITED;
+        let socket_addr = self.network_addr_to_socket(&addr);
+        match self.addresses.get_mut(&socket_addr) {
+            Some(entry) => {
+                entry.update_seen();
+                // Clear the LIMITED flag — let the next version handshake re-classify.
+                entry.services &= !NODE_NETWORK_LIMITED;
+            }
+            None => {
+                if self.total_count() >= self.max_addresses {
+                    self.evict_oldest_unified();
+                }
+                self.addresses
+                    .insert(socket_addr, AddressEntry::new(addr, 0));
             }
         }
     }
@@ -151,6 +179,67 @@ impl AddressDatabase {
         self.get_fresh_addresses(self.max_addresses)
     }
 
+    /// Like `get_fresh_addresses` but biased for IBD: returns full-history peers
+    /// (advertises `NODE_NETWORK` — the "complete blockchain" flag) first, then
+    /// unknown-service peers (services == 0), then genuinely pruned peers last.
+    ///
+    /// Bitcoin Core 25+ advertises both `NODE_NETWORK` and `NODE_NETWORK_LIMITED`
+    /// simultaneously (BIP159 capability advertisement). These nodes ARE full-history
+    /// and must be classified as `full`, not `limited`. The authoritative check is
+    /// whether `NODE_NETWORK` (0x1) is set — consistent with `peer_manager.rs` and
+    /// `count_fresh_non_limited`.
+    ///
+    /// Within each group addresses are sorted by `last_seen` descending.
+    pub fn get_fresh_ibd_addresses(&self, count: usize) -> Vec<NetworkAddress> {
+        use blvm_protocol::service_flags::standard::NODE_NETWORK;
+
+        let mut full: Vec<_> = Vec::new();
+        let mut unknown: Vec<_> = Vec::new();
+        let mut limited: Vec<_> = Vec::new();
+
+        for (_, entry) in self.addresses.iter() {
+            if !entry.is_fresh(self.expiration_seconds) {
+                continue;
+            }
+            if entry.services == 0 {
+                unknown.push((entry.last_seen, entry.addr.clone()));
+            } else if (entry.services & NODE_NETWORK) != 0 {
+                // Explicitly advertises NODE_NETWORK — full-history archive node.
+                // Includes BC25+ nodes that also set NODE_NETWORK_LIMITED.
+                full.push((entry.last_seen, entry.addr.clone()));
+            } else {
+                // No NODE_NETWORK: genuinely pruned (NODE_NETWORK_LIMITED only).
+                limited.push((entry.last_seen, entry.addr.clone()));
+            }
+        }
+
+        full.sort_by(|a, b| b.0.cmp(&a.0));
+        unknown.sort_by(|a, b| b.0.cmp(&a.0));
+        limited.sort_by(|a, b| b.0.cmp(&a.0));
+
+        full.into_iter()
+            .chain(unknown)
+            .chain(limited)
+            .take(count)
+            .map(|(_, addr)| addr)
+            .collect()
+    }
+
+    /// Count how many fresh addresses are suitable for full-history IBD.
+    /// "Full-history" = explicitly advertises NODE_NETWORK (0x1) OR services unknown.
+    /// Modern Bitcoin Core 25+ sets both NODE_NETWORK and NODE_NETWORK_LIMITED; checking
+    /// only for absence of NODE_NETWORK_LIMITED would exclude all such archive nodes.
+    pub fn count_fresh_non_limited(&self) -> usize {
+        use blvm_protocol::service_flags::standard::NODE_NETWORK;
+        self.addresses
+            .values()
+            .filter(|e| {
+                e.is_fresh(self.expiration_seconds)
+                    && (e.services == 0 || (e.services & NODE_NETWORK) != 0)
+            })
+            .count()
+    }
+
     /// Remove expired addresses
     pub fn remove_expired(&mut self) -> usize {
         let before = self.addresses.len();
@@ -163,6 +252,22 @@ impl AddressDatabase {
     pub fn remove_address(&mut self, addr: &NetworkAddress) {
         let socket_addr = self.network_addr_to_socket(addr);
         self.addresses.remove(&socket_addr);
+    }
+
+    /// Overwrite (force-set) service flags on an existing entry identified by its `SocketAddr`.
+    ///
+    /// Used by the IBD path to write `NODE_NETWORK_LIMITED` onto a peer that has proven it cannot
+    /// serve historical blocks (consistent block-timeout failures), so that subsequent calls to
+    /// `get_fresh_addresses` / `peer_socket_addresses_for_ibd` exclude it.
+    pub fn set_services_by_socket(&mut self, addr: SocketAddr, services: u64) {
+        if let Some(entry) = self.addresses.get_mut(&addr) {
+            entry.services = services;
+        }
+    }
+
+    /// Return the stored service flags for a `SocketAddr`, or 0 if not in the database.
+    pub fn services_for_socket(&self, addr: SocketAddr) -> u64 {
+        self.addresses.get(&addr).map(|e| e.services).unwrap_or(0)
     }
 
     /// Check if address is banned

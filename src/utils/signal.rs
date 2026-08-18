@@ -25,9 +25,11 @@ fn shutdown_watch() -> &'static ShutdownWatch {
             #[cfg(feature = "production")]
             crate::node::parallel_ibd::IBD_SHUTDOWN_REQUESTED.store(true, Ordering::Release);
             let _ = notify_tx.send(true);
-            // If the runtime is blocked on sync RocksDB / UTXO work, `node.start()` may not
-            // yield for minutes. Guarantee termination within a bounded wall-clock window.
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            // If the runtime is blocked on sync RocksDB / UTXO / IBD flush drain, `node.start()`
+            // may not yield for minutes. Bound forced exit, but give IBD enough time to join
+            // block flushes + watermark (30s was too short — process kept validating and then
+            // `exit(0)` skipped durable tip advance).
+            tokio::time::sleep(std::time::Duration::from_secs(180)).await;
             warn!("Shutdown grace period elapsed — forcing process exit");
             std::process::exit(0);
         });

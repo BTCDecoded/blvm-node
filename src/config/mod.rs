@@ -385,7 +385,7 @@ pub struct NetworkTimingConfig {
 }
 
 fn default_target_peer_count() -> usize {
-    8
+    32
 }
 
 fn default_peer_connection_delay() -> u64 {
@@ -407,7 +407,7 @@ fn default_max_addresses_from_dns() -> usize {
 impl Default for NetworkTimingConfig {
     fn default() -> Self {
         Self {
-            target_outbound_peers: 8,
+            target_outbound_peers: 32,
             peer_connection_delay_seconds: 2,
             addr_relay_min_interval_seconds: 8640,
             max_addresses_per_addr_message: 1000,

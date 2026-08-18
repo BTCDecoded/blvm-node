@@ -174,7 +174,11 @@ impl Default for SyncCoordinator {
 
 impl Clone for SyncCoordinator {
     fn clone(&self) -> Self {
-        Self::new()
+        Self {
+            state_machine: SyncStateMachine::new(),
+            block_provider: InMemoryBlockProvider::new(),
+            event_publisher: self.event_publisher.clone(),
+        }
     }
 }
 
@@ -307,7 +311,7 @@ impl SyncCoordinator {
                     }
                 }
                 error!(
-                    "Parallel IBD failed: {}. Sequential sync is not supported - IBD must succeed in parallel mode.",
+                    "Parallel IBD failed: {:#}. Sequential sync is not supported - IBD must succeed in parallel mode.",
                     e
                 );
                 Err(e)
